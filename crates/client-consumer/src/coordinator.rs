@@ -26,10 +26,12 @@ use tokio_util::sync::CancellationToken;
 use crabka_client_core::Client;
 use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
+use crabka_protocol::owned::join_group_response::JoinGroupResponse;
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
+use crabka_protocol::owned::sync_group_response::SyncGroupResponse;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::assignor::{Assignor, RebalanceProtocol};
@@ -38,6 +40,63 @@ use crate::builder::{
 };
 use crate::commit::build_commit_topics;
 use crate::error::ConsumerError;
+
+/// Retriable group-coordinator error codes. The coordinator is loading its
+/// state (`14`), not yet available (`15`), or has moved to another broker
+/// (`16`). Kafka clients retry these with backoff rather than failing.
+pub(crate) const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
+pub(crate) const COORDINATOR_NOT_AVAILABLE: i16 = 15;
+pub(crate) const NOT_COORDINATOR: i16 = 16;
+
+/// How long `with_coordinator_retry` keeps retrying a cold coordinator before
+/// surfacing the last error. Matches a typical client `request.timeout.ms`.
+pub(crate) const COORDINATOR_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn is_retriable_coordinator_code(code: i16) -> bool {
+    matches!(
+        code,
+        COORDINATOR_LOAD_IN_PROGRESS | COORDINATOR_NOT_AVAILABLE | NOT_COORDINATOR
+    )
+}
+
+/// Send a group-coordinator RPC, retrying on cold-coordinator codes
+/// (14/15/16) and transient `Disconnected` transport errors with capped
+/// exponential backoff until `timeout` elapses. `make` rebuilds the request
+/// each attempt (so it can be re-sent); `code` reads the response's
+/// `error_code`. On deadline, returns the last response (so the caller's
+/// `error_code` handling runs) or `CoordinatorUnavailable` if the last attempt
+/// was a disconnect.
+pub(crate) async fn with_coordinator_retry<R, F, Fut>(
+    timeout: Duration,
+    code: impl Fn(&R) -> i16,
+    make: F,
+) -> Result<R, ConsumerError>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<R, ConsumerError>>,
+{
+    const MAX_BACKOFF: Duration = Duration::from_secs(1);
+    let start = tokio::time::Instant::now();
+    let mut backoff = Duration::from_millis(100);
+    loop {
+        match make().await {
+            Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
+            Ok(r) => {
+                if start.elapsed() >= timeout {
+                    return Ok(r);
+                }
+            }
+            Err(ConsumerError::Client(crabka_client_core::ClientError::Disconnected)) => {
+                if start.elapsed() >= timeout {
+                    return Err(ConsumerError::CoordinatorUnavailable);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
+}
 
 /// Mutable state owned exclusively by the coordinator task.
 ///
@@ -335,26 +394,39 @@ async fn join_and_sync(
     );
     let protocol_name = state.assignor.protocol_name().to_string();
 
-    let make_join = |member_id: String| JoinGroupRequest {
-        group_id: state.group_id.clone(),
-        protocol_type: "consumer".into(),
-        member_id,
-        session_timeout_ms,
-        rebalance_timeout_ms,
-        protocols: vec![JoinGroupRequestProtocol {
-            name: protocol_name.clone(),
-            metadata: subscription_bytes.clone(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-
-    // First join: if we have no member_id, expect MEMBER_ID_REQUIRED (79)
-    // and capture the broker-assigned id, then issue a second join.
-    let r1 = state
-        .client
-        .send(make_join(state.member_id.clone()))
-        .await?;
+    // First join: if we have no member_id, expect MEMBER_ID_REQUIRED (79) and
+    // capture the broker-assigned id, then issue a second join. Retry a cold or
+    // relocating coordinator (14/15/16) with backoff on each send.
+    let r1 = with_coordinator_retry(
+        COORDINATOR_RETRY_TIMEOUT,
+        |r: &JoinGroupResponse| r.error_code,
+        || {
+            let group_id = state.group_id.clone();
+            let member_id = state.member_id.clone();
+            let protocol_name = protocol_name.clone();
+            let subscription_bytes = subscription_bytes.clone();
+            let client = &state.client;
+            async move {
+                client
+                    .send(JoinGroupRequest {
+                        group_id,
+                        protocol_type: "consumer".into(),
+                        member_id,
+                        session_timeout_ms,
+                        rebalance_timeout_ms,
+                        protocols: vec![JoinGroupRequestProtocol {
+                            name: protocol_name,
+                            metadata: subscription_bytes,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(ConsumerError::from)
+            }
+        },
+    )
+    .await?;
     let join_resp = if r1.error_code == 0 {
         r1
     } else if r1.error_code == 79 {
@@ -365,7 +437,36 @@ async fn join_and_sync(
             ));
         }
         state.member_id.clone_from(&assigned_id);
-        let r2 = state.client.send(make_join(assigned_id)).await?;
+        let r2 = with_coordinator_retry(
+            COORDINATOR_RETRY_TIMEOUT,
+            |r: &JoinGroupResponse| r.error_code,
+            || {
+                let group_id = state.group_id.clone();
+                let assigned_id = assigned_id.clone();
+                let protocol_name = protocol_name.clone();
+                let subscription_bytes = subscription_bytes.clone();
+                let client = &state.client;
+                async move {
+                    client
+                        .send(JoinGroupRequest {
+                            group_id,
+                            protocol_type: "consumer".into(),
+                            member_id: assigned_id,
+                            session_timeout_ms,
+                            rebalance_timeout_ms,
+                            protocols: vec![JoinGroupRequestProtocol {
+                                name: protocol_name,
+                                metadata: subscription_bytes,
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(ConsumerError::from)
+                }
+            },
+        )
+        .await?;
         if r2.error_code != 0 {
             return Err(ConsumerError::Server(r2.error_code));
         }
@@ -441,22 +542,36 @@ async fn join_and_sync(
         Vec::new()
     };
 
-    let sync = state
-        .client
-        .send(SyncGroupRequest {
-            group_id: state.group_id.clone(),
-            generation_id,
-            member_id: state.member_id.clone(),
-            protocol_type: Some("consumer".into()),
-            protocol_name: Some(chosen_protocol.clone()),
-            assignments: assignments_for_sync,
-            ..Default::default()
-        })
-        .await?;
-    if sync.error_code != 0 {
-        return Err(ConsumerError::Server(sync.error_code));
+    let sync_resp = with_coordinator_retry(
+        COORDINATOR_RETRY_TIMEOUT,
+        |r: &SyncGroupResponse| r.error_code,
+        || {
+            let group_id = state.group_id.clone();
+            let member_id = state.member_id.clone();
+            let chosen_protocol = chosen_protocol.clone();
+            let assignments_for_sync = assignments_for_sync.clone();
+            let client = &state.client;
+            async move {
+                client
+                    .send(SyncGroupRequest {
+                        group_id,
+                        generation_id,
+                        member_id,
+                        protocol_type: Some("consumer".into()),
+                        protocol_name: Some(chosen_protocol),
+                        assignments: assignments_for_sync,
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(ConsumerError::from)
+            }
+        },
+    )
+    .await?;
+    if sync_resp.error_code != 0 {
+        return Err(ConsumerError::Server(sync_resp.error_code));
     }
-    let my_assignment = decode_assignment(&sync.assignment);
+    let my_assignment = decode_assignment(&sync_resp.assignment);
     Ok((my_assignment, generation_id, chosen_protocol))
 }
 
@@ -523,4 +638,82 @@ async fn prime_offsets(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Resp {
+        error_code: i16,
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retries_until_coordinator_finishes_loading() {
+        let calls = AtomicUsize::new(0);
+        let r = with_coordinator_retry(
+            Duration::from_secs(30),
+            |r: &Resp| r.error_code,
+            || {
+                let n = calls.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    // COORDINATOR_LOAD_IN_PROGRESS (14) thrice, then success.
+                    Ok::<_, ConsumerError>(Resp {
+                        error_code: if n < 3 { 14 } else { 0 },
+                    })
+                }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.error_code, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn surfaces_last_response_after_deadline() {
+        let r = with_coordinator_retry(
+            Duration::from_secs(1),
+            |r: &Resp| r.error_code,
+            || async { Ok::<_, ConsumerError>(Resp { error_code: 15 }) },
+        )
+        .await
+        .unwrap();
+        // Deadline hit while still retriable: return the last response so the
+        // caller's `error_code != 0` handling surfaces it.
+        assert_eq!(r.error_code, 15);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_retriable_code_returns_immediately() {
+        let calls = AtomicUsize::new(0);
+        let r = with_coordinator_retry(
+            Duration::from_secs(30),
+            |r: &Resp| r.error_code,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async move { Ok::<_, ConsumerError>(Resp { error_code: 25 }) } // UNKNOWN_MEMBER_ID
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(r.error_code, 25);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disconnect_past_deadline_surfaces_coordinator_unavailable() {
+        let r = with_coordinator_retry(
+            Duration::from_secs(1),
+            |r: &Resp| r.error_code,
+            || async {
+                Err::<Resp, _>(ConsumerError::Client(
+                    crabka_client_core::ClientError::Disconnected,
+                ))
+            },
+        )
+        .await;
+        assert!(matches!(r, Err(ConsumerError::CoordinatorUnavailable)));
+    }
 }

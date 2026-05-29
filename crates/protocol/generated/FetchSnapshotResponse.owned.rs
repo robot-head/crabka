@@ -195,7 +195,7 @@ impl<'de> Decode<'de> for PartitionSnapshot {
         if version >= 0 { out.snapshot_id = SnapshotId::decode(buf, version)?; }
         if version >= 0 { out.size = get_i64(buf)?; }
         if version >= 0 { out.position = get_i64(buf)?; }
-        if version >= 0 { out.unaligned_records = { let __rb_bytes = if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }; let mut __rb_cur: &[u8] = &__rb_bytes; <crate::records::RecordsPayload as crate::Decode>::decode(&mut __rb_cur, version)? }; }
+        if version >= 0 { out.unaligned_records = { let __rb_bytes = if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }; let mut __rb_cur: &[u8] = &__rb_bytes; crate::records::RecordsPayload::decode_lenient(&mut __rb_cur, version)? }; }
         if flex {
             // Pre-declare typed slots for known tagged fields.
             let mut tag_current_leader = None;
