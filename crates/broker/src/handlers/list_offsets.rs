@@ -93,6 +93,9 @@ pub(crate) fn handle(
                             match reader.earliest_offset(&tp) {
                                 Ok(Some(remote_start)) => earliest = earliest.min(remote_start),
                                 Ok(None) => {}
+                                // Includes RemoteStorageError::NotReady (metadata
+                                // partition catching up): warn + keep the local
+                                // earliest as the conservative answer.
                                 Err(e) => tracing::warn!(
                                     topic = %topic.name, partition = idx, error = %e,
                                     "list_offsets: remote earliest_offset failed"
@@ -121,6 +124,9 @@ pub(crate) fn handle(
                                 match reader.offset_for_timestamp(&tp, ts).await {
                                     Ok(Some(o)) => Some(o),
                                     Ok(None) => None,
+                                    // Includes RemoteStorageError::NotReady
+                                    // (metadata partition catching up): warn +
+                                    // fall back to the local answer below.
                                     Err(e) => {
                                         tracing::warn!(
                                             topic = %topic.name, partition = idx, error = %e,

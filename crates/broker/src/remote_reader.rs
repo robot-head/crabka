@@ -949,4 +949,80 @@ mod tests {
         let got = reader.offset_for_timestamp(&tp(), 1).await.unwrap();
         assert_eq!(got, None);
     }
+
+    // ── 48q: `NotReady` from the RLMM must propagate out of the reader
+    // ── (not be swallowed as a miss), so the handlers can keep
+    // ── OFFSET_OUT_OF_RANGE / answer conservatively.
+
+    struct NotReadyRlmm;
+    impl RemoteLogMetadataManager for NotReadyRlmm {
+        fn add_remote_log_segment_metadata(
+            &self,
+            _m: RemoteLogSegmentMetadata,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+        fn update_remote_log_segment_metadata(
+            &self,
+            _u: crabka_remote_storage::RemoteLogSegmentMetadataUpdate,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+        fn remote_log_segment_metadata(
+            &self,
+            _tp: &TopicIdPartition,
+            _epoch: i32,
+            _offset: i64,
+        ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError> {
+            Err(RemoteStorageError::NotReady { partition: 3 })
+        }
+        fn highest_offset_for_epoch(
+            &self,
+            _tp: &TopicIdPartition,
+            _epoch: i32,
+        ) -> Result<Option<i64>, RemoteStorageError> {
+            Ok(None)
+        }
+        fn list_remote_log_segments(
+            &self,
+            _tp: &TopicIdPartition,
+        ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
+            Err(RemoteStorageError::NotReady { partition: 3 })
+        }
+        fn list_remote_log_segments_by_epoch(
+            &self,
+            _tp: &TopicIdPartition,
+            _epoch: i32,
+        ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
+            Ok(Vec::new())
+        }
+        fn put_remote_partition_delete_metadata(
+            &self,
+            _m: crabka_remote_storage::RemotePartitionDeleteMetadata,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_batch_propagates_not_ready() {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> = Arc::new(NotReadyRlmm);
+        let reader = RemoteReader::new(rsm, rlmm);
+        let err = reader.fetch_batch(&tp(), 0, 0, 4096).await.unwrap_err();
+        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
+    }
+
+    #[tokio::test]
+    async fn earliest_offset_propagates_not_ready() {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> = Arc::new(NotReadyRlmm);
+        let reader = RemoteReader::new(rsm, rlmm);
+        let err = reader.earliest_offset(&tp()).unwrap_err();
+        assert!(matches!(err, RemoteStorageError::NotReady { .. }));
+    }
 }

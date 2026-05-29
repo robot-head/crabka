@@ -1058,6 +1058,21 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
             Some(bytes_est)
         }
         Ok(None) => None,
+        Err(crabka_remote_storage::RemoteStorageError::NotReady { partition }) => {
+            // The metadata partition that would answer this read is assigned
+            // to this broker but its consumer has not caught up yet. Leave
+            // OFFSET_OUT_OF_RANGE (retryable) — NOT a definitive miss — so the
+            // client retries. Expected churn during catch-up, so log at debug.
+            tracing::debug!(
+                topic = %p.topic_name,
+                partition = p.partition_index,
+                offset = p.fetch_offset,
+                metadata_partition = partition,
+                "remote-reader: metadata partition not yet caught up; \
+                 leaving OFFSET_OUT_OF_RANGE for client retry"
+            );
+            None
+        }
         Err(e) => {
             tracing::warn!(
                 topic = %p.topic_name,
