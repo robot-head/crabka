@@ -109,6 +109,16 @@ pub enum ValidationError {
     /// `introspectionEndpointUri` + `clientId` + `clientSecret` and forbids
     /// `jwksEndpointUri`.
     ListenerOauthAccessTokenIsJwtInvalid(String),
+    /// `type: gssapi` listener missing `keytabSecretRef` (secretName/key).
+    ListenerGssapiKeytabSecretMissing(String),
+    /// A `principalToLocalRules` entry failed `auth_to_local` parsing.
+    ListenerGssapiInvalidRule(String),
+    /// Two or more GSSAPI listeners declare differing config. The broker
+    /// `[gssapi]` block is broker-global, so divergence isn't representable.
+    ConflictingGssapiListenerConfig,
+    /// The inter-broker listener is `type: gssapi` but
+    /// `spec.interBrokerKerberos` is absent.
+    InterBrokerGssapiRequiresKerberosConfig(String),
 }
 
 #[allow(dead_code)]
@@ -137,6 +147,12 @@ impl ValidationError {
             }
             Self::ConflictingOAuthListenerConfig => "ConflictingOAuthConfig",
             Self::ListenerOauthAccessTokenIsJwtInvalid(_) => "ListenerOauthAccessTokenIsJwtInvalid",
+            Self::ListenerGssapiKeytabSecretMissing(_) => "ListenerGssapiKeytabSecretMissing",
+            Self::ListenerGssapiInvalidRule(_) => "ListenerGssapiInvalidRule",
+            Self::ConflictingGssapiListenerConfig => "ListenerGssapiConfigConflict",
+            Self::InterBrokerGssapiRequiresKerberosConfig(_) => {
+                "InterBrokerGssapiRequiresKerberosConfig"
+            }
         }
     }
 
@@ -190,7 +206,17 @@ impl ValidationError {
             }
             Self::ListenerOauthAccessTokenIsJwtInvalid(msg)
             | Self::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(msg)
-            | Self::ListenerOauthJwksFieldsRejectedInIntrospectionMode(msg) => msg.clone(),
+            | Self::ListenerOauthJwksFieldsRejectedInIntrospectionMode(msg)
+            | Self::ListenerGssapiInvalidRule(msg) => msg.clone(),
+            Self::ListenerGssapiKeytabSecretMissing(n) => {
+                format!("listener '{n}': authentication.type=gssapi requires keytabSecretRef.secretName and .key")
+            }
+            Self::ConflictingGssapiListenerConfig => {
+                "all GSSAPI listeners must share identical config (the broker [gssapi] block is broker-global)".to_string()
+            }
+            Self::InterBrokerGssapiRequiresKerberosConfig(n) => format!(
+                "interBrokerListenerName='{n}' is type=gssapi but spec.interBrokerKerberos is not set"
+            ),
         }
     }
 }
@@ -207,6 +233,16 @@ fn oauth_canonical(cfg: &ListenerAuthenticationOAuth) -> ListenerAuthenticationO
     let mut out = cfg.clone();
     out.enable_oauth_bearer = true;
     out
+}
+
+/// Canonical form for cross-listener GSSAPI conflict detection. The broker
+/// `[gssapi]` block is broker-global, so every field must agree across
+/// GSSAPI listeners. Compare the whole struct.
+#[must_use]
+fn gssapi_canonical(
+    cfg: &crate::crd::ListenerAuthenticationGssapi,
+) -> crate::crd::ListenerAuthenticationGssapi {
+    cfg.clone()
 }
 
 /// Validate `spec.listeners` + `spec.interBrokerListenerName`. Returns
@@ -357,6 +393,22 @@ pub fn validate_listeners(
                 });
             }
         }
+        if let Some(ListenerAuthentication::Gssapi(cfg)) = &l.authentication {
+            if cfg.keytab_secret_ref.secret_name.is_empty() || cfg.keytab_secret_ref.key.is_empty()
+            {
+                return Err(ValidationError::ListenerGssapiKeytabSecretMissing(
+                    l.name.clone(),
+                ));
+            }
+            for spec in &cfg.principal_to_local_rules {
+                if crabka_security::gssapi::name::Rule::parse(spec).is_err() {
+                    return Err(ValidationError::ListenerGssapiInvalidRule(format!(
+                        "listener '{}': invalid principalToLocalRules entry {spec:?}",
+                        l.name
+                    )));
+                }
+            }
+        }
         if matches!(l.type_, ListenerType::Ingress | ListenerType::Route) {
             if !l.tls {
                 return Err(ValidationError::ListenerIngressRequiresTls(l.name.clone()));
@@ -414,6 +466,21 @@ pub fn validate_listeners(
         return Err(ValidationError::ConflictingOAuthListenerConfig);
     }
 
+    // Broker-global [gssapi] block: all GSSAPI listeners must agree.
+    let mut gssapi_canon: Option<crate::crd::ListenerAuthenticationGssapi> = None;
+    for l in listeners {
+        if let Some(ListenerAuthentication::Gssapi(cfg)) = &l.authentication {
+            let canon = gssapi_canonical(cfg);
+            match &gssapi_canon {
+                None => gssapi_canon = Some(canon),
+                Some(prev) if *prev != canon => {
+                    return Err(ValidationError::ConflictingGssapiListenerConfig);
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
     // Inter-broker listener resolution.
     if !listeners.is_empty() {
         let has_internal = listeners.iter().any(|l| l.type_ == ListenerType::Internal);
@@ -431,6 +498,26 @@ pub fn validate_listeners(
         }
     }
 
+    Ok(())
+}
+
+/// When the resolved inter-broker listener uses GSSAPI, `spec.interBrokerKerberos`
+/// must be present. `ib_kerberos_present` is `spec.inter_broker_kerberos.is_some()`.
+#[allow(dead_code)]
+pub fn validate_inter_broker_gssapi(
+    listeners: &[Listener],
+    inter_broker_listener_name: &str,
+    ib_kerberos_present: bool,
+) -> Result<(), ValidationError> {
+    let ib_is_gssapi = listeners.iter().any(|l| {
+        l.name == inter_broker_listener_name
+            && matches!(l.authentication, Some(ListenerAuthentication::Gssapi(_)))
+    });
+    if ib_is_gssapi && !ib_kerberos_present {
+        return Err(ValidationError::InterBrokerGssapiRequiresKerberosConfig(
+            inter_broker_listener_name.to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -2096,6 +2183,108 @@ mod tests {
             ),
             "unexpected error variant: {err:?}"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // GSSAPI listener validation
+    // -----------------------------------------------------------------
+
+    fn gssapi_cfg_with_service(svc: &str) -> crate::crd::ListenerAuthenticationGssapi {
+        crate::crd::ListenerAuthenticationGssapi {
+            keytab_secret_ref: crate::crd::KeytabSecretRef {
+                secret_name: "kt".into(),
+                key: "keytab".into(),
+            },
+            service_name: Some(svc.into()),
+            principal_to_local_rules: vec!["DEFAULT".into()],
+            realm: None,
+            kdc: None,
+        }
+    }
+
+    fn gssapi_cfg_with_rules(rules: Vec<String>) -> crate::crd::ListenerAuthenticationGssapi {
+        let mut c = gssapi_cfg_with_service("kafka");
+        c.principal_to_local_rules = rules;
+        c
+    }
+
+    fn gssapi_listener(
+        name: &str,
+        port: i32,
+        tls: bool,
+        cfg: crate::crd::ListenerAuthenticationGssapi,
+    ) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls,
+            authentication: Some(crate::crd::ListenerAuthentication::Gssapi(cfg)),
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    #[test]
+    fn gssapi_listener_without_keytab_is_invalid() {
+        let g = crate::crd::ListenerAuthenticationGssapi {
+            keytab_secret_ref: crate::crd::KeytabSecretRef {
+                secret_name: String::new(),
+                key: "k".into(),
+            },
+            service_name: None,
+            principal_to_local_rules: vec![],
+            realm: None,
+            kdc: None,
+        };
+        let l = gssapi_listener("gss", 9092, false, g);
+        assert_eq!(
+            validate_listeners(&[l], None).unwrap_err().reason(),
+            "ListenerGssapiKeytabSecretMissing"
+        );
+    }
+
+    #[test]
+    fn gssapi_listener_with_bad_rule_is_invalid() {
+        let g = gssapi_cfg_with_rules(vec!["NOT_A_RULE:::".into()]);
+        let l = gssapi_listener("gss", 9092, false, g);
+        assert_eq!(
+            validate_listeners(&[l], None).unwrap_err().reason(),
+            "ListenerGssapiInvalidRule"
+        );
+    }
+
+    #[test]
+    fn divergent_gssapi_listeners_conflict() {
+        let a = gssapi_cfg_with_service("kafka");
+        let b = gssapi_cfg_with_service("other");
+        let la = gssapi_listener("g1", 9092, false, a);
+        let lb = gssapi_listener("g2", 9093, false, b);
+        assert_eq!(
+            validate_listeners(&[la, lb], None).unwrap_err().reason(),
+            "ListenerGssapiConfigConflict"
+        );
+    }
+
+    #[test]
+    fn gssapi_listener_allows_plaintext_and_ssl() {
+        let g = gssapi_cfg_with_service("kafka");
+        let l = gssapi_listener("g", 9092, false, g);
+        validate_listeners(&[l], None).expect("plaintext+gssapi is valid");
+    }
+
+    #[test]
+    fn inter_broker_gssapi_without_kerberos_config_is_invalid() {
+        let g = gssapi_cfg_with_service("kafka");
+        let l = gssapi_listener("ib", 9092, false, g);
+        assert_eq!(
+            validate_inter_broker_gssapi(&[l.clone()], "ib", false)
+                .unwrap_err()
+                .reason(),
+            "InterBrokerGssapiRequiresKerberosConfig"
+        );
+        validate_inter_broker_gssapi(&[l], "ib", true)
+            .expect("ok when interBrokerKerberos present");
     }
 
     // -----------------------------------------------------------------
