@@ -433,7 +433,11 @@ pub struct BrokerConfig {
 
 /// Parameters for the topic-backed
 /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Does not derive `PartialEq`/`Eq`: the `security` field holds
+/// rustls-adjacent types (a `ClientConfig` connector) that are not
+/// comparable, and nothing compares this config by value.
+#[derive(Debug, Clone)]
 pub struct KafkaRlmmConfig {
     /// `host:port` the manager dials to reach its own broker (loopback
     /// in a single-broker setup, the inter-broker listener in a
@@ -445,7 +449,29 @@ pub struct KafkaRlmmConfig {
     /// Replication factor to create `__remote_log_metadata` with on
     /// first startup. Ignored when the topic already exists.
     pub replication: i32,
+    /// 48p: how often the topic-backed manager flushes its RLMM cache
+    /// snapshot to disk. Maps to Kafka's
+    /// `remote.log.metadata.snapshot.interval`. Default
+    /// [`DEFAULT_RLMM_SNAPSHOT_INTERVAL`].
+    pub snapshot_interval: std::time::Duration,
+    /// 48p: directory the RLMM cache snapshot is written to (one
+    /// `snapshot` file). Derived from the broker `log.dir`.
+    pub snapshot_dir: std::path::PathBuf,
+    /// Client TLS/SASL security for the metadata client. `None` =
+    /// plaintext loopback (single-broker / fully-plaintext clusters).
+    /// The broker overrides this at runtime in `bootstrap_topic_rlmm`
+    /// from the inter-broker listener; the TOML path always supplies
+    /// `None`.
+    ///
+    /// Boxed to keep `KafkaRlmmConfig` (and the enclosing `BrokerConfig`)
+    /// small: `BrokerConfig` is moved by value into the large
+    /// `Broker::start` future.
+    pub security: Option<Box<crabka_client_core::security::ClientSecurity>>,
 }
+
+/// 48p: default cadence of the topic-backed RLMM snapshot flush. 60s,
+/// matching Kafka's `remote.log.metadata.snapshot.interval` default.
+pub const DEFAULT_RLMM_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
 
 /// What backs the broker's `RemoteStorageManager` when tiered storage is on.
 #[derive(Debug, Clone)]
@@ -825,6 +851,36 @@ impl Default for BrokerConfig {
 mod tests {
     use super::*;
     use crate::BrokerError as BrokerStartError;
+
+    #[test]
+    fn kafka_rlmm_config_carries_snapshot_settings() {
+        let c = KafkaRlmmConfig {
+            bootstrap: "127.0.0.1:9092".into(),
+            num_partitions: 50,
+            replication: 1,
+            snapshot_interval: std::time::Duration::from_mins(1),
+            snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
+            security: None,
+        };
+        assert_eq!(c.snapshot_interval, std::time::Duration::from_mins(1));
+        assert_eq!(
+            c.snapshot_dir,
+            std::path::PathBuf::from("/data/remote-log-metadata")
+        );
+    }
+
+    #[test]
+    fn kafka_rlmm_config_carries_optional_security() {
+        let c = KafkaRlmmConfig {
+            bootstrap: "127.0.0.1:9092".into(),
+            num_partitions: 1,
+            replication: 1,
+            snapshot_interval: std::time::Duration::from_mins(1),
+            snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
+            security: None,
+        };
+        assert!(c.security.is_none());
+    }
 
     /// A well-formed two-listener config used as the base for validation
     /// tests.

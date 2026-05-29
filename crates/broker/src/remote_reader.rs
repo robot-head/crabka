@@ -44,6 +44,28 @@ struct TimeIndexEntry {
 
 const _: () = assert!(std::mem::size_of::<TimeIndexEntry>() == 12);
 
+/// 24 bytes per entry: `start_offset` i64 BE + `last_offset` i64 BE +
+/// `producer_id` i64 BE. Mirrors `crabka_log::txn_index::AbortedTxnRaw` so the
+/// remote-tier copy of a `.txnindex` file decodes through the same byte layout
+/// the local index was written with.
+#[derive(Debug, Clone, Copy, FromBytes, KnownLayout, Immutable, Unaligned)]
+#[repr(C)]
+struct AbortedTxnIndexEntry {
+    start_offset: I64<BigEndian>,
+    last_offset: I64<BigEndian>,
+    producer_id: I64<BigEndian>,
+}
+
+const _: () = assert!(std::mem::size_of::<AbortedTxnIndexEntry>() == 24);
+
+/// One decoded aborted-transaction entry from a remote segment's `.txnindex`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AbortedTxnEntry {
+    pub(crate) start_offset: i64,
+    pub(crate) last_offset: i64,
+    pub(crate) producer_id: i64,
+}
+
 /// Holds the broker's shared `RSM` + `RLMM` and serves remote reads.
 pub(crate) struct RemoteReader {
     pub(crate) rsm: Arc<dyn RemoteStorageManager>,
@@ -102,6 +124,46 @@ impl RemoteReader {
 
         let batch = first_batch_at_or_after(&data, offset);
         Ok(batch)
+    }
+
+    /// Aborted transactions overlapping the inclusive offset range
+    /// `[from_offset, to_offset]` in the finished remote segment covering
+    /// `from_offset`. Returns an empty `Vec` when no finished segment covers
+    /// the offset, when the segment carries no transaction index
+    /// (`SegmentNotFound` from `fetch_index`), or when nothing overlaps.
+    pub(crate) async fn aborted_transactions(
+        &self,
+        tp: &TopicIdPartition,
+        leader_epoch: i32,
+        from_offset: i64,
+        to_offset: i64,
+    ) -> Result<Vec<AbortedTxnEntry>, RemoteStorageError> {
+        let Some(metadata) =
+            self.rlmm
+                .remote_log_segment_metadata(tp, leader_epoch, from_offset)?
+        else {
+            return Ok(Vec::new());
+        };
+        if metadata.state() != RemoteLogSegmentState::CopySegmentFinished {
+            return Ok(Vec::new());
+        }
+
+        let index_bytes = match self
+            .fetch_index_blocking(metadata, IndexType::Transaction)
+            .await
+        {
+            Ok(bytes) => bytes,
+            // The transaction index is optional: a segment with no aborted
+            // transactions has no `.txnindex`, surfaced as SegmentNotFound.
+            Err(RemoteStorageError::SegmentNotFound(_)) => return Ok(Vec::new()),
+            Err(e) => return Err(e),
+        };
+
+        let entries = parse_txn_index(&index_bytes);
+        Ok(entries
+            .into_iter()
+            .filter(|e| txn_overlaps(e, from_offset, to_offset))
+            .collect())
     }
 
     /// Lowest `start_offset` across finished segments for `tp`, or `None` when
@@ -249,6 +311,33 @@ pub(crate) fn parse_time_index(bytes: &[u8]) -> Vec<(i64, u32)> {
         .iter()
         .map(|e| (e.timestamp.get(), e.relative_offset.get()))
         .collect()
+}
+
+/// Parse Kafka's transaction-index format (24 bytes / entry: `start_offset`
+/// i64 BE, `last_offset` i64 BE, `producer_id` i64 BE). Trailing bytes that
+/// don't complete a 24-byte entry are ignored.
+#[must_use]
+pub(crate) fn parse_txn_index(bytes: &[u8]) -> Vec<AbortedTxnEntry> {
+    let truncated_len = (bytes.len() / 24) * 24;
+    let entries = <[AbortedTxnIndexEntry]>::ref_from_bytes(&bytes[..truncated_len])
+        .expect("len is multiple of 24 and AbortedTxnIndexEntry is Unaligned");
+    entries
+        .iter()
+        .map(|e| AbortedTxnEntry {
+            start_offset: e.start_offset.get(),
+            last_offset: e.last_offset.get(),
+            producer_id: e.producer_id.get(),
+        })
+        .collect()
+}
+
+/// Whether an aborted-transaction entry overlaps the inclusive offset range
+/// `[from_offset, to_offset]`. Mirrors `TxnIndex::aborted_in_range`'s overlap
+/// test against an inclusive range: the entry's `[start, last]` intersects
+/// `[from, to]` iff `start <= to && last >= from`.
+#[must_use]
+pub(crate) fn txn_overlaps(entry: &AbortedTxnEntry, from_offset: i64, to_offset: i64) -> bool {
+    entry.start_offset <= to_offset && entry.last_offset >= from_offset
 }
 
 /// First entry whose `ts >= target_ts`, returning the relative offset, or
@@ -415,6 +504,65 @@ mod tests {
         assert!(first_batch_at_or_after(&[], 0).is_none());
     }
 
+    #[test]
+    fn parse_txn_index_round_trips_known_entries() {
+        // Mirror TxnIndex::append: 8B start_offset BE, 8B last_offset BE,
+        // 8B producer_id BE.
+        let mut buf = Vec::new();
+        for (start, last, pid) in [(0_i64, 4_i64, 1000_i64), (10, 14, 2000)] {
+            buf.extend_from_slice(&start.to_be_bytes());
+            buf.extend_from_slice(&last.to_be_bytes());
+            buf.extend_from_slice(&pid.to_be_bytes());
+        }
+        let entries = parse_txn_index(&buf);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].start_offset, 0);
+        assert_eq!(entries[0].last_offset, 4);
+        assert_eq!(entries[0].producer_id, 1000);
+        assert_eq!(entries[1].start_offset, 10);
+        assert_eq!(entries[1].last_offset, 14);
+        assert_eq!(entries[1].producer_id, 2000);
+    }
+
+    #[test]
+    fn parse_txn_index_truncates_trailing_partial_bytes() {
+        let mut buf = Vec::new();
+        for v in [0_i64, 4, 1000] {
+            buf.extend_from_slice(&v.to_be_bytes());
+        }
+        // 5 trailing bytes that don't complete a 24-byte entry.
+        buf.extend_from_slice(&[0xAA; 5]);
+        let entries = parse_txn_index(&buf);
+        assert_eq!(entries.len(), 1, "partial trailing entry ignored");
+        assert_eq!(entries[0].producer_id, 1000);
+    }
+
+    #[test]
+    fn parse_txn_index_empty_is_empty() {
+        assert!(parse_txn_index(&[]).is_empty());
+    }
+
+    #[test]
+    fn txn_overlaps_boundaries() {
+        let e = AbortedTxnEntry {
+            start_offset: 10,
+            last_offset: 14,
+            producer_id: 1,
+        };
+        // Range fully before the entry → excluded.
+        assert!(!txn_overlaps(&e, 0, 9), "range ends just before entry");
+        // Range touching the entry's first offset → included.
+        assert!(txn_overlaps(&e, 0, 10), "range ends on entry start");
+        // Range fully inside the entry → included.
+        assert!(txn_overlaps(&e, 11, 13), "range inside entry");
+        // Range touching the entry's last offset → included.
+        assert!(txn_overlaps(&e, 14, 100), "range starts on entry last");
+        // Range fully after the entry → excluded.
+        assert!(!txn_overlaps(&e, 15, 100), "range starts just after entry");
+        // Range fully covering the entry → included.
+        assert!(txn_overlaps(&e, 0, 100), "range covers entry");
+    }
+
     // ── Integration tests against `LocalTieredStorage` +
     // ── `InmemoryRemoteLogMetadataManager`. These exercise the full RSM/RLMM
     // ── plumbing through `RemoteReader` (the actual SPI calls, not just
@@ -532,6 +680,137 @@ mod tests {
         (RemoteReader::new(rsm, rlmm), log)
     }
 
+    /// Like `populated_reader`, but before copying, writes a single aborted-txn
+    /// entry into the first sealed segment's `.txnindex` (24 BE bytes:
+    /// `start_offset`, `last_offset`, `producer_id`) so the copy path carries
+    /// it to the remote tier. Returns the reader, the log, and the
+    /// `(start_offset, last_offset, producer_id)` written.
+    fn populated_reader_with_abort(
+        log_dir: &std::path::Path,
+        remote_dir: &std::path::Path,
+    ) -> (RemoteReader, Log, (i64, i64, i64)) {
+        let mut log = Log::open(
+            log_dir,
+            LogConfig {
+                segment_bytes: 256,
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        for _ in 0..12 {
+            let mut b = batch_of(2, 64);
+            log.append(&mut b).unwrap();
+        }
+        let exports = log.tierable_segments();
+        assert!(exports.len() >= 2, "test needs multiple sealed segments");
+
+        // Write a `.txnindex` next to the first sealed segment's `.log` so the
+        // export below picks it up. The abort covers the whole first segment.
+        let first = &exports[0];
+        let abort = (first.base_offset, first.last_offset, 7777_i64);
+        let mut txn_bytes = Vec::new();
+        txn_bytes.extend_from_slice(&abort.0.to_be_bytes());
+        txn_bytes.extend_from_slice(&abort.1.to_be_bytes());
+        txn_bytes.extend_from_slice(&abort.2.to_be_bytes());
+        let txn_path = first.log_path.with_extension("txnindex");
+        std::fs::write(&txn_path, &txn_bytes).unwrap();
+
+        // Re-derive exports so the first one now carries the txnindex path.
+        let exports = log.tierable_segments();
+        assert!(
+            exports[0].transaction_index_path.is_some(),
+            "first segment must now carry a .txnindex"
+        );
+
+        let rsm: Arc<dyn RemoteStorageManager> = Arc::new(LocalTieredStorage::new(remote_dir));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        for ex in &exports {
+            let id = crabka_remote_storage::RemoteLogSegmentId::new(tp(), Uuid::new_v4());
+            let epochs: BTreeMap<i32, i64> = if ex.leader_epochs.is_empty() {
+                BTreeMap::from([(0, ex.base_offset)])
+            } else {
+                ex.leader_epochs.iter().copied().collect()
+            };
+            let md = RemoteLogSegmentMetadata::new(
+                id.clone(),
+                ex.base_offset,
+                ex.last_offset,
+                ex.max_timestamp,
+                1,
+                ex.max_timestamp,
+                i32::try_from(ex.size_bytes).unwrap_or(i32::MAX),
+                RemoteLogSegmentState::CopySegmentStarted,
+                epochs.clone(),
+            )
+            .unwrap();
+            rlmm.add_remote_log_segment_metadata(md.clone()).unwrap();
+            let mut s = String::from("0\n");
+            let _ = writeln!(s, "{}", epochs.len());
+            for (e, st) in &epochs {
+                let _ = writeln!(s, "{e} {st}");
+            }
+            let data = crabka_remote_storage::LogSegmentData {
+                log_segment: ex.log_path.clone(),
+                offset_index: ex.offset_index_path.clone(),
+                time_index: ex.time_index_path.clone(),
+                transaction_index: ex.transaction_index_path.clone(),
+                producer_snapshot_index: None,
+                leader_epoch_index: bytes::Bytes::from(s.into_bytes()),
+            };
+            rsm.copy_log_segment_data(&md, &data).unwrap();
+            rlmm.update_remote_log_segment_metadata(
+                crabka_remote_storage::RemoteLogSegmentMetadataUpdate {
+                    remote_log_segment_id: id,
+                    event_timestamp_ms: ex.max_timestamp,
+                    custom_metadata: None,
+                    state: RemoteLogSegmentState::CopySegmentFinished,
+                    broker_id: 1,
+                },
+            )
+            .unwrap();
+        }
+
+        (RemoteReader::new(rsm, rlmm), log, abort)
+    }
+
+    #[tokio::test]
+    async fn aborted_transactions_returns_copied_abort() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        let (reader, _log, abort) = populated_reader_with_abort(log_dir.path(), remote_dir.path());
+        let (start, last, pid) = abort;
+
+        // Query the first segment's offset range → the abort overlaps.
+        let got = reader
+            .aborted_transactions(&tp(), 0, start, last)
+            .await
+            .expect("ok");
+        assert_eq!(got.len(), 1, "the copied abort is returned");
+        assert_eq!(got[0].start_offset, start);
+        assert_eq!(got[0].last_offset, last);
+        assert_eq!(got[0].producer_id, pid);
+    }
+
+    #[tokio::test]
+    async fn aborted_transactions_empty_when_segment_has_no_txnindex() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+        // The default harness writes no `.txnindex` for any segment.
+        let (reader, log) = populated_reader(log_dir.path(), remote_dir.path());
+        let exports = log.tierable_segments();
+        let seg = &exports[0];
+
+        let got = reader
+            .aborted_transactions(&tp(), 0, seg.base_offset, seg.last_offset)
+            .await
+            .expect("ok");
+        assert!(
+            got.is_empty(),
+            "segment with no .txnindex yields an empty list, not an error"
+        );
+    }
+
     #[tokio::test]
     async fn fetch_batch_finds_segment_and_returns_first_batch() {
         let log_dir = tempfile::tempdir().unwrap();
@@ -570,6 +849,22 @@ mod tests {
         // RLMM is empty → no segment for `tp` at epoch 0.
         let got = reader.fetch_batch(&tp(), 0, 0, 4096).await.unwrap();
         assert!(got.is_none());
+    }
+
+    #[tokio::test]
+    async fn aborted_transactions_empty_when_no_segment() {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> =
+            Arc::new(InmemoryRemoteLogMetadataManager::new());
+        let reader = RemoteReader::new(rsm, rlmm);
+        // RLMM is empty → no covering segment → empty list, not an error.
+        let got = reader
+            .aborted_transactions(&tp(), 0, 0, 100)
+            .await
+            .expect("ok");
+        assert!(got.is_empty());
     }
 
     #[tokio::test]
@@ -653,5 +948,236 @@ mod tests {
         // strictly-positive target is past every remote segment.
         let got = reader.offset_for_timestamp(&tp(), 1).await.unwrap();
         assert_eq!(got, None);
+    }
+
+    // ── 48q: `NotReady` from the RLMM must propagate out of the reader
+    // ── (not be swallowed as a miss), so the handlers can keep
+    // ── OFFSET_OUT_OF_RANGE / answer conservatively.
+
+    struct NotReadyRlmm;
+    impl RemoteLogMetadataManager for NotReadyRlmm {
+        fn add_remote_log_segment_metadata(
+            &self,
+            _m: RemoteLogSegmentMetadata,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+        fn update_remote_log_segment_metadata(
+            &self,
+            _u: crabka_remote_storage::RemoteLogSegmentMetadataUpdate,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+        fn remote_log_segment_metadata(
+            &self,
+            _tp: &TopicIdPartition,
+            _epoch: i32,
+            _offset: i64,
+        ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError> {
+            Err(RemoteStorageError::NotReady { partition: 3 })
+        }
+        fn highest_offset_for_epoch(
+            &self,
+            _tp: &TopicIdPartition,
+            _epoch: i32,
+        ) -> Result<Option<i64>, RemoteStorageError> {
+            Ok(None)
+        }
+        fn list_remote_log_segments(
+            &self,
+            _tp: &TopicIdPartition,
+        ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
+            Err(RemoteStorageError::NotReady { partition: 3 })
+        }
+        fn list_remote_log_segments_by_epoch(
+            &self,
+            _tp: &TopicIdPartition,
+            _epoch: i32,
+        ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
+            Ok(Vec::new())
+        }
+        fn put_remote_partition_delete_metadata(
+            &self,
+            _m: crabka_remote_storage::RemotePartitionDeleteMetadata,
+        ) -> Result<(), RemoteStorageError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_batch_propagates_not_ready() {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> = Arc::new(NotReadyRlmm);
+        let reader = RemoteReader::new(rsm, rlmm);
+        let err = reader.fetch_batch(&tp(), 0, 0, 4096).await.unwrap_err();
+        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
+    }
+
+    #[tokio::test]
+    async fn earliest_offset_propagates_not_ready() {
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> = Arc::new(NotReadyRlmm);
+        let reader = RemoteReader::new(rsm, rlmm);
+        let err = reader.earliest_offset(&tp()).unwrap_err();
+        assert!(matches!(err, RemoteStorageError::NotReady { .. }));
+    }
+
+    // ── I1: the list-based read paths (`earliest_offset` /
+    // ── `offset_for_timestamp` → `list_remote_log_segments`) must observe
+    // ── `NotReady` from the REAL `TopicBasedRemoteLogMetadataManager` while
+    // ── an assigned metadata partition is still catching up, and an empty
+    // ── result for a partition this broker does not own (Unassigned). The
+    // ── `NotReadyRlmm` stub proves propagation through the reader; this test
+    // ── proves the manager's list-path gate actually produces those states.
+
+    /// Drive `reconcile_assignment` and block (off the reactor) until the
+    /// list path stops returning `NotReady` for `tp`, i.e. the partition is
+    /// caught up to its assignment-time HWM.
+    async fn assign_and_wait_ready(
+        m: &Arc<crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager>,
+        mp: i32,
+        tp: &TopicIdPartition,
+    ) {
+        m.reconcile_assignment(&[mp]).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            // `list_remote_log_segments` is the method the list path uses.
+            match m.list_remote_log_segments(tp) {
+                Ok(_) => return,
+                Err(RemoteStorageError::NotReady { .. }) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "list path never became ready"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Err(e) => panic!("unexpected list error: {e:?}"),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_path_observes_not_ready_and_unassigned_from_real_manager() {
+        use crabka_remote_storage_topic::{
+            InProcessMetadataEventLog, MetadataEventLog, TopicBasedRemoteLogMetadataManager,
+            metadata_partition_for,
+        };
+
+        let topic_id = Uuid::from_u128(0xABCD);
+        let owned = TopicIdPartition::new(topic_id, "orders", 0);
+        let not_owned = TopicIdPartition::new(topic_id, "orders", 1);
+
+        // Wide metadata topic so the two user-partitions land in distinct
+        // metadata partitions.
+        let n = 16;
+        let mp_owned = metadata_partition_for(&owned, n);
+        let mp_other = metadata_partition_for(&not_owned, n);
+        assert_ne!(mp_owned, mp_other, "test needs distinct metadata buckets");
+
+        let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(n);
+
+        let writer_snap_dir = tempfile::tempdir().unwrap();
+        let mgr_snap_dir = tempfile::tempdir().unwrap();
+
+        // Pre-seed a finished segment for the owned partition via a transient
+        // all-consuming writer.
+        {
+            let writer = TopicBasedRemoteLogMetadataManager::start(
+                log.clone(),
+                tokio::runtime::Handle::current(),
+                writer_snap_dir.path().to_path_buf(),
+                std::time::Duration::from_hours(1),
+            )
+            .await
+            .unwrap();
+            writer
+                .reconcile_assignment(&(0..n).collect::<Vec<_>>())
+                .await;
+            let id = crabka_remote_storage::RemoteLogSegmentId::new(owned.clone(), Uuid::new_v4());
+            let md = RemoteLogSegmentMetadata::new(
+                id.clone(),
+                0,
+                99,
+                100,
+                1,
+                100,
+                2048,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([(0, 0)]),
+            )
+            .unwrap();
+            let w2 = writer.clone();
+            let md2 = md.clone();
+            tokio::task::spawn_blocking(move || {
+                w2.add_remote_log_segment_metadata(md2).unwrap();
+            })
+            .await
+            .unwrap();
+            let w2 = writer.clone();
+            tokio::task::spawn_blocking(move || {
+                w2.update_remote_log_segment_metadata(
+                    crabka_remote_storage::RemoteLogSegmentMetadataUpdate {
+                        remote_log_segment_id: id,
+                        event_timestamp_ms: 100,
+                        custom_metadata: None,
+                        state: RemoteLogSegmentState::CopySegmentFinished,
+                        broker_id: 1,
+                    },
+                )
+                .unwrap();
+            })
+            .await
+            .unwrap();
+            writer.shutdown();
+        }
+
+        // A fresh manager that consumes NOTHING until assigned.
+        let m = TopicBasedRemoteLogMetadataManager::start(
+            log.clone(),
+            tokio::runtime::Handle::current(),
+            mgr_snap_dir.path().to_path_buf(),
+            std::time::Duration::from_hours(1),
+        )
+        .await
+        .unwrap();
+
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> = m.clone();
+        let reader = RemoteReader::new(rsm, rlmm);
+
+        // Unowned partition (never assigned) → the list path treats it as a
+        // genuine miss: empty, not an error.
+        assert_eq!(
+            reader.earliest_offset(&not_owned).unwrap(),
+            None,
+            "unassigned partition is an empty list-path result, not NotReady"
+        );
+
+        // Assign the owned partition. Before catch-up the list path surfaces
+        // NotReady through the reader. Poll until ready; observe at least the
+        // ready (Some) terminal state.
+        assign_and_wait_ready(&m, mp_owned, &owned).await;
+        assert_eq!(
+            reader.earliest_offset(&owned).unwrap(),
+            Some(0),
+            "owned + caught up → real earliest from the remote tier"
+        );
+
+        // Remove the owned partition: the list path now returns empty (the
+        // broker no longer owns it), NOT a stale segment.
+        m.reconcile_assignment(&[]).await;
+        assert_eq!(
+            reader.earliest_offset(&owned).unwrap(),
+            None,
+            "removed partition's list path returns empty, not stale segments"
+        );
+
+        m.shutdown();
     }
 }

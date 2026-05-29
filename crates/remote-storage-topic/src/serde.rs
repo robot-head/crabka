@@ -325,7 +325,7 @@ fn decode_len(r: &mut Reader<'_>, _ctx: &'static str) -> Result<usize, CodecErro
 /// Unsigned LEB128 — 7 data bits per byte, MSB is the continuation
 /// flag. Encodes 1 byte for values < 128.
 #[allow(clippy::cast_possible_truncation)] // varint encode-byte by design
-fn write_uvarint(mut v: u64, buf: &mut BytesMut) {
+pub(crate) fn write_uvarint(mut v: u64, buf: &mut BytesMut) {
     while v >= 0x80 {
         buf.put_u8(((v as u8) & 0x7F) | 0x80);
         v >>= 7;
@@ -333,7 +333,7 @@ fn write_uvarint(mut v: u64, buf: &mut BytesMut) {
     buf.put_u8(v as u8);
 }
 
-fn read_uvarint(r: &mut Reader<'_>) -> Result<u64, CodecError> {
+pub(crate) fn read_uvarint(r: &mut Reader<'_>) -> Result<u64, CodecError> {
     let mut result: u64 = 0;
     for shift in (0..10).map(|i| i * 7) {
         let byte = r.read_u8()?;
@@ -345,17 +345,22 @@ fn read_uvarint(r: &mut Reader<'_>) -> Result<u64, CodecError> {
     Err(CodecError::LengthOverflow(u64::MAX))
 }
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(buf: &'a [u8]) -> Self {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
         Self { buf, pos: 0 }
     }
 
-    fn read_u8(&mut self) -> Result<u8, CodecError> {
+    /// Bytes not yet consumed.
+    pub(crate) fn remaining(&self) -> usize {
+        self.buf.len() - self.pos
+    }
+
+    pub(crate) fn read_u8(&mut self) -> Result<u8, CodecError> {
         let &b = self
             .buf
             .get(self.pos)
@@ -364,7 +369,7 @@ impl<'a> Reader<'a> {
         Ok(b)
     }
 
-    fn read_i32(&mut self) -> Result<i32, CodecError> {
+    pub(crate) fn read_i32(&mut self) -> Result<i32, CodecError> {
         let bytes: [u8; 4] = self
             .read_n(4)?
             .try_into()
@@ -372,7 +377,7 @@ impl<'a> Reader<'a> {
         Ok(i32::from_be_bytes(bytes))
     }
 
-    fn read_i64(&mut self) -> Result<i64, CodecError> {
+    pub(crate) fn read_i64(&mut self) -> Result<i64, CodecError> {
         let bytes: [u8; 8] = self
             .read_n(8)?
             .try_into()
@@ -380,7 +385,7 @@ impl<'a> Reader<'a> {
         Ok(i64::from_be_bytes(bytes))
     }
 
-    fn read_n(&mut self, n: usize) -> Result<&'a [u8], CodecError> {
+    pub(crate) fn read_n(&mut self, n: usize) -> Result<&'a [u8], CodecError> {
         let end = self
             .pos
             .checked_add(n)

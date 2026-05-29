@@ -69,6 +69,9 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
         bootstrap: format!("127.0.0.1:{}", listen.port()),
         num_partitions: 1,
         replication: 1,
+        snapshot_interval: Duration::from_hours(1),
+        snapshot_dir: log_dir.path().join("remote-log-metadata"),
+        security: None,
     });
 
     let broker = Broker::start(cfg).await.expect("broker start");
@@ -76,9 +79,20 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
 }
 
 async fn build_client(broker: &BrokerHandle) -> Client {
+    build_client_secured(broker, None).await
+}
+
+/// Build a test client, optionally negotiating TLS/SASL. `None` is the
+/// plaintext path used by the loopback tests; `Some(..)` authenticates
+/// against a SASL listener.
+async fn build_client_secured(
+    broker: &BrokerHandle,
+    security: Option<crabka_client_core::security::ClientSecurity>,
+) -> Client {
     Client::builder()
         .bootstrap(broker.listen_addr().to_string())
         .client_id("tiered-topic-rlmm-test")
+        .maybe_security(security)
         .build()
         .await
         .expect("client build")
@@ -128,14 +142,29 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
     await_activation(&broker).await;
 
     let client = build_client(&broker).await;
+    copy_then_fetch_round_trip(&broker, &client, remote_dir.path(), TOPIC).await;
+    broker.shutdown().await;
+}
 
+/// Shared copy→metadata→read body: create a tiered topic, wait for the
+/// config to propagate, produce enough to seal segments, wait for the RLM
+/// copy task to tier one through the topic-backed RLMM, then read offset 0
+/// back. Used by both the plaintext loopback test and the SASL_PLAINTEXT
+/// variant; the only difference is how `client` was built.
+#[allow(clippy::too_many_lines)]
+async fn copy_then_fetch_round_trip(
+    broker: &BrokerHandle,
+    client: &Client,
+    remote_dir: &std::path::Path,
+    topic: &str,
+) {
     // Tiny `segment.bytes` so a modest produce seals several segments;
     // `local.retention.bytes=1` evicts every copied segment from local
     // disk so the read-back must consult the remote tier.
     let resp = client
         .send(CreateTopicsRequest {
             topics: vec![CreatableTopic {
-                name: TOPIC.into(),
+                name: topic.into(),
                 num_partitions: 1,
                 replication_factor: 1,
                 configs: vec![
@@ -189,7 +218,7 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
     // (1 GiB segments, tiering off) and never roll or copy.
     let cfg_deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(cfg) = broker.partition_log_config_for_test(TOPIC, 0)
+        if let Some(cfg) = broker.partition_log_config_for_test(topic, 0)
             && cfg.remote_storage_enable
             && cfg.segment_bytes == 1024
             && cfg.local_retention_bytes == Some(1)
@@ -199,7 +228,7 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
         assert!(
             Instant::now() <= cfg_deadline,
             "tiered-storage topic config never propagated within 10s; saw {:?}",
-            broker.partition_log_config_for_test(TOPIC, 0)
+            broker.partition_log_config_for_test(topic, 0)
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -207,7 +236,7 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
     // Single-record batches (~85 bytes each) roll the 1 KiB segment every
     // ~12 records, so 80 records seal several segments for the copy task.
     broker
-        .produce_records_for_test(TOPIC, 0, 80)
+        .produce_records_for_test(topic, 0, 80)
         .await
         .expect("produce records");
 
@@ -217,7 +246,7 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
     // `CopySegment*` events round-tripped through `__remote_log_metadata`.
     let copy_deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if count_remote_log_files(remote_dir.path()) >= 1 {
+        if count_remote_log_files(remote_dir) >= 1 {
             break;
         }
         assert!(
@@ -231,7 +260,7 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
     // or (after eviction) the remote tier, a successful read exercises the
     // full path with the topic-backed RLMM active. Retry to absorb the
     // local-retention eviction race.
-    let topic_id = topic_id_for(&client, TOPIC).await;
+    let topic_id = topic_id_for(client, topic).await;
     let fetch_deadline = Instant::now() + Duration::from_secs(30);
     let value = loop {
         let r = client
@@ -239,7 +268,7 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
                 max_wait_ms: 500,
                 min_bytes: 1,
                 topics: vec![FetchTopic {
-                    topic: TOPIC.into(),
+                    topic: topic.into(),
                     topic_id,
                     partitions: vec![FetchPartition {
                         partition: 0,
@@ -275,8 +304,6 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
         Some(b"test-record-0".as_slice()),
         "offset 0 should read back the first produced record"
     );
-
-    broker.shutdown().await;
 }
 
 async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
@@ -316,4 +343,86 @@ fn count_remote_log_files(root: &std::path::Path) -> usize {
     let mut count = 0;
     walk(root, &mut count);
     count
+}
+
+/// Boot a single broker whose only (and inter-broker) listener is
+/// SASL_PLAINTEXT/PLAIN, with the topic-backed RLMM pointed at it. The
+/// RLMM authenticates as the inter-broker PLAIN principal.
+async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
+    use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
+    use crabka_security::{ListenerProtocol, SaslMechanism};
+
+    support::init_tracing();
+    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(1).await;
+    let listen = client_addrs[0];
+    let log_dir = TempDir::new().expect("log tempdir");
+    let remote_dir = TempDir::new().expect("remote tempdir");
+
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listen_addr = listen;
+    cfg.advertised_listener = listen.to_string();
+    cfg.controller_listen_addr = controller_addrs[0];
+    cfg.controller_quorum_voters = vec![(1, controller_addrs[0])];
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: listen,
+        advertised: format!("127.0.0.1:{}", listen.port()),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
+    cfg.plain_credentials
+        .insert("rlmm".to_string(), "rlmm-secret".to_string());
+    cfg.inter_broker_credentials = Some(InterBrokerCredentials::Plain {
+        username: "rlmm".to_string(),
+        password: "rlmm-secret".to_string(),
+    });
+    cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
+        dir: remote_dir.path().to_path_buf(),
+    });
+    cfg.remote_log_manager_interval = Duration::from_secs(1);
+    cfg.remote_log_metadata_kafka = Some(KafkaRlmmConfig {
+        // The broker overrides bootstrap + security from the inter-broker
+        // listener; the operator value here is the same loopback addr.
+        bootstrap: format!("127.0.0.1:{}", listen.port()),
+        num_partitions: 1,
+        replication: 1,
+        snapshot_interval: Duration::from_hours(1),
+        snapshot_dir: log_dir.path().join("remote-log-metadata"),
+        security: None,
+    });
+
+    let broker = Broker::start(cfg).await.expect("broker start");
+    (broker, log_dir, remote_dir)
+}
+
+/// The full copy→metadata→read round-trip, but the broker's only listener
+/// is SASL_PLAINTEXT/PLAIN. The RLMM's internal metadata client must
+/// authenticate as the inter-broker PLAIN principal to bootstrap the
+/// topic, publish/consume CopySegment events, and serve the read-back —
+/// proving the secured metadata client works end-to-end. The test's own
+/// client authenticates with the same credentials.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn topic_rlmm_sasl_loopback_copy_then_fetch_round_trip() {
+    use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+    use crabka_security::ListenerProtocol;
+
+    const TOPIC: &str = "tiered-topic-rlmm-sasl-itest";
+    let (broker, _log_dir, remote_dir) = start_sasl_broker_with_topic_rlmm().await;
+    await_activation(&broker).await;
+
+    let security = ClientSecurity {
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls: None,
+        sasl: Some(SaslCredentials::Plain {
+            username: "rlmm".into(),
+            password: "rlmm-secret".into(),
+        }),
+        sasl_host: None,
+    };
+    let client = build_client_secured(&broker, Some(security)).await;
+    copy_then_fetch_round_trip(&broker, &client, remote_dir.path(), TOPIC).await;
+    broker.shutdown().await;
 }

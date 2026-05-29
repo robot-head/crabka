@@ -879,6 +879,11 @@ impl FileConfig {
                     bootstrap: km.bootstrap.clone(),
                     num_partitions: km.num_partitions.unwrap_or(50),
                     replication: km.replication.unwrap_or(3),
+                    snapshot_interval: crate::config::DEFAULT_RLMM_SNAPSHOT_INTERVAL,
+                    snapshot_dir: cfg.log_dir.join("remote-log-metadata"),
+                    // The broker overrides this at runtime from the
+                    // inter-broker listener in `bootstrap_topic_rlmm`.
+                    security: None,
                 });
             }
         }

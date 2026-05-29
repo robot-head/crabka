@@ -360,25 +360,40 @@ pub struct KafkaError {
 }
 
 /// Short-lived admin client targeting one cluster's controller.
-/// Plaintext only.
+/// Optionally negotiates TLS/SASL via [`AdminClient::connect_secured`].
 pub struct AdminClient {
     pub(crate) conn: Connection,
+    /// Client security carried forward to `reconnect` so a
+    /// `NOT_CONTROLLER` retry re-dials the new controller the same way.
+    security: Option<crabka_client_core::security::ClientSecurity>,
 }
 
 impl AdminClient {
-    /// Try each bootstrap address in order. Each entry is `host:port`;
-    /// DNS is resolved via `tokio::net::lookup_host`. First successful
-    /// connect wins. Returns `AdminError::Connect { tried }` if none
-    /// responded.
-    pub async fn connect(bootstrap_addrs: &[String]) -> Result<Self, AdminError> {
-        let opts = ConnectionOptions {
+    /// Build the per-connect options for `client_id="crabka-operator"`,
+    /// carrying the supplied security policy.
+    fn opts(security: Option<crabka_client_core::security::ClientSecurity>) -> ConnectionOptions {
+        ConnectionOptions {
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(30),
             client_id: "crabka-operator".to_string(),
-        };
+            security: security.map(Box::new),
+        }
+    }
+
+    /// Connect, applying optional client security. `None` = plaintext
+    /// (identical to [`AdminClient::connect`]).
+    ///
+    /// # Errors
+    /// Returns `AdminError::Connect { tried }` if no bootstrap address
+    /// accepted the (optionally secured) connection.
+    pub async fn connect_secured(
+        bootstrap_addrs: &[String],
+        security: Option<crabka_client_core::security::ClientSecurity>,
+    ) -> Result<Self, AdminError> {
+        let opts = Self::opts(security.clone());
         for host_port in bootstrap_addrs {
             match Self::connect_one(host_port, opts.clone()).await {
-                Ok(conn) => return Ok(Self { conn }),
+                Ok(conn) => return Ok(Self { conn, security }),
                 Err(e) => {
                     tracing::debug!(
                         target: "crabka_client_admin",
@@ -394,6 +409,14 @@ impl AdminClient {
         })
     }
 
+    /// Try each bootstrap address in order. Each entry is `host:port`;
+    /// DNS is resolved via `tokio::net::lookup_host`. First successful
+    /// connect wins. Returns `AdminError::Connect { tried }` if none
+    /// responded. Plaintext; see [`AdminClient::connect_secured`].
+    pub async fn connect(bootstrap_addrs: &[String]) -> Result<Self, AdminError> {
+        Self::connect_secured(bootstrap_addrs, None).await
+    }
+
     async fn connect_one(
         host_port: &str,
         opts: ConnectionOptions,
@@ -404,7 +427,7 @@ impl AdminClient {
         let addr = addrs
             .next()
             .ok_or_else(|| AdminError::Protocol(format!("no addresses for {host_port}")))?;
-        Connection::connect(addr, opts)
+        Connection::connect_with_options(addr, opts)
             .await
             .map_err(AdminError::from)
     }
@@ -412,11 +435,7 @@ impl AdminClient {
     /// Replace the underlying connection. Used internally by the
     /// `NOT_CONTROLLER` retry path to reconnect to the current controller.
     pub(crate) async fn reconnect(&mut self, host_port: &str) -> Result<(), AdminError> {
-        let opts = ConnectionOptions {
-            connect_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(30),
-            client_id: "crabka-operator".to_string(),
-        };
+        let opts = Self::opts(self.security.clone());
         self.conn = Self::connect_one(host_port, opts).await?;
         Ok(())
     }
@@ -461,5 +480,25 @@ mod tests {
     #[test]
     fn kafka_error_name_unknown_returns_unknown() {
         assert_eq!(kafka_error_name(9999), "UNKNOWN");
+    }
+
+    #[tokio::test]
+    async fn connect_secured_threads_security_and_fails_to_closed_port() {
+        use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+        use crabka_security::ListenerProtocol;
+
+        let security = ClientSecurity {
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls: None,
+            sasl: Some(SaslCredentials::Plain {
+                username: "u".into(),
+                password: "p".into(),
+            }),
+            sasl_host: None,
+        };
+        // 127.0.0.1:1 has no listener; the secured connect must fail —
+        // proving the security arg is threaded (not a type error).
+        let res = AdminClient::connect_secured(&["127.0.0.1:1".to_string()], Some(security)).await;
+        assert!(res.is_err(), "connect to closed port must fail");
     }
 }

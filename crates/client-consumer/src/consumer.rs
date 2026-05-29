@@ -89,6 +89,7 @@ impl Consumer {
         #[builder(default = IsolationLevel::ReadUncommitted)] isolation_level: IsolationLevel,
         #[builder(default = Assignor::Range)] assignor: Assignor,
         #[builder(into)] client_rack: Option<String>,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConsumerError> {
         if subscribe.is_empty() {
             return Err(ConsumerError::NotSubscribed);
@@ -100,6 +101,7 @@ impl Consumer {
         let client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
+            .maybe_security(security.clone())
             .build()
             .await?;
 
@@ -287,6 +289,7 @@ impl Consumer {
         let coordinator_client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
+            .maybe_security(security.clone())
             .build()
             .await?;
 
@@ -392,5 +395,36 @@ impl Consumer {
             })
             .await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod security_arg_tests {
+    use super::*;
+    use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+    use crabka_security::ListenerProtocol;
+
+    #[tokio::test]
+    async fn consumer_builder_accepts_security() {
+        let security = ClientSecurity {
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls: None,
+            sasl: Some(SaslCredentials::Plain {
+                username: "u".into(),
+                password: "p".into(),
+            }),
+            sasl_host: None,
+        };
+        // 127.0.0.1:1 is unroutable; the consumer build connects eagerly
+        // (JoinGroup), so it must fail — proving the security arg is
+        // threaded (not a type error).
+        let res = Consumer::builder()
+            .bootstrap("127.0.0.1:1")
+            .group_id("g")
+            .subscribe(vec!["t".to_string()])
+            .security(security)
+            .build()
+            .await;
+        assert!(res.is_err(), "connect to closed port must fail");
     }
 }
