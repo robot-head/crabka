@@ -22,7 +22,22 @@ $brown:    #aa9c84;
 $blue-300: #8ed6fb;
 $pink-500: #d32e9d;
 
-$primary: $purple;
+// Crabka brand palette — sampled from the logo.
+// Vivid orange for accents/brand, deeper variants for accessible text/buttons,
+// steel grey from the crab body for secondary surfaces.
+$crabka-orange:      #ff5500; // brand / accent (logo "ka", crab claws)
+$crabka-orange-deep: #e8420a; // button fill (white text)
+$crabka-orange-ink:  #c8410a; // links & nav on light bg (AA on white)
+$crabka-orange-lite: #ff7a45; // brand accent on dark backgrounds
+$crabka-steel:       #a2a2a4; // logo silver / crab body
+$crabka-slate:       #1d2d35; // ink / headings (matches $black)
+
+$primary: $crabka-orange;
+
+// The brand orange is a vivid colour; allow Bootstrap's auto-contrast helper
+// to pair it with white text (≈3.2:1) instead of warning at build time. Crabka
+// overrides the actual link/button text colours for AA in _custom.scss.
+$min-contrast-ratio: 3;
 
 // Options
 //
@@ -64,7 +79,7 @@ $body-color:                $black;
 //
 // Style anchor elements.
 
-$link-color:                              $primary;
+$link-color:                              $crabka-orange-ink;
 $link-decoration:                         none;
 
 // Grid containers
@@ -134,8 +149,8 @@ $navbar-padding-x:                  null;
 $navbar-nav-link-padding-x:         0.5rem;
 
 $navbar-light-color:                $black;
-$navbar-light-hover-color:          $primary;
-$navbar-light-active-color:         $primary;
+$navbar-light-hover-color:          $crabka-orange-ink;
+$navbar-light-active-color:         $crabka-orange-ink;
 
 // Cards
 

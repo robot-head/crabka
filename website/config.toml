@@ -26,7 +26,7 @@ library = "katex"
 
 [extra.open]
 enable = true
-image = ""
+image = "og-image.jpg"
 twitter_site = ""
 twitter_creator = ""
 facebook_author = ""
@@ -35,7 +35,7 @@ og_locale = "en_US"
 
 [extra.schema]
 type = "Organization"
-logo = ""
+logo = "android-chrome-512x512.png"
 twitter = ""
 linked_in = ""
 github = "https://github.com/robot-head/crabka"
