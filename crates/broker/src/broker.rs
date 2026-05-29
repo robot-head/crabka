@@ -2093,12 +2093,23 @@ impl Broker {
             let runtime = tokio::runtime::Handle::current();
             let shutdown_token = shutdown.clone();
             let metrics_for_bootstrap = broker.metrics.clone();
+            let node_id = broker.config.node_id;
+            let image_rx = broker.controller.watch_image();
+            let reconciler_shutdown = shutdown.clone();
             tokio::spawn(async move {
                 tokio::select! {
                     () = shutdown_token.cancelled() => {
                         tracing::debug!("topic-backed RLMM bootstrap cancelled");
                     }
-                    () = bootstrap_topic_rlmm(swap, kafka_cfg, runtime, metrics_for_bootstrap) => {}
+                    () = bootstrap_topic_rlmm(
+                        swap,
+                        kafka_cfg,
+                        runtime,
+                        metrics_for_bootstrap,
+                        node_id,
+                        image_rx,
+                        reconciler_shutdown,
+                    ) => {}
                 }
             });
         }
@@ -2118,6 +2129,30 @@ struct KafkaSwapKickoff {
     broker_id: i32,
 }
 
+/// The sorted, deduped set of `__remote_log_metadata` partitions this broker
+/// (`node_id`) must consume: one entry per metadata partition covering any
+/// user-topic-partition this node leads or follows, given the metadata topic's
+/// `partition_count`.
+fn needed_metadata_partitions(
+    image: &crabka_metadata::MetadataImage,
+    node_id: crabka_metadata::NodeId,
+    partition_count: i32,
+) -> Vec<i32> {
+    let mut tps: Vec<crabka_remote_storage::TopicIdPartition> = Vec::new();
+    for topic in image.topics() {
+        for p in image.partitions_of(&topic.name) {
+            if p.leader == node_id || p.replicas.contains(&node_id) {
+                tps.push(crabka_remote_storage::TopicIdPartition::new(
+                    topic.topic_id,
+                    topic.name.clone(),
+                    p.partition,
+                ));
+            }
+        }
+    }
+    crabka_remote_storage_topic::metadata_partitions_for(tps.iter(), partition_count)
+}
+
 /// Construct the topic-backed
 /// [`crabka_remote_storage::RemoteLogMetadataManager`] against the
 /// broker's loopback listener and swap it into `swap`. On failure
@@ -2127,6 +2162,9 @@ async fn bootstrap_topic_rlmm(
     cfg: KafkaSwapKickoff,
     runtime: tokio::runtime::Handle,
     metrics: crate::metrics::BrokerMetrics,
+    node_id: crabka_metadata::NodeId,
+    mut image_rx: tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>>,
+    shutdown: CancellationToken,
 ) {
     let log_cfg = crabka_remote_storage_topic::KafkaMetadataLogConfig {
         bootstrap: cfg.cfg.bootstrap,
@@ -2162,9 +2200,79 @@ async fn bootstrap_topic_rlmm(
             return;
         }
     };
-    swap.swap(manager);
+    // Keep the concrete handle so the reconciler can call
+    // `reconcile_assignment`; the swap facade only needs the trait object.
+    swap.swap(manager.clone());
     metrics.tiered_storage_rlmm_topic_backed.set(1);
     tracing::info!("topic-backed RemoteLogMetadataManager activated");
+
+    // Publish the leadership-derived needed-set on a watch; re-emit whenever
+    // the metadata image changes. The initial value is the current image's
+    // set, so the bootstrap assignment is leadership-derived (not all
+    // partitions).
+    let partition_count = cfg.cfg.num_partitions;
+    let initial =
+        needed_metadata_partitions(&image_rx.borrow_and_update(), node_id, partition_count);
+    let (set_tx, set_rx) = tokio::sync::watch::channel(initial);
+
+    // Image-watcher: recompute on every image change.
+    {
+        let set_tx = set_tx;
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    changed = image_rx.changed() => {
+                        if changed.is_err() {
+                            return; // image sender dropped
+                        }
+                        let set = needed_metadata_partitions(
+                            &image_rx.borrow_and_update(),
+                            node_id,
+                            partition_count,
+                        );
+                        // send_if_modified avoids a reconcile when the set is
+                        // unchanged across an image bump that didn't touch us.
+                        set_tx.send_if_modified(|cur| {
+                            if *cur == set {
+                                false
+                            } else {
+                                *cur = set;
+                                true
+                            }
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    // Reconciler: apply the latest set to the manager's AssignmentHandle.
+    {
+        let manager = manager;
+        let mut set_rx = set_rx;
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            // Apply the initial set immediately.
+            {
+                let set = set_rx.borrow_and_update().clone();
+                manager.reconcile_assignment(&set).await;
+            }
+            loop {
+                tokio::select! {
+                    () = shutdown.cancelled() => return,
+                    changed = set_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        let set = set_rx.borrow_and_update().clone();
+                        manager.reconcile_assignment(&set).await;
+                    }
+                }
+            }
+        });
+    }
 }
 
 /// Create the partition runtime (mpsc channel + writer task + notify).
@@ -2303,6 +2411,50 @@ async fn accept_loop(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn needed_metadata_partitions_covers_led_and_followed() {
+        use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+        use crabka_remote_storage::TopicIdPartition;
+        use crabka_remote_storage_topic::metadata_partition_for;
+        use uuid::Uuid;
+
+        let topic_id = Uuid::from_u128(0xABCD);
+        let mut image = MetadataImage::new(Uuid::from_u128(1));
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id,
+            partitions: 3,
+            replication_factor: 2,
+        }));
+        // node 7 leads p0, follows p1 (replica), is absent from p2.
+        for (partition, leader, replicas) in [
+            (0_i32, 7_u64, vec![7_u64, 8]),
+            (1, 8, vec![8, 7]),
+            (2, 8, vec![8, 9]),
+        ] {
+            image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: "orders".into(),
+                partition,
+                leader,
+                replicas: replicas.clone(),
+                isr: replicas,
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+            }));
+        }
+
+        let got = needed_metadata_partitions(&image, 7, 50);
+
+        let mut expected = vec![
+            metadata_partition_for(&TopicIdPartition::new(topic_id, "orders", 0), 50),
+            metadata_partition_for(&TopicIdPartition::new(topic_id, "orders", 1), 50),
+        ];
+        expected.sort_unstable();
+        expected.dedup();
+        assert_eq!(got, expected, "p2 (node 7 not a replica) must be excluded");
+    }
 
     #[tokio::test]
     async fn start_and_shutdown_clean() {

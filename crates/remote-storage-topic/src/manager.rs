@@ -63,9 +63,9 @@ enum ReadGate {
 /// `__remote_log_metadata` topic (via a [`MetadataEventLog`]
 /// adapter).
 ///
-/// Construct with [`Self::start`]; once it returns, the manager has
-/// finished bootstrapping its in-memory cache from the log and is
-/// ready to serve queries and accept mutations.
+/// Construct with [`Self::start`]; it loads any on-disk snapshot but
+/// consumes no metadata partitions until [`Self::reconcile_assignment`]
+/// adds the broker's leader/follower-derived set.
 pub struct TopicBasedRemoteLogMetadataManager {
     log: Arc<dyn MetadataEventLog>,
     inner: Arc<InmemoryRemoteLogMetadataManager>,
@@ -102,9 +102,9 @@ pub struct TopicBasedRemoteLogMetadataManager {
 }
 
 impl TopicBasedRemoteLogMetadataManager {
-    /// Spawn the consumer pump and block until the manager has
-    /// applied every event already in `log` at the moment of the
-    /// call.
+    /// Load any on-disk snapshot into the cache and spawn the consumer
+    /// pump with an empty assignment. The manager consumes nothing until
+    /// [`Self::reconcile_assignment`] is driven (by the broker).
     ///
     /// `runtime` must be a Tokio runtime handle that lives at least
     /// as long as the returned manager. The synchronous
