@@ -39,8 +39,9 @@ fn page<K: CustomResourceExt>() -> CrdPage {
         .schema
         .as_ref()
         .and_then(|s| s.open_api_v3_schema.as_ref())
-        .map(|s| serde_json::to_value(s).expect("schema to json"))
-        .unwrap_or(Value::Null);
+        .map_or(Value::Null, |s| {
+            serde_json::to_value(s).expect("schema to json")
+        });
     let spec = schema_json
         .pointer("/properties/spec")
         .cloned()
@@ -51,11 +52,11 @@ fn page<K: CustomResourceExt>() -> CrdPage {
         version.name
     );
     body.push_str(&render_field_table(&spec));
-    if let Some(status) = status {
-        if status.get("properties").is_some() {
-            body.push_str("\n## Status\n\n");
-            body.push_str(&render_field_table(&status));
-        }
+    if let Some(status) = status
+        && status.get("properties").is_some()
+    {
+        body.push_str("\n## Status\n\n");
+        body.push_str(&render_field_table(&status));
     }
     CrdPage {
         slug: kind.to_lowercase(),

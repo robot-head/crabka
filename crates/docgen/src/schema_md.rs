@@ -1,7 +1,8 @@
-//! Render a JSON-Schema-shaped value (OpenAPI v3 / schemars output) to a
+//! Render a JSON-Schema-shaped value (`OpenAPI` v3 / schemars output) to a
 //! markdown field table. Shared by the CRD and broker-config generators.
 
 use serde_json::Value;
+use std::fmt::Write;
 
 /// Render the `properties` of an object schema as a markdown table with one
 /// row per (possibly nested) field. Columns: Field, Type, Required, Default,
@@ -45,9 +46,7 @@ fn collect_rows(schema: &Value, prefix: &str, out: &mut String) {
             .and_then(Value::as_str)
             .unwrap_or("")
             .replace('\n', " ");
-        out.push_str(&format!(
-            "| `{path}` | {ty} | {req} | {default} | {desc} |\n"
-        ));
+        let _ = writeln!(out, "| `{path}` | {ty} | {req} | {default} | {desc} |");
         if field.get("type").and_then(Value::as_str) == Some("object")
             && field.get("properties").is_some()
         {
@@ -60,10 +59,7 @@ fn type_label(field: &Value) -> String {
     match field.get("type").and_then(Value::as_str) {
         Some("array") => format!(
             "array<{}>",
-            field
-                .get("items")
-                .map(type_label)
-                .unwrap_or_else(|| "any".into())
+            field.get("items").map_or_else(|| "any".into(), type_label)
         ),
         Some(t) => t.to_string(),
         None => "object".to_string(),
