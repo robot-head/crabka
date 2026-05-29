@@ -40,7 +40,12 @@ pub struct ConnectionOptions {
     pub connect_timeout: Duration,
     pub request_timeout: Duration,
     /// Client-side TLS/SASL policy. `None` = plaintext (default).
-    pub security: Option<crate::security::ClientSecurity>,
+    ///
+    /// Boxed so `ConnectionOptions` stays small: it is cloned widely and
+    /// embedded in many connection-building futures, and `ClientSecurity`
+    /// carries several `String`/`PathBuf` fields that would otherwise
+    /// bloat every such future.
+    pub security: Option<Box<crate::security::ClientSecurity>>,
 }
 
 impl Default for ConnectionOptions {
@@ -559,7 +564,9 @@ mod secured_tests {
                     frame.put_u8(0);
                 }
                 frame.put_slice(&body);
-                s.write_u32(frame.len() as u32).await.unwrap();
+                s.write_u32(u32::try_from(frame.len()).unwrap())
+                    .await
+                    .unwrap();
                 s.write_all(&frame).await.unwrap();
                 s.flush().await.unwrap();
             }

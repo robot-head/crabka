@@ -487,7 +487,7 @@ async fn partition_fetch_loop(
     };
     let opts = ConnectionOptions {
         client_id: state.client_id.clone(),
-        security: state.security.clone(),
+        security: state.security.clone().map(Box::new),
         ..Default::default()
     };
     let connect = match &state.security {

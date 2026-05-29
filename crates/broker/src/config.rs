@@ -462,7 +462,11 @@ pub struct KafkaRlmmConfig {
     /// The broker overrides this at runtime in `bootstrap_topic_rlmm`
     /// from the inter-broker listener; the TOML path always supplies
     /// `None`.
-    pub security: Option<crabka_client_core::security::ClientSecurity>,
+    ///
+    /// Boxed to keep `KafkaRlmmConfig` (and the enclosing `BrokerConfig`)
+    /// small: `BrokerConfig` is moved by value into the large
+    /// `Broker::start` future.
+    pub security: Option<Box<crabka_client_core::security::ClientSecurity>>,
 }
 
 /// 48p: default cadence of the topic-backed RLMM snapshot flush. 60s,

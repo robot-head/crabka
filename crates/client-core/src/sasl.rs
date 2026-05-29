@@ -432,7 +432,10 @@ mod tests {
             frame.put_u8(0); // empty response-header tagged-fields
         }
         frame.put_slice(body);
-        stream.write_u32(frame.len() as u32).await.unwrap();
+        stream
+            .write_u32(u32::try_from(frame.len()).unwrap())
+            .await
+            .unwrap();
         stream.write_all(&frame).await.unwrap();
         stream.flush().await.unwrap();
     }

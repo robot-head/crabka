@@ -39,7 +39,7 @@ impl Client {
             client_id,
             connect_timeout,
             request_timeout,
-            security,
+            security: security.map(Box::new),
         };
         Self::start_with_options(bootstrap, options).await
     }

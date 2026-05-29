@@ -1848,14 +1848,15 @@ impl Broker {
                             crabka_client_core::security::TlsConnectorConfig {
                                 trust_roots_pem: t.trust_roots_path.clone(),
                                 // SNI = the advertised host of the inter-broker listener.
-                                server_name: inter
-                                    .map(|l| {
+                                server_name: inter.map_or_else(
+                                    || "localhost".to_string(),
+                                    |l| {
                                         l.advertised.rsplit_once(':').map_or_else(
                                             || l.advertised.clone(),
                                             |(h, _)| h.to_string(),
                                         )
-                                    })
-                                    .unwrap_or_else(|| "localhost".to_string()),
+                                    },
+                                ),
                             }
                         })
                     } else {
@@ -1865,11 +1866,11 @@ impl Broker {
                         .inter_broker_credentials
                         .as_ref()
                         .map(to_client_creds_from_inter_broker);
-                    Some(crabka_client_core::security::ClientSecurity {
+                    Some(Box::new(crabka_client_core::security::ClientSecurity {
                         protocol: proto,
                         tls,
                         sasl,
-                    })
+                    }))
                 } else {
                     None
                 };
@@ -2236,7 +2237,7 @@ async fn bootstrap_topic_rlmm(
         num_partitions: cfg.cfg.num_partitions,
         replication: cfg.cfg.replication,
         client_id: format!("crabka-rlmm-broker-{}", cfg.broker_id),
-        security: cfg.cfg.security,
+        security: cfg.cfg.security.map(|b| *b),
     };
     let log = match crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg).await {
         Ok(log) => log,

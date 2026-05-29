@@ -17,7 +17,7 @@ async fn connect_with_options(
     options: ConnectionOptions,
 ) -> Result<Connection, ClientError> {
     match options.security.clone() {
-        Some(sec) => Connection::connect_secured(addr, options, &sec).await,
+        Some(sec) => Connection::connect_secured(addr, options, sec.as_ref()).await,
         None => Connection::connect(addr, options).await,
     }
 }

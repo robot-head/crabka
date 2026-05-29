@@ -376,7 +376,7 @@ impl AdminClient {
             connect_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(30),
             client_id: "crabka-operator".to_string(),
-            security,
+            security: security.map(Box::new),
         }
     }
 
@@ -427,8 +427,8 @@ impl AdminClient {
         let addr = addrs
             .next()
             .ok_or_else(|| AdminError::Protocol(format!("no addresses for {host_port}")))?;
-        let conn = match &opts.security {
-            Some(sec) => Connection::connect_secured(addr, opts.clone(), sec).await,
+        let conn = match opts.security.clone() {
+            Some(sec) => Connection::connect_secured(addr, opts, sec.as_ref()).await,
             None => Connection::connect(addr, opts).await,
         };
         conn.map_err(AdminError::from)
