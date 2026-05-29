@@ -9,7 +9,14 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-ignore = []
+ignore = [
+    # RSA "Marvin" timing side-channel. Pulled in transitively by `picky`
+    # (a hard dependency of the vendored `sspi` Kerberos stack). Our GSSAPI
+    # path is auth-only over AES keytab keys and performs no RSA private-key
+    # operations (no PKINIT), so the network-observable timing leak does not
+    # apply. The advisory has no fixed release available.
+    "RUSTSEC-2023-0071",
+]
 
 [licenses]
 allow = [
@@ -30,7 +37,12 @@ allow = [
     # CDLA-Permissive-2.0. Pulled in transitively via reqwest + rustls.
     "CDLA-Permissive-2.0",
 ]
-exceptions = []
+exceptions = [
+    # portpicker is public-domain-equivalent (The Unlicense, OSI-approved and
+    # FSF Free/Libre). Pulled in transitively via the vendored `sspi` crate's
+    # `network_client` feature, which we need for KDC communication.
+    { allow = ["Unlicense"], crate = "portpicker" },
+]
 confidence-threshold = 0.93
 
 [bans]
