@@ -207,8 +207,10 @@ spec:
                 nullable: true
                 properties:
                   key:
+                    description: Key within the Secret whose value is the krb5.conf contents.
                     type: string
                   secretName:
+                    description: Name of the Secret holding the krb5.conf.
                     type: string
                 required:
                 - key

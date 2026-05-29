@@ -387,7 +387,9 @@ pub struct ListenerAuthenticationGssapi {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KeytabSecretRef {
+    /// Name of the Secret holding the keytab.
     pub secret_name: String,
+    /// Key within the Secret whose value is the keytab bytes. Mounted at a fixed in-pod path regardless of this key name.
     pub key: String,
 }
 
@@ -786,13 +788,13 @@ authentication:
         let schema = listener_authentication_schema(&mut generator);
         let v = serde_json::to_value(&schema).unwrap();
 
-        // Discriminator enum contains all four variants.
+        // Discriminator enum contains all five variants.
         let type_enum = v
             .pointer("/properties/type/enum")
             .and_then(|x| x.as_array())
             .expect("schema must have properties.type.enum array");
         let names: Vec<&str> = type_enum.iter().filter_map(|x| x.as_str()).collect();
-        for want in ["tls", "scram-sha-512", "scram-sha-256", "oauth"] {
+        for want in ["tls", "scram-sha-512", "scram-sha-256", "oauth", "gssapi"] {
             assert!(names.contains(&want), "missing {want} in {names:?}");
         }
 
@@ -829,6 +831,7 @@ authentication:
             "jwksMinRefreshPauseSeconds",
             "jwksExpirySeconds",
             "jwksIgnoreKeyUse",
+            "keytabSecretRef",
         ] {
             assert!(props.contains_key(want), "missing property {want}");
         }

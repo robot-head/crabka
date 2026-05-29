@@ -147,7 +147,9 @@ pub struct InterBrokerKerberos {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Krb5ConfSecretRef {
+    /// Name of the Secret holding the krb5.conf.
     pub secret_name: String,
+    /// Key within the Secret whose value is the krb5.conf contents.
     pub key: String,
 }
 
