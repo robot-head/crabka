@@ -2212,6 +2212,12 @@ fn needed_metadata_partitions(
     crabka_remote_storage_topic::metadata_partitions_for(tps.iter(), partition_count)
 }
 
+/// Cadence at which the metadata-partition reconciler re-applies the
+/// current assigned set even when the metadata image is unchanged. Drives
+/// recovery of partitions parked at the `HWM_UNKNOWN` sentinel after a
+/// transient `high_water_marks` failure at assignment time.
+const RLMM_RECONCILE_TICK: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Construct the topic-backed
 /// [`crabka_remote_storage::RemoteLogMetadataManager`] against the
 /// broker's loopback listener and swap it into `swap`. On failure
@@ -2309,30 +2315,49 @@ async fn bootstrap_topic_rlmm(
     }
 
     // Reconciler: apply the latest set to the manager's AssignmentHandle.
-    {
-        let manager = manager;
-        let mut set_rx = set_rx;
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            // Apply the initial set immediately.
-            {
-                let set = set_rx.borrow_and_update().clone();
-                manager.reconcile_assignment(&set).await;
-            }
-            loop {
-                tokio::select! {
-                    () = shutdown.cancelled() => return,
-                    changed = set_rx.changed() => {
-                        if changed.is_err() {
-                            return;
-                        }
-                        let set = set_rx.borrow_and_update().clone();
-                        manager.reconcile_assignment(&set).await;
+    spawn_rlmm_reconciler(manager, set_rx, shutdown);
+}
+
+/// Spawn the metadata-partition reconciler: apply the leadership-derived
+/// set to the RLMM's `AssignmentHandle` on the initial value, on every
+/// change, and on a fixed [`RLMM_RECONCILE_TICK`] cadence.
+///
+/// The periodic tick is what makes a partition parked at the
+/// `HWM_UNKNOWN` sentinel (after a transient assignment-time
+/// `high_water_marks` failure) eventually re-attempt its HWM and leave the
+/// `NotReady` state, even when the metadata image stays static.
+/// `reconcile_assignment` is idempotent for partitions already
+/// assigned-and-ready, so the periodic re-apply is cheap.
+fn spawn_rlmm_reconciler(
+    manager: Arc<crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager>,
+    mut set_rx: tokio::sync::watch::Receiver<Vec<i32>>,
+    shutdown: CancellationToken,
+) {
+    tokio::spawn(async move {
+        // Apply the initial set immediately.
+        {
+            let set = set_rx.borrow_and_update().clone();
+            manager.reconcile_assignment(&set).await;
+        }
+        let mut tick = tokio::time::interval(RLMM_RECONCILE_TICK);
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                () = shutdown.cancelled() => return,
+                changed = set_rx.changed() => {
+                    if changed.is_err() {
+                        return;
                     }
+                    let set = set_rx.borrow_and_update().clone();
+                    manager.reconcile_assignment(&set).await;
+                }
+                _ = tick.tick() => {
+                    let set = set_rx.borrow().clone();
+                    manager.reconcile_assignment(&set).await;
                 }
             }
-        });
-    }
+        }
+    });
 }
 
 /// Create the partition runtime (mpsc channel + writer task + notify).
