@@ -1,0 +1,24 @@
+# Local MIT krb5 KDC for the CRABKA.TEST realm, used by the GSSAPI spike and
+# (later) the GSSAPI integration tests. Hand-rolled on debian so we control the
+# realm, principals, enctypes, and keytab export precisely.
+#
+#   docker compose up --build        # brings the realm up; keytabs land in ./
+#   docker compose logs | grep READY # KDC_READY printed once setup completes
+#   docker compose down              # tears it down
+#
+# Port 88 (tcp+udp) is mapped to localhost so the sspi client can reach the KDC
+# via SSPI_KDC_URL=tcp://localhost:88. Kerberos is clock-sensitive: the
+# container inherits the host clock through Docker, so keep the host clock sane.
+services:
+  kdc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crabka-kdc
+    ports:
+      - "88:88/tcp"
+      - "88:88/udp"
+    volumes:
+      # Shared volume: setup.sh writes kafka.keytab / alice.keytab here, which is
+      # this very directory on the host, so the spike can read them directly.
+      - ./:/fixtures

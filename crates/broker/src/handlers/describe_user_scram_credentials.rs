@@ -111,7 +111,7 @@ fn sasl_mechanism_to_byte(m: SaslMechanism) -> i8 {
         SaslMechanism::ScramSha512 => 2,
         // Non-SCRAM mechanisms never own SCRAM credential records; map to the
         // KIP-554 UNKNOWN sentinel (0).
-        SaslMechanism::Plain | SaslMechanism::OAuthBearer => 0,
+        SaslMechanism::Plain | SaslMechanism::OAuthBearer | SaslMechanism::Gssapi => 0,
     }
 }
 

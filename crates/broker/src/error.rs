@@ -135,6 +135,11 @@ pub enum BrokerError {
     #[error("SASL listener {name} declared but enabled_sasl_mechanisms is empty")]
     SaslListenerNoMechanisms { name: String },
 
+    /// `Gssapi` is an enabled SASL mechanism but no `gssapi` config (keytab,
+    /// service name, principal mapping) was provided.
+    #[error("GSSAPI is an enabled SASL mechanism but gssapi config is missing")]
+    GssapiConfigMissing,
+
     /// TLS configuration error.
     #[error("tls: {0}")]
     Tls(String),

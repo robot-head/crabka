@@ -169,6 +169,13 @@ async fn run_inbound_sasl(
                             "OAUTHBEARER is not supported on the controller listener".into(),
                         ));
                     }
+                    // GSSAPI server-side accept on the controller listener is
+                    // wired in a later GSSAPI task.
+                    SaslMechanism::Gssapi => {
+                        return Err(RaftHandshakeError::Sasl(
+                            "GSSAPI is not yet wired on the controller listener".into(),
+                        ));
+                    }
                 };
                 let error_code = resp.error_code;
                 write_response(stream, api_key, api_version, corr_id, &resp).await?;

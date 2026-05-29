@@ -23,6 +23,11 @@ pub enum SaslMechanism {
     /// by the broker's configured token validator.
     #[strum(serialize = "OAUTHBEARER")]
     OAuthBearer,
+    /// SASL/GSSAPI (Kerberos, RFC 4752). Context establishment and the
+    /// RFC 4752 security-layer negotiation are driven by the broker's
+    /// configured service keytab via the GSS provider.
+    #[strum(serialize = "GSSAPI")]
+    Gssapi,
 }
 
 impl SaslMechanism {
@@ -89,6 +94,16 @@ mod tests {
         );
         assert_eq!(SaslMechanism::OAuthBearer.wire_name(), "OAUTHBEARER");
         assert!(!SaslMechanism::OAuthBearer.is_scram());
+    }
+
+    #[test]
+    fn gssapi_mechanism_roundtrips_wire_name() {
+        use std::str::FromStr;
+        assert_eq!(
+            SaslMechanism::from_str("GSSAPI").unwrap(),
+            SaslMechanism::Gssapi
+        );
+        assert_eq!(SaslMechanism::Gssapi.wire_name(), "GSSAPI");
     }
 
     #[test]

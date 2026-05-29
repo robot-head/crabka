@@ -11,6 +11,9 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# Slice: SASL/GSSAPI auth_to_local rules (Task 3) match principals with
+# RE2-compatible regexes; declared here so the gssapi::name module compiles.
+regex.workspace = true
 strum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,6 +38,20 @@ jsonpath-rust = { workspace = true }
 # fire-and-forget on-demand JWKS refresh signals. The "sync" feature is
 # enough — no runtime / no I/O surface in this crate.
 tokio = { workspace = true, features = ["sync"] }
+# Slice: SASL/GSSAPI (Kerberos). Pure-Rust SSPI implementation. Provides the
+# server-side accept_security_context path backed by a service keytab, plus the
+# client initiate path used for inter-broker auth. `network_client` pulls in the
+# reqwest-based KDC transport so the SSP can reach the KDC over the network; we
+# pick `ring` over the default `aws-lc-rs` crypto provider to match the rest of
+# the workspace (rustls/rcgen already ride on ring).
+#
+# NOTE (spike finding): sspi 0.21 -> picky-krb 0.12.3 hard-pins
+# pbkdf2 =0.13.0-rc.10, which is why the workspace pbkdf2 pin was moved to that
+# RC. And sspi 0.21's client AS-exchange has an MIT-KDC interop bug (AS-REP
+# enc-part APPLICATION tag 26 rejected); see
+# docs/superpowers/specs/2026-05-28-gssapi-sspi-findings.md for the one-line fix
+# the provider task (Task 5) must apply (fork / vendor / upstream).
+sspi = { version = "0.21", default-features = false, features = ["network_client", "ring"] }
 
 [dev-dependencies]
 hex.workspace = true

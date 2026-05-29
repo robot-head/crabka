@@ -41,6 +41,9 @@ pub const INVALID_TOPIC_EXCEPTION: i16 = 17;
 /// the connection has completed `SaslHandshake` + `SaslAuthenticate`, or in
 /// the wrong order. The broker closes the connection after emitting it.
 pub const ILLEGAL_SASL_STATE: i16 = 34;
+/// `UNSUPPORTED_SASL_MECHANISM` (33) — the client requested a SASL mechanism
+/// the broker does not offer on this listener.
+pub const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
 pub const UNSUPPORTED_VERSION: i16 = 35;
 pub const TOPIC_ALREADY_EXISTS: i16 = 36;
 pub const INVALID_PARTITIONS: i16 = 37;
@@ -253,6 +256,7 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::EmptyRoles
         | BrokerError::NonControllerIsVoter { .. }
         | BrokerError::SaslListenerNoMechanisms { .. }
+        | BrokerError::GssapiConfigMissing
         | BrokerError::Tls(_)
         | BrokerError::BootstrapFile { .. }
         | BrokerError::InvalidLeaderRebalanceInterval { .. }

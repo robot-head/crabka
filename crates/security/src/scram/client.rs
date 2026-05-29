@@ -105,7 +105,7 @@ impl ScramClientExchange {
             SaslMechanism::ScramSha256 => {
                 compute_proof_sha256(&self.password, &salt, iters, auth_message.as_bytes())?
             }
-            SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
+            SaslMechanism::Plain | SaslMechanism::OAuthBearer | SaslMechanism::Gssapi => {
                 return Err(AuthError::MalformedMessage);
             }
         };
@@ -142,7 +142,7 @@ impl ScramClientExchange {
                 mac.update(auth_message.as_bytes());
                 mac.finalize().into_bytes().to_vec()
             }
-            SaslMechanism::Plain | SaslMechanism::OAuthBearer => {
+            SaslMechanism::Plain | SaslMechanism::OAuthBearer | SaslMechanism::Gssapi => {
                 return Err(AuthError::MalformedMessage);
             }
         };

@@ -1592,6 +1592,14 @@ async fn handle_sasl_frame(
                         )
                         .await
                     }
+                    crabka_security::SaslMechanism::Gssapi => {
+                        let cfg = broker
+                            .config
+                            .gssapi
+                            .as_ref()
+                            .expect("GSSAPI enabled without config");
+                        crate::network::auth::handle_authenticate_gssapi(&req, auth, cfg)
+                    }
                 }
             } else {
                 crabka_protocol::owned::sasl_authenticate_response::SaslAuthenticateResponse {

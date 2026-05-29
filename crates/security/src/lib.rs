@@ -5,6 +5,7 @@
 
 pub mod ca;
 pub mod delegation_token;
+pub mod gssapi;
 mod jwks;
 mod jwks_trust;
 mod listener;

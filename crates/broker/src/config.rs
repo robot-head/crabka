@@ -40,12 +40,41 @@ pub struct ListenerSpec {
     pub sasl_mechanisms: Option<Vec<SaslMechanism>>,
 }
 
-/// Credentials the broker uses when connecting *to* other brokers.
+/// Credentials the broker uses when connecting *to* other brokers, one
+/// variant per SASL mechanism the inter-broker client can speak.
 #[derive(Debug, Clone)]
-pub struct InterBrokerCredentials {
-    pub mechanism: SaslMechanism,
-    pub username: String,
-    pub password: String,
+pub enum InterBrokerCredentials {
+    /// SASL/PLAIN: `\0username\0password`.
+    Plain { username: String, password: String },
+    /// SASL/SCRAM (SHA-256 or SHA-512).
+    Scram {
+        mechanism: SaslMechanism,
+        username: String,
+        password: String,
+    },
+    /// SASL/GSSAPI: authenticate as `client_principal` using the long-term
+    /// key in `keytab_path` (no password). `service_name` is the target
+    /// broker's SPN primary (combined with the dialed host into
+    /// `service_name/host` at connect time); `kdc_url` is the KDC endpoint
+    /// (e.g. `tcp://kdc:88`).
+    Gssapi {
+        keytab_path: PathBuf,
+        client_principal: String,
+        service_name: String,
+        kdc_url: String,
+    },
+}
+
+impl InterBrokerCredentials {
+    /// The SASL mechanism this credential set authenticates with.
+    #[must_use]
+    pub fn mechanism(&self) -> SaslMechanism {
+        match self {
+            Self::Plain { .. } => SaslMechanism::Plain,
+            Self::Scram { mechanism, .. } => *mechanism,
+            Self::Gssapi { .. } => SaslMechanism::Gssapi,
+        }
+    }
 }
 
 /// Construction-time configuration for [`crate::Broker::start`].
@@ -219,6 +248,11 @@ pub struct BrokerConfig {
     /// validator with principal claim `sub`; configuring a JWKS endpoint
     /// (`[oauthbearer].jwks_endpoint_uri`) selects the signed-JWT validator.
     pub oauthbearer_validator: crabka_security::OAuthBearerValidator,
+
+    /// SASL/GSSAPI (Kerberos) configuration. `Some` only when `Gssapi` is in
+    /// `enabled_sasl_mechanisms`; carries the service keytab path,
+    /// `auth_to_local` rules, and KDC/realm settings for the initiate path.
+    pub gssapi: Option<crabka_security::gssapi::GssapiConfig>,
 
     /// JWKS endpoint to fetch OAUTHBEARER signing keys from. `Some`
     /// only when `oauthbearer_validator` is the signed variant. When set,
@@ -491,6 +525,7 @@ impl BrokerConfig {
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
+            gssapi: None,
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             oauthbearer_idp_tls_trust: None,
@@ -607,6 +642,23 @@ impl BrokerConfig {
             }
         }
 
+        // GSSAPI, wherever it is enabled (per-listener override or broker-wide
+        // default), requires a `gssapi` config block. Without it the dispatch
+        // path has nothing to authenticate against, so reject at startup rather
+        // than panicking when the first GSSAPI client connects.
+        let gssapi_enabled = listeners.iter().any(|l| {
+            l.protocol.requires_sasl()
+                && l.sasl_mechanisms
+                    .as_deref()
+                    .unwrap_or(&self.enabled_sasl_mechanisms)
+                    .contains(&SaslMechanism::Gssapi)
+        }) || self
+            .enabled_sasl_mechanisms
+            .contains(&SaslMechanism::Gssapi);
+        if gssapi_enabled && self.gssapi.is_none() {
+            return Err(BrokerError::GssapiConfigMissing);
+        }
+
         let cp = self.controller_listener_protocol;
         if cp.requires_tls() && self.tls_config.is_none() {
             return Err(BrokerError::Tls(
@@ -720,6 +772,7 @@ impl Default for BrokerConfig {
             tls_config: None,
             enabled_sasl_mechanisms: vec![],
             oauthbearer_validator: crabka_security::OAuthBearerValidator::default(),
+            gssapi: None,
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: std::time::Duration::from_mins(5),
             oauthbearer_idp_tls_trust: None,
@@ -1026,6 +1079,20 @@ mod tests {
         };
         c.validate()
             .expect("per-listener mechanisms satisfy SASL validation");
+    }
+
+    #[test]
+    fn rejects_gssapi_mechanism_without_gssapi_config() {
+        let c = BrokerConfig {
+            controller_listener_protocol: ListenerProtocol::Plaintext,
+            enabled_sasl_mechanisms: vec![SaslMechanism::Gssapi],
+            gssapi: None,
+            ..BrokerConfig::default()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(BrokerError::GssapiConfigMissing)
+        ));
     }
 
     #[test]

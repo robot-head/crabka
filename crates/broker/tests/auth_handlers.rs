@@ -2364,21 +2364,22 @@ async fn inter_broker_client_authenticates_via_plain() {
 
     let client = crabka_broker::network::client::InterBrokerClient::new(
         None,
-        Some(crabka_broker::config::InterBrokerCredentials {
-            mechanism: SaslMechanism::Plain,
+        Some(crabka_broker::config::InterBrokerCredentials::Plain {
             username: "broker".to_string(),
             password: "secret".to_string(),
         }),
     );
 
-    let result = drive_inter_broker_client_plain(&client, addr).await;
+    let result = drive_inter_broker_client_then_apiversions(&client, addr).await;
     handle.shutdown().await;
     result.expect("InterBrokerClient PLAIN auth + ApiVersions round-trip must succeed");
 }
 
 /// Drive `InterBrokerClient::connect` and prove the post-auth stream
-/// survives by running one `ApiVersions` round-trip over it.
-async fn drive_inter_broker_client_plain(
+/// survives by running one `ApiVersions` round-trip over it. Mechanism-
+/// agnostic: dials `localhost:<port>` over `SaslPlaintext` (so a GSSAPI SPN
+/// resolves to `kafka/localhost`) and asserts the post-auth stream works.
+async fn drive_inter_broker_client_then_apiversions(
     client: &crabka_broker::network::client::InterBrokerClient,
     addr: SocketAddr,
 ) -> Result<(), io::Error> {
@@ -2428,6 +2429,146 @@ async fn drive_inter_broker_client_plain(
     let _av_resp = ApiVersionsResponse::decode(&mut cur, 0)
         .map_err(|e| io::Error::other(format!("ApiVersions decode: {e}")))?;
     Ok(())
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Task 8: SASL/GSSAPI handshake advertisement (no Docker / no KDC).
+// ────────────────────────────────────────────────────────────────────────
+
+/// A broker with GSSAPI enabled advertises GSSAPI in its `SaslHandshake`
+/// response and accepts the handshake (`error_code = 0`), leaving the
+/// connection in GSSAPI negotiation. The actual GSS context exchange needs a
+/// live KDC and is covered by the E2E parity tests (Task 10); this case only
+/// proves the mechanism is wired through handshake advertisement and that the
+/// keytab is not touched until the first `SaslAuthenticate` round.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gssapi_handshake_advertised_when_enabled() {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Gssapi];
+    cfg.gssapi = Some(crabka_security::gssapi::GssapiConfig {
+        // Points at the committed fixture, but the handshake path never reads
+        // it (the acceptor is built lazily on the first SaslAuthenticate).
+        keytab_path: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../security/tests/fixtures/kdc/kafka.keytab"),
+        service_name: "kafka".to_string(),
+        principal_to_local_rules: vec![],
+        realm: Some("CRABKA.TEST".to_string()),
+        kdc: None,
+    });
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut corr = 0;
+
+    // ApiVersions (pre-auth) so the connection is in a clean state.
+    let av_req = ApiVersionsRequest::default();
+    let mut av_body = BytesMut::new();
+    av_req.encode(&mut av_body, 0).unwrap();
+    let av = round_trip(&mut stream, 18, 0, corr, false, &av_body)
+        .await
+        .unwrap();
+    corr += 1;
+    let mut cur: &[u8] = &av;
+    ApiVersionsResponse::decode(&mut cur, 0).unwrap();
+
+    // SaslHandshake v1, mechanism = "GSSAPI".
+    let sh_req = SaslHandshakeRequest {
+        mechanism: "GSSAPI".to_string(),
+        ..Default::default()
+    };
+    let mut sh_body = BytesMut::new();
+    sh_req.encode(&mut sh_body, 1).unwrap();
+    let sh = round_trip(&mut stream, 17, 1, corr, false, &sh_body)
+        .await
+        .unwrap();
+    let mut cur: &[u8] = &sh;
+    let sh_resp = SaslHandshakeResponse::decode(&mut cur, 1).unwrap();
+
+    handle.shutdown().await;
+
+    assert_eq!(sh_resp.error_code, 0, "GSSAPI handshake must succeed");
+    assert!(
+        sh_resp.mechanisms.iter().any(|m| m == "GSSAPI"),
+        "GSSAPI must be advertised; got {:?}",
+        sh_resp.mechanisms
+    );
+}
+
+/// End-to-end inter-broker GSSAPI initiate against a live KDC: a Crabka
+/// broker accepts on a `SASL_PLAINTEXT`/GSSAPI listener (service key in
+/// `kafka.keytab`), and `InterBrokerClient` dials it with
+/// `InterBrokerCredentials::Gssapi`, authenticating *from a keytab* as
+/// `alice@CRABKA.TEST` (no password). Proves the full outbound GSSAPI path:
+/// AS/TGS from `alice.keytab` → AP-REQ → broker validates → RFC 4752
+/// auth-only layer negotiation → authenticated stream, confirmed by a
+/// follow-up `ApiVersions` round-trip.
+///
+/// Requires the MIT KDC fixture and exported env, same as the provider
+/// contract test:
+///
+/// ```text
+/// cd crates/security/tests/fixtures/kdc && docker compose up --build -d
+/// KRB5_CONFIG=crates/security/tests/fixtures/kdc/krb5.conf SSPI_KDC_URL=tcp://localhost:88 \
+///   cargo test -p crabka-broker gssapi_inter_broker -- --ignored
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires the MIT KDC fixture (docker compose up) + exported KRB5_CONFIG/SSPI_KDC_URL"]
+async fn gssapi_inter_broker_client_authenticates_from_keytab() {
+    let fixtures =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../security/tests/fixtures/kdc");
+    let kdc_url =
+        std::env::var("SSPI_KDC_URL").unwrap_or_else(|_| "tcp://localhost:88".to_string());
+
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listeners = vec![ListenerSpec {
+        name: "SASL_PLAINTEXT".to_string(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        advertised: "127.0.0.1:0".to_string(),
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls_config: None,
+        sasl_mechanisms: None,
+    }];
+    cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
+    cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Gssapi];
+    cfg.gssapi = Some(crabka_security::gssapi::GssapiConfig {
+        keytab_path: fixtures.join("kafka.keytab"),
+        service_name: "kafka".to_string(),
+        // DEFAULT rule + matching default realm maps alice@CRABKA.TEST to
+        // the short name "alice".
+        principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
+        realm: Some("CRABKA.TEST".to_string()),
+        kdc: Some(kdc_url.clone()),
+    });
+
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+
+    let client = crabka_broker::network::client::InterBrokerClient::new(
+        None,
+        Some(crabka_broker::config::InterBrokerCredentials::Gssapi {
+            keytab_path: fixtures.join("alice.keytab"),
+            client_principal: "alice@CRABKA.TEST".to_string(),
+            service_name: "kafka".to_string(),
+            kdc_url,
+        }),
+    );
+
+    let result = drive_inter_broker_client_then_apiversions(&client, addr).await;
+    handle.shutdown().await;
+    result.expect("InterBrokerClient GSSAPI auth + ApiVersions round-trip must succeed");
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -2511,8 +2652,7 @@ mod two_broker_sasl {
         cfg.enabled_sasl_mechanisms = vec![SaslMechanism::Plain];
         cfg.plain_credentials
             .insert("broker".to_string(), "secret".to_string());
-        cfg.inter_broker_credentials = Some(InterBrokerCredentials {
-            mechanism: SaslMechanism::Plain,
+        cfg.inter_broker_credentials = Some(InterBrokerCredentials::Plain {
             username: "broker".to_string(),
             password: "secret".to_string(),
         });

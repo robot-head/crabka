@@ -91,7 +91,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"
 x509-parser = "0.18"
 rustls-webpki = "0.103"
 arc-swap = "1"
-pbkdf2 = { version = "0.13", default-features = false, features = ["kdf", "hmac"] }
+pbkdf2 = { version = "=0.13.0-rc.10", default-features = false, features = ["kdf", "hmac"] }
 hmac = "0.13"
 sha2 = "0.11"
 ring = "0.17"
@@ -116,3 +116,9 @@ parking_lot = "0.12"
 # an O(1) LRU with a non-zero capacity invariant; pair it with our own
 # TTL field on the value (no built-in expiry).
 lru = "0.18"
+
+# Vendored sspi 0.21.0 carrying a one-line MIT-KDC AS-REP interop fix
+# (RFC 4120 5.4.2: accept EncTGSRepPart tag 26, not just tag 25). See
+# docs/superpowers/specs/2026-05-28-gssapi-sspi-findings.md §6.
+[patch.crates-io]
+sspi = { path = "third_party/sspi" }

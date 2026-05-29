@@ -23,6 +23,8 @@ pub enum AuthMethod {
     SaslScramSha512,
     /// SASL/OAUTHBEARER.
     SaslOAuthBearer,
+    /// SASL/GSSAPI (Kerberos, RFC 4752).
+    SaslGssapi,
     /// mTLS client-cert verified against the listener's
     /// `client_ca_path`.
     MTls,
@@ -37,6 +39,7 @@ impl AuthMethod {
             SaslMechanism::ScramSha256 => Self::SaslScramSha256,
             SaslMechanism::ScramSha512 => Self::SaslScramSha512,
             SaslMechanism::OAuthBearer => Self::SaslOAuthBearer,
+            SaslMechanism::Gssapi => Self::SaslGssapi,
         }
     }
 }
@@ -145,6 +148,10 @@ mod tests {
         assert_eq!(
             AuthMethod::from_sasl(SaslMechanism::OAuthBearer),
             AuthMethod::SaslOAuthBearer
+        );
+        assert_eq!(
+            AuthMethod::from_sasl(SaslMechanism::Gssapi),
+            AuthMethod::SaslGssapi
         );
     }
 }
