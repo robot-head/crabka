@@ -5,7 +5,8 @@
 //! Cluster formation is driven by `BootstrapMode`: one broker boots as
 //! the singleton voter (`Bootstrap`), remaining fresh brokers skip
 //! `initialize` (`Join`), and restarted brokers replay their on-disk log
-//! (`Rejoin`). Snapshot replay is not implemented.
+//! (`Rejoin`), seeding state from the newest metadata checkpoint when one
+//! exists before replaying the log entries that follow it.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -58,6 +59,31 @@ pub struct QuorumState {
     pub per_voter_matched_index: BTreeMap<NodeId, u64>,
 }
 
+/// A contiguous byte window of the latest metadata `.checkpoint`,
+/// returned by [`ControllerHandle::read_snapshot_range`] to back the
+/// broker's `FetchSnapshot` handler. `end_offset` / `epoch` identify the
+/// snapshot, and `total_size` is its full byte length so the handler can
+/// drive paging.
+pub struct SnapshotSlice {
+    pub end_offset: i64,
+    pub epoch: i32,
+    pub total_size: i64,
+    pub bytes: bytes::Bytes,
+}
+
+/// Outcome of [`ControllerHandle::read_snapshot_range`]. The broker's
+/// `FetchSnapshot` handler maps each variant to its Kafka error code:
+/// `NoSnapshot` → `SNAPSHOT_NOT_FOUND`, `OutOfRange` → `POSITION_OUT_OF_RANGE`.
+pub enum SnapshotRange {
+    /// No `.checkpoint` exists yet.
+    NoSnapshot,
+    /// `position` is strictly past the snapshot's end byte. A `position`
+    /// exactly at the end is valid and yields an empty `Slice`.
+    OutOfRange,
+    /// The requested byte window.
+    Slice(SnapshotSlice),
+}
+
 /// Handle returned by [`Controller::start`]. Carries the live openraft
 /// node, the state machine, a leader-id watcher, and the background task
 /// join handles. Drop is NOT a clean shutdown — call [`Self::shutdown`]
@@ -70,6 +96,11 @@ pub struct ControllerHandle {
     shutdown: CancellationToken,
     listener_task: Mutex<Option<JoinHandle<()>>>,
     leader_pump_task: Mutex<Option<JoinHandle<()>>>,
+    snapshot_task: Mutex<Option<JoinHandle<()>>>,
+    /// Directory holding the latest KIP-630 metadata `.checkpoint`. Read
+    /// by [`Self::read_snapshot_range`] to serve the broker's
+    /// `FetchSnapshot` handler.
+    snapshot_dir: std::path::PathBuf,
     client_id: String,
     /// This node's own raft id. Used by [`ReconfigOps::is_leader`] to compare
     /// against the leader reported by `quorum_state`.
@@ -116,6 +147,30 @@ impl ControllerHandle {
     #[must_use]
     pub fn controller_bound_addr(&self) -> SocketAddr {
         self.controller_bound_addr
+    }
+
+    /// Read up to `max_bytes` of the latest metadata snapshot starting at
+    /// `position`.
+    #[must_use]
+    pub fn read_snapshot_range(&self, position: i64, max_bytes: i32) -> SnapshotRange {
+        let Some((id, bytes, _meta)) = crate::snapshot::load_latest(&self.snapshot_dir)
+            .ok()
+            .flatten()
+        else {
+            return SnapshotRange::NoSnapshot;
+        };
+        let pos = usize::try_from(position.max(0)).unwrap_or(0);
+        if pos > bytes.len() {
+            return SnapshotRange::OutOfRange;
+        }
+        let max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
+        let slice = crate::snapshot::SnapshotReader::byte_range(&bytes, pos, max);
+        SnapshotRange::Slice(SnapshotSlice {
+            end_offset: id.end_offset,
+            epoch: id.epoch,
+            total_size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+            bytes: bytes::Bytes::copy_from_slice(slice),
+        })
     }
 
     /// Subscribe to leader-id changes. The receiver's initial value is
@@ -173,6 +228,26 @@ impl ControllerHandle {
             voter_nodes,
             per_voter_matched_index,
         }
+    }
+
+    /// Manually trigger a metadata snapshot on this node. openraft's
+    /// snapshot policy is [`SnapshotPolicy::Never`], so checkpoints are
+    /// produced either through this path or the config-driven background
+    /// trigger task. Returns once openraft has accepted the request; the
+    /// build runs asynchronously in the engine. After the build completes
+    /// openraft purges the log behind the snapshot (we keep zero
+    /// in-snapshot logs).
+    ///
+    /// # Errors
+    ///
+    /// `RaftError::Openraft` if the raft engine is shut down or in a
+    /// fatal state.
+    pub async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+        self.raft
+            .trigger()
+            .snapshot()
+            .await
+            .map_err(|e| RaftError::Openraft(format!("{e:?}")))
     }
 
     /// Read committed `__cluster_metadata` entries starting at
@@ -549,6 +624,9 @@ impl ControllerHandle {
         if let Some(h) = self.leader_pump_task.lock().await.take() {
             let _ = h.await;
         }
+        if let Some(h) = self.snapshot_task.lock().await.take() {
+            let _ = h.await;
+        }
     }
 
     /// Stop the openraft engine and cancel the controller listener without
@@ -567,6 +645,9 @@ impl ControllerHandle {
         // Drain the listener task so its `TcpListener` is dropped (and the
         // port is released by the OS) before we return.
         if let Some(h) = self.listener_task.lock().await.take() {
+            let _ = h.await;
+        }
+        if let Some(h) = self.snapshot_task.lock().await.take() {
             let _ = h.await;
         }
     }
@@ -675,8 +756,10 @@ impl Controller {
         //    cluster id. Falls back to `Uuid::nil()` for legacy
         //    single-node tests that don't set it.
         let log_store = Arc::new(RaftLogStore::open(config.log_dir.clone()).await?);
+        let snapshot_dir = config.log_dir.join("@metadata-0");
         let state_machine = Arc::new(CrabkaStateMachine::new(
             config.cluster_id.unwrap_or_else(Uuid::nil),
+            snapshot_dir.clone(),
         ));
 
         // 2. openraft engine config. Times are millis; we widen the
@@ -691,6 +774,13 @@ impl Controller {
             election_timeout_max: election_max,
             heartbeat_interval: heartbeat,
             install_snapshot_timeout: 5_000,
+            // Never auto-snapshot — Crabka drives checkpoints itself via
+            // `trigger_snapshot` and the config-driven background trigger
+            // task. Keep zero in-snapshot logs so a completed snapshot
+            // immediately drives `purge`, compacting the metadata log
+            // behind the checkpoint.
+            snapshot_policy: openraft::SnapshotPolicy::Never,
+            max_in_snapshot_log_to_keep: 0,
             ..Default::default()
         };
 
@@ -830,6 +920,47 @@ impl Controller {
             }
         });
 
+        // 8. Snapshot trigger pump. openraft's policy is
+        //    `SnapshotPolicy::Never`, so the Kafka-faithful heuristics live
+        //    here: only the current leader fires, and only when the
+        //    metadata-log has grown by `max_bytes_between_snapshots` since the
+        //    last snapshot, or the interval elapses. The byte signal is a
+        //    delta against a baseline captured at the previous trigger —
+        //    purge only deletes sealed segments, so the active segment keeps
+        //    the absolute size above the threshold and a raw comparison would
+        //    re-fire on every tick.
+        let raft_for_snap = raft.clone();
+        let shutdown_for_snap = shutdown.clone();
+        let log_store_for_snap = log_store.clone();
+        let max_bytes = config.max_bytes_between_snapshots;
+        let interval = config.max_snapshot_interval;
+        let snapshot_task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(500));
+            let mut last_snapshot_at = tokio::time::Instant::now();
+            let mut bytes_at_last_snapshot = log_store_for_snap.size_bytes().await;
+            loop {
+                tokio::select! {
+                    () = shutdown_for_snap.cancelled() => break,
+                    _ = tick.tick() => {
+                        let m = raft_for_snap.metrics().borrow().clone();
+                        if m.current_leader != Some(m.id) {
+                            continue;
+                        }
+                        let log_bytes = log_store_for_snap.size_bytes().await;
+                        let bytes_grown = log_bytes.saturating_sub(bytes_at_last_snapshot);
+                        let interval_elapsed =
+                            interval > Duration::ZERO && last_snapshot_at.elapsed() >= interval;
+                        if (bytes_grown >= max_bytes || interval_elapsed)
+                            && raft_for_snap.trigger().snapshot().await.is_ok()
+                        {
+                            last_snapshot_at = tokio::time::Instant::now();
+                            bytes_at_last_snapshot = log_bytes;
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(ControllerHandle {
             raft,
             state_machine,
@@ -837,6 +968,8 @@ impl Controller {
             shutdown,
             listener_task: Mutex::new(Some(listener_task)),
             leader_pump_task: Mutex::new(Some(leader_pump_task)),
+            snapshot_task: Mutex::new(Some(snapshot_task)),
+            snapshot_dir,
             client_id: config.client_id.clone(),
             self_node_id: config.node_id,
             observer_lag_bound: config.observer_lag_bound,

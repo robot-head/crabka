@@ -14,6 +14,9 @@ pub enum RaftError {
     #[error("protocol: {0}")]
     Protocol(#[from] crabka_protocol::ProtocolError),
 
+    #[error("records: {0}")]
+    Records(#[from] crabka_protocol::records::RecordsError),
+
     #[error("metadata: {0}")]
     Metadata(#[from] crabka_metadata::MetadataError),
 

@@ -11,7 +11,8 @@ use crabka_security::{KafkaPrincipal, SaslMechanism, ScramCredential};
 use crate::acl::{AclEntry, PatternType, ResourceType};
 use crate::error::MetadataError;
 use crate::records::{
-    BrokerRegistrationRecord, DelegationTokenRecord, MetadataRecord, NodeId, PartitionRecord,
+    BrokerConfigRecord, BrokerRegistrationRecord, ClientQuotaRecord, DelegationTokenRecord,
+    MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
     TopicRecord,
 };
 
@@ -52,7 +53,7 @@ pub fn canonicalize_entity(mut tuple: Vec<(String, Option<String>)>) -> EntityKe
     tuple
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct MetadataImage {
     cluster_id: Uuid,
     topics: HashMap<String, TopicRecord>,
@@ -451,6 +452,123 @@ impl MetadataImage {
         }
     }
 
+    /// Serialize the image into the minimal sequence of [`MetadataRecord`]s
+    /// whose in-order [`apply`](Self::apply) reproduces this image exactly.
+    /// This is the inverse of `apply` over a sequence of non-tombstone
+    /// records: each stored entry maps to the record that would create it.
+    ///
+    /// Tombstone / removal records (`V1DeleteTopic`,
+    /// `V1DeleteScramCredential`, `V1DeleteAccessControlEntry`,
+    /// `V1DeleteDelegationToken`, `V1UnregisterBroker`) are intentionally
+    /// never emitted: a snapshot captures resulting *state*, not deletion
+    /// history. `V1BrokerConfig` deletes likewise vanish — only the
+    /// surviving key/value pairs are emitted as `Some(value)` sets.
+    ///
+    /// Records are emitted in dependency order so that a fresh image
+    /// `apply`ing them never sees a dangling reference: brokers,
+    /// broker-configs, topics, partitions, topic-configs, SCRAM creds,
+    /// ACLs, client quotas, delegation tokens.
+    #[must_use]
+    pub fn to_records(&self) -> Vec<MetadataRecord> {
+        let mut out = Vec::new();
+
+        // Brokers before their configs.
+        for b in self.brokers.values() {
+            out.push(MetadataRecord::V1BrokerRegistration(b.clone()));
+        }
+        for (node_id, configs) in &self.broker_configs {
+            for (config_name, config_value) in configs {
+                out.push(MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                    node_id: *node_id,
+                    config_name: config_name.clone(),
+                    config_value: Some(config_value.clone()),
+                }));
+            }
+        }
+
+        // Topics before partitions and topic-configs (apply-side validate
+        // and the snapshot's own DeleteTopic-clears-configs invariant both
+        // assume the topic exists first).
+        for t in self.topics.values() {
+            out.push(MetadataRecord::V1Topic(t.clone()));
+        }
+        for p in self.partitions.values() {
+            out.push(MetadataRecord::V1Partition(p.clone()));
+        }
+        for (topic, overrides) in &self.topic_configs {
+            out.push(MetadataRecord::V1TopicConfig(TopicConfigRecord {
+                topic: topic.clone(),
+                overrides: overrides.clone(),
+            }));
+        }
+
+        // SCRAM credentials.
+        for ((user, mechanism), cred) in &self.scram_credentials {
+            out.push(MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+                user: user.clone(),
+                mechanism: *mechanism,
+                salt: cred.salt.clone(),
+                stored_key: cred.stored_key.clone(),
+                server_key: cred.server_key.clone(),
+                iterations: cred.iterations,
+            }));
+        }
+
+        // ACLs (literal + prefixed). Each stored entry already carries its
+        // own pattern_type, so re-applying routes it back to the right
+        // bucket.
+        for entry in self.all_acls() {
+            out.push(MetadataRecord::V1AccessControlEntry(entry.clone()));
+        }
+
+        // Client quotas. The key is the canonicalized entity tuple; rebuild
+        // a QuotaEntity list from it and emit one record per config pair.
+        // apply re-canonicalizes, so the round-trip is stable.
+        for (entity_key, configs) in &self.client_quotas {
+            let entity: Vec<QuotaEntity> = entity_key
+                .iter()
+                .map(|(entity_type, entity_name)| QuotaEntity {
+                    entity_type: entity_type.clone(),
+                    entity_name: entity_name.clone(),
+                })
+                .collect();
+            for (config_key, config_value) in configs {
+                out.push(MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+                    entity: entity.clone(),
+                    config_key: config_key.clone(),
+                    config_value: Some(*config_value),
+                }));
+            }
+        }
+
+        // Delegation tokens.
+        for tok in self.delegation_tokens.values() {
+            out.push(MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+                token_id: tok.token_id.clone(),
+                owner: tok.owner.clone(),
+                hmac: tok.hmac.clone(),
+                issue_timestamp_ms: tok.issue_timestamp_ms,
+                expiry_timestamp_ms: tok.expiry_timestamp_ms,
+                max_timestamp_ms: tok.max_timestamp_ms,
+                renewers: tok.renewers.clone(),
+            }));
+        }
+
+        out
+    }
+
+    /// Reconstruct an image from a `cluster_id` and a record sequence
+    /// (typically [`Self::to_records`] output read back from a snapshot):
+    /// `new` an empty image and `apply` each record in order.
+    #[must_use]
+    pub fn from_records(cluster_id: Uuid, records: &[MetadataRecord]) -> Self {
+        let mut image = Self::new(cluster_id);
+        for rec in records {
+            image.apply(rec);
+        }
+        image
+    }
+
     /// Synchronous pre-validation: returns `Ok` if the record would be a
     /// no-conflict apply, otherwise the appropriate error. Used by
     /// `Controller::submit_change` before forwarding to openraft.
@@ -578,6 +696,258 @@ mod tests {
         assert!(m.finalized_features().get("metadata.version").is_none());
         // Epoch still advanced — it is monotonic, not a count of live features.
         assert_eq!(m.finalized_features_epoch(), 1);
+    }
+
+    #[test]
+    fn to_records_from_records_round_trips() {
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 3,
+            replication_factor: 2,
+        }));
+        assert_eq!(MetadataImage::from_records(cid, &image.to_records()), image);
+    }
+
+    /// Exercises every stored variant the image can hold (the 9
+    /// state-producing records), plus tombstones whose effects must NOT
+    /// leak into the snapshot. The round-trip must reproduce the image
+    /// exactly.
+    #[test]
+    #[allow(clippy::too_many_lines)] // exhaustive fixture over every stored variant
+    fn to_records_round_trips_all_variants() {
+        use crabka_security::{KafkaPrincipal, SaslMechanism};
+
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+
+        // Brokers (one survives, one is unregistered → must not reappear).
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 1,
+                host: "h1".into(),
+                port: 9092,
+                rack: Some("r1".into()),
+                endpoints: vec![crate::records::BrokerEndpoint {
+                    name: "EXTERNAL".into(),
+                    host: "ext".into(),
+                    port: 9093,
+                    protocol: crabka_security::ListenerProtocol::SaslSsl,
+                }],
+            },
+        ));
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 2,
+                host: "h2".into(),
+                port: 9092,
+                rack: None,
+                endpoints: vec![],
+            },
+        ));
+        image.apply(&MetadataRecord::V1UnregisterBroker(
+            crate::records::UnregisterBrokerRecord { node_id: 2 },
+        ));
+
+        // Broker configs: one set survives, one deleted-back-to-empty.
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("2048".into()),
+        }));
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "follower.replication.throttled.rate".into(),
+            config_value: Some("4096".into()),
+        }));
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "follower.replication.throttled.rate".into(),
+            config_value: None,
+        }));
+
+        // Topics + partitions (one topic deleted → topic, partitions and
+        // its config must vanish).
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 2,
+            replication_factor: 2,
+        }));
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "doomed".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "orders".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2],
+            isr: vec![1, 2],
+            leader_epoch: 4,
+            adding_replicas: vec![2],
+            removing_replicas: vec![],
+        }));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "orders".into(),
+            partition: 1,
+            leader: 2,
+            replicas: vec![2, 1],
+            isr: vec![2],
+            leader_epoch: 7,
+            adding_replicas: vec![],
+            removing_replicas: vec![1],
+        }));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "doomed".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1],
+            isr: vec![1],
+            leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+        }));
+
+        // Topic config.
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("retention.ms".to_string(), "60000".to_string());
+        overrides.insert("segment.bytes".to_string(), "1048576".to_string());
+        image.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "orders".into(),
+            overrides,
+        }));
+
+        // Delete the doomed topic (clears its partition + config too).
+        image.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
+            name: "doomed".into(),
+        }));
+
+        // SCRAM creds (one survives, one deleted).
+        image.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "alice".into(),
+            mechanism: SaslMechanism::ScramSha512,
+            salt: vec![1; 16],
+            stored_key: vec![2; 64],
+            server_key: vec![3; 64],
+            iterations: 8192,
+        }));
+        image.apply(&MetadataRecord::V1ScramCredential(ScramCredentialRecord {
+            user: "bob".into(),
+            mechanism: SaslMechanism::ScramSha256,
+            salt: vec![4; 16],
+            stored_key: vec![5; 32],
+            server_key: vec![6; 32],
+            iterations: 4096,
+        }));
+        image.apply(&MetadataRecord::V1DeleteScramCredential(
+            DeleteScramCredentialRecord {
+                user: "bob".into(),
+                mechanism: SaslMechanism::ScramSha256,
+            },
+        ));
+
+        // ACLs: literal + prefixed survive; a deleted one must not.
+        let literal = AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "orders".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        };
+        let prefixed = AclEntry {
+            resource_type: ResourceType::Group,
+            resource_name: "cg-".into(),
+            pattern_type: PatternType::Prefixed,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        };
+        let doomed_acl = AclEntry {
+            resource_type: ResourceType::Cluster,
+            resource_name: "kafka-cluster".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:eve".into(),
+            host: "*".into(),
+            operation: AclOperation::Alter,
+            permission_type: PermissionType::Deny,
+        };
+        image.apply(&MetadataRecord::V1AccessControlEntry(literal));
+        image.apply(&MetadataRecord::V1AccessControlEntry(prefixed));
+        image.apply(&MetadataRecord::V1AccessControlEntry(doomed_acl));
+        image.apply(&MetadataRecord::V1DeleteAccessControlEntry(
+            AclEntryFilter {
+                resource_type: Some(ResourceType::Cluster),
+                ..AclEntryFilter::default()
+            },
+        ));
+
+        // Client quotas.
+        image.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![
+                QuotaEntity {
+                    entity_type: "user".into(),
+                    entity_name: Some("alice".into()),
+                },
+                QuotaEntity {
+                    entity_type: "client-id".into(),
+                    entity_name: Some("app1".into()),
+                },
+            ],
+            config_key: "producer_byte_rate".into(),
+            config_value: Some(1024.0),
+        }));
+        image.apply(&MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![QuotaEntity {
+                entity_type: "user".into(),
+                entity_name: None,
+            }],
+            config_key: "consumer_byte_rate".into(),
+            config_value: Some(2048.0),
+        }));
+
+        // Delegation tokens (one survives, one deleted).
+        let alice = KafkaPrincipal {
+            principal_type: "User".into(),
+            name: "alice".into(),
+        };
+        let bob = KafkaPrincipal {
+            principal_type: "User".into(),
+            name: "bob".into(),
+        };
+        image.apply(&MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+            token_id: "tok-1".into(),
+            owner: alice,
+            hmac: vec![0x42; 32],
+            issue_timestamp_ms: 1_000,
+            expiry_timestamp_ms: 5_000,
+            max_timestamp_ms: 10_000,
+            renewers: vec![bob.clone()],
+        }));
+        image.apply(&MetadataRecord::V1DelegationToken(DelegationTokenRecord {
+            token_id: "tok-2".into(),
+            owner: bob,
+            hmac: vec![0x43; 32],
+            issue_timestamp_ms: 1_000,
+            expiry_timestamp_ms: 5_000,
+            max_timestamp_ms: 10_000,
+            renewers: vec![],
+        }));
+        image.apply(&MetadataRecord::V1DeleteDelegationToken(
+            DeleteDelegationTokenRecord {
+                token_id: "tok-2".into(),
+            },
+        ));
+
+        let rebuilt = MetadataImage::from_records(cid, &image.to_records());
+        assert_eq!(rebuilt, image);
     }
 
     fn topic(name: &str, partitions: i32) -> MetadataRecord {

@@ -11,9 +11,8 @@
 //! discard everything but `api_key` and `correlation_id`.
 //!
 //! The bodies are decoded by [`crate::wire`] into Crabka-private types
-//! and converted into openraft's `AppendEntriesRequest` /
-//! `VoteRequest`. Snapshot installation is stubbed — the response carries
-//! `error_code = REJECT_NOT_IMPLEMENTED` so callers know not to retry.
+//! and converted into openraft's `AppendEntriesRequest` / `VoteRequest` /
+//! `InstallSnapshotRequest`.
 
 use std::sync::Arc;
 
@@ -24,15 +23,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::error::RaftError;
-use crate::types::{AppData, Raft, TypeConfig};
+use crate::types::{AppData, Node, NodeId, Raft, TypeConfig};
 use crate::wire::{
     API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_METADATA_FETCH,
     API_KEY_SUBMIT_CHANGE, API_KEY_VOTE, CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse,
-    CrabkaInstallSnapshotResponse, CrabkaMetadataFetchRequest, CrabkaMetadataFetchResponse,
-    CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse, CrabkaVoteRequest, CrabkaVoteResponse,
+    CrabkaInstallSnapshotRequest, CrabkaInstallSnapshotResponse, CrabkaMetadataFetchRequest,
+    CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse,
+    CrabkaVoteRequest, CrabkaVoteResponse,
 };
-
-const REJECT_NOT_IMPLEMENTED: i16 = -1;
 
 /// Kafka's `ApiVersions` API key. The controller TCP listener has to
 /// answer this because `crabka_client_core::Connection::connect`
@@ -322,9 +320,29 @@ async fn dispatch(
             Ok(Bytes::from(out))
         }
         API_KEY_INSTALL_SNAPSHOT => {
-            let mut out = Vec::with_capacity(4);
+            use serde_wincode::SerdeCompat;
+            use wincode::{Deserialize as _, Serialize as _};
+            let mut cur = body;
+            let req = CrabkaInstallSnapshotRequest::decode_v0(&mut cur)?;
+            let vote: openraft::Vote<NodeId> =
+                <SerdeCompat<openraft::Vote<NodeId>>>::deserialize(&req.vote)?;
+            let meta: openraft::SnapshotMeta<NodeId, Node> =
+                <SerdeCompat<openraft::SnapshotMeta<NodeId, Node>>>::deserialize(&req.meta)?;
+            let or_req = openraft::raft::InstallSnapshotRequest {
+                vote,
+                meta,
+                offset: u64::try_from(req.offset).unwrap_or(0),
+                data: req.data.to_vec(),
+                done: req.done,
+            };
+            let resp = raft
+                .install_snapshot(or_req)
+                .await
+                .map_err(|e| RaftError::Openraft(format!("{e:?}")))?;
+            let vote_bytes = <SerdeCompat<openraft::Vote<NodeId>>>::serialize(&resp.vote)?;
+            let mut out = Vec::new();
             CrabkaInstallSnapshotResponse {
-                error_code: REJECT_NOT_IMPLEMENTED,
+                vote: Bytes::from(vote_bytes),
             }
             .encode_v0(&mut out)?;
             Ok(Bytes::from(out))

@@ -301,6 +301,17 @@ impl Log {
         0
     }
 
+    /// Total `.log` byte size across sealed and active segments. Read from
+    /// the segments' tracked logical size rather than a filesystem stat,
+    /// so it reflects buffered appends immediately and consistently across
+    /// platforms (a directory stat can lag an open, unflushed write handle
+    /// on some OSes).
+    #[must_use]
+    pub fn size_bytes(&self) -> u64 {
+        let sealed: u64 = self.segments.iter().map(|s| s.size_bytes()).sum();
+        sealed + self.active.as_ref().map_or(0, Segment::size_bytes)
+    }
+
     /// Last-Stable-Offset: the highest offset that consumers in
     /// `read_committed` isolation may see. Advances only when no
     /// transactions are in flight; held back at the first offset of any

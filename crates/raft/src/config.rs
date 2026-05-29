@@ -81,6 +81,10 @@ pub struct ControllerConfig {
     /// implementation here when the controller listener should
     /// terminate TLS and/or SASL before raft frames start flowing.
     pub handshake: Option<Arc<dyn crate::RaftListenerHandshake>>,
+    /// `metadata.log.max.record.bytes.between.snapshots` (default 20 MiB).
+    pub max_bytes_between_snapshots: u64,
+    /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
+    pub max_snapshot_interval: Duration,
 }
 
 impl std::fmt::Debug for ControllerConfig {
@@ -101,6 +105,11 @@ impl std::fmt::Debug for ControllerConfig {
             .field("cluster_id", &self.cluster_id)
             .field("dialer", &self.dialer.is_some())
             .field("handshake", &self.handshake.is_some())
+            .field(
+                "max_bytes_between_snapshots",
+                &self.max_bytes_between_snapshots,
+            )
+            .field("max_snapshot_interval", &self.max_snapshot_interval)
             .finish()
     }
 }
@@ -135,6 +144,8 @@ impl ControllerConfig {
             cluster_id: None,
             dialer: None,
             handshake: None,
+            max_bytes_between_snapshots: 20 * 1024 * 1024,
+            max_snapshot_interval: Duration::from_hours(1),
         }
     }
 }
