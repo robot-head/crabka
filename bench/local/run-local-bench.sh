@@ -110,6 +110,9 @@ start_crabka() {
   rm -rf "$datadir"; mkdir -p "$datadir"
   "$CRABKA" format --log-dir "$datadir" --standalone --node-id 1 \
     --controller-listener 127.0.0.1:9093 >"$WORK_DIR/crabka-format.log" 2>&1
+  # warn-level only: the default INFO filter logs every request/response,
+  # which would dwarf real broker CPU under load and skew the comparison.
+  RUST_LOG="${RUST_LOG:-warn}" \
   "$CRABKA_BROKER" --log-dir "$datadir" --listen-addr 127.0.0.1:9092 \
     --metrics-listen-addr none >"$WORK_DIR/crabka-broker.log" 2>&1 &
   BROKER_PID=$!
