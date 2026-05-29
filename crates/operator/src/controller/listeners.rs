@@ -503,6 +503,7 @@ pub fn validate_listeners(
 
 /// When the resolved inter-broker listener uses GSSAPI, `spec.interBrokerKerberos`
 /// must be present. `ib_kerberos_present` is `spec.inter_broker_kerberos.is_some()`.
+// Not yet called: wired into the reconcile path (kafka.rs) in a later task.
 #[allow(dead_code)]
 pub fn validate_inter_broker_gssapi(
     listeners: &[Listener],
@@ -2268,9 +2269,11 @@ mod tests {
 
     #[test]
     fn gssapi_listener_allows_plaintext_and_ssl() {
-        let g = gssapi_cfg_with_service("kafka");
-        let l = gssapi_listener("g", 9092, false, g);
-        validate_listeners(&[l], None).expect("plaintext+gssapi is valid");
+        // GSSAPI brings its own RFC 4752 security layer — TLS is optional.
+        let plain = gssapi_listener("g", 9092, false, gssapi_cfg_with_service("kafka"));
+        validate_listeners(&[plain], None).expect("plaintext+gssapi is valid");
+        let ssl = gssapi_listener("g", 9092, true, gssapi_cfg_with_service("kafka"));
+        validate_listeners(&[ssl], None).expect("ssl+gssapi is valid");
     }
 
     #[test]
