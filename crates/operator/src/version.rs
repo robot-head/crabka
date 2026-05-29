@@ -85,6 +85,8 @@ pub enum VersionReason {
     InvalidVersion,
     /// The resolved metadata version is newer than the binary.
     MetadataVersionTooHigh,
+    /// The resolved metadata version is below the broker's supported floor.
+    MetadataVersionTooLow,
     /// The resolved metadata version is older than the finalized one.
     MetadataVersionDowngrade,
 }
@@ -152,6 +154,28 @@ pub fn evaluate(
                 "metadata.version {} is newer than kafkaVersion {}; upgrade the binary first",
                 resolved.short(),
                 binary.short()
+            ),
+        };
+    }
+
+    // The broker aborts on a finalized metadata.version below its
+    // supported floor (3.3-IV3). Refuse to inject one.
+    if let Some(mv) = crabka_metadata::metadata_version::from_version_string(&resolved.short()) {
+        if mv.feature_level() < crabka_metadata::metadata_version::METADATA_VERSION_MIN {
+            return VersionOutcome::Invalid {
+                reason: VersionReason::MetadataVersionTooLow,
+                message: format!(
+                    "metadata.version {} is below the broker's supported floor (3.3-IV3)",
+                    resolved.short()
+                ),
+            };
+        }
+    } else {
+        return VersionOutcome::Invalid {
+            reason: VersionReason::MetadataVersionTooLow,
+            message: format!(
+                "metadata.version {} is not a supported level",
+                resolved.short()
             ),
         };
     }
@@ -349,5 +373,24 @@ mod tests {
                 resolved_metadata: "3.7".into()
             }
         );
+    }
+
+    #[test]
+    fn resolved_below_broker_min_is_too_low() {
+        // 3.2 maps below the broker's metadata.version floor (3.3-IV3).
+        let out = evaluate("3.2.0", None, None);
+        assert!(matches!(
+            out,
+            VersionOutcome::Invalid {
+                reason: VersionReason::MetadataVersionTooLow,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn resolved_at_or_above_min_is_valid() {
+        let out = evaluate("3.7.0", None, None);
+        assert!(matches!(out, VersionOutcome::Valid { .. }));
     }
 }
