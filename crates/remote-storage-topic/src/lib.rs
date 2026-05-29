@@ -42,10 +42,6 @@
 //!
 //! ## What this crate does NOT do (yet)
 //!
-//! - **No per-broker metadata-partition assignment.** Every broker
-//!   consumes all `__remote_log_metadata` partitions; restricting the
-//!   consumed set to a broker's leader/follower assignments is a
-//!   follow-up.
 //! - **No log compaction or snapshot** of the metadata topic — every
 //!   restart re-reads from offset 0. Snapshot/fast-bootstrap is a
 //!   future optimization.

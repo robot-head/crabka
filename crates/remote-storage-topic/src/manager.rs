@@ -9,11 +9,15 @@
 //!
 //! Lifecycle:
 //!
-//! - [`TopicBasedRemoteLogMetadataManager::start`]: read the metadata log's high-water marks,
-//!   spawn the consumer pump, then block the caller until the pump
-//!   has applied every event that was already in the log at start
-//!   time (initial catch-up). After `start` returns, reads from this
-//!   manager reflect the full pre-existing history.
+//! - [`TopicBasedRemoteLogMetadataManager::start`]: load any on-disk
+//!   snapshot into the cache and spawn the consumer pump subscribed to
+//!   NOTHING. 48q: the broker then drives the consumed set via
+//!   [`TopicBasedRemoteLogMetadataManager::reconcile_assignment`], adding
+//!   only the `__remote_log_metadata` partitions covering the
+//!   user-partitions this broker leads or follows. A newly-added partition
+//!   is gated by `NotReady` until the pump reaches the HWM observed at
+//!   assignment time; a partition this broker does not consume is a genuine
+//!   `Ok(None)` (never served from any stale cache).
 //! - Mutation calls (`add`/`update`/`put_partition_delete`):
 //!   serialize, publish, and wait until the consumer pump has applied
 //!   the published offset to the inner cache. The sync return implies
@@ -42,6 +46,19 @@ use crate::log::{AssignmentHandle, MetadataEventLog, MetadataEventStream, Partit
 use crate::partitioning::metadata_partition_for;
 use crate::serde::MetadataEvent;
 
+/// Outcome of the per-metadata-partition readiness check that gates
+/// [`RemoteLogMetadataManager::remote_log_segment_metadata`].
+enum ReadGate {
+    /// This broker does not consume the metadata partition (neither leads
+    /// nor follows any covered user-partition) → answer `Ok(None)`.
+    Unassigned,
+    /// Assigned but the consumer pump has not reached the assignment-time
+    /// HWM → answer `Err(NotReady)` (retryable).
+    NotReady,
+    /// Assigned and caught up → delegate to the inner cache.
+    Ready,
+}
+
 /// Production [`RemoteLogMetadataManager`] backed by the
 /// `__remote_log_metadata` topic (via a [`MetadataEventLog`]
 /// adapter).
@@ -65,9 +82,8 @@ pub struct TopicBasedRemoteLogMetadataManager {
     snapshotter: std::sync::Mutex<Option<JoinHandle<()>>>,
     /// Live assignment handle for the metadata-log subscription. Held so
     /// 48p (resume from snapshot offsets) and 48q (per-broker partition
-    /// assignment) can mutate the consumed set at runtime. Unused in
-    /// 48o beyond construction (assign-all-from-0).
-    #[allow(dead_code)]
+    /// assignment) can mutate the consumed set at runtime. Driven by
+    /// [`Self::reconcile_assignment`] (48q).
     assignment: Arc<dyn AssignmentHandle>,
     /// Per-metadata-partition committed offsets loaded from the snapshot
     /// at `start()`, indexed by metadata partition (`-1` == no committed
@@ -76,6 +92,13 @@ pub struct TopicBasedRemoteLogMetadataManager {
     /// reconciler reads it via [`Self::committed_offset`] when it
     /// dynamically adds a partition (to start at `committed + 1`).
     committed_offsets: Vec<i64>,
+    /// 48q: metadata partition → target HWM observed at assignment time.
+    /// Presence == this manager is currently assigned that partition;
+    /// reads for a user-partition hashing into it return
+    /// [`RemoteStorageError::NotReady`] until `applied[mp] >= target - 1`.
+    /// Empty for managers that never call [`Self::reconcile_assignment`]
+    /// (every read then delegates straight to `inner`).
+    ready_targets: Arc<std::sync::Mutex<std::collections::HashMap<i32, i64>>>,
 }
 
 impl TopicBasedRemoteLogMetadataManager {
@@ -92,18 +115,19 @@ impl TopicBasedRemoteLogMetadataManager {
     ///
     /// # Errors
     ///
-    /// Returns [`RemoteStorageError::Io`] if the log fails to surface
-    /// its current high-water marks.
+    /// Currently infallible (the consumed set starts empty), but returns a
+    /// `Result` so the bootstrap contract stays stable if `start` regains a
+    /// fallible step.
+    // Kept `async` for the established 4-arg bootstrap contract the broker
+    // awaits; bootstrap no longer blocks on catch-up (it consumes nothing
+    // until `reconcile_assignment`), so there is no internal `.await`.
+    #[allow(clippy::unused_async)]
     pub async fn start(
         log: Arc<dyn MetadataEventLog>,
         runtime: Handle,
         snapshot_dir: std::path::PathBuf,
         snapshot_interval: std::time::Duration,
     ) -> Result<Arc<Self>, RemoteStorageError> {
-        let target_hwms = log
-            .high_water_marks()
-            .await
-            .map_err(MetadataLogError::into_storage)?;
         let n = usize::try_from(log.partition_count()).expect("partition_count fits in usize");
         let (applied_tx, _) = watch::channel(0u64);
         let inner = Arc::new(InmemoryRemoteLogMetadataManager::new());
@@ -111,10 +135,9 @@ impl TopicBasedRemoteLogMetadataManager {
 
         // Load the snapshot (if any) ONCE and seed the cache from its
         // dump. `resume_from_snapshot` is the single canonical place that
-        // turns a loaded snapshot into the per-partition committed offsets
-        // and the resume assignment (committed + 1). On absence/corruption,
-        // committed[] is all -1 (full replay) and the cache stays empty —
-        // never fatal.
+        // turns a loaded snapshot into the per-partition committed offsets.
+        // On absence/corruption, committed[] is all -1 (full replay) and the
+        // cache stays empty — never fatal.
         let snapshot = match crate::snapshot::Snapshot::load(
             &snapshot_dir.join(crate::snapshot::SNAPSHOT_FILE_NAME),
         ) {
@@ -127,13 +150,20 @@ impl TopicBasedRemoteLogMetadataManager {
         if let Some(snap) = &snapshot {
             inner.import(snap.dump.clone());
         }
-        let (committed, assignment) = Self::resume_from_snapshot(snapshot.as_ref(), n);
+        // 48q: a freshly-started manager consumes NOTHING. The broker drives
+        // the consumed set via [`Self::reconcile_assignment`], adding only the
+        // metadata partitions covering user-partitions this broker leads or
+        // follows (each resumed at its snapshot `committed + 1`). This is what
+        // makes an unassigned partition a genuine `Ok(None)` rather than a
+        // false hit from globally-replayed state.
+        let (committed, _assignment) = Self::resume_from_snapshot(snapshot.as_ref(), n);
 
-        // Pre-seed `applied` to the committed offsets so wait_for_targets
-        // only blocks on the delta from committed+1 to HWM.
+        // Pre-seed `applied` to the committed offsets so readiness checks for
+        // a later-added partition only block on the delta from committed+1 to
+        // the assignment-time HWM.
         let applied = Arc::new(std::sync::Mutex::new(committed.clone()));
 
-        let (stream, assignment_handle) = log.subscribe(assignment);
+        let (stream, assignment_handle) = log.subscribe(Vec::new());
         let pump = runtime.spawn(pump_loop(
             stream,
             inner.clone(),
@@ -154,6 +184,7 @@ impl TopicBasedRemoteLogMetadataManager {
             snapshotter: std::sync::Mutex::new(None),
             assignment: assignment_handle,
             committed_offsets: committed,
+            ready_targets: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         });
 
         // Spawn the periodic snapshotter: flush whenever the cache
@@ -191,7 +222,11 @@ impl TopicBasedRemoteLogMetadataManager {
             .lock()
             .expect("snapshotter mutex poisoned") = Some(snapshotter);
 
-        manager.wait_for_targets(&target_hwms).await;
+        // Nothing is consumed at bootstrap (empty assignment), so the manager
+        // is immediately ready. Per-partition catch-up after a later
+        // `reconcile_assignment` is governed by `metadata_partition_ready`,
+        // which gates reads with `NotReady` until the pump reaches the
+        // assignment-time HWM.
         Ok(manager)
     }
 
@@ -298,22 +333,108 @@ impl TopicBasedRemoteLogMetadataManager {
             .unwrap_or(-1)
     }
 
-    async fn wait_for_targets(&self, targets: &[i64]) {
-        // Each `targets[p]` is one past the highest offset that existed
-        // at start time; need `applied[p] >= targets[p] - 1` to declare
-        // catch-up complete. Empty partitions (`targets[p] == 0`) need
-        // no wait.
-        let mut rx = self.applied_tx.subscribe();
-        loop {
-            {
-                let applied = self.applied.lock().expect("applied mutex poisoned");
-                if (0..targets.len()).all(|i| targets[i] == 0 || applied[i] >= targets[i] - 1) {
-                    return;
-                }
+    /// The read decision for metadata partition `mp`, used to gate
+    /// [`RemoteLogMetadataManager::remote_log_segment_metadata`].
+    fn metadata_partition_gate(&self, mp: i32) -> ReadGate {
+        let target = {
+            let guard = self.ready_targets.lock().expect("ready_targets poisoned");
+            match guard.get(&mp) {
+                Some(&t) => t,
+                // Not assigned: this broker neither leads nor follows any
+                // user-partition in `mp`, so it must not answer from any
+                // stale cache it happened to consume earlier. A genuine
+                // miss — `Ok(None)`, NOT `NotReady`.
+                None => return ReadGate::Unassigned,
             }
-            if rx.changed().await.is_err() {
-                return; // Sender dropped; pump is gone, give up.
-            }
+        };
+        if target == 0 {
+            return ReadGate::Ready; // empty partition: nothing to catch up to
+        }
+        let Ok(idx) = usize::try_from(mp) else {
+            return ReadGate::Ready;
+        };
+        let applied = self.applied.lock().expect("applied mutex poisoned");
+        if idx < applied.len() && applied[idx] >= target - 1 {
+            ReadGate::Ready
+        } else {
+            ReadGate::NotReady
+        }
+    }
+
+    /// `true` when metadata partition `mp` is assigned and caught up to its
+    /// assignment-time HWM. Used by tests to poll for catch-up.
+    #[cfg(test)]
+    fn metadata_partition_ready(&self, mp: i32) -> bool {
+        matches!(self.metadata_partition_gate(mp), ReadGate::Ready)
+    }
+
+    /// The metadata partitions this manager is currently assigned (tracked
+    /// for readiness). Sorted ascending.
+    #[must_use]
+    pub fn assigned_metadata_partitions(&self) -> Vec<i32> {
+        let mut v: Vec<i32> = self
+            .ready_targets
+            .lock()
+            .expect("ready_targets poisoned")
+            .keys()
+            .copied()
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
+    /// Diff `desired` against the current assignment and drive the 48o
+    /// [`AssignmentHandle`]: add newly-needed partitions (seeded from the
+    /// 48p snapshot committed offset + 1, falling back to 0 when there is
+    /// no committed event) and remove ones no longer needed. Records each
+    /// added partition's assignment-time HWM so reads gate on `NotReady`
+    /// until the pump catches up.
+    ///
+    /// Async because it reads the log's high-water marks; the broker calls
+    /// it from its reconciler task (on the runtime), never from a
+    /// `spawn_blocking` thread.
+    pub async fn reconcile_assignment(&self, desired: &[i32]) {
+        use std::collections::HashSet;
+        let want: HashSet<i32> = desired.iter().copied().collect();
+        let have: HashSet<i32> = self
+            .ready_targets
+            .lock()
+            .expect("ready_targets poisoned")
+            .keys()
+            .copied()
+            .collect();
+
+        // Snapshot HWMs once for any additions.
+        let needs_add = want.difference(&have).copied().collect::<Vec<_>>();
+        let hwms = if needs_add.is_empty() {
+            Vec::new()
+        } else {
+            self.log.high_water_marks().await.unwrap_or_default()
+        };
+
+        for mp in needs_add {
+            // `committed_offset` is `-1` when there is no committed event
+            // (full replay), so `+ 1` lands on the resume start offset (0).
+            let start_offset = self.committed_offset(mp) + 1;
+            self.assignment.add(PartitionStart {
+                partition: mp,
+                start_offset,
+            });
+            let target = usize::try_from(mp)
+                .ok()
+                .and_then(|i| hwms.get(i).copied())
+                .unwrap_or(0);
+            self.ready_targets
+                .lock()
+                .expect("ready_targets poisoned")
+                .insert(mp, target);
+        }
+        for mp in have.difference(&want).copied() {
+            self.assignment.remove(mp);
+            self.ready_targets
+                .lock()
+                .expect("ready_targets poisoned")
+                .remove(&mp);
         }
     }
 
@@ -406,8 +527,18 @@ impl RemoteLogMetadataManager for TopicBasedRemoteLogMetadataManager {
         leader_epoch: i32,
         offset: i64,
     ) -> Result<Option<RemoteLogSegmentMetadata>, RemoteStorageError> {
-        self.inner
-            .remote_log_segment_metadata(topic_id_partition, leader_epoch, offset)
+        let mp = metadata_partition_for(topic_id_partition, self.log.partition_count());
+        match self.metadata_partition_gate(mp) {
+            // Not this broker's partition → genuine miss, do NOT serve any
+            // stale cache.
+            ReadGate::Unassigned => Ok(None),
+            // Assigned but not caught up → retryable, distinct from a miss.
+            ReadGate::NotReady => Err(RemoteStorageError::NotReady { partition: mp }),
+            ReadGate::Ready => {
+                self.inner
+                    .remote_log_segment_metadata(topic_id_partition, leader_epoch, offset)
+            }
+        }
     }
 
     fn highest_offset_for_epoch(
@@ -554,6 +685,9 @@ mod tests {
         tokio::task::spawn_blocking(f).await.unwrap()
     }
 
+    /// Start a manager that consumes NOTHING until the caller drives
+    /// `reconcile_assignment`. Used by the assignment/readiness tests, which
+    /// assert pre-assignment reads are a genuine miss.
     async fn start_manager(
         log: Arc<dyn MetadataEventLog>,
     ) -> Arc<TopicBasedRemoteLogMetadataManager> {
@@ -567,10 +701,36 @@ mod tests {
         .unwrap()
     }
 
+    /// Start a manager and assign EVERY metadata partition (the pre-48q
+    /// "consume all" behavior). Used by tests that publish through the
+    /// manager and read the result back, and by the multi-broker pre-seed
+    /// writers. Blocks until each non-empty partition has caught up to its
+    /// assignment-time HWM so a subsequent read does not race the pump.
+    async fn start_manager_all(
+        log: Arc<dyn MetadataEventLog>,
+    ) -> Arc<TopicBasedRemoteLogMetadataManager> {
+        let n = log.partition_count();
+        let m = start_manager(log).await;
+        let all: Vec<i32> = (0..n).collect();
+        m.reconcile_assignment(&all).await;
+        // Wait for the pump to catch up to every assigned partition's HWM so
+        // the manager is "ready" for all partitions, mirroring the old
+        // bootstrap contract.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !all.iter().all(|&mp| m.metadata_partition_ready(mp)) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "manager did not catch up on all partitions within 5s"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        m
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn add_finish_query_round_trip() {
         let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(4);
-        let m = start_manager(log).await;
+        let m = start_manager_all(log).await;
         let m2 = m.clone();
         on_blocking(move || {
             m2.add_remote_log_segment_metadata(started(10, 0, 99))
@@ -607,8 +767,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn two_managers_sharing_a_log_converge() {
         let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(4);
-        let a = start_manager(log.clone()).await;
-        let b = start_manager(log.clone()).await;
+        let a = start_manager_all(log.clone()).await;
+        let b = start_manager_all(log.clone()).await;
 
         let a2 = a.clone();
         on_blocking(move || {
@@ -644,7 +804,7 @@ mod tests {
     async fn restart_rehydrates_from_log() {
         let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(4);
         {
-            let m = start_manager(log.clone()).await;
+            let m = start_manager_all(log.clone()).await;
             for (id, start, end) in [(10u128, 0, 99), (11, 100, 199), (12, 200, 299)] {
                 let m2 = m.clone();
                 on_blocking(move || {
@@ -659,9 +819,9 @@ mod tests {
             m.shutdown();
         }
 
-        // Fresh manager against the same log: start() blocks until it
-        // has applied the full history.
-        let fresh = start_manager(log).await;
+        // Fresh manager against the same log: assigning all partitions
+        // replays the full history before the read below.
+        let fresh = start_manager_all(log).await;
         let listed = fresh.list_remote_log_segments(&tp()).unwrap();
         assert_eq!(listed.len(), 3);
         assert_eq!(listed[0].start_offset(), 0);
@@ -673,7 +833,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn partition_delete_lifecycle_round_trip() {
         let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(2);
-        let m = start_manager(log).await;
+        let m = start_manager_all(log).await;
         for state in [
             RemotePartitionDeleteState::DeletePartitionMarked,
             RemotePartitionDeleteState::DeletePartitionStarted,
@@ -706,6 +866,8 @@ mod tests {
         )
         .await
         .unwrap();
+        m.reconcile_assignment(&(0..log.partition_count()).collect::<Vec<_>>())
+            .await;
         let m2 = m.clone();
         on_blocking(move || {
             m2.add_remote_log_segment_metadata(started(10, 0, 99))
@@ -751,6 +913,8 @@ mod tests {
             )
             .await
             .unwrap();
+            m.reconcile_assignment(&(0..log.partition_count()).collect::<Vec<_>>())
+                .await;
             for (id, start, end) in [(10u128, 0, 99), (11, 100, 199), (12, 200, 299)] {
                 let m2 = m.clone();
                 on_blocking(move || {
@@ -810,6 +974,69 @@ mod tests {
         assert_eq!(fresh.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(299));
         fresh.shutdown();
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn add_then_remove_drives_assignment_and_readiness() {
+        use crate::partitioning::metadata_partition_for;
+
+        let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(4);
+        // Pre-seed a finished segment for `tp()` so a ready read returns Some.
+        {
+            let writer = start_manager_all(log.clone()).await;
+            let w2 = writer.clone();
+            on_blocking(move || {
+                w2.add_remote_log_segment_metadata(started(10, 0, 99))
+                    .unwrap();
+            })
+            .await;
+            let w2 = writer.clone();
+            on_blocking(move || w2.update_remote_log_segment_metadata(finish(10)).unwrap()).await;
+            writer.shutdown();
+        }
+
+        let mp = metadata_partition_for(&tp(), log.partition_count());
+        let m = start_manager(log).await;
+
+        // Before assignment: the partition is not consumed → genuine miss.
+        assert!(matches!(
+            m.remote_log_segment_metadata(&tp(), 0, 42),
+            Ok(None)
+        ));
+
+        // Assign it. add() must enqueue a PartitionStart for `mp`, and the
+        // pump catches up; once applied >= HWM-1 the read returns Some.
+        m.reconcile_assignment(&[mp]).await;
+        assert_eq!(m.assigned_metadata_partitions(), vec![mp]);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match m.remote_log_segment_metadata(&tp(), 0, 42) {
+                Ok(Some(md)) => {
+                    assert_eq!(md.remote_log_segment_id().id, Uuid::from_u128(10));
+                    break;
+                }
+                Err(RemoteStorageError::NotReady { partition }) => {
+                    assert_eq!(partition, mp, "NotReady names the catching-up partition");
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "metadata partition never became ready"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                other => panic!("unexpected read outcome: {other:?}"),
+            }
+        }
+
+        // Remove it: assignment drops, and subsequent reads are a genuine
+        // miss (Ok(None)) — the partition is no longer consumed.
+        m.reconcile_assignment(&[]).await;
+        assert!(m.assigned_metadata_partitions().is_empty());
+        assert!(matches!(
+            m.remote_log_segment_metadata(&tp(), 0, 42),
+            Ok(None)
+        ));
+        m.shutdown();
     }
 
     #[tokio::test(flavor = "multi_thread")]
