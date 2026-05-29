@@ -3,23 +3,34 @@
 //! Kafka topic.
 //!
 //! Writes flow through a [`crabka_client_producer::Producer`] with
-//! explicit per-record partition pinning; reads come back through a
-//! [`crabka_client_consumer::Consumer`] using a unique random
-//! `group_id` (so concurrent brokers do not contend on offsets) and
-//! `AutoOffsetReset::Earliest` (so every startup replays the whole
-//! topic). Topic provisioning runs once at [`KafkaMetadataEventLog::start`] via the
-//! [`crabka_client_admin::AdminClient`]: an existing topic is reused
-//! (the configured `num_partitions` is overridden by the topic's
-//! actual count), an absent topic is created with
-//! `cleanup.policy=delete`, `retention.ms=-1`.
+//! explicit per-record partition pinning. Reads come back through one
+//! cancellable manual-`Fetch` task per assigned partition, each driving
+//! its own dedicated [`crabka_client_core::Connection`] and emitting
+//! [`MetadataEventRecord`]s into a shared mpsc. There is **no consumer
+//! group and no broker-side offset commit**: the read position is owned
+//! by the RLMM (the manager assigns all partitions from offset 0 today;
+//! 48p/48q resume from snapshot offsets and restrict the consumed set).
+//!
+//! A dedicated connection per partition is required because the broker
+//! is serial per-connection: a long-`max_wait_ms` fetch would
+//! head-of-line-block any other RPC sharing the socket.
+//!
+//! Topic provisioning runs once at [`KafkaMetadataEventLog::start`] via
+//! the [`crabka_client_admin::AdminClient`]: an existing topic is reused
+//! (the configured `num_partitions` is overridden by the topic's actual
+//! count), an absent topic is created with `cleanup.policy=delete`,
+//! `retention.ms=-1`. The same admin round-trip surfaces the topic's
+//! `Uuid`, which the manual `Fetch` path needs (Fetch v≥13 carries
+//! `topic_id`, not the name).
 //!
 //! High-water marks are pulled with one `ListOffsets(timestamp=-1)`
-//! over the raw [`crabka_client_core::Client`], not via the consumer,
-//! so [`MetadataEventLog::high_water_marks`] does not require the
-//! consumer group's first assignment to land.
+//! over the raw [`crabka_client_core::Client`], not via a consumer, so
+//! [`MetadataEventLog::high_water_marks`] does not require any fetch
+//! task to have made progress.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -30,15 +41,17 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_protocol::owned::list_offsets_request::{
     ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
 };
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::error::MetadataLogError;
-use crate::log::{MetadataEventLog, MetadataEventRecord, MetadataEventStream};
+use crate::log::{
+    AssignmentHandle, MetadataEventLog, MetadataEventRecord, MetadataEventStream, PartitionStart,
+};
 
 /// Default name of the internal metadata topic.
 pub const METADATA_TOPIC: &str = "__remote_log_metadata";
@@ -91,23 +104,26 @@ pub struct KafkaMetadataEventLog {
     producer: Producer,
     client: Client,
     topic: String,
+    topic_id: WireUuid,
     partition_count: i32,
     bootstrap: String,
     client_id: String,
-    subscriptions: tokio::sync::Mutex<Vec<CancellationToken>>,
+    subscriptions: tokio::sync::Mutex<Vec<Arc<ConsumerState>>>,
 }
 
 impl KafkaMetadataEventLog {
     /// Provision the topic if missing, connect the producer and the
-    /// raw client, and return the log.
+    /// raw client, learn the topic id, and return the log.
     ///
     /// # Errors
     ///
     /// Returns [`MetadataLogError::Other`] on admin / producer /
     /// client construction failures.
     pub async fn start(cfg: KafkaMetadataLogConfig) -> Result<Arc<Self>, MetadataLogError> {
-        // 1. Provision the topic, learn its partition count.
-        let partition_count = ensure_topic(&cfg).await?;
+        // 1. Provision the topic, learn its partition count and id. The
+        //    manual Fetch path needs the topic Uuid (Fetch v≥13 carries
+        //    topic_id, not the name).
+        let (partition_count, topic_id) = ensure_topic(&cfg).await?;
 
         // 2. Producer with acks=All and idempotence on. Read-your-writes
         //    depends on the broker durably acking the publish.
@@ -132,6 +148,7 @@ impl KafkaMetadataEventLog {
             producer,
             client,
             topic: cfg.topic,
+            topic_id,
             partition_count,
             bootstrap: cfg.bootstrap,
             client_id: cfg.client_id,
@@ -139,11 +156,11 @@ impl KafkaMetadataEventLog {
         }))
     }
 
-    /// Cancel every active subscription. Drop also cancels.
+    /// Cancel every active subscription's fetch tasks. Drop also cancels.
     pub async fn shutdown(&self) {
         let mut subs = self.subscriptions.lock().await;
-        for tok in subs.drain(..) {
-            tok.cancel();
+        for state in subs.drain(..) {
+            state.cancel_all();
         }
     }
 }
@@ -151,10 +168,82 @@ impl KafkaMetadataEventLog {
 impl Drop for KafkaMetadataEventLog {
     fn drop(&mut self) {
         if let Ok(mut subs) = self.subscriptions.try_lock() {
-            for tok in subs.drain(..) {
-                tok.cancel();
+            for state in subs.drain(..) {
+                state.cancel_all();
             }
         }
+    }
+}
+
+/// Per-subscription live consumer: one cancellable fetch task per
+/// assigned partition, all emitting into the shared `tx`.
+struct ConsumerState {
+    bootstrap: String,
+    client_id: String,
+    topic: String,
+    topic_id: WireUuid,
+    tx: mpsc::Sender<MetadataEventRecord>,
+    /// partition -> cancel token for its fetch task.
+    tasks: StdMutex<HashMap<i32, CancellationToken>>,
+}
+
+impl ConsumerState {
+    fn spawn_partition(self: &Arc<Self>, start: PartitionStart) {
+        let mut tasks = self.tasks.lock().expect("metadata tasks mutex poisoned");
+        if tasks.contains_key(&start.partition) {
+            return; // already assigned
+        }
+        let cancel = CancellationToken::new();
+        tasks.insert(start.partition, cancel.clone());
+        tokio::spawn(partition_fetch_loop(
+            self.clone(),
+            start.partition,
+            start.start_offset,
+            cancel,
+        ));
+    }
+
+    fn cancel_partition(&self, partition: i32) {
+        if let Some(tok) = self
+            .tasks
+            .lock()
+            .expect("metadata tasks mutex poisoned")
+            .remove(&partition)
+        {
+            tok.cancel();
+        }
+    }
+
+    fn cancel_all(&self) {
+        let mut tasks = self.tasks.lock().expect("metadata tasks mutex poisoned");
+        for (_, tok) in tasks.drain() {
+            tok.cancel();
+        }
+    }
+}
+
+struct KafkaAssignmentHandle {
+    state: Arc<ConsumerState>,
+}
+
+impl AssignmentHandle for KafkaAssignmentHandle {
+    fn add(&self, start: PartitionStart) {
+        self.state.spawn_partition(start);
+    }
+    fn remove(&self, partition: i32) {
+        self.state.cancel_partition(partition);
+    }
+    fn assigned(&self) -> Vec<i32> {
+        let mut v: Vec<i32> = self
+            .state
+            .tasks
+            .lock()
+            .expect("metadata tasks mutex poisoned")
+            .keys()
+            .copied()
+            .collect();
+        v.sort_unstable();
+        v
     }
 }
 
@@ -187,38 +276,30 @@ impl MetadataEventLog for KafkaMetadataEventLog {
         Ok(meta.offset)
     }
 
-    fn subscribe(&self) -> MetadataEventStream {
+    fn subscribe(
+        &self,
+        assignment: Vec<PartitionStart>,
+    ) -> (MetadataEventStream, Arc<dyn AssignmentHandle>) {
         let (tx, rx) = mpsc::channel::<MetadataEventRecord>(1024);
-        let bootstrap = self.bootstrap.clone();
-        let topic = self.topic.clone();
-        let client_id = format!("{}-consumer", self.client_id);
-        let cancel = CancellationToken::new();
-        let task_cancel = cancel.clone();
-
-        // Each subscriber gets its own unique group_id so concurrent
-        // subscribers (e.g. test fixtures) do not share offsets.
-        let group_id = format!("crabka-rlmm-{}", uuid::Uuid::new_v4());
-
-        tokio::spawn(consumer_pump(
-            bootstrap,
-            client_id,
-            group_id,
-            topic,
+        let state = Arc::new(ConsumerState {
+            bootstrap: self.bootstrap.clone(),
+            client_id: format!("{}-consumer", self.client_id),
+            topic: self.topic.clone(),
+            topic_id: self.topic_id,
             tx,
-            task_cancel,
-        ));
-
-        if let Ok(mut subs) = self.subscriptions.try_lock() {
-            subs.push(cancel);
-        } else {
-            // Lock contention would be exceptional; drop the token so
-            // shutdown can't cancel this subscription. Caller still
-            // observes events; manager-driven shutdown stops the
-            // consumer poll loop independently.
-            warn!("KafkaMetadataEventLog: could not track subscription cancel token");
+            tasks: StdMutex::new(HashMap::new()),
+        });
+        for ps in assignment {
+            state.spawn_partition(ps);
         }
-
-        unfold(rx, |mut rx| async move { rx.recv().await.map(|r| (r, rx)) }).boxed()
+        if let Ok(mut subs) = self.subscriptions.try_lock() {
+            subs.push(state.clone());
+        } else {
+            warn!("KafkaMetadataEventLog: could not track subscription state");
+        }
+        let stream = unfold(rx, |mut rx| async move { rx.recv().await.map(|r| (r, rx)) }).boxed();
+        let handle: Arc<dyn AssignmentHandle> = Arc::new(KafkaAssignmentHandle { state });
+        (stream, handle)
     }
 
     async fn high_water_marks(&self) -> Result<Vec<i64>, MetadataLogError> {
@@ -268,7 +349,11 @@ impl MetadataEventLog for KafkaMetadataEventLog {
     }
 }
 
-async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<i32, MetadataLogError> {
+/// Provision the topic if missing and return `(partition_count,
+/// topic_id)`. An existing topic's count and id win; a freshly-created
+/// topic's id is re-read with a second metadata round-trip (the
+/// `CreateTopics` outcome does not reliably carry it).
+async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), MetadataLogError> {
     let mut admin = AdminClient::connect(std::slice::from_ref(&cfg.bootstrap))
         .await
         .map_err(|e| MetadataLogError::Other(format!("admin connect failed: {e}")))?;
@@ -288,7 +373,8 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<i32, MetadataLogEr
             partition_count = entry.partition_count,
             "metadata topic already exists; reusing"
         );
-        return Ok(entry.partition_count);
+        let topic_id = entry.topic_id.map(to_wire_uuid).unwrap_or(WireUuid::ZERO);
+        return Ok((entry.partition_count, topic_id));
     }
 
     let mut configs = BTreeMap::new();
@@ -319,61 +405,111 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<i32, MetadataLogEr
         partition_count = cfg.num_partitions,
         "metadata topic created"
     );
-    Ok(cfg.num_partitions)
+
+    // Re-read metadata to learn the freshly-assigned topic id.
+    let topic_id = if let Some(id) = outcome.topic_id {
+        to_wire_uuid(id)
+    } else {
+        let meta = admin
+            .metadata(&[topic_ref])
+            .await
+            .map_err(|e| MetadataLogError::Other(format!("metadata (post-create) failed: {e}")))?;
+        meta.topics
+            .iter()
+            .find(|t| t.name == cfg.topic)
+            .and_then(|t| t.topic_id)
+            .map(to_wire_uuid)
+            .unwrap_or(WireUuid::ZERO)
+    };
+    Ok((cfg.num_partitions, topic_id))
 }
 
-async fn consumer_pump(
-    bootstrap: String,
-    client_id: String,
-    group_id: String,
-    topic: String,
-    tx: mpsc::Sender<MetadataEventRecord>,
+/// Convert the admin client's `uuid::Uuid` to the wire `Uuid` Fetch
+/// requires.
+fn to_wire_uuid(u: uuid::Uuid) -> WireUuid {
+    WireUuid(*u.as_bytes())
+}
+
+/// Manual single-partition fetch loop over a dedicated connection.
+///
+/// A dedicated connection per partition keeps the metadata consumer off
+/// any parkable/shared stream: the broker is serial per-connection, so a
+/// long-`max_wait_ms` fetch must not head-of-line-block other RPCs.
+async fn partition_fetch_loop(
+    state: Arc<ConsumerState>,
+    partition: i32,
+    start_offset: i64,
     cancel: CancellationToken,
 ) {
-    // Build the consumer; on failure, surface a warning and exit —
-    // the manager's pump_loop will see the stream end and its
-    // wait_for_offsets futures will hang, which the broker's
-    // spawn_blocking worker eventually times out.
-    let consumer = match Consumer::builder()
-        .bootstrap(bootstrap)
-        .client_id(client_id)
-        .group_id(group_id)
-        .subscribe(vec![topic])
-        .auto_offset_reset(AutoOffsetReset::Earliest)
-        .build()
-        .await
+    use crabka_client_core::{Connection, ConnectionOptions, fetch_partition};
+    use std::net::ToSocketAddrs;
+
+    // Dedicated connection for this partition's fetch loop. Resolve the
+    // bootstrap address; on failure, warn and exit (the manager's
+    // wait_for_targets will then time out, matching prior behavior).
+    let addr = match state
+        .bootstrap
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut a| a.next())
     {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "KafkaMetadataEventLog: consumer build failed");
+        Some(a) => a,
+        None => {
+            warn!(bootstrap = %state.bootstrap, "metadata consumer: bad bootstrap addr");
             return;
         }
     };
-    let mut consumer = consumer;
+    let opts = ConnectionOptions {
+        client_id: state.client_id.clone(),
+        ..Default::default()
+    };
+    let conn = match Connection::connect(addr, opts).await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(error = %e, partition, "metadata consumer: connect failed");
+            return;
+        }
+    };
+
+    let mut next_offset = start_offset.max(0);
     loop {
         tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                let _ = consumer.close().await;
+                conn.close();
                 return;
             }
-            res = consumer.poll(Duration::from_millis(500)) => {
+            res = fetch_partition(
+                &conn,
+                &state.topic,
+                state.topic_id,
+                partition,
+                next_offset,
+                500,
+                1 << 20,
+            ) => {
                 match res {
                     Ok(records) => {
                         for r in records {
+                            if r.offset < next_offset {
+                                continue; // defensive: never go backwards
+                            }
                             let payload = r.value.unwrap_or_default();
                             let record = MetadataEventRecord {
-                                partition: r.partition,
+                                partition,
                                 offset: r.offset,
                                 payload,
                             };
-                            if tx.send(record).await.is_err() {
-                                return;
+                            next_offset = r.offset + 1;
+                            if state.tx.send(record).await.is_err() {
+                                conn.close();
+                                return; // stream dropped
                             }
                         }
                     }
                     Err(e) => {
-                        warn!(error = %e, "KafkaMetadataEventLog: poll failed; retrying");
+                        warn!(error = %e, partition, "metadata consumer: fetch failed; retrying");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
                     }
                 }
             }

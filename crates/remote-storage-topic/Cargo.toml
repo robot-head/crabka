@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 crabka-remote-storage = { version = "0.1", path = "../remote-storage" }
 crabka-client-admin = { version = "0.1", path = "../client-admin" }
-crabka-client-consumer = { version = "0.1", path = "../client-consumer" }
 crabka-client-core = { version = "0.1", path = "../client-core" }
 crabka-client-producer = { version = "0.1", path = "../client-producer" }
 crabka-protocol = { version = "0.1", path = "../protocol" }

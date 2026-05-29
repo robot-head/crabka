@@ -30,9 +30,10 @@
 //!   `TopicIdPartition → metadata-topic-partition` hash.
 //! - [`KafkaMetadataEventLog`] — the production [`MetadataEventLog`]
 //!   adapter that wires the trait to
-//!   [`crabka_client_producer`] / [`crabka_client_consumer`] /
+//!   [`crabka_client_producer`] / [`crabka_client_core`] /
 //!   [`crabka_client_admin`], persisting events in the
-//!   `__remote_log_metadata` topic.
+//!   `__remote_log_metadata` topic. Reads use manual per-partition
+//!   `Fetch` loops over `crabka_client_core` (no consumer group).
 //! - [`SwappableRlmm`] — the hot-swap facade the broker boots behind so
 //!   it can start on the in-memory placeholder and upgrade to the
 //!   topic-backed manager once its listener is serving.
