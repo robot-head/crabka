@@ -261,6 +261,17 @@ impl UncleanRecoveryManager {
             return RecoveryOutcome::NotNeeded;
         }
 
+        self.commit_elected_leader(job, pr, winner).await
+    }
+
+    /// Build and submit the `PartitionRecord` electing `winner` as the new
+    /// leader (bumping the epoch and shrinking ISR to just the winner).
+    async fn commit_elected_leader(
+        &self,
+        job: &RecoveryJob,
+        pr: &PartitionRecord,
+        winner: NodeId,
+    ) -> RecoveryOutcome {
         let new_pr = PartitionRecord {
             topic: pr.topic.clone(),
             partition: pr.partition,
