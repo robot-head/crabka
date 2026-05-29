@@ -433,7 +433,11 @@ pub struct BrokerConfig {
 
 /// Parameters for the topic-backed
 /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Does not derive `PartialEq`/`Eq`: the `security` field holds
+/// rustls-adjacent types (a `ClientConfig` connector) that are not
+/// comparable, and nothing compares this config by value.
+#[derive(Debug, Clone)]
 pub struct KafkaRlmmConfig {
     /// `host:port` the manager dials to reach its own broker (loopback
     /// in a single-broker setup, the inter-broker listener in a
@@ -453,6 +457,12 @@ pub struct KafkaRlmmConfig {
     /// 48p: directory the RLMM cache snapshot is written to (one
     /// `snapshot` file). Derived from the broker `log.dir`.
     pub snapshot_dir: std::path::PathBuf,
+    /// Client TLS/SASL security for the metadata client. `None` =
+    /// plaintext loopback (single-broker / fully-plaintext clusters).
+    /// The broker overrides this at runtime in `bootstrap_topic_rlmm`
+    /// from the inter-broker listener; the TOML path always supplies
+    /// `None`.
+    pub security: Option<crabka_client_core::security::ClientSecurity>,
 }
 
 /// 48p: default cadence of the topic-backed RLMM snapshot flush. 60s,
@@ -846,12 +856,26 @@ mod tests {
             replication: 1,
             snapshot_interval: std::time::Duration::from_mins(1),
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
+            security: None,
         };
         assert_eq!(c.snapshot_interval, std::time::Duration::from_mins(1));
         assert_eq!(
             c.snapshot_dir,
             std::path::PathBuf::from("/data/remote-log-metadata")
         );
+    }
+
+    #[test]
+    fn kafka_rlmm_config_carries_optional_security() {
+        let c = KafkaRlmmConfig {
+            bootstrap: "127.0.0.1:9092".into(),
+            num_partitions: 1,
+            replication: 1,
+            snapshot_interval: std::time::Duration::from_mins(1),
+            snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
+            security: None,
+        };
+        assert!(c.security.is_none());
     }
 
     /// A well-formed two-listener config used as the base for validation

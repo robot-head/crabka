@@ -71,6 +71,7 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
         replication: 1,
         snapshot_interval: Duration::from_hours(1),
         snapshot_dir: log_dir.path().join("remote-log-metadata"),
+        security: None,
     });
 
     let broker = Broker::start(cfg).await.expect("broker start");

@@ -1830,12 +1830,67 @@ impl Broker {
         // single broker has exactly one of each.
         // Hoist the parameters for the topic-backed RLMM
         // bootstrap before `config` moves into the broker struct.
-        let kafka_swap_kickoff: Option<KafkaSwapKickoff> = config
-            .remote_log_metadata_kafka
-            .as_ref()
-            .map(|cfg| KafkaSwapKickoff {
-                cfg: cfg.clone(),
-                broker_id: config.broker_id,
+        let kafka_swap_kickoff: Option<KafkaSwapKickoff> =
+            config.remote_log_metadata_kafka.as_ref().map(|cfg| {
+                // Resolve the inter-broker listener: its advertised address is
+                // the RLMM bootstrap; its protocol + the broker's credentials +
+                // TLS client config form the metadata-client security policy.
+                let listeners = config.effective_listeners();
+                let inter = listeners
+                    .iter()
+                    .find(|l| l.name == config.inter_broker_listener_name);
+                let proto =
+                    inter.map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
+                // Plaintext inter-broker → no security (loopback unchanged).
+                let security = if proto.requires_tls() || proto.requires_sasl() {
+                    let tls = if proto.requires_tls() {
+                        config.tls_config.as_ref().map(|t| {
+                            crabka_client_core::security::TlsConnectorConfig {
+                                trust_roots_pem: t.trust_roots_path.clone(),
+                                // SNI = the advertised host of the inter-broker listener.
+                                server_name: inter
+                                    .map(|l| {
+                                        l.advertised.rsplit_once(':').map_or_else(
+                                            || l.advertised.clone(),
+                                            |(h, _)| h.to_string(),
+                                        )
+                                    })
+                                    .unwrap_or_else(|| "localhost".to_string()),
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let sasl = config
+                        .inter_broker_credentials
+                        .as_ref()
+                        .map(to_client_creds_from_inter_broker);
+                    Some(crabka_client_core::security::ClientSecurity {
+                        protocol: proto,
+                        tls,
+                        sasl,
+                    })
+                } else {
+                    None
+                };
+                // Bootstrap = inter-broker listener advertised addr when secured;
+                // otherwise the operator-supplied (loopback) bootstrap is kept.
+                let bootstrap = if security.is_some() {
+                    inter.map_or_else(|| cfg.bootstrap.clone(), |l| l.advertised.clone())
+                } else {
+                    cfg.bootstrap.clone()
+                };
+                KafkaSwapKickoff {
+                    cfg: crate::config::KafkaRlmmConfig {
+                        bootstrap,
+                        num_partitions: cfg.num_partitions,
+                        replication: cfg.replication,
+                        snapshot_interval: cfg.snapshot_interval,
+                        snapshot_dir: cfg.snapshot_dir.clone(),
+                        security,
+                    },
+                    broker_id: config.broker_id,
+                }
             });
         let (remote_reader, kafka_swap_target): (
             Option<Arc<crate::remote_reader::RemoteReader>>,
@@ -2129,6 +2184,15 @@ struct KafkaSwapKickoff {
     broker_id: i32,
 }
 
+/// Map the broker's inter-broker credentials onto the client-core
+/// [`crabka_client_core::security::SaslCredentials`] for the metadata
+/// client, reusing the same mapping as the inter-broker dialer.
+fn to_client_creds_from_inter_broker(
+    c: &crate::config::InterBrokerCredentials,
+) -> crabka_client_core::security::SaslCredentials {
+    crate::network::client::to_client_creds(c)
+}
+
 /// The sorted, deduped set of `__remote_log_metadata` partitions this broker
 /// (`node_id`) must consume: one entry per metadata partition covering any
 /// user-topic-partition this node leads or follows, given the metadata topic's
@@ -2172,7 +2236,7 @@ async fn bootstrap_topic_rlmm(
         num_partitions: cfg.cfg.num_partitions,
         replication: cfg.cfg.replication,
         client_id: format!("crabka-rlmm-broker-{}", cfg.broker_id),
-        security: None,
+        security: cfg.cfg.security,
     };
     let log = match crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg).await {
         Ok(log) => log,
