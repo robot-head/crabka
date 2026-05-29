@@ -259,3 +259,37 @@ async fn stale_epoch_rejected() {
     let resp = client.send(stale).await.unwrap();
     assert_eq!(resp.error_code, crabka_broker::codes::STALE_MEMBER_EPOCH);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn first_join_with_client_member_id_echoes_and_assigns() {
+    let (_b, bootstrap, _d) = boot().await;
+    let client = Arc::new(
+        Client::builder()
+            .bootstrap(bootstrap.as_str())
+            .client_id("c")
+            .build()
+            .await
+            .unwrap(),
+    );
+    create_topic(&client, "tc", 2).await;
+
+    // Client supplies its own member id (GA KIP-848 semantics).
+    let mut req = heartbeat("gc", "client-generated-id", 0);
+    req.subscribed_topic_names = Some(vec!["tc".into()]);
+    let resp = client.send(req).await.unwrap();
+
+    assert_eq!(resp.error_code, 0, "client-id first-join failed");
+    assert_eq!(
+        resp.member_id.as_deref(),
+        Some("client-generated-id"),
+        "broker must echo the client-supplied member id"
+    );
+    let parts: usize = resp
+        .assignment
+        .expect("assignment present")
+        .topic_partitions
+        .iter()
+        .map(|t| t.partitions.len())
+        .sum();
+    assert_eq!(parts, 2, "single member should be assigned both partitions");
+}
