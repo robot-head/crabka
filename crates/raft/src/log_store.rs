@@ -96,6 +96,12 @@ impl RaftLogStore {
             .map(|e| e.log_id)
     }
 
+    /// Authoritative on-disk byte size of the metadata log, read from the
+    /// log's tracked segment sizes rather than a directory stat.
+    pub(crate) async fn size_bytes(&self) -> u64 {
+        self.log.lock().await.size_bytes()
+    }
+
     pub(crate) async fn read_range<R: RangeBounds<u64>>(&self, range: R) -> Vec<Entry<TypeConfig>> {
         self.cache
             .lock()

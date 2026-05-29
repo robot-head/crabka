@@ -10,7 +10,6 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -851,22 +850,22 @@ impl Controller {
 
         // 8. Snapshot trigger pump. openraft's policy is
         //    `SnapshotPolicy::Never`, so the Kafka-faithful heuristics live
-        //    here: only the current leader fires, and only when the on-disk
+        //    here: only the current leader fires, and only when the
         //    metadata-log has grown by `max_bytes_between_snapshots` since the
         //    last snapshot, or the interval elapses. The byte signal is a
         //    delta against a baseline captured at the previous trigger —
         //    purge only deletes sealed segments, so the active segment keeps
-        //    the absolute on-disk size above the threshold and a raw
-        //    comparison would re-fire on every tick.
+        //    the absolute size above the threshold and a raw comparison would
+        //    re-fire on every tick.
         let raft_for_snap = raft.clone();
         let shutdown_for_snap = shutdown.clone();
-        let meta_dir = config.log_dir.join("@metadata-0");
+        let log_store_for_snap = log_store.clone();
         let max_bytes = config.max_bytes_between_snapshots;
         let interval = config.max_snapshot_interval;
         let snapshot_task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(500));
             let mut last_snapshot_at = tokio::time::Instant::now();
-            let mut bytes_at_last_snapshot = dir_log_bytes(&meta_dir);
+            let mut bytes_at_last_snapshot = log_store_for_snap.size_bytes().await;
             loop {
                 tokio::select! {
                     () = shutdown_for_snap.cancelled() => break,
@@ -875,7 +874,7 @@ impl Controller {
                         if m.current_leader != Some(m.id) {
                             continue;
                         }
-                        let log_bytes = dir_log_bytes(&meta_dir);
+                        let log_bytes = log_store_for_snap.size_bytes().await;
                         let bytes_grown = log_bytes.saturating_sub(bytes_at_last_snapshot);
                         let interval_elapsed =
                             interval > Duration::ZERO && last_snapshot_at.elapsed() >= interval;
@@ -907,20 +906,6 @@ impl Controller {
             controller_bound_addr: actual_addr,
         })
     }
-}
-
-/// Sum the byte sizes of the `*.log` segment files in the metadata dir.
-/// Returns 0 if the dir is absent or unreadable.
-fn dir_log_bytes(dir: &Path) -> u64 {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "log"))
-        .filter_map(|e| e.metadata().ok())
-        .map(|m| m.len())
-        .sum()
 }
 
 #[cfg(test)]
