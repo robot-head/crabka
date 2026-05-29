@@ -68,6 +68,17 @@ impl<'de> Decode<'de> for ListGroupsRequest {
     }
 }
 
+#[cfg(test)]
+impl ListGroupsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 4 { m.states_filter = vec!["x".to_string()]; }
+        if version >= 5 { m.types_filter = vec!["x".to_string()]; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

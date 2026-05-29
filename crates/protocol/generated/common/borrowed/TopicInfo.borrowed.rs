@@ -89,3 +89,16 @@ impl<'de> DecodeBorrow<'de> for TopicInfo<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> TopicInfo<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partitions = 1i32; }
+        if version >= 0 { m.replication_factor = 1i16; }
+        if version >= 0 { m.topic_configs = vec![super::key_value::KeyValue::populated(version)]; }
+        m
+    }
+}

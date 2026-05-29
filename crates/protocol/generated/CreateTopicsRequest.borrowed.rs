@@ -101,6 +101,18 @@ impl<'de> DecodeBorrow<'de> for CreateTopicsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> CreateTopicsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = vec![CreatableTopic::populated(version)]; }
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 1 { m.validate_only = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableTopic<'a> {
     pub name: &'a str,
@@ -185,6 +197,20 @@ impl<'de> DecodeBorrow<'de> for CreatableTopic<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> CreatableTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.num_partitions = 1i32; }
+        if version >= 0 { m.replication_factor = 1i16; }
+        if version >= 0 { m.assignments = vec![CreatableReplicaAssignment::populated(version)]; }
+        if version >= 0 { m.configs = vec![CreatableTopicConfig::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableReplicaAssignment {
     pub partition_index: i32,
@@ -251,6 +277,17 @@ impl<'de> DecodeBorrow<'de> for CreatableReplicaAssignment {
     }
 }
 
+#[cfg(test)]
+impl CreatableReplicaAssignment {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.broker_ids = vec![1i32]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableTopicConfig<'a> {
     pub name: &'a str,
@@ -314,5 +351,16 @@ impl<'de> DecodeBorrow<'de> for CreatableTopicConfig<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> CreatableTopicConfig<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.value = Some("x"); }
+        m
     }
 }

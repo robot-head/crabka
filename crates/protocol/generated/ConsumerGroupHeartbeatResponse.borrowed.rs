@@ -125,6 +125,22 @@ impl<'de> DecodeBorrow<'de> for ConsumerGroupHeartbeatResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ConsumerGroupHeartbeatResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.member_id = Some("x"); }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.heartbeat_interval_ms = 1i32; }
+        if version >= 0 { m.assignment = Some(Assignment::populated(version)); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assignment {
     pub topic_partitions: Vec<super::common::topic_partitions::TopicPartitions>,
@@ -182,5 +198,15 @@ impl<'de> DecodeBorrow<'de> for Assignment {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Assignment {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_partitions = vec![super::common::topic_partitions::TopicPartitions::populated(version)]; }
+        m
     }
 }

@@ -172,6 +172,27 @@ impl<'de> DecodeBorrow<'de> for FetchRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> FetchRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 14 { m.replica_id = 1i32; }
+        if version >= 0 { m.max_wait_ms = 1i32; }
+        if version >= 0 { m.min_bytes = 1i32; }
+        if version >= 3 { m.max_bytes = 1i32; }
+        if version >= 4 { m.isolation_level = 1i8; }
+        if version >= 7 { m.session_id = 1i32; }
+        if version >= 7 { m.session_epoch = 1i32; }
+        if version >= 0 { m.topics = vec![FetchTopic::populated(version)]; }
+        if version >= 7 { m.forgotten_topics_data = vec![ForgottenTopic::populated(version)]; }
+        if version >= 11 { m.rack_id = "x"; }
+        if version >= 12 { m.cluster_id = Some("x".to_string()); }
+        if version >= 15 { m.replica_state = ReplicaState::populated(version); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicaState {
     pub replica_id: i32,
@@ -235,6 +256,17 @@ impl<'de> DecodeBorrow<'de> for ReplicaState {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ReplicaState {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 15 { m.replica_id = 1i32; }
+        if version >= 15 { m.replica_epoch = 1i64; }
+        m
     }
 }
 
@@ -307,6 +339,18 @@ impl<'de> DecodeBorrow<'de> for FetchTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> FetchTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 12 { m.topic = "x"; }
+        if version >= 13 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![FetchPartition::populated(version)]; }
+        m
     }
 }
 
@@ -400,6 +444,21 @@ impl<'de> DecodeBorrow<'de> for FetchPartition {
     }
 }
 
+#[cfg(test)]
+impl FetchPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 9 { m.current_leader_epoch = 1i32; }
+        if version >= 0 { m.fetch_offset = 1i64; }
+        if version >= 12 { m.last_fetched_epoch = 1i32; }
+        if version >= 5 { m.log_start_offset = 1i64; }
+        if version >= 0 { m.partition_max_bytes = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForgottenTopic<'a> {
     pub topic: &'a str,
@@ -469,5 +528,17 @@ impl<'de> DecodeBorrow<'de> for ForgottenTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ForgottenTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 7 && version <= 12 { m.topic = "x"; }
+        if version >= 13 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 7 { m.partitions = vec![1i32]; }
+        m
     }
 }

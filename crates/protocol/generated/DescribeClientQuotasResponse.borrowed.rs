@@ -107,6 +107,19 @@ impl<'de> DecodeBorrow<'de> for DescribeClientQuotasResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeClientQuotasResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.entries = Some(vec![EntryData::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryData<'a> {
     pub entity: Vec<EntityData<'a>>,
@@ -170,6 +183,17 @@ impl<'de> DecodeBorrow<'de> for EntryData<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> EntryData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entity = vec![EntityData::populated(version)]; }
+        if version >= 0 { m.values = vec![ValueData::populated(version)]; }
+        m
     }
 }
 
@@ -239,6 +263,17 @@ impl<'de> DecodeBorrow<'de> for EntityData<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> EntityData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entity_type = "x"; }
+        if version >= 0 { m.entity_name = Some("x"); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValueData<'a> {
     pub key: &'a str,
@@ -302,5 +337,16 @@ impl<'de> DecodeBorrow<'de> for ValueData<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ValueData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.key = "x"; }
+        if version >= 0 { m.value = 1.0f64; }
+        m
     }
 }

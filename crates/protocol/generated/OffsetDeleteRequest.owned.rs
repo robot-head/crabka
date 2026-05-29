@@ -56,6 +56,17 @@ impl<'de> Decode<'de> for OffsetDeleteRequest {
     }
 }
 
+#[cfg(test)]
+impl OffsetDeleteRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.topics = vec![OffsetDeleteRequestTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetDeleteRequestTopic {
     pub name: String,
@@ -89,6 +100,17 @@ impl<'de> Decode<'de> for OffsetDeleteRequestTopic {
     }
 }
 
+#[cfg(test)]
+impl OffsetDeleteRequestTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![OffsetDeleteRequestPartition::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetDeleteRequestPartition {
     pub partition_index: i32,
@@ -115,6 +137,16 @@ impl<'de> Decode<'de> for OffsetDeleteRequestPartition {
         let mut out = Self::default();
         if version >= 0 { out.partition_index = get_i32(buf)?; }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl OffsetDeleteRequestPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        m
     }
 }
 

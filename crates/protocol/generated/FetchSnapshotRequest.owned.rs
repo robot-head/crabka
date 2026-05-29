@@ -102,6 +102,19 @@ impl<'de> Decode<'de> for FetchSnapshotRequest {
     }
 }
 
+#[cfg(test)]
+impl FetchSnapshotRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.replica_id = 1i32; }
+        if version >= 0 { m.max_bytes = 1i32; }
+        if version >= 0 { m.topics = vec![TopicSnapshot::populated(version)]; }
+        if version >= 0 { m.cluster_id = Some("x".to_string()); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicSnapshot {
     pub name: String,
@@ -145,6 +158,17 @@ impl<'de> Decode<'de> for TopicSnapshot {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicSnapshot {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![PartitionSnapshot::populated(version)]; }
+        m
     }
 }
 
@@ -216,6 +240,20 @@ impl<'de> Decode<'de> for PartitionSnapshot {
     }
 }
 
+#[cfg(test)]
+impl PartitionSnapshot {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 0 { m.current_leader_epoch = 1i32; }
+        if version >= 0 { m.snapshot_id = SnapshotId::populated(version); }
+        if version >= 0 { m.position = 1i64; }
+        if version >= 1 { m.replica_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotId {
     pub end_offset: i64,
@@ -259,6 +297,17 @@ impl<'de> Decode<'de> for SnapshotId {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl SnapshotId {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.end_offset = 1i64; }
+        if version >= 0 { m.epoch = 1i32; }
+        m
     }
 }
 

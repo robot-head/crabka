@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for AlterClientQuotasRequest {
     }
 }
 
+#[cfg(test)]
+impl AlterClientQuotasRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entries = vec![EntryData::populated(version)]; }
+        if version >= 0 { m.validate_only = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntryData {
     pub entity: Vec<EntityData>,
@@ -118,6 +129,17 @@ impl<'de> Decode<'de> for EntryData {
     }
 }
 
+#[cfg(test)]
+impl EntryData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entity = vec![EntityData::populated(version)]; }
+        if version >= 0 { m.ops = vec![OpData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EntityData {
     pub entity_type: String,
@@ -161,6 +183,17 @@ impl<'de> Decode<'de> for EntityData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl EntityData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entity_type = "x".to_string(); }
+        if version >= 0 { m.entity_name = Some("x".to_string()); }
+        m
     }
 }
 
@@ -211,6 +244,18 @@ impl<'de> Decode<'de> for OpData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl OpData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.key = "x".to_string(); }
+        if version >= 0 { m.value = 1.0f64; }
+        if version >= 0 { m.remove = true; }
+        m
     }
 }
 

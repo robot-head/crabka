@@ -120,6 +120,29 @@ impl<'de> Decode<'de> for StreamsGroupHeartbeatResponse {
     }
 }
 
+#[cfg(test)]
+impl StreamsGroupHeartbeatResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.member_id = "x".to_string(); }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.heartbeat_interval_ms = 1i32; }
+        if version >= 0 { m.acceptable_recovery_lag = 1i32; }
+        if version >= 0 { m.task_offset_interval_ms = 1i32; }
+        if version >= 0 { m.status = Some(vec![super::common::status::Status::populated(version)]); }
+        if version >= 0 { m.active_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]); }
+        if version >= 0 { m.standby_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]); }
+        if version >= 0 { m.warmup_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]); }
+        if version >= 0 { m.endpoint_information_epoch = 1i32; }
+        if version >= 0 { m.partitions_by_user_endpoint = Some(vec![EndpointToPartitions::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndpointToPartitions {
     pub user_endpoint: super::common::endpoint::Endpoint,
@@ -167,6 +190,18 @@ impl<'de> Decode<'de> for EndpointToPartitions {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl EndpointToPartitions {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.user_endpoint = super::common::endpoint::Endpoint::populated(version); }
+        if version >= 0 { m.active_partitions = vec![super::common::topic_partition::TopicPartition::populated(version)]; }
+        if version >= 0 { m.standby_partitions = vec![super::common::topic_partition::TopicPartition::populated(version)]; }
+        m
     }
 }
 

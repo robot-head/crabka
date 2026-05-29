@@ -112,6 +112,23 @@ impl<'de> Decode<'de> for TxnOffsetCommitRequest {
     }
 }
 
+#[cfg(test)]
+impl TxnOffsetCommitRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.transactional_id = "x".to_string(); }
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.producer_epoch = 1i16; }
+        if version >= 3 { m.generation_id = 1i32; }
+        if version >= 3 { m.member_id = "x".to_string(); }
+        if version >= 3 { m.group_instance_id = Some("x".to_string()); }
+        if version >= 0 { m.topics = vec![TxnOffsetCommitRequestTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TxnOffsetCommitRequestTopic {
     pub name: String,
@@ -155,6 +172,17 @@ impl<'de> Decode<'de> for TxnOffsetCommitRequestTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TxnOffsetCommitRequestTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![TxnOffsetCommitRequestPartition::populated(version)]; }
+        m
     }
 }
 
@@ -221,6 +249,19 @@ impl<'de> Decode<'de> for TxnOffsetCommitRequestPartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TxnOffsetCommitRequestPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.committed_offset = 1i64; }
+        if version >= 2 { m.committed_leader_epoch = 1i32; }
+        if version >= 0 { m.committed_metadata = Some("x".to_string()); }
+        m
     }
 }
 

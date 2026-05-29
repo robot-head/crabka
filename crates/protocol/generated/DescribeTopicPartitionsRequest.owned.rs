@@ -85,6 +85,18 @@ impl<'de> Decode<'de> for DescribeTopicPartitionsRequest {
     }
 }
 
+#[cfg(test)]
+impl DescribeTopicPartitionsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = vec![TopicRequest::populated(version)]; }
+        if version >= 0 { m.response_partition_limit = 1i32; }
+        if version >= 0 { m.cursor = Some(Cursor::populated(version)); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicRequest {
     pub name: String,
@@ -124,6 +136,16 @@ impl<'de> Decode<'de> for TopicRequest {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        m
     }
 }
 
@@ -170,6 +192,17 @@ impl<'de> Decode<'de> for Cursor {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Cursor {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        if version >= 0 { m.partition_index = 1i32; }
+        m
     }
 }
 

@@ -132,6 +132,27 @@ impl<'de> Decode<'de> for ShareFetchRequest {
     }
 }
 
+#[cfg(test)]
+impl ShareFetchRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = Some("x".to_string()); }
+        if version >= 0 { m.member_id = Some("x".to_string()); }
+        if version >= 0 { m.share_session_epoch = 1i32; }
+        if version >= 0 { m.max_wait_ms = 1i32; }
+        if version >= 0 { m.min_bytes = 1i32; }
+        if version >= 0 { m.max_bytes = 1i32; }
+        if version >= 1 { m.max_records = 1i32; }
+        if version >= 1 { m.batch_size = 1i32; }
+        if version >= 2 { m.share_acquire_mode = 1i8; }
+        if version >= 2 { m.is_renew_ack = true; }
+        if version >= 0 { m.topics = vec![FetchTopic::populated(version)]; }
+        if version >= 0 { m.forgotten_topics_data = vec![ForgottenTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FetchTopic {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -175,6 +196,17 @@ impl<'de> Decode<'de> for FetchTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl FetchTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![FetchPartition::populated(version)]; }
+        m
     }
 }
 
@@ -228,6 +260,18 @@ impl<'de> Decode<'de> for FetchPartition {
     }
 }
 
+#[cfg(test)]
+impl FetchPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 && version <= 0 { m.partition_max_bytes = 1i32; }
+        if version >= 0 { m.acknowledgement_batches = vec![AcknowledgementBatch::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AcknowledgementBatch {
     pub first_offset: i64,
@@ -278,6 +322,18 @@ impl<'de> Decode<'de> for AcknowledgementBatch {
     }
 }
 
+#[cfg(test)]
+impl AcknowledgementBatch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.first_offset = 1i64; }
+        if version >= 0 { m.last_offset = 1i64; }
+        if version >= 0 { m.acknowledge_types = vec![1i8]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ForgottenTopic {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -321,6 +377,17 @@ impl<'de> Decode<'de> for ForgottenTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ForgottenTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }
 

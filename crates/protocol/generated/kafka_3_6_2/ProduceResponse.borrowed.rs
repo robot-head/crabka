@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for ProduceResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ProduceResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.responses = vec![TopicProduceResponse::populated(version)]; }
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicProduceResponse<'a> {
     pub name: &'a str,
@@ -158,6 +169,17 @@ impl<'de> DecodeBorrow<'de> for TopicProduceResponse<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicProduceResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partition_responses = vec![PartitionProduceResponse::populated(version)]; }
+        m
     }
 }
 
@@ -257,6 +279,22 @@ impl<'de> DecodeBorrow<'de> for PartitionProduceResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> PartitionProduceResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.base_offset = 1i64; }
+        if version >= 2 { m.log_append_time_ms = 1i64; }
+        if version >= 5 { m.log_start_offset = 1i64; }
+        if version >= 8 { m.record_errors = vec![BatchIndexAndErrorMessage::populated(version)]; }
+        if version >= 8 { m.error_message = Some("x"); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchIndexAndErrorMessage<'a> {
     pub batch_index: i32,
@@ -320,5 +358,16 @@ impl<'de> DecodeBorrow<'de> for BatchIndexAndErrorMessage<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> BatchIndexAndErrorMessage<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 8 { m.batch_index = 1i32; }
+        if version >= 8 { m.batch_index_error_message = Some("x"); }
+        m
     }
 }

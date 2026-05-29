@@ -85,6 +85,20 @@ impl<'de> Decode<'de> for SyncGroupResponse {
     }
 }
 
+#[cfg(test)]
+impl SyncGroupResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 5 { m.protocol_type = Some("x".to_string()); }
+        if version >= 5 { m.protocol_name = Some("x".to_string()); }
+        if version >= 0 { m.assignment = ::bytes::Bytes::from_static(b"x"); }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

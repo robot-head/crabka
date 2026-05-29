@@ -101,6 +101,18 @@ impl<'de> DecodeBorrow<'de> for DescribeTopicPartitionsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeTopicPartitionsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![DescribeTopicPartitionsResponseTopic::populated(version)]; }
+        if version >= 0 { m.next_cursor = Some(Cursor::populated(version)); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeTopicPartitionsResponseTopic<'a> {
     pub error_code: i16,
@@ -188,6 +200,21 @@ impl<'de> DecodeBorrow<'de> for DescribeTopicPartitionsResponseTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribeTopicPartitionsResponseTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.name = Some("x"); }
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.is_internal = true; }
+        if version >= 0 { m.partitions = vec![DescribeTopicPartitionsResponsePartition::populated(version)]; }
+        if version >= 0 { m.topic_authorized_operations = 1i32; }
+        m
     }
 }
 
@@ -299,6 +326,24 @@ impl<'de> DecodeBorrow<'de> for DescribeTopicPartitionsResponsePartition {
     }
 }
 
+#[cfg(test)]
+impl DescribeTopicPartitionsResponsePartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 { m.replica_nodes = vec![1i32]; }
+        if version >= 0 { m.isr_nodes = vec![1i32]; }
+        if version >= 0 { m.eligible_leader_replicas = Some(vec![1i32]); }
+        if version >= 0 { m.last_known_elr = Some(vec![1i32]); }
+        if version >= 0 { m.offline_replicas = vec![1i32]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Cursor<'a> {
     pub topic_name: &'a str,
@@ -362,5 +407,16 @@ impl<'de> DecodeBorrow<'de> for Cursor<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> Cursor<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.partition_index = 1i32; }
+        m
     }
 }

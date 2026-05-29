@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for DescribeShareGroupOffsetsResponse {
     }
 }
 
+#[cfg(test)]
+impl DescribeShareGroupOffsetsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.groups = vec![DescribeShareGroupOffsetsResponseGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeShareGroupOffsetsResponseGroup {
     pub group_id: String,
@@ -126,6 +137,19 @@ impl<'de> Decode<'de> for DescribeShareGroupOffsetsResponseGroup {
     }
 }
 
+#[cfg(test)]
+impl DescribeShareGroupOffsetsResponseGroup {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.topics = vec![DescribeShareGroupOffsetsResponseTopic::populated(version)]; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeShareGroupOffsetsResponseTopic {
     pub topic_name: String,
@@ -173,6 +197,18 @@ impl<'de> Decode<'de> for DescribeShareGroupOffsetsResponseTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribeShareGroupOffsetsResponseTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![DescribeShareGroupOffsetsResponsePartition::populated(version)]; }
+        m
     }
 }
 
@@ -249,6 +285,21 @@ impl<'de> Decode<'de> for DescribeShareGroupOffsetsResponsePartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribeShareGroupOffsetsResponsePartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.start_offset = 1i64; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 1 { m.lag = 1i64; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        m
     }
 }
 

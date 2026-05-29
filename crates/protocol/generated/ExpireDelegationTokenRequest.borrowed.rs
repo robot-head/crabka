@@ -87,3 +87,14 @@ impl<'de> DecodeBorrow<'de> for ExpireDelegationTokenRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> ExpireDelegationTokenRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.hmac = &b"x"[..]; }
+        if version >= 0 { m.expiry_time_period_ms = 1i64; }
+        m
+    }
+}

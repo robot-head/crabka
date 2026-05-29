@@ -77,3 +77,14 @@ impl<'de> DecodeBorrow<'de> for SaslHandshakeResponse<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> SaslHandshakeResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.mechanisms = vec!["x"]; }
+        m
+    }
+}

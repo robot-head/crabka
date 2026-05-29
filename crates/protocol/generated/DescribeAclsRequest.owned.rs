@@ -107,6 +107,22 @@ impl<'de> Decode<'de> for DescribeAclsRequest {
     }
 }
 
+#[cfg(test)]
+impl DescribeAclsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_type_filter = 1i8; }
+        if version >= 0 { m.resource_name_filter = Some("x".to_string()); }
+        if version >= 1 { m.pattern_type_filter = 1i8; }
+        if version >= 0 { m.principal_filter = Some("x".to_string()); }
+        if version >= 0 { m.host_filter = Some("x".to_string()); }
+        if version >= 0 { m.operation = 1i8; }
+        if version >= 0 { m.permission_type = 1i8; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

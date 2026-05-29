@@ -86,6 +86,16 @@ impl<'de> DecodeBorrow<'de> for DescribeQuorumRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeQuorumRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
@@ -152,6 +162,17 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> TopicData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionData {
     pub partition_index: i32,
@@ -209,5 +230,15 @@ impl<'de> DecodeBorrow<'de> for PartitionData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        m
     }
 }

@@ -83,3 +83,13 @@ impl<'de> DecodeBorrow<'de> for DescribeTransactionsRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> DescribeTransactionsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.transactional_ids = vec!["x"]; }
+        m
+    }
+}

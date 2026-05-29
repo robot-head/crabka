@@ -64,6 +64,16 @@ impl<'de> Decode<'de> for DescribeUserScramCredentialsRequest {
     }
 }
 
+#[cfg(test)]
+impl DescribeUserScramCredentialsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.users = Some(vec![UserName::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UserName {
     pub name: String,
@@ -103,6 +113,16 @@ impl<'de> Decode<'de> for UserName {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl UserName {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        m
     }
 }
 

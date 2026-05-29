@@ -75,3 +75,14 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnTopicResult<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> AddPartitionsToTxnTopicResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.results_by_partition = vec![super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::populated(version)]; }
+        m
+    }
+}

@@ -77,3 +77,13 @@ impl<'de> DecodeBorrow<'de> for GetTelemetrySubscriptionsRequest {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl GetTelemetrySubscriptionsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.client_instance_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        m
+    }
+}

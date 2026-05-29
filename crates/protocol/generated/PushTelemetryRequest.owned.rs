@@ -79,6 +79,20 @@ impl<'de> Decode<'de> for PushTelemetryRequest {
     }
 }
 
+#[cfg(test)]
+impl PushTelemetryRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.client_instance_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.subscription_id = 1i32; }
+        if version >= 0 { m.terminating = true; }
+        if version >= 0 { m.compression_type = 1i8; }
+        if version >= 0 { m.metrics = ::bytes::Bytes::from_static(b"x"); }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

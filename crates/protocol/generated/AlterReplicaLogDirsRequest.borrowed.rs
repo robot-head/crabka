@@ -86,6 +86,16 @@ impl<'de> DecodeBorrow<'de> for AlterReplicaLogDirsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterReplicaLogDirsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.dirs = vec![AlterReplicaLogDir::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterReplicaLogDir<'a> {
     pub path: &'a str,
@@ -152,6 +162,17 @@ impl<'de> DecodeBorrow<'de> for AlterReplicaLogDir<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterReplicaLogDir<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.path = "x"; }
+        if version >= 0 { m.topics = vec![AlterReplicaLogDirTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterReplicaLogDirTopic<'a> {
     pub name: &'a str,
@@ -215,5 +236,16 @@ impl<'de> DecodeBorrow<'de> for AlterReplicaLogDirTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> AlterReplicaLogDirTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }

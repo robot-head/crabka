@@ -136,6 +136,22 @@ impl<'de> Decode<'de> for ApiVersionsResponse {
     }
 }
 
+#[cfg(test)]
+impl ApiVersionsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.api_keys = vec![ApiVersion::populated(version)]; }
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 3 { m.supported_features = vec![SupportedFeatureKey::populated(version)]; }
+        if version >= 3 { m.finalized_features_epoch = 1i64; }
+        if version >= 3 { m.finalized_features = vec![FinalizedFeatureKey::populated(version)]; }
+        if version >= 3 { m.zk_migration_ready = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ApiVersion {
     pub api_key: i16,
@@ -183,6 +199,18 @@ impl<'de> Decode<'de> for ApiVersion {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ApiVersion {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.api_key = 1i16; }
+        if version >= 0 { m.min_version = 1i16; }
+        if version >= 0 { m.max_version = 1i16; }
+        m
     }
 }
 
@@ -236,6 +264,18 @@ impl<'de> Decode<'de> for SupportedFeatureKey {
     }
 }
 
+#[cfg(test)]
+impl SupportedFeatureKey {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.name = "x".to_string(); }
+        if version >= 3 { m.min_version = 1i16; }
+        if version >= 3 { m.max_version = 1i16; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FinalizedFeatureKey {
     pub name: String,
@@ -283,6 +323,18 @@ impl<'de> Decode<'de> for FinalizedFeatureKey {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl FinalizedFeatureKey {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.name = "x".to_string(); }
+        if version >= 3 { m.max_version_level = 1i16; }
+        if version >= 3 { m.min_version_level = 1i16; }
+        m
     }
 }
 

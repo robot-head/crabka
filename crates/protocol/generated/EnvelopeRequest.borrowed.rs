@@ -91,3 +91,15 @@ impl<'de> DecodeBorrow<'de> for EnvelopeRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> EnvelopeRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.request_data = &b"x"[..]; }
+        if version >= 0 { m.request_principal = Some(&b"x"[..]); }
+        if version >= 0 { m.client_host_address = &b"x"[..]; }
+        m
+    }
+}

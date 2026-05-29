@@ -104,3 +104,16 @@ impl<'de> DecodeBorrow<'de> for RequestHeader<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> RequestHeader<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.request_api_key = 1i16; }
+        if version >= 0 { m.request_api_version = 1i16; }
+        if version >= 0 { m.correlation_id = 1i32; }
+        if version >= 1 { m.client_id = Some("x"); }
+        m
+    }
+}

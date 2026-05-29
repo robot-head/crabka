@@ -80,6 +80,19 @@ impl<'de> Decode<'de> for DeleteShareGroupOffsetsResponse {
     }
 }
 
+#[cfg(test)]
+impl DeleteShareGroupOffsetsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.responses = vec![DeleteShareGroupOffsetsResponseTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteShareGroupOffsetsResponseTopic {
     pub topic_name: String,
@@ -131,6 +144,19 @@ impl<'de> Decode<'de> for DeleteShareGroupOffsetsResponseTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DeleteShareGroupOffsetsResponseTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        m
     }
 }
 

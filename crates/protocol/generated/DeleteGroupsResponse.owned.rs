@@ -70,6 +70,17 @@ impl<'de> Decode<'de> for DeleteGroupsResponse {
     }
 }
 
+#[cfg(test)]
+impl DeleteGroupsResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.results = vec![DeletableGroupResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeletableGroupResult {
     pub group_id: String,
@@ -113,6 +124,17 @@ impl<'de> Decode<'de> for DeletableGroupResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DeletableGroupResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.error_code = 1i16; }
+        m
     }
 }
 

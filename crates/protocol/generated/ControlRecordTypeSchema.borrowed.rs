@@ -63,3 +63,13 @@ impl<'de> DecodeBorrow<'de> for ControlRecordTypeSchema {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl ControlRecordTypeSchema {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.type_ = 1i16; }
+        m
+    }
+}

@@ -107,6 +107,19 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> OffsetFetchResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.throttle_time_ms = 1i32; }
+        if version >= 0 && version <= 7 { m.topics = vec![OffsetFetchResponseTopic::populated(version)]; }
+        if version >= 2 && version <= 7 { m.error_code = 1i16; }
+        if version >= 8 { m.groups = vec![OffsetFetchResponseGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchResponseTopic<'a> {
     pub name: &'a str,
@@ -170,6 +183,17 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponseTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> OffsetFetchResponseTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 7 { m.name = "x"; }
+        if version >= 0 && version <= 7 { m.partitions = vec![OffsetFetchResponsePartition::populated(version)]; }
+        m
     }
 }
 
@@ -257,6 +281,20 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponsePartition<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> OffsetFetchResponsePartition<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 7 { m.partition_index = 1i32; }
+        if version >= 0 && version <= 7 { m.committed_offset = 1i64; }
+        if version >= 5 && version <= 7 { m.committed_leader_epoch = 1i32; }
+        if version >= 0 && version <= 7 { m.metadata = Some("x"); }
+        if version >= 0 && version <= 7 { m.error_code = 1i16; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchResponseGroup<'a> {
     pub group_id: &'a str,
@@ -329,6 +367,18 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponseGroup<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> OffsetFetchResponseGroup<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 8 { m.group_id = "x"; }
+        if version >= 8 { m.topics = vec![OffsetFetchResponseTopics::populated(version)]; }
+        if version >= 8 { m.error_code = 1i16; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchResponseTopics<'a> {
     pub name: &'a str,
@@ -398,6 +448,18 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponseTopics<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> OffsetFetchResponseTopics<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 8 && version <= 9 { m.name = "x"; }
+        if version >= 10 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 8 { m.partitions = vec![OffsetFetchResponsePartitions::populated(version)]; }
+        m
     }
 }
 
@@ -482,5 +544,19 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponsePartitions<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> OffsetFetchResponsePartitions<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 8 { m.partition_index = 1i32; }
+        if version >= 8 { m.committed_offset = 1i64; }
+        if version >= 8 { m.committed_leader_epoch = 1i32; }
+        if version >= 8 { m.metadata = Some("x"); }
+        if version >= 8 { m.error_code = 1i16; }
+        m
     }
 }

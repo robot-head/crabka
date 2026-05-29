@@ -46,6 +46,16 @@ impl<'de> Decode<'de> for EndTxnMarker {
     }
 }
 
+#[cfg(test)]
+impl EndTxnMarker {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.coordinator_epoch = 1i32; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

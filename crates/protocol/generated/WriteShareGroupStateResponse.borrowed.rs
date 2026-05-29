@@ -89,6 +89,16 @@ impl<'de> DecodeBorrow<'de> for WriteShareGroupStateResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> WriteShareGroupStateResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.results = vec![WriteStateResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteStateResult<'a> {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -152,6 +162,17 @@ impl<'de> DecodeBorrow<'de> for WriteStateResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> WriteStateResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionResult::populated(version)]; }
+        m
     }
 }
 
@@ -224,5 +245,17 @@ impl<'de> DecodeBorrow<'de> for PartitionResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> PartitionResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        m
     }
 }

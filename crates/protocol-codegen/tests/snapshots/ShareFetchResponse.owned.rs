@@ -89,6 +89,21 @@ impl<'de> Decode<'de> for ShareFetchResponse {
     }
 }
 
+#[cfg(test)]
+impl ShareFetchResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 1 { m.acquisition_lock_timeout_ms = 1i32; }
+        if version >= 0 { m.responses = vec![ShareFetchableTopicResponse::populated(version)]; }
+        if version >= 0 { m.node_endpoints = vec![NodeEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareFetchableTopicResponse {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -132,6 +147,17 @@ impl<'de> Decode<'de> for ShareFetchableTopicResponse {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ShareFetchableTopicResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -205,6 +231,22 @@ impl<'de> Decode<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.acknowledge_error_code = 1i16; }
+        if version >= 0 { m.acknowledge_error_message = Some("x".to_string()); }
+        if version >= 0 { m.current_leader = LeaderIdAndEpoch::populated(version); }
+        if version >= 0 { m.acquired_records = vec![AcquiredRecords::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderIdAndEpoch {
     pub leader_id: i32,
@@ -248,6 +290,17 @@ impl<'de> Decode<'de> for LeaderIdAndEpoch {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl LeaderIdAndEpoch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        m
     }
 }
 
@@ -298,6 +351,18 @@ impl<'de> Decode<'de> for AcquiredRecords {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AcquiredRecords {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.first_offset = 1i64; }
+        if version >= 0 { m.last_offset = 1i64; }
+        if version >= 0 { m.delivery_count = 1i16; }
+        m
     }
 }
 
@@ -352,6 +417,19 @@ impl<'de> Decode<'de> for NodeEndpoint {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl NodeEndpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.node_id = 1i32; }
+        if version >= 0 { m.host = "x".to_string(); }
+        if version >= 0 { m.port = 1i32; }
+        if version >= 0 { m.rack = Some("x".to_string()); }
+        m
     }
 }
 

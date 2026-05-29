@@ -80,6 +80,17 @@ impl<'de> Decode<'de> for ListPartitionReassignmentsRequest {
     }
 }
 
+#[cfg(test)]
+impl ListPartitionReassignmentsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 0 { m.topics = Some(vec![ListPartitionReassignmentsTopics::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListPartitionReassignmentsTopics {
     pub name: String,
@@ -123,6 +134,17 @@ impl<'de> Decode<'de> for ListPartitionReassignmentsTopics {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ListPartitionReassignmentsTopics {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partition_indexes = vec![1i32]; }
+        m
     }
 }
 

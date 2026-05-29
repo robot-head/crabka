@@ -98,6 +98,18 @@ impl<'de> DecodeBorrow<'de> for UpdateFeaturesRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> UpdateFeaturesRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 0 { m.feature_updates = vec![FeatureUpdateKey::populated(version)]; }
+        if version >= 1 { m.validate_only = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FeatureUpdateKey<'a> {
     pub feature: &'a str,
@@ -173,5 +185,18 @@ impl<'de> DecodeBorrow<'de> for FeatureUpdateKey<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> FeatureUpdateKey<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.feature = "x"; }
+        if version >= 0 { m.max_version_level = 1i16; }
+        if version >= 0 && version <= 0 { m.allow_downgrade = true; }
+        if version >= 1 { m.upgrade_type = 1i8; }
+        m
     }
 }

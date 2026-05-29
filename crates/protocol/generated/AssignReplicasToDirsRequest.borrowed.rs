@@ -92,6 +92,18 @@ impl<'de> DecodeBorrow<'de> for AssignReplicasToDirsRequest {
     }
 }
 
+#[cfg(test)]
+impl AssignReplicasToDirsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.broker_id = 1i32; }
+        if version >= 0 { m.broker_epoch = 1i64; }
+        if version >= 0 { m.directories = vec![DirectoryData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectoryData {
     pub id: crate::primitives::uuid::Uuid,
@@ -155,6 +167,17 @@ impl<'de> DecodeBorrow<'de> for DirectoryData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DirectoryData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        m
     }
 }
 
@@ -224,6 +247,17 @@ impl<'de> DecodeBorrow<'de> for TopicData {
     }
 }
 
+#[cfg(test)]
+impl TopicData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionData {
     pub partition_index: i32,
@@ -281,5 +315,15 @@ impl<'de> DecodeBorrow<'de> for PartitionData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        m
     }
 }

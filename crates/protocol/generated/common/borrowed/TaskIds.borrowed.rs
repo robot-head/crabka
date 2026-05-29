@@ -77,3 +77,14 @@ impl<'de> DecodeBorrow<'de> for TaskIds<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> TaskIds<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.subtopology_id = "x"; }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
+    }
+}

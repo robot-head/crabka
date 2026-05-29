@@ -106,3 +106,16 @@ impl<'de> DecodeBorrow<'de> for ListTransactionsRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> ListTransactionsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.state_filters = vec!["x"]; }
+        if version >= 0 { m.producer_id_filters = vec![1i64]; }
+        if version >= 1 { m.duration_filter = 1i64; }
+        if version >= 2 { m.transactional_id_pattern = Some("x"); }
+        m
+    }
+}

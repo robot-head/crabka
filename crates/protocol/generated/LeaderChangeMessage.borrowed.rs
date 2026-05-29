@@ -95,3 +95,16 @@ impl<'de> DecodeBorrow<'de> for LeaderChangeMessage {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl LeaderChangeMessage {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.version = 1i16; }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.voters = vec![super::common::voter::Voter::populated(version)]; }
+        if version >= 0 { m.granting_voters = vec![super::common::voter::Voter::populated(version)]; }
+        m
+    }
+}

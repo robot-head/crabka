@@ -77,3 +77,14 @@ impl<'de> DecodeBorrow<'de> for Endpoint<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> Endpoint<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.host = "x"; }
+        if version >= 0 { m.port = 1u16; }
+        m
+    }
+}

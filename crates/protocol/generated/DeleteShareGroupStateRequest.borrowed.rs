@@ -92,6 +92,17 @@ impl<'de> DecodeBorrow<'de> for DeleteShareGroupStateRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DeleteShareGroupStateRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.topics = vec![DeleteStateData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteStateData {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -158,6 +169,17 @@ impl<'de> DecodeBorrow<'de> for DeleteStateData {
     }
 }
 
+#[cfg(test)]
+impl DeleteStateData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionData {
     pub partition: i32,
@@ -215,5 +237,15 @@ impl<'de> DecodeBorrow<'de> for PartitionData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        m
     }
 }

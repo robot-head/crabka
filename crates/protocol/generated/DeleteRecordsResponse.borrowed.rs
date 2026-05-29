@@ -92,6 +92,17 @@ impl<'de> DecodeBorrow<'de> for DeleteRecordsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DeleteRecordsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![DeleteRecordsTopicResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteRecordsTopicResult<'a> {
     pub name: &'a str,
@@ -155,6 +166,17 @@ impl<'de> DecodeBorrow<'de> for DeleteRecordsTopicResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DeleteRecordsTopicResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partitions = vec![DeleteRecordsPartitionResult::populated(version)]; }
+        m
     }
 }
 
@@ -227,5 +249,17 @@ impl<'de> DecodeBorrow<'de> for DeleteRecordsPartitionResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DeleteRecordsPartitionResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.low_watermark = 1i64; }
+        if version >= 0 { m.error_code = 1i16; }
+        m
     }
 }

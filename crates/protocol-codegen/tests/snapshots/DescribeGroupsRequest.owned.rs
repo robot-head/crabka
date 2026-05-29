@@ -70,6 +70,17 @@ impl<'de> Decode<'de> for DescribeGroupsRequest {
     }
 }
 
+#[cfg(test)]
+impl DescribeGroupsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.groups = vec!["x".to_string()]; }
+        if version >= 3 { m.include_authorized_operations = true; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

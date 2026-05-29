@@ -33,6 +33,21 @@ pub fn emit(
     emit_to_owned_impl(&mut primary, spec, &res_map, namespace);
     emit_encode_impl(&mut primary, spec, &res_map);
     emit_decode_borrow_impl(&mut primary, spec, &res_map, &parent_module);
+    {
+        let lt = if spec_needs_lifetime(spec, &res_map) {
+            "<'a>"
+        } else {
+            ""
+        };
+        emit_populated_impl(
+            &mut primary,
+            &name_conv::type_name(&spec.name),
+            lt,
+            &spec.fields,
+            &res_map,
+            &parent_module,
+        );
+    }
 
     let fm = flex_min(spec);
     emit_nested_structs_for_fields(
@@ -1844,8 +1859,120 @@ impl<'de> DecodeBorrow<'de> for {struct_name}{lt_de} {{
 
     writeln!(out, "        Ok(out)\n    }}\n}}").unwrap();
 
+    emit_populated_impl(out, struct_name, lt, fields, res_map, parent_module);
+
     // Recurse into deeper nesting
     emit_nested_structs_for_fields(out, fields, flex_min_val, res_map, parent_module, namespace);
+}
+
+/// Emit a test-only `populated(version)` constructor for a borrowed struct. See
+/// the owned-flavor counterpart for rationale. Tagged fields that store owned
+/// data (because borrowed data cannot escape the tagged-field closure) are
+/// populated with owned-flavor values to match their Rust type.
+fn emit_populated_impl(
+    out: &mut String,
+    type_name: &str,
+    lt: &str,
+    fields: &[FieldSpec],
+    res_map: &HashMap<String, Resolution>,
+    parent_module: &str,
+) {
+    writeln!(
+        out,
+        "
+#[cfg(test)]
+impl{lt} {type_name}{lt} {{
+    #[must_use]
+    pub fn populated(version: i16) -> Self {{
+        let mut m = Self::default();"
+    )
+    .unwrap();
+    for f in fields.iter().filter(|f| !is_tagged(f)) {
+        emit_borrowed_populated_field(out, f, res_map, parent_module, is_nullable(f));
+    }
+    for f in fields.iter().filter(|f| is_tagged(f)) {
+        let option = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
+        emit_borrowed_populated_field(out, f, res_map, parent_module, option);
+    }
+    writeln!(out, "        m\n    }}\n}}").unwrap();
+}
+
+/// Emit one conditional assignment, guarding the non-default value behind the
+/// field's version range (see the owned-flavor counterpart). `records` fields
+/// are skipped (left at default).
+fn emit_borrowed_populated_field(
+    out: &mut String,
+    f: &FieldSpec,
+    res_map: &HashMap<String, Resolution>,
+    parent_module: &str,
+    option: bool,
+) {
+    if base_type(&f.field_type) == "records" {
+        return;
+    }
+    let field = name_conv::field_name(&f.name);
+    let value = borrowed_populated_value(f, res_map, parent_module, option);
+    let cond = version_cond(f.versions, "version");
+    writeln!(out, "        if {cond} {{ m.{field} = {value}; }}").unwrap();
+}
+
+/// Build the populated-value expression for one borrowed field.
+fn borrowed_populated_value(
+    f: &FieldSpec,
+    res_map: &HashMap<String, Resolution>,
+    parent_module: &str,
+    option: bool,
+) -> String {
+    let base = base_type(&f.field_type);
+    let is_array = f.field_type.starts_with("[]");
+    let owned = is_tagged(f) && tagged_field_needs_owned(f, res_map);
+    let elem = borrowed_populated_scalar(base, f, res_map, parent_module, owned);
+    let inner = if is_array {
+        format!("vec![{elem}]")
+    } else {
+        elem
+    };
+    if option {
+        format!("Some({inner})")
+    } else {
+        inner
+    }
+}
+
+fn borrowed_populated_scalar(
+    base: &str,
+    f: &FieldSpec,
+    res_map: &HashMap<String, Resolution>,
+    parent_module: &str,
+    owned: bool,
+) -> String {
+    match base {
+        "bool" => "true".to_string(),
+        "int8" => "1i8".to_string(),
+        "int16" => "1i16".to_string(),
+        "int32" => "1i32".to_string(),
+        "int64" => "1i64".to_string(),
+        "uint16" => "1u16".to_string(),
+        "uint32" => "1u32".to_string(),
+        "float64" => "1.0f64".to_string(),
+        "uuid" => "crate::primitives::uuid::Uuid([1u8; 16])".to_string(),
+        "string" if owned => "\"x\".to_string()".to_string(),
+        "string" => "\"x\"".to_string(),
+        "bytes" if owned => "::bytes::Bytes::from_static(b\"x\")".to_string(),
+        "bytes" => "&b\"x\"[..]".to_string(),
+        _ if owned => {
+            let path = owned_struct_path_for(f, parent_module, res_map)
+                .expect("struct field must resolve");
+            format!("{path}::populated(version)")
+        }
+        _ => {
+            let path = res_map
+                .get(base)
+                .map(|r| r.rust_path.clone())
+                .expect("struct field must resolve");
+            format!("{path}::populated(version)")
+        }
+    }
 }
 
 // ── primitive encode/decode call generators ────────────────────────────────

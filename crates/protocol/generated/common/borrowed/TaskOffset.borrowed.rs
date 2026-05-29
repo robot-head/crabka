@@ -83,3 +83,15 @@ impl<'de> DecodeBorrow<'de> for TaskOffset<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> TaskOffset<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.subtopology_id = "x"; }
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 0 { m.offset = 1i64; }
+        m
+    }
+}

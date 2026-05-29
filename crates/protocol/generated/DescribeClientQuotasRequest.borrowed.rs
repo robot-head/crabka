@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for DescribeClientQuotasRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeClientQuotasRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.components = vec![ComponentData::populated(version)]; }
+        if version >= 0 { m.strict = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComponentData<'a> {
     pub entity_type: &'a str,
@@ -164,5 +175,17 @@ impl<'de> DecodeBorrow<'de> for ComponentData<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ComponentData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entity_type = "x"; }
+        if version >= 0 { m.match_type = 1i8; }
+        if version >= 0 { m.match_ = Some("x"); }
+        m
     }
 }

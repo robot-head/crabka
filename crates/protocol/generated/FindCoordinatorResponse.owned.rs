@@ -92,6 +92,22 @@ impl<'de> Decode<'de> for FindCoordinatorResponse {
     }
 }
 
+#[cfg(test)]
+impl FindCoordinatorResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 0 && version <= 3 { m.error_code = 1i16; }
+        if version >= 1 && version <= 3 { m.error_message = Some("x".to_string()); }
+        if version >= 0 && version <= 3 { m.node_id = 1i32; }
+        if version >= 0 && version <= 3 { m.host = "x".to_string(); }
+        if version >= 0 && version <= 3 { m.port = 1i32; }
+        if version >= 4 { m.coordinators = vec![Coordinator::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Coordinator {
     pub key: String,
@@ -151,6 +167,21 @@ impl<'de> Decode<'de> for Coordinator {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Coordinator {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 4 { m.key = "x".to_string(); }
+        if version >= 4 { m.node_id = 1i32; }
+        if version >= 4 { m.host = "x".to_string(); }
+        if version >= 4 { m.port = 1i32; }
+        if version >= 4 { m.error_code = 1i16; }
+        if version >= 4 { m.error_message = Some("x".to_string()); }
+        m
     }
 }
 

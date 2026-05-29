@@ -104,6 +104,19 @@ impl<'de> DecodeBorrow<'de> for ListOffsetsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ListOffsetsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.replica_id = 1i32; }
+        if version >= 2 { m.isolation_level = 1i8; }
+        if version >= 0 { m.topics = vec![ListOffsetsTopic::populated(version)]; }
+        if version >= 10 { m.timeout_ms = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListOffsetsTopic<'a> {
     pub name: &'a str,
@@ -167,6 +180,17 @@ impl<'de> DecodeBorrow<'de> for ListOffsetsTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ListOffsetsTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partitions = vec![ListOffsetsPartition::populated(version)]; }
+        m
     }
 }
 
@@ -239,5 +263,17 @@ impl<'de> DecodeBorrow<'de> for ListOffsetsPartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ListOffsetsPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 4 { m.current_leader_epoch = 1i32; }
+        if version >= 0 { m.timestamp = 1i64; }
+        m
     }
 }

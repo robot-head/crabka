@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for GetReplicaLogInfoResponse {
     }
 }
 
+#[cfg(test)]
+impl GetReplicaLogInfoResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.broker_epoch = 1i64; }
+        if version >= 0 { m.topic_partition_log_info_list = vec![TopicPartitionLogInfo::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartitionLogInfo {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -115,6 +126,17 @@ impl<'de> Decode<'de> for TopicPartitionLogInfo {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicPartitionLogInfo {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partition_log_info = vec![PartitionLogInfo::populated(version)]; }
+        m
     }
 }
 
@@ -177,6 +199,21 @@ impl<'de> Decode<'de> for PartitionLogInfo {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionLogInfo {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 0 { m.last_written_leader_epoch = 1i32; }
+        if version >= 0 { m.current_leader_epoch = 1i32; }
+        if version >= 0 { m.log_end_offset = 1i64; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        m
     }
 }
 

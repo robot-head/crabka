@@ -71,3 +71,14 @@ impl<'de> DecodeBorrow<'de> for Voter {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl Voter {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.voter_id = 1i32; }
+        if version >= 1 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        m
+    }
+}

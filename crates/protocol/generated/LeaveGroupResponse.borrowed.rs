@@ -101,6 +101,18 @@ impl<'de> DecodeBorrow<'de> for LeaveGroupResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> LeaveGroupResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 3 { m.members = vec![MemberResponse::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberResponse<'a> {
     pub member_id: &'a str,
@@ -170,5 +182,17 @@ impl<'de> DecodeBorrow<'de> for MemberResponse<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> MemberResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.member_id = "x"; }
+        if version >= 3 { m.group_instance_id = Some("x"); }
+        if version >= 3 { m.error_code = 1i16; }
+        m
     }
 }

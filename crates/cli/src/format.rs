@@ -641,6 +641,91 @@ mod tests {
     }
 
     #[test]
+    fn parse_acl_spec_all_operations() {
+        use crabka_metadata::AclOperation;
+        for (s, op) in [
+            ("All", AclOperation::All),
+            ("Read", AclOperation::Read),
+            ("Write", AclOperation::Write),
+            ("Create", AclOperation::Create),
+            ("Delete", AclOperation::Delete),
+            ("Alter", AclOperation::Alter),
+            ("Describe", AclOperation::Describe),
+            ("ClusterAction", AclOperation::ClusterAction),
+            ("DescribeConfigs", AclOperation::DescribeConfigs),
+            ("AlterConfigs", AclOperation::AlterConfigs),
+            ("IdempotentWrite", AclOperation::IdempotentWrite),
+        ] {
+            let spec =
+                format!("principal=User:u,host=*,operation={s},permission=Allow,resource=Topic:t");
+            assert_eq!(parse_acl_spec(&spec).unwrap().operation, op);
+        }
+    }
+
+    #[test]
+    fn parse_acl_spec_all_resource_types_and_deny() {
+        use crabka_metadata::{PermissionType, ResourceType};
+        for (s, rt) in [
+            ("Topic", ResourceType::Topic),
+            ("Group", ResourceType::Group),
+            ("Cluster", ResourceType::Cluster),
+            ("TransactionalId", ResourceType::TransactionalId),
+        ] {
+            let spec =
+                format!("principal=User:u,host=*,operation=All,permission=Deny,resource={s}:n");
+            let entry = parse_acl_spec(&spec).unwrap();
+            assert_eq!(entry.resource_type, rt);
+            assert_eq!(entry.permission_type, PermissionType::Deny);
+        }
+    }
+
+    #[test]
+    fn parse_acl_spec_error_branches() {
+        for bad in [
+            "principal=User:u,host=*,operation=Bogus,permission=Allow,resource=Topic:t",
+            "principal=User:u,host=*,operation=All,permission=Maybe,resource=Topic:t",
+            "principal=User:u,host=*,operation=All,permission=Allow,resource=Topic:t:Weird",
+            "principal=User:u,host=*,operation=All,permission=Allow,resource=Bogus:t",
+            "principal=User:u,host=*,operation=All,permission=Allow,resource=Topic",
+            "malformedpair",
+            "host=*,operation=All,permission=Allow,resource=Topic:t",
+            "principal=User:u,operation=All,permission=Allow,resource=Topic:t",
+            "principal=User:u,host=*,permission=Allow,resource=Topic:t",
+            "principal=User:u,host=*,operation=All,resource=Topic:t",
+            "principal=User:u,host=*,operation=All,permission=Allow",
+        ] {
+            assert!(parse_acl_spec(bad).is_err(), "expected error for {bad:?}");
+        }
+    }
+
+    #[test]
+    fn parse_scram_spec_error_branches() {
+        for bad in [
+            "SCRAM-SHA-512=[name=a,password=b", // missing closing ]
+            "SCRAM-SHA-512=[name=a,password=b,iterations=xx]", // bad iterations
+            "SCRAM-SHA-512=[name=a,badattr]",   // malformed attr (no '=')
+            "SCRAM-SHA-512=[name=a,iterations=4096]", // missing password
+        ] {
+            assert!(parse_scram_spec(bad).is_err(), "expected error for {bad:?}");
+        }
+    }
+
+    #[test]
+    fn parse_initial_controller_error_branches() {
+        for bad in [
+            "notanum@host:9093:00000000-0000-0000-0000-000000000003", // bad id
+            "3@host9093",                                             // missing directory uuid
+            "3@host:notaport:00000000-0000-0000-0000-000000000003",   // bad port
+            "3@hostonly:00000000-0000-0000-0000-000000000003",        // missing host:port
+        ] {
+            assert!(
+                parse_initial_controller(bad).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
     fn base64_encode_known_vectors() {
         // RFC 4648 §10
         assert_eq!(base64_encode(b""), "");

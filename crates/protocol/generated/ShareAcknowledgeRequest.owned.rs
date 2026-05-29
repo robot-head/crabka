@@ -84,6 +84,20 @@ impl<'de> Decode<'de> for ShareAcknowledgeRequest {
     }
 }
 
+#[cfg(test)]
+impl ShareAcknowledgeRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = Some("x".to_string()); }
+        if version >= 0 { m.member_id = Some("x".to_string()); }
+        if version >= 0 { m.share_session_epoch = 1i32; }
+        if version >= 2 { m.is_renew_ack = true; }
+        if version >= 0 { m.topics = vec![AcknowledgeTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AcknowledgeTopic {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -130,6 +144,17 @@ impl<'de> Decode<'de> for AcknowledgeTopic {
     }
 }
 
+#[cfg(test)]
+impl AcknowledgeTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![AcknowledgePartition::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AcknowledgePartition {
     pub partition_index: i32,
@@ -173,6 +198,17 @@ impl<'de> Decode<'de> for AcknowledgePartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AcknowledgePartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.acknowledgement_batches = vec![AcknowledgementBatch::populated(version)]; }
+        m
     }
 }
 
@@ -223,6 +259,18 @@ impl<'de> Decode<'de> for AcknowledgementBatch {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AcknowledgementBatch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.first_offset = 1i64; }
+        if version >= 0 { m.last_offset = 1i64; }
+        if version >= 0 { m.acknowledge_types = vec![1i8]; }
+        m
     }
 }
 

@@ -67,6 +67,17 @@ impl<'de> Decode<'de> for EnvelopeResponse {
     }
 }
 
+#[cfg(test)]
+impl EnvelopeResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.response_data = Some(::bytes::Bytes::from_static(b"x")); }
+        if version >= 0 { m.error_code = 1i16; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

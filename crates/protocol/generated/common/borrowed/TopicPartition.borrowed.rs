@@ -77,3 +77,14 @@ impl<'de> DecodeBorrow<'de> for TopicPartition<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> TopicPartition<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x"; }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
+    }
+}

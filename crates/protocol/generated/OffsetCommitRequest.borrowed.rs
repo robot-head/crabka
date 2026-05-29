@@ -119,6 +119,21 @@ impl<'de> DecodeBorrow<'de> for OffsetCommitRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> OffsetCommitRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 1 { m.generation_id_or_member_epoch = 1i32; }
+        if version >= 1 { m.member_id = "x"; }
+        if version >= 7 { m.group_instance_id = Some("x"); }
+        if version >= 2 && version <= 4 { m.retention_time_ms = 1i64; }
+        if version >= 0 { m.topics = vec![OffsetCommitRequestTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetCommitRequestTopic<'a> {
     pub name: &'a str,
@@ -188,6 +203,18 @@ impl<'de> DecodeBorrow<'de> for OffsetCommitRequestTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> OffsetCommitRequestTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 9 { m.name = "x"; }
+        if version >= 10 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![OffsetCommitRequestPartition::populated(version)]; }
+        m
     }
 }
 
@@ -266,5 +293,18 @@ impl<'de> DecodeBorrow<'de> for OffsetCommitRequestPartition<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> OffsetCommitRequestPartition<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.committed_offset = 1i64; }
+        if version >= 6 { m.committed_leader_epoch = 1i32; }
+        if version >= 0 { m.committed_metadata = Some("x"); }
+        m
     }
 }

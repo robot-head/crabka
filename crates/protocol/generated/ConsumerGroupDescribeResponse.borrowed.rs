@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for ConsumerGroupDescribeResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ConsumerGroupDescribeResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.groups = vec![DescribedGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedGroup<'a> {
     pub error_code: i16,
@@ -200,6 +211,24 @@ impl<'de> DecodeBorrow<'de> for DescribedGroup<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribedGroup<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.group_state = "x"; }
+        if version >= 0 { m.group_epoch = 1i32; }
+        if version >= 0 { m.assignment_epoch = 1i32; }
+        if version >= 0 { m.assignor_name = "x"; }
+        if version >= 0 { m.members = vec![Member::populated(version)]; }
+        if version >= 0 { m.authorized_operations = 1i32; }
+        m
     }
 }
 
@@ -320,5 +349,25 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> Member<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 0 { m.instance_id = Some("x"); }
+        if version >= 0 { m.rack_id = Some("x"); }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.client_id = "x"; }
+        if version >= 0 { m.client_host = "x"; }
+        if version >= 0 { m.subscribed_topic_names = vec!["x"]; }
+        if version >= 0 { m.subscribed_topic_regex = Some("x"); }
+        if version >= 0 { m.assignment = super::common::assignment::Assignment::populated(version); }
+        if version >= 0 { m.target_assignment = super::common::assignment::Assignment::populated(version); }
+        if version >= 1 { m.member_type = 1i8; }
+        m
     }
 }

@@ -94,6 +94,17 @@ impl<'de> DecodeBorrow<'de> for AlterUserScramCredentialsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterUserScramCredentialsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.deletions = vec![ScramCredentialDeletion::populated(version)]; }
+        if version >= 0 { m.upsertions = vec![ScramCredentialUpsertion::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScramCredentialDeletion<'a> {
     pub name: &'a str,
@@ -157,6 +168,17 @@ impl<'de> DecodeBorrow<'de> for ScramCredentialDeletion<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ScramCredentialDeletion<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.mechanism = 1i8; }
+        m
     }
 }
 
@@ -241,5 +263,19 @@ impl<'de> DecodeBorrow<'de> for ScramCredentialUpsertion<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ScramCredentialUpsertion<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.mechanism = 1i8; }
+        if version >= 0 { m.iterations = 1i32; }
+        if version >= 0 { m.salt = &b"x"[..]; }
+        if version >= 0 { m.salted_password = &b"x"[..]; }
+        m
     }
 }

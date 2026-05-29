@@ -99,6 +99,18 @@ impl<'de> DecodeBorrow<'de> for LeaveGroupRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> LeaveGroupRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 && version <= 2 { m.member_id = "x"; }
+        if version >= 3 { m.members = vec![MemberIdentity::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberIdentity<'a> {
     pub member_id: &'a str,
@@ -168,5 +180,17 @@ impl<'de> DecodeBorrow<'de> for MemberIdentity<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> MemberIdentity<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.member_id = "x"; }
+        if version >= 3 { m.group_instance_id = Some("x"); }
+        if version >= 5 { m.reason = Some("x"); }
+        m
     }
 }

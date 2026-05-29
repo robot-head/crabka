@@ -125,6 +125,20 @@ impl<'de> DecodeBorrow<'de> for FetchResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> FetchResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 7 { m.error_code = 1i16; }
+        if version >= 7 { m.session_id = 1i32; }
+        if version >= 0 { m.responses = vec![FetchableTopicResponse::populated(version)]; }
+        if version >= 16 { m.node_endpoints = vec![crate::owned::fetch_response::NodeEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchableTopicResponse<'a> {
     pub topic: &'a str,
@@ -194,6 +208,18 @@ impl<'de> DecodeBorrow<'de> for FetchableTopicResponse<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> FetchableTopicResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 12 { m.topic = "x"; }
+        if version >= 13 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -341,6 +367,25 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> PartitionData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.high_watermark = 1i64; }
+        if version >= 4 { m.last_stable_offset = 1i64; }
+        if version >= 5 { m.log_start_offset = 1i64; }
+        if version >= 4 { m.aborted_transactions = Some(vec![AbortedTransaction::populated(version)]); }
+        if version >= 11 { m.preferred_read_replica = 1i32; }
+        if version >= 12 { m.diverging_epoch = EpochEndOffset::populated(version); }
+        if version >= 12 { m.current_leader = LeaderIdAndEpoch::populated(version); }
+        if version >= 12 { m.snapshot_id = SnapshotId::populated(version); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpochEndOffset {
     pub epoch: i32,
@@ -404,6 +449,17 @@ impl<'de> DecodeBorrow<'de> for EpochEndOffset {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl EpochEndOffset {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 12 { m.epoch = 1i32; }
+        if version >= 12 { m.end_offset = 1i64; }
+        m
     }
 }
 
@@ -473,6 +529,17 @@ impl<'de> DecodeBorrow<'de> for LeaderIdAndEpoch {
     }
 }
 
+#[cfg(test)]
+impl LeaderIdAndEpoch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 12 { m.leader_id = 1i32; }
+        if version >= 12 { m.leader_epoch = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotId {
     pub end_offset: i64,
@@ -539,6 +606,17 @@ impl<'de> DecodeBorrow<'de> for SnapshotId {
     }
 }
 
+#[cfg(test)]
+impl SnapshotId {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.end_offset = 1i64; }
+        if version >= 0 { m.epoch = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbortedTransaction {
     pub producer_id: i64,
@@ -602,6 +680,17 @@ impl<'de> DecodeBorrow<'de> for AbortedTransaction {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AbortedTransaction {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 4 { m.producer_id = 1i64; }
+        if version >= 4 { m.first_offset = 1i64; }
+        m
     }
 }
 
@@ -680,5 +769,18 @@ impl<'de> DecodeBorrow<'de> for NodeEndpoint<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> NodeEndpoint<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 16 { m.node_id = 1i32; }
+        if version >= 16 { m.host = "x"; }
+        if version >= 16 { m.port = 1i32; }
+        if version >= 16 { m.rack = Some("x"); }
+        m
     }
 }

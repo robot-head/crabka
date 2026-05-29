@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for DeleteTopicsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DeleteTopicsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.responses = vec![DeletableTopicResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeletableTopicResult<'a> {
     pub name: Option<&'a str>,
@@ -170,5 +181,18 @@ impl<'de> DecodeBorrow<'de> for DeletableTopicResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DeletableTopicResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = Some("x"); }
+        if version >= 6 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 5 { m.error_message = Some("x"); }
+        m
     }
 }

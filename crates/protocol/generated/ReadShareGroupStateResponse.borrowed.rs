@@ -89,6 +89,16 @@ impl<'de> DecodeBorrow<'de> for ReadShareGroupStateResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ReadShareGroupStateResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.results = vec![ReadStateResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadStateResult<'a> {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -152,6 +162,17 @@ impl<'de> DecodeBorrow<'de> for ReadStateResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ReadStateResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionResult::populated(version)]; }
+        m
     }
 }
 
@@ -245,6 +266,21 @@ impl<'de> DecodeBorrow<'de> for PartitionResult<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> PartitionResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.state_epoch = 1i32; }
+        if version >= 0 { m.start_offset = 1i64; }
+        if version >= 0 { m.state_batches = vec![StateBatch::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StateBatch {
     pub first_offset: i64,
@@ -320,5 +356,18 @@ impl<'de> DecodeBorrow<'de> for StateBatch {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl StateBatch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.first_offset = 1i64; }
+        if version >= 0 { m.last_offset = 1i64; }
+        if version >= 0 { m.delivery_state = 1i8; }
+        if version >= 0 { m.delivery_count = 1i16; }
+        m
     }
 }

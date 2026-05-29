@@ -92,6 +92,18 @@ impl<'de> DecodeBorrow<'de> for AlterPartitionResponse {
     }
 }
 
+#[cfg(test)]
+impl AlterPartitionResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -155,6 +167,17 @@ impl<'de> DecodeBorrow<'de> for TopicData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 2 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -251,5 +274,21 @@ impl<'de> DecodeBorrow<'de> for PartitionData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 { m.isr = vec![1i32]; }
+        if version >= 1 { m.leader_recovery_state = 1i8; }
+        if version >= 0 { m.partition_epoch = 1i32; }
+        m
     }
 }

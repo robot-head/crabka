@@ -109,6 +109,19 @@ impl<'de> DecodeBorrow<'de> for ProduceRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ProduceRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.transactional_id = Some("x"); }
+        if version >= 0 { m.acks = 1i16; }
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 0 { m.topic_data = vec![TopicProduceData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicProduceData<'a> {
     pub name: &'a str,
@@ -181,6 +194,18 @@ impl<'de> DecodeBorrow<'de> for TopicProduceData<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> TopicProduceData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 12 { m.name = "x"; }
+        if version >= 13 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partition_data = vec![PartitionProduceData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionProduceData<'a> {
     pub index: i32,
@@ -244,5 +269,15 @@ impl<'de> DecodeBorrow<'de> for PartitionProduceData<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> PartitionProduceData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.index = 1i32; }
+        m
     }
 }

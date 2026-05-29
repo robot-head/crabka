@@ -81,6 +81,18 @@ impl<'de> Decode<'de> for AlterPartitionRequest {
     }
 }
 
+#[cfg(test)]
+impl AlterPartitionRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.broker_id = 1i32; }
+        if version >= 0 { m.broker_epoch = 1i64; }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicData {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -124,6 +136,17 @@ impl<'de> Decode<'de> for TopicData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 2 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -189,6 +212,21 @@ impl<'de> Decode<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 && version <= 2 { m.new_isr = vec![1i32]; }
+        if version >= 3 { m.new_isr_with_epochs = vec![BrokerState::populated(version)]; }
+        if version >= 1 { m.leader_recovery_state = 1i8; }
+        if version >= 0 { m.partition_epoch = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerState {
     pub broker_id: i32,
@@ -242,6 +280,17 @@ impl<'de> Decode<'de> for BrokerState {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl BrokerState {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.broker_id = 1i32; }
+        if version >= 3 { m.broker_epoch = 1i64; }
+        m
     }
 }
 

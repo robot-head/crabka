@@ -70,6 +70,17 @@ impl<'de> Decode<'de> for InitializeShareGroupStateRequest {
     }
 }
 
+#[cfg(test)]
+impl InitializeShareGroupStateRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.topics = vec![InitializeStateData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InitializeStateData {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -113,6 +124,17 @@ impl<'de> Decode<'de> for InitializeStateData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl InitializeStateData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -163,6 +185,18 @@ impl<'de> Decode<'de> for PartitionData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 0 { m.state_epoch = 1i32; }
+        if version >= 0 { m.start_offset = 1i64; }
+        m
     }
 }
 

@@ -95,6 +95,20 @@ impl<'de> Decode<'de> for FetchResponse {
     }
 }
 
+#[cfg(test)]
+impl FetchResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 1 { m.throttle_time_ms = 1i32; }
+        if version >= 7 { m.error_code = 1i16; }
+        if version >= 7 { m.session_id = 1i32; }
+        if version >= 0 { m.responses = vec![FetchableTopicResponse::populated(version)]; }
+        if version >= 16 { m.node_endpoints = vec![NodeEndpoint::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FetchableTopicResponse {
     pub topic: String,
@@ -142,6 +156,18 @@ impl<'de> Decode<'de> for FetchableTopicResponse {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl FetchableTopicResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 12 { m.topic = "x".to_string(); }
+        if version >= 13 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -270,6 +296,25 @@ impl<'de> Decode<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.high_watermark = 1i64; }
+        if version >= 4 { m.last_stable_offset = 1i64; }
+        if version >= 5 { m.log_start_offset = 1i64; }
+        if version >= 4 { m.aborted_transactions = Some(vec![AbortedTransaction::populated(version)]); }
+        if version >= 11 { m.preferred_read_replica = 1i32; }
+        if version >= 12 { m.diverging_epoch = EpochEndOffset::populated(version); }
+        if version >= 12 { m.current_leader = LeaderIdAndEpoch::populated(version); }
+        if version >= 12 { m.snapshot_id = SnapshotId::populated(version); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EpochEndOffset {
     pub epoch: i32,
@@ -323,6 +368,17 @@ impl<'de> Decode<'de> for EpochEndOffset {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl EpochEndOffset {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 12 { m.epoch = 1i32; }
+        if version >= 12 { m.end_offset = 1i64; }
+        m
     }
 }
 
@@ -382,6 +438,17 @@ impl<'de> Decode<'de> for LeaderIdAndEpoch {
     }
 }
 
+#[cfg(test)]
+impl LeaderIdAndEpoch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 12 { m.leader_id = 1i32; }
+        if version >= 12 { m.leader_epoch = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotId {
     pub end_offset: i64,
@@ -438,6 +505,17 @@ impl<'de> Decode<'de> for SnapshotId {
     }
 }
 
+#[cfg(test)]
+impl SnapshotId {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.end_offset = 1i64; }
+        if version >= 0 { m.epoch = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AbortedTransaction {
     pub producer_id: i64,
@@ -481,6 +559,17 @@ impl<'de> Decode<'de> for AbortedTransaction {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AbortedTransaction {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 4 { m.producer_id = 1i64; }
+        if version >= 4 { m.first_offset = 1i64; }
+        m
     }
 }
 
@@ -535,6 +624,19 @@ impl<'de> Decode<'de> for NodeEndpoint {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl NodeEndpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 16 { m.node_id = 1i32; }
+        if version >= 16 { m.host = "x".to_string(); }
+        if version >= 16 { m.port = 1i32; }
+        if version >= 16 { m.rack = Some("x".to_string()); }
+        m
     }
 }
 

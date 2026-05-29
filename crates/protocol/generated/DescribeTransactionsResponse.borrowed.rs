@@ -92,6 +92,17 @@ impl<'de> DecodeBorrow<'de> for DescribeTransactionsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeTransactionsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.transaction_states = vec![TransactionState::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransactionState<'a> {
     pub error_code: i16,
@@ -194,6 +205,23 @@ impl<'de> DecodeBorrow<'de> for TransactionState<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> TransactionState<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.transactional_id = "x"; }
+        if version >= 0 { m.transaction_state = "x"; }
+        if version >= 0 { m.transaction_timeout_ms = 1i32; }
+        if version >= 0 { m.transaction_start_time_ms = 1i64; }
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.producer_epoch = 1i16; }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic: &'a str,
@@ -257,5 +285,16 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x"; }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }

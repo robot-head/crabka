@@ -101,6 +101,18 @@ impl<'de> DecodeBorrow<'de> for DescribeConfigsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeConfigsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resources = vec![DescribeConfigsResource::populated(version)]; }
+        if version >= 1 { m.include_synonyms = true; }
+        if version >= 3 { m.include_documentation = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeConfigsResource<'a> {
     pub resource_type: i8,
@@ -170,5 +182,17 @@ impl<'de> DecodeBorrow<'de> for DescribeConfigsResource<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribeConfigsResource<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_type = 1i8; }
+        if version >= 0 { m.resource_name = "x"; }
+        if version >= 0 { m.configuration_keys = Some(vec!["x"]); }
+        m
     }
 }

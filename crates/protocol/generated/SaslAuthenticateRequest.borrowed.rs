@@ -79,3 +79,13 @@ impl<'de> DecodeBorrow<'de> for SaslAuthenticateRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> SaslAuthenticateRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.auth_bytes = &b"x"[..]; }
+        m
+    }
+}

@@ -69,6 +69,18 @@ impl<'de> Decode<'de> for EnvelopeRequest {
     }
 }
 
+#[cfg(test)]
+impl EnvelopeRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.request_data = ::bytes::Bytes::from_static(b"x"); }
+        if version >= 0 { m.request_principal = Some(::bytes::Bytes::from_static(b"x")); }
+        if version >= 0 { m.client_host_address = ::bytes::Bytes::from_static(b"x"); }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

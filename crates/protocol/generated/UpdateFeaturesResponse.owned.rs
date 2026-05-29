@@ -80,6 +80,19 @@ impl<'de> Decode<'de> for UpdateFeaturesResponse {
     }
 }
 
+#[cfg(test)]
+impl UpdateFeaturesResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 && version <= 1 { m.results = vec![UpdatableFeatureResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdatableFeatureResult {
     pub feature: String,
@@ -127,6 +140,18 @@ impl<'de> Decode<'de> for UpdatableFeatureResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl UpdatableFeatureResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.feature = "x".to_string(); }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        m
     }
 }
 

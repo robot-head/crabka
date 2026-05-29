@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for AlterConfigsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterConfigsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.responses = vec![AlterConfigsResourceResponse::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterConfigsResourceResponse<'a> {
     pub error_code: i16,
@@ -170,5 +181,18 @@ impl<'de> DecodeBorrow<'de> for AlterConfigsResourceResponse<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> AlterConfigsResourceResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.resource_type = 1i8; }
+        if version >= 0 { m.resource_name = "x"; }
+        m
     }
 }

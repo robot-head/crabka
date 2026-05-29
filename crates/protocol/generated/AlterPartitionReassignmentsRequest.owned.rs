@@ -85,6 +85,18 @@ impl<'de> Decode<'de> for AlterPartitionReassignmentsRequest {
     }
 }
 
+#[cfg(test)]
+impl AlterPartitionReassignmentsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 1 { m.allow_replication_factor_change = true; }
+        if version >= 0 { m.topics = vec![ReassignableTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReassignableTopic {
     pub name: String,
@@ -131,6 +143,17 @@ impl<'de> Decode<'de> for ReassignableTopic {
     }
 }
 
+#[cfg(test)]
+impl ReassignableTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![ReassignablePartition::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReassignablePartition {
     pub partition_index: i32,
@@ -174,6 +197,17 @@ impl<'de> Decode<'de> for ReassignablePartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ReassignablePartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.replicas = Some(vec![1i32]); }
+        m
     }
 }
 

@@ -76,6 +76,17 @@ impl<'de> Decode<'de> for AllocateProducerIdsRequest {
     }
 }
 
+#[cfg(test)]
+impl AllocateProducerIdsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.broker_id = 1i32; }
+        if version >= 0 { m.broker_epoch = 1i64; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

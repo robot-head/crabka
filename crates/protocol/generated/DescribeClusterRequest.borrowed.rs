@@ -91,3 +91,15 @@ impl<'de> DecodeBorrow<'de> for DescribeClusterRequest {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl DescribeClusterRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.include_cluster_authorized_operations = true; }
+        if version >= 1 { m.endpoint_type = 1i8; }
+        if version >= 2 { m.include_fenced_brokers = true; }
+        m
+    }
+}

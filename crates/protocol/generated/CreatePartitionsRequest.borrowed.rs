@@ -98,6 +98,18 @@ impl<'de> DecodeBorrow<'de> for CreatePartitionsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> CreatePartitionsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = vec![CreatePartitionsTopic::populated(version)]; }
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 0 { m.validate_only = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatePartitionsTopic<'a> {
     pub name: &'a str,
@@ -170,6 +182,18 @@ impl<'de> DecodeBorrow<'de> for CreatePartitionsTopic<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> CreatePartitionsTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.count = 1i32; }
+        if version >= 0 { m.assignments = Some(vec![CreatePartitionsAssignment::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatePartitionsAssignment {
     pub broker_ids: Vec<i32>,
@@ -227,5 +251,15 @@ impl<'de> DecodeBorrow<'de> for CreatePartitionsAssignment {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl CreatePartitionsAssignment {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.broker_ids = vec![1i32]; }
+        m
     }
 }

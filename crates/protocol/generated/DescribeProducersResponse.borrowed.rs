@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for DescribeProducersResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeProducersResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![TopicResponse::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicResponse<'a> {
     pub name: &'a str,
@@ -158,6 +169,17 @@ impl<'de> DecodeBorrow<'de> for TopicResponse<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partitions = vec![PartitionResponse::populated(version)]; }
+        m
     }
 }
 
@@ -236,6 +258,19 @@ impl<'de> DecodeBorrow<'de> for PartitionResponse<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> PartitionResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        if version >= 0 { m.active_producers = vec![ProducerState::populated(version)]; }
+        m
     }
 }
 
@@ -326,5 +361,20 @@ impl<'de> DecodeBorrow<'de> for ProducerState {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ProducerState {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.producer_epoch = 1i32; }
+        if version >= 0 { m.last_sequence = 1i32; }
+        if version >= 0 { m.last_timestamp = 1i64; }
+        if version >= 0 { m.coordinator_epoch = 1i32; }
+        if version >= 0 { m.current_txn_start_offset = 1i64; }
+        m
     }
 }

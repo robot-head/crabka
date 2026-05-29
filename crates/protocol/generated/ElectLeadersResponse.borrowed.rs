@@ -101,6 +101,18 @@ impl<'de> DecodeBorrow<'de> for ElectLeadersResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> ElectLeadersResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 1 { m.error_code = 1i16; }
+        if version >= 0 { m.replica_election_results = vec![ReplicaElectionResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicaElectionResult<'a> {
     pub topic: &'a str,
@@ -164,6 +176,17 @@ impl<'de> DecodeBorrow<'de> for ReplicaElectionResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> ReplicaElectionResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x"; }
+        if version >= 0 { m.partition_result = vec![PartitionResult::populated(version)]; }
+        m
     }
 }
 
@@ -236,5 +259,17 @@ impl<'de> DecodeBorrow<'de> for PartitionResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> PartitionResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_id = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x"); }
+        m
     }
 }

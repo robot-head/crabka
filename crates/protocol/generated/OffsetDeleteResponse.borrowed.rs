@@ -84,6 +84,18 @@ impl<'de> DecodeBorrow<'de> for OffsetDeleteResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> OffsetDeleteResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![OffsetDeleteResponseTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetDeleteResponseTopic<'a> {
     pub name: &'a str,
@@ -137,6 +149,17 @@ impl<'de> DecodeBorrow<'de> for OffsetDeleteResponseTopic<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> OffsetDeleteResponseTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.partitions = vec![OffsetDeleteResponsePartition::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetDeleteResponsePartition {
     pub partition_index: i32,
@@ -187,5 +210,16 @@ impl<'de> DecodeBorrow<'de> for OffsetDeleteResponsePartition {
         if version >= 0 { out.partition_index = get_i32(buf)?; }
         if version >= 0 { out.error_code = get_i16(buf)?; }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl OffsetDeleteResponsePartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        m
     }
 }

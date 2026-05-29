@@ -66,6 +66,16 @@ impl<'de> Decode<'de> for WriteTxnMarkersRequest {
     }
 }
 
+#[cfg(test)]
+impl WriteTxnMarkersRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.markers = vec![WritableTxnMarker::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WritableTxnMarker {
     pub producer_id: i64,
@@ -128,6 +138,21 @@ impl<'de> Decode<'de> for WritableTxnMarker {
     }
 }
 
+#[cfg(test)]
+impl WritableTxnMarker {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.producer_epoch = 1i16; }
+        if version >= 0 { m.transaction_result = true; }
+        if version >= 0 { m.topics = vec![WritableTxnMarkerTopic::populated(version)]; }
+        if version >= 0 { m.coordinator_epoch = 1i32; }
+        if version >= 2 { m.transaction_version = 1i8; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WritableTxnMarkerTopic {
     pub name: String,
@@ -171,6 +196,17 @@ impl<'de> Decode<'de> for WritableTxnMarkerTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl WritableTxnMarkerTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partition_indexes = vec![1i32]; }
+        m
     }
 }
 

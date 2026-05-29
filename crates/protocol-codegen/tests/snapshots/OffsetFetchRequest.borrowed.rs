@@ -107,6 +107,19 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> OffsetFetchRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 7 { m.group_id = "x"; }
+        if version >= 0 && version <= 7 { m.topics = Some(vec![OffsetFetchRequestTopic::populated(version)]); }
+        if version >= 8 { m.groups = vec![OffsetFetchRequestGroup::populated(version)]; }
+        if version >= 7 { m.require_stable = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchRequestTopic<'a> {
     pub name: &'a str,
@@ -170,6 +183,17 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchRequestTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> OffsetFetchRequestTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 7 { m.name = "x"; }
+        if version >= 0 && version <= 7 { m.partition_indexes = vec![1i32]; }
+        m
     }
 }
 
@@ -251,6 +275,19 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchRequestGroup<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> OffsetFetchRequestGroup<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 8 { m.group_id = "x"; }
+        if version >= 9 { m.member_id = Some("x"); }
+        if version >= 9 { m.member_epoch = 1i32; }
+        if version >= 8 { m.topics = Some(vec![OffsetFetchRequestTopics::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetFetchRequestTopics<'a> {
     pub name: &'a str,
@@ -320,5 +357,17 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchRequestTopics<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> OffsetFetchRequestTopics<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 8 && version <= 9 { m.name = "x"; }
+        if version >= 10 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 8 { m.partition_indexes = vec![1i32]; }
+        m
     }
 }

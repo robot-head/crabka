@@ -55,6 +55,17 @@ impl<'de> Decode<'de> for ConsumerProtocolAssignment {
     }
 }
 
+#[cfg(test)]
+impl ConsumerProtocolAssignment {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.assigned_partitions = vec![TopicPartition::populated(version)]; }
+        if version >= 0 { m.user_data = Some(::bytes::Bytes::from_static(b"x")); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartition {
     pub topic: String,
@@ -85,6 +96,17 @@ impl<'de> Decode<'de> for TopicPartition {
         if version >= 0 { out.topic = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
         if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i32(buf)?); } v }; }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl TopicPartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }
 

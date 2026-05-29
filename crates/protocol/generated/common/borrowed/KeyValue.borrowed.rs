@@ -75,3 +75,14 @@ impl<'de> DecodeBorrow<'de> for KeyValue<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> KeyValue<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.key = "x"; }
+        if version >= 0 { m.value = "x"; }
+        m
+    }
+}

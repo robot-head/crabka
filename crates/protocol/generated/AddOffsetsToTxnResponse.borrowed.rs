@@ -85,3 +85,14 @@ impl<'de> DecodeBorrow<'de> for AddOffsetsToTxnResponse {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl AddOffsetsToTxnResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        m
+    }
+}

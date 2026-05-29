@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for AlterClientQuotasResponse {
     }
 }
 
+#[cfg(test)]
+impl AlterClientQuotasResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.entries = vec![EntryData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EntryData {
     pub error_code: i16,
@@ -122,6 +133,18 @@ impl<'de> Decode<'de> for EntryData {
     }
 }
 
+#[cfg(test)]
+impl EntryData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.entity = vec![EntityData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EntityData {
     pub entity_type: String,
@@ -165,6 +188,17 @@ impl<'de> Decode<'de> for EntityData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl EntityData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entity_type = "x".to_string(); }
+        if version >= 0 { m.entity_name = Some("x".to_string()); }
+        m
     }
 }
 

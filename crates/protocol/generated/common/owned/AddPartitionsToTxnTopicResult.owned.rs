@@ -53,3 +53,14 @@ impl<'de> Decode<'de> for AddPartitionsToTxnTopicResult {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl AddPartitionsToTxnTopicResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.results_by_partition = vec![super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::populated(version)]; }
+        m
+    }
+}

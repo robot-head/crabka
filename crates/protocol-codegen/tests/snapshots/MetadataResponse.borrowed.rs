@@ -125,6 +125,22 @@ impl<'de> DecodeBorrow<'de> for MetadataResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> MetadataResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 3 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.brokers = vec![MetadataResponseBroker::populated(version)]; }
+        if version >= 2 { m.cluster_id = Some("x"); }
+        if version >= 1 { m.controller_id = 1i32; }
+        if version >= 0 { m.topics = vec![MetadataResponseTopic::populated(version)]; }
+        if version >= 8 && version <= 10 { m.cluster_authorized_operations = 1i32; }
+        if version >= 13 { m.error_code = 1i16; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataResponseBroker<'a> {
     pub node_id: i32,
@@ -200,6 +216,19 @@ impl<'de> DecodeBorrow<'de> for MetadataResponseBroker<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> MetadataResponseBroker<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.node_id = 1i32; }
+        if version >= 0 { m.host = "x"; }
+        if version >= 0 { m.port = 1i32; }
+        if version >= 1 { m.rack = Some("x"); }
+        m
     }
 }
 
@@ -290,6 +319,21 @@ impl<'de> DecodeBorrow<'de> for MetadataResponseTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> MetadataResponseTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.name = Some("x"); }
+        if version >= 10 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 1 { m.is_internal = true; }
+        if version >= 0 { m.partitions = vec![MetadataResponsePartition::populated(version)]; }
+        if version >= 8 { m.topic_authorized_operations = 1i32; }
+        m
     }
 }
 
@@ -386,5 +430,21 @@ impl<'de> DecodeBorrow<'de> for MetadataResponsePartition {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl MetadataResponsePartition {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.leader_id = 1i32; }
+        if version >= 7 { m.leader_epoch = 1i32; }
+        if version >= 0 { m.replica_nodes = vec![1i32]; }
+        if version >= 0 { m.isr_nodes = vec![1i32]; }
+        if version >= 5 { m.offline_replicas = vec![1i32]; }
+        m
     }
 }

@@ -91,3 +91,14 @@ impl<'de> DecodeBorrow<'de> for DescribeGroupsRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> DescribeGroupsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.groups = vec!["x"]; }
+        if version >= 3 { m.include_authorized_operations = true; }
+        m
+    }
+}

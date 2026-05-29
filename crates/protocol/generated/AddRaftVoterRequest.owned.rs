@@ -102,6 +102,21 @@ impl<'de> Decode<'de> for AddRaftVoterRequest {
     }
 }
 
+#[cfg(test)]
+impl AddRaftVoterRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.cluster_id = Some("x".to_string()); }
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 0 { m.voter_id = 1i32; }
+        if version >= 0 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.listeners = vec![Listener::populated(version)]; }
+        if version >= 1 { m.ack_when_committed = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listener {
     pub name: String,
@@ -149,6 +164,18 @@ impl<'de> Decode<'de> for Listener {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Listener {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.host = "x".to_string(); }
+        if version >= 0 { m.port = 1u16; }
+        m
     }
 }
 

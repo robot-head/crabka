@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for AlterConfigsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterConfigsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resources = vec![AlterConfigsResource::populated(version)]; }
+        if version >= 0 { m.validate_only = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterConfigsResource<'a> {
     pub resource_type: i8,
@@ -167,6 +178,18 @@ impl<'de> DecodeBorrow<'de> for AlterConfigsResource<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> AlterConfigsResource<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_type = 1i8; }
+        if version >= 0 { m.resource_name = "x"; }
+        if version >= 0 { m.configs = vec![AlterableConfig::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterableConfig<'a> {
     pub name: &'a str,
@@ -230,5 +253,16 @@ impl<'de> DecodeBorrow<'de> for AlterableConfig<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> AlterableConfig<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 0 { m.value = Some("x"); }
+        m
     }
 }

@@ -71,3 +71,14 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnPartitionResult {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl AddPartitionsToTxnPartitionResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.partition_error_code = 1i16; }
+        m
+    }
+}

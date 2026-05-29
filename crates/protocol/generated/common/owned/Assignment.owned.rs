@@ -53,3 +53,15 @@ impl<'de> Decode<'de> for Assignment {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl Assignment {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.active_tasks = vec![super::task_ids::TaskIds::populated(version)]; }
+        if version >= 0 { m.standby_tasks = vec![super::task_ids::TaskIds::populated(version)]; }
+        if version >= 0 { m.warmup_tasks = vec![super::task_ids::TaskIds::populated(version)]; }
+        m
+    }
+}

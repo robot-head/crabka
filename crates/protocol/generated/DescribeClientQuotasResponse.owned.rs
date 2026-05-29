@@ -80,6 +80,19 @@ impl<'de> Decode<'de> for DescribeClientQuotasResponse {
     }
 }
 
+#[cfg(test)]
+impl DescribeClientQuotasResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.entries = Some(vec![EntryData::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntryData {
     pub entity: Vec<EntityData>,
@@ -123,6 +136,17 @@ impl<'de> Decode<'de> for EntryData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl EntryData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entity = vec![EntityData::populated(version)]; }
+        if version >= 0 { m.values = vec![ValueData::populated(version)]; }
+        m
     }
 }
 
@@ -172,6 +196,17 @@ impl<'de> Decode<'de> for EntityData {
     }
 }
 
+#[cfg(test)]
+impl EntityData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.entity_type = "x".to_string(); }
+        if version >= 0 { m.entity_name = Some("x".to_string()); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ValueData {
     pub key: String,
@@ -215,6 +250,17 @@ impl<'de> Decode<'de> for ValueData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ValueData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.key = "x".to_string(); }
+        if version >= 0 { m.value = 1.0f64; }
+        m
     }
 }
 

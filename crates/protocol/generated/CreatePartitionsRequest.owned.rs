@@ -74,6 +74,18 @@ impl<'de> Decode<'de> for CreatePartitionsRequest {
     }
 }
 
+#[cfg(test)]
+impl CreatePartitionsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topics = vec![CreatePartitionsTopic::populated(version)]; }
+        if version >= 0 { m.timeout_ms = 1i32; }
+        if version >= 0 { m.validate_only = true; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatePartitionsTopic {
     pub name: String,
@@ -124,6 +136,18 @@ impl<'de> Decode<'de> for CreatePartitionsTopic {
     }
 }
 
+#[cfg(test)]
+impl CreatePartitionsTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.count = 1i32; }
+        if version >= 0 { m.assignments = Some(vec![CreatePartitionsAssignment::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatePartitionsAssignment {
     pub broker_ids: Vec<i32>,
@@ -163,6 +187,16 @@ impl<'de> Decode<'de> for CreatePartitionsAssignment {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl CreatePartitionsAssignment {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.broker_ids = vec![1i32]; }
+        m
     }
 }
 

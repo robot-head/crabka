@@ -95,6 +95,17 @@ impl<'de> DecodeBorrow<'de> for CreateTopicsResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> CreateTopicsResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 2 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![CreatableTopicResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableTopicResult<'a> {
     pub name: &'a str,
@@ -207,6 +218,23 @@ impl<'de> DecodeBorrow<'de> for CreatableTopicResult<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> CreatableTopicResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x"; }
+        if version >= 7 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 1 { m.error_message = Some("x"); }
+        if version >= 5 { m.num_partitions = 1i32; }
+        if version >= 5 { m.replication_factor = 1i16; }
+        if version >= 5 { m.configs = Some(vec![CreatableTopicConfigs::populated(version)]); }
+        if version >= 5 { m.topic_config_error_code = 1i16; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableTopicConfigs<'a> {
     pub name: &'a str,
@@ -288,5 +316,19 @@ impl<'de> DecodeBorrow<'de> for CreatableTopicConfigs<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> CreatableTopicConfigs<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 5 { m.name = "x"; }
+        if version >= 5 { m.value = Some("x"); }
+        if version >= 5 { m.read_only = true; }
+        if version >= 5 { m.config_source = 1i8; }
+        if version >= 5 { m.is_sensitive = true; }
+        m
     }
 }

@@ -92,6 +92,19 @@ impl<'de> Decode<'de> for ListTransactionsRequest {
     }
 }
 
+#[cfg(test)]
+impl ListTransactionsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.state_filters = vec!["x".to_string()]; }
+        if version >= 0 { m.producer_id_filters = vec![1i64]; }
+        if version >= 1 { m.duration_filter = 1i64; }
+        if version >= 2 { m.transactional_id_pattern = Some("x".to_string()); }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

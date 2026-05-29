@@ -72,6 +72,17 @@ impl<'de> Decode<'de> for ShareGroupDescribeResponse {
     }
 }
 
+#[cfg(test)]
+impl ShareGroupDescribeResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.groups = vec![DescribedGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedGroup {
     pub error_code: i16,
@@ -163,6 +174,24 @@ impl<'de> Decode<'de> for DescribedGroup {
     }
 }
 
+#[cfg(test)]
+impl DescribedGroup {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.group_state = "x".to_string(); }
+        if version >= 0 { m.group_epoch = 1i32; }
+        if version >= 0 { m.assignment_epoch = 1i32; }
+        if version >= 0 { m.assignor_name = "x".to_string(); }
+        if version >= 0 { m.members = vec![Member::populated(version)]; }
+        if version >= 0 { m.authorized_operations = 1i32; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Member {
     pub member_id: String,
@@ -226,6 +255,22 @@ impl<'de> Decode<'de> for Member {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Member {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.member_id = "x".to_string(); }
+        if version >= 0 { m.rack_id = Some("x".to_string()); }
+        if version >= 0 { m.member_epoch = 1i32; }
+        if version >= 0 { m.client_id = "x".to_string(); }
+        if version >= 0 { m.client_host = "x".to_string(); }
+        if version >= 0 { m.subscribed_topic_names = vec!["x".to_string()]; }
+        if version >= 0 { m.assignment = super::common::assignment::Assignment::populated(version); }
+        m
     }
 }
 

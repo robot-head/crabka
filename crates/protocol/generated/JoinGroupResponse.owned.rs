@@ -118,6 +118,24 @@ impl<'de> Decode<'de> for JoinGroupResponse {
     }
 }
 
+#[cfg(test)]
+impl JoinGroupResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 2 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.generation_id = 1i32; }
+        if version >= 7 { m.protocol_type = Some("x".to_string()); }
+        if version >= 0 { m.protocol_name = Some("x".to_string()); }
+        if version >= 0 { m.leader = "x".to_string(); }
+        if version >= 9 { m.skip_assignment = true; }
+        if version >= 0 { m.member_id = "x".to_string(); }
+        if version >= 0 { m.members = vec![JoinGroupResponseMember::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct JoinGroupResponseMember {
     pub member_id: String,
@@ -165,6 +183,18 @@ impl<'de> Decode<'de> for JoinGroupResponseMember {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl JoinGroupResponseMember {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.member_id = "x".to_string(); }
+        if version >= 5 { m.group_instance_id = Some("x".to_string()); }
+        if version >= 0 { m.metadata = ::bytes::Bytes::from_static(b"x"); }
+        m
     }
 }
 

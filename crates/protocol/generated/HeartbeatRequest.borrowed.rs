@@ -106,3 +106,16 @@ impl<'de> DecodeBorrow<'de> for HeartbeatRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> HeartbeatRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.generation_id = 1i32; }
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 3 { m.group_instance_id = Some("x"); }
+        m
+    }
+}

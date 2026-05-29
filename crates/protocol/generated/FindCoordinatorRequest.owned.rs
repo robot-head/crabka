@@ -74,6 +74,18 @@ impl<'de> Decode<'de> for FindCoordinatorRequest {
     }
 }
 
+#[cfg(test)]
+impl FindCoordinatorRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 && version <= 3 { m.key = "x".to_string(); }
+        if version >= 1 { m.key_type = 1i8; }
+        if version >= 4 { m.coordinator_keys = vec!["x".to_string()]; }
+        m
+    }
+}
+
 /// Default JSON payload matching `Self::default()` for JVM oracle differential testing.
 /// Only includes fields valid for the given version.
 #[must_use]

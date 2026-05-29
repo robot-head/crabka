@@ -55,3 +55,14 @@ impl<'de> Decode<'de> for Endpoint {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl Endpoint {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.host = "x".to_string(); }
+        if version >= 0 { m.port = 1u16; }
+        m
+    }
+}

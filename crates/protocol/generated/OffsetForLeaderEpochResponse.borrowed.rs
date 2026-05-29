@@ -92,6 +92,17 @@ impl<'de> DecodeBorrow<'de> for OffsetForLeaderEpochResponse<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> OffsetForLeaderEpochResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 2 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.topics = vec![OffsetForLeaderTopicResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetForLeaderTopicResult<'a> {
     pub topic: &'a str,
@@ -155,6 +166,17 @@ impl<'de> DecodeBorrow<'de> for OffsetForLeaderTopicResult<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> OffsetForLeaderTopicResult<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic = "x"; }
+        if version >= 0 { m.partitions = vec![EpochEndOffset::populated(version)]; }
+        m
     }
 }
 
@@ -233,5 +255,18 @@ impl<'de> DecodeBorrow<'de> for EpochEndOffset {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl EpochEndOffset {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 1 { m.leader_epoch = 1i32; }
+        if version >= 0 { m.end_offset = 1i64; }
+        m
     }
 }

@@ -55,3 +55,14 @@ impl<'de> Decode<'de> for AddPartitionsToTxnTopic {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl AddPartitionsToTxnTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
+    }
+}

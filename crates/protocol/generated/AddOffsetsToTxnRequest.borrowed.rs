@@ -103,3 +103,16 @@ impl<'de> DecodeBorrow<'de> for AddOffsetsToTxnRequest<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> AddOffsetsToTxnRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.transactional_id = "x"; }
+        if version >= 0 { m.producer_id = 1i64; }
+        if version >= 0 { m.producer_epoch = 1i16; }
+        if version >= 0 { m.group_id = "x"; }
+        m
+    }
+}

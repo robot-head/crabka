@@ -66,6 +66,16 @@ impl<'de> Decode<'de> for DescribeShareGroupOffsetsRequest {
     }
 }
 
+#[cfg(test)]
+impl DescribeShareGroupOffsetsRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.groups = vec![DescribeShareGroupOffsetsRequestGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeShareGroupOffsetsRequestGroup {
     pub group_id: String,
@@ -112,6 +122,17 @@ impl<'de> Decode<'de> for DescribeShareGroupOffsetsRequestGroup {
     }
 }
 
+#[cfg(test)]
+impl DescribeShareGroupOffsetsRequestGroup {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.topics = Some(vec![DescribeShareGroupOffsetsRequestTopic::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeShareGroupOffsetsRequestTopic {
     pub topic_name: String,
@@ -155,6 +176,17 @@ impl<'de> Decode<'de> for DescribeShareGroupOffsetsRequestTopic {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl DescribeShareGroupOffsetsRequestTopic {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x".to_string(); }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }
 

@@ -70,6 +70,17 @@ impl<'de> Decode<'de> for WriteShareGroupStateRequest {
     }
 }
 
+#[cfg(test)]
+impl WriteShareGroupStateRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x".to_string(); }
+        if version >= 0 { m.topics = vec![WriteStateData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WriteStateData {
     pub topic_id: crate::primitives::uuid::Uuid,
@@ -113,6 +124,17 @@ impl<'de> Decode<'de> for WriteStateData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl WriteStateData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -192,6 +214,21 @@ impl<'de> Decode<'de> for PartitionData {
     }
 }
 
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition = 1i32; }
+        if version >= 0 { m.state_epoch = 1i32; }
+        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 { m.start_offset = 1i64; }
+        if version >= 1 { m.delivery_complete_count = 1i32; }
+        if version >= 0 { m.state_batches = vec![StateBatch::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StateBatch {
     pub first_offset: i64,
@@ -243,6 +280,19 @@ impl<'de> Decode<'de> for StateBatch {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl StateBatch {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.first_offset = 1i64; }
+        if version >= 0 { m.last_offset = 1i64; }
+        if version >= 0 { m.delivery_state = 1i8; }
+        if version >= 0 { m.delivery_count = 1i16; }
+        m
     }
 }
 

@@ -74,6 +74,18 @@ impl<'de> Decode<'de> for ListConfigResourcesResponse {
     }
 }
 
+#[cfg(test)]
+impl ListConfigResourcesResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 0 { m.error_code = 1i16; }
+        if version >= 0 { m.config_resources = vec![ConfigResource::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigResource {
     pub resource_name: String,
@@ -127,6 +139,17 @@ impl<'de> Decode<'de> for ConfigResource {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl ConfigResource {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.resource_name = "x".to_string(); }
+        if version >= 1 { m.resource_type = 1i8; }
+        m
     }
 }
 

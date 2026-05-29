@@ -82,6 +82,20 @@ impl<'de> Decode<'de> for AddPartitionsToTxnRequest {
     }
 }
 
+#[cfg(test)]
+impl AddPartitionsToTxnRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 4 { m.transactions = vec![AddPartitionsToTxnTransaction::populated(version)]; }
+        if version >= 0 && version <= 3 { m.v3_and_below_transactional_id = "x".to_string(); }
+        if version >= 0 && version <= 3 { m.v3_and_below_producer_id = 1i64; }
+        if version >= 0 && version <= 3 { m.v3_and_below_producer_epoch = 1i16; }
+        if version >= 0 && version <= 3 { m.v3_and_below_topics = vec![super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnTransaction {
     pub transactional_id: String,
@@ -137,6 +151,20 @@ impl<'de> Decode<'de> for AddPartitionsToTxnTransaction {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AddPartitionsToTxnTransaction {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 4 { m.transactional_id = "x".to_string(); }
+        if version >= 4 { m.producer_id = 1i64; }
+        if version >= 4 { m.producer_epoch = 1i16; }
+        if version >= 4 { m.verify_only = true; }
+        if version >= 4 { m.topics = vec![super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(version)]; }
+        m
     }
 }
 

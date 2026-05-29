@@ -86,6 +86,16 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeShareGroupOffsetsRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.groups = vec![DescribeShareGroupOffsetsRequestGroup::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeShareGroupOffsetsRequestGroup<'a> {
     pub group_id: &'a str,
@@ -152,6 +162,17 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsRequestGroup<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> DescribeShareGroupOffsetsRequestGroup<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.topics = Some(vec![DescribeShareGroupOffsetsRequestTopic::populated(version)]); }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeShareGroupOffsetsRequestTopic<'a> {
     pub topic_name: &'a str,
@@ -215,5 +236,16 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsRequestTopic<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> DescribeShareGroupOffsetsRequestTopic<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.partitions = vec![1i32]; }
+        m
     }
 }

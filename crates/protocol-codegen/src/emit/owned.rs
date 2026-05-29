@@ -38,6 +38,12 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
     emit_struct(&mut primary, spec, &res_map);
     emit_encode_impl(&mut primary, spec, &res_map);
     emit_decode_impl(&mut primary, spec, &res_map, lenient_records);
+    emit_populated_impl(
+        &mut primary,
+        &name_conv::type_name(&spec.name),
+        &spec.fields,
+        &res_map,
+    );
 
     // Emit sibling types for nested structs (depth-first, post-order so parent
     // types appear before their children's children — order doesn't matter for
@@ -1072,8 +1078,119 @@ impl<'de> Decode<'de> for {struct_name} {{
 
     writeln!(out, "        Ok(out)\n    }}\n}}").unwrap();
 
+    emit_populated_impl(out, struct_name, fields, res_map);
+
     // Recurse into deeper nesting
     emit_nested_structs_for_fields(out, fields, flex_min_val, res_map, lenient_records);
+}
+
+/// Emit a test-only `populated(version)` constructor for an owned struct.
+///
+/// `default()` leaves every collection empty and every scalar zero, so the
+/// derived round-trip tests never reach array-element, nested-struct, or
+/// tagged-field encode/decode paths. `populated(version)` starts from
+/// `Self::default()` and overwrites each field that is valid at `version` with a
+/// non-default value (single-element arrays, recursively populated nested
+/// structs). Building on top of `default()` guarantees that fields outside their
+/// version range keep their exact default value — important for tagged fields,
+/// which the encoder emits whenever the message is flexible (independent of the
+/// field's own version range): leaving them at default makes the encoder skip
+/// them, so the round-trip stays byte-exact. `records` fields are left at default
+/// to avoid constructing invalid record batches.
+fn emit_populated_impl(
+    out: &mut String,
+    type_name: &str,
+    fields: &[FieldSpec],
+    res_map: &HashMap<String, Resolution>,
+) {
+    writeln!(
+        out,
+        "
+#[cfg(test)]
+impl {type_name} {{
+    #[must_use]
+    pub fn populated(version: i16) -> Self {{
+        let mut m = Self::default();"
+    )
+    .unwrap();
+    for f in fields.iter().filter(|f| !is_tagged(f)) {
+        emit_owned_populated_field(out, f, res_map, is_nullable(f));
+    }
+    for f in fields.iter().filter(|f| is_tagged(f)) {
+        let option = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
+        emit_owned_populated_field(out, f, res_map, option);
+    }
+    writeln!(out, "        m\n    }}\n}}").unwrap();
+}
+
+/// Emit one conditional assignment for the populated constructor, guarding the
+/// non-default value behind the field's version range so it matches the bytes
+/// the encoder produces at that version. `records` fields are skipped (left at
+/// default).
+fn emit_owned_populated_field(
+    out: &mut String,
+    f: &FieldSpec,
+    res_map: &HashMap<String, Resolution>,
+    option: bool,
+) {
+    if base_type(&f.field_type) == "records" {
+        return;
+    }
+    let field = name_conv::field_name(&f.name);
+    let value = owned_populated_value(f, res_map, option);
+    let cond = version_cond(f.versions, "version");
+    writeln!(out, "        if {cond} {{ m.{field} = {value}; }}").unwrap();
+}
+
+/// Build the populated-value expression for one owned field. `option` mirrors
+/// the field's Rust-type `Option<...>` wrapping as computed by `emit_struct`.
+fn owned_populated_value(
+    f: &FieldSpec,
+    res_map: &HashMap<String, Resolution>,
+    option: bool,
+) -> String {
+    let base = base_type(&f.field_type);
+    let is_array = f.field_type.starts_with("[]");
+    // Records are left at default — building a valid batch here is unnecessary
+    // and the dedicated records tests cover that codec.
+    if base == "records" {
+        return owned_default_expr(f);
+    }
+    let elem = owned_populated_scalar(base, f, res_map);
+    let inner = if is_array {
+        format!("vec![{elem}]")
+    } else {
+        elem
+    };
+    if option {
+        format!("Some({inner})")
+    } else {
+        inner
+    }
+}
+
+fn owned_populated_scalar(
+    base: &str,
+    f: &FieldSpec,
+    res_map: &HashMap<String, Resolution>,
+) -> String {
+    match base {
+        "bool" => "true".to_string(),
+        "int8" => "1i8".to_string(),
+        "int16" => "1i16".to_string(),
+        "int32" => "1i32".to_string(),
+        "int64" => "1i64".to_string(),
+        "uint16" => "1u16".to_string(),
+        "uint32" => "1u32".to_string(),
+        "float64" => "1.0f64".to_string(),
+        "string" => "\"x\".to_string()".to_string(),
+        "bytes" => "::bytes::Bytes::from_static(b\"x\")".to_string(),
+        "uuid" => "crate::primitives::uuid::Uuid([1u8; 16])".to_string(),
+        _ => {
+            let path = struct_path_for(f, res_map).expect("struct field must resolve");
+            format!("{path}::populated(version)")
+        }
+    }
 }
 
 // --- single-field encode/decode helpers -----------------------------------

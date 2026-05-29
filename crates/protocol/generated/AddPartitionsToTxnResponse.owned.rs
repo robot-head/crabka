@@ -78,6 +78,19 @@ impl<'de> Decode<'de> for AddPartitionsToTxnResponse {
     }
 }
 
+#[cfg(test)]
+impl AddPartitionsToTxnResponse {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.throttle_time_ms = 1i32; }
+        if version >= 4 { m.error_code = 1i16; }
+        if version >= 4 { m.results_by_transaction = vec![AddPartitionsToTxnResult::populated(version)]; }
+        if version >= 0 && version <= 3 { m.results_by_topic_v3_and_below = vec![super::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnResult {
     pub transactional_id: String,
@@ -121,6 +134,17 @@ impl<'de> Decode<'de> for AddPartitionsToTxnResult {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl AddPartitionsToTxnResult {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 4 { m.transactional_id = "x".to_string(); }
+        if version >= 4 { m.topic_results = vec![super::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::populated(version)]; }
+        m
     }
 }
 

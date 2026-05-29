@@ -101,6 +101,18 @@ impl<'de> DecodeBorrow<'de> for VoteRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> VoteRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.cluster_id = Some("x"); }
+        if version >= 1 { m.voter_id = 1i32; }
+        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
@@ -164,6 +176,17 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> TopicData<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.topic_name = "x"; }
+        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        m
     }
 }
 
@@ -266,5 +289,22 @@ impl<'de> DecodeBorrow<'de> for PartitionData {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl PartitionData {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.partition_index = 1i32; }
+        if version >= 0 { m.replica_epoch = 1i32; }
+        if version >= 0 { m.replica_id = 1i32; }
+        if version >= 1 { m.replica_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 1 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.last_offset_epoch = 1i32; }
+        if version >= 0 { m.last_offset = 1i64; }
+        if version >= 2 { m.pre_vote = true; }
+        m
     }
 }

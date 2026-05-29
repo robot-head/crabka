@@ -127,6 +127,22 @@ impl<'de> DecodeBorrow<'de> for SyncGroupRequest<'de> {
     }
 }
 
+#[cfg(test)]
+impl<'a> SyncGroupRequest<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 { m.generation_id = 1i32; }
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 3 { m.group_instance_id = Some("x"); }
+        if version >= 5 { m.protocol_type = Some("x"); }
+        if version >= 5 { m.protocol_name = Some("x"); }
+        if version >= 0 { m.assignments = vec![SyncGroupRequestAssignment::populated(version)]; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncGroupRequestAssignment<'a> {
     pub member_id: &'a str,
@@ -190,5 +206,16 @@ impl<'de> DecodeBorrow<'de> for SyncGroupRequestAssignment<'de> {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl<'a> SyncGroupRequestAssignment<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.member_id = "x"; }
+        if version >= 0 { m.assignment = &b"x"[..]; }
+        m
     }
 }

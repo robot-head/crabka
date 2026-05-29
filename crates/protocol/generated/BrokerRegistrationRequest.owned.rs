@@ -117,6 +117,24 @@ impl<'de> Decode<'de> for BrokerRegistrationRequest {
     }
 }
 
+#[cfg(test)]
+impl BrokerRegistrationRequest {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.broker_id = 1i32; }
+        if version >= 0 { m.cluster_id = "x".to_string(); }
+        if version >= 0 { m.incarnation_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 { m.listeners = vec![Listener::populated(version)]; }
+        if version >= 0 { m.features = vec![Feature::populated(version)]; }
+        if version >= 0 { m.rack = Some("x".to_string()); }
+        if version >= 1 { m.is_migrating_zk_broker = true; }
+        if version >= 2 { m.log_dirs = vec![crate::primitives::uuid::Uuid([1u8; 16])]; }
+        if version >= 3 { m.previous_broker_epoch = 1i64; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listener {
     pub name: String,
@@ -171,6 +189,19 @@ impl<'de> Decode<'de> for Listener {
     }
 }
 
+#[cfg(test)]
+impl Listener {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.host = "x".to_string(); }
+        if version >= 0 { m.port = 1u16; }
+        if version >= 0 { m.security_protocol = 1i16; }
+        m
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Feature {
     pub name: String,
@@ -218,6 +249,18 @@ impl<'de> Decode<'de> for Feature {
             })?;
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+impl Feature {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.name = "x".to_string(); }
+        if version >= 0 { m.min_supported_version = 1i16; }
+        if version >= 0 { m.max_supported_version = 1i16; }
+        m
     }
 }
 

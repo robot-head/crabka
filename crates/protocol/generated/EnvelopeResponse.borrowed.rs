@@ -87,3 +87,14 @@ impl<'de> DecodeBorrow<'de> for EnvelopeResponse<'de> {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+impl<'a> EnvelopeResponse<'a> {
+    #[must_use]
+    pub fn populated(version: i16) -> Self {
+        let mut m = Self::default();
+        if version >= 0 { m.response_data = Some(&b"x"[..]); }
+        if version >= 0 { m.error_code = 1i16; }
+        m
+    }
+}
