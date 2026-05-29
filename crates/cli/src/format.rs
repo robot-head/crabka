@@ -540,8 +540,11 @@ mod tests {
         assert!(resolve_release_level("9.9-IV0").is_err()); // unknown
     }
 
+    // The no-flag default path (`Ok(None) => METADATA_VERSION_MAX` in `run()`)
+    // is covered end-to-end by `format_smoke.rs`, which formats without
+    // `--release-version` and asserts the FeatureLevel record is present.
     #[test]
-    fn default_release_level_is_max() {
+    fn max_version_string_resolves_to_max() {
         assert_eq!(
             resolve_release_level("4.0").unwrap(),
             crabka_metadata::metadata_version::METADATA_VERSION_MAX
