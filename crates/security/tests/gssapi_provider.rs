@@ -35,8 +35,17 @@ const CLIENT_KEYTAB_PATH: &str = "tests/fixtures/kdc/alice.keytab";
 #[test]
 #[ignore = "requires the MIT KDC fixture (docker compose up) + exported KRB5_CONFIG/SSPI_KDC_URL"]
 fn full_gssapi_handshake_and_wrap_roundtrip() {
-    let kdc_url =
-        std::env::var("SSPI_KDC_URL").unwrap_or_else(|_| "tcp://localhost:88".to_string());
+    // Skip even under `--include-ignored` (the jvm-differential coverage job
+    // runs ignored tests) unless a KDC is actually reachable. `SSPI_KDC_URL`
+    // being exported is the signal that the docker compose fixture is up.
+    let Ok(kdc_url) = std::env::var("SSPI_KDC_URL") else {
+        eprintln!(
+            "Skipping full_gssapi_handshake_and_wrap_roundtrip: set SSPI_KDC_URL \
+             (and KRB5_CONFIG) and bring up the MIT KDC fixture under \
+             crates/security/tests/fixtures/kdc to run."
+        );
+        return;
+    };
 
     let mut acceptor = SspiAcceptor::new(KEYTAB_PATH, SERVICE_NAME).expect("build acceptor");
     let mut initiator =
