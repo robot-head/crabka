@@ -138,6 +138,7 @@ async fn produce_v1_message_set_is_upconverted_and_round_trips() {
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
+        .and_then(<[_]>::first)
         .expect("Fetch returned a v2 batch");
     assert_eq!(batch.records.len(), 3);
     let values: Vec<&[u8]> = batch

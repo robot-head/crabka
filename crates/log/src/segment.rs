@@ -5,7 +5,9 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use crabka_protocol::records::RecordBatch;
+use bytes::Bytes;
+use crabka_protocol::records::{HEADER_LEN, RecordBatch, RecordBatchHeader};
+use zerocopy::FromBytes;
 
 use crate::error::LogError;
 use crate::index::{OffsetIndex, TimeIndex};
@@ -36,6 +38,33 @@ pub struct Segment {
     max_timestamp: i64,
     /// Last absolute offset (inclusive) of any batch in this segment.
     last_offset: i64,
+}
+
+/// Verbatim, decode-free output of [`Segment::read_raw`].
+#[derive(Debug, Clone)]
+pub struct RawSegmentRead {
+    /// `base_offset` of the first included batch (≤ requested offset).
+    pub start_offset: i64,
+    /// Last absolute offset covered by `bytes` (`start_offset - 1` if empty).
+    pub last_offset: i64,
+    /// Verbatim `.log` bytes — one or more complete v2 batches.
+    pub bytes: Bytes,
+}
+
+impl RawSegmentRead {
+    fn empty() -> Self {
+        Self {
+            start_offset: 0,
+            last_offset: -1,
+            bytes: Bytes::new(),
+        }
+    }
+
+    /// `true` when no batch bytes were returned.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
 }
 
 impl Segment {
@@ -220,6 +249,91 @@ impl Segment {
             }
         }
         Ok(out)
+    }
+
+    /// Read a contiguous run of **complete, verbatim** record-batch bytes
+    /// beginning at the batch containing `fetch_offset`, including only
+    /// batches whose `base_offset < limit_offset`, up to roughly `max_bytes`
+    /// (always at least one batch — Kafka's anti-stall rule). No record
+    /// decoding: only fixed batch headers are read to find boundaries.
+    pub fn read_raw(
+        &self,
+        fetch_offset: i64,
+        limit_offset: i64,
+        max_bytes: usize,
+    ) -> Result<RawSegmentRead, LogError> {
+        if fetch_offset > self.last_offset || fetch_offset >= limit_offset {
+            return Ok(RawSegmentRead::empty());
+        }
+        let target_rel = u32::try_from((fetch_offset - self.base_offset).max(0))
+            .map_err(|_| LogError::Corrupt("read_raw target offset out of range".into()))?;
+        let start_pos = u64::from(self.offset_index.lookup(target_rel));
+
+        let first_read = max_bytes.max(HEADER_LEN);
+        let mut buf: Vec<u8> = Vec::with_capacity(first_read.min(4 * 1024 * 1024));
+        self.read_log_range(start_pos, &mut buf, first_read)?;
+
+        let mut pos = 0usize;
+        let mut range_start: Option<usize> = None;
+        let mut range_end = 0usize;
+        let mut start_offset = fetch_offset;
+        let mut last_offset = fetch_offset - 1;
+
+        loop {
+            if pos + HEADER_LEN > buf.len() {
+                break;
+            }
+            let hdr = RecordBatchHeader::ref_from_bytes(&buf[pos..pos + HEADER_LEN])
+                .map_err(|_| LogError::Corrupt("record batch header".into()))?;
+            let base = hdr.base_offset.get();
+            let batch_len = usize::try_from(hdr.batch_length.get().max(0)).unwrap_or(0);
+            let total = 12 + batch_len;
+            let batch_last = base + i64::from(hdr.last_offset_delta.get());
+
+            if batch_last < fetch_offset {
+                pos += total;
+                continue;
+            }
+            if base >= limit_offset {
+                break;
+            }
+            if pos + total > buf.len() {
+                if range_start.is_none() {
+                    let mut one: Vec<u8> = Vec::with_capacity(total);
+                    self.read_log_range(start_pos + pos as u64, &mut one, total)?;
+                    if one.len() < total {
+                        break;
+                    }
+                    return Ok(RawSegmentRead {
+                        start_offset: base,
+                        last_offset: batch_last,
+                        bytes: Bytes::from(one),
+                    });
+                }
+                break;
+            }
+
+            if range_start.is_none() {
+                range_start = Some(pos);
+                start_offset = base;
+            }
+            range_end = pos + total;
+            last_offset = batch_last;
+            pos += total;
+
+            if range_end - range_start.expect("set above") >= max_bytes {
+                break;
+            }
+        }
+
+        match range_start {
+            Some(s) => Ok(RawSegmentRead {
+                start_offset,
+                last_offset,
+                bytes: Bytes::from(buf).slice(s..range_end),
+            }),
+            None => Ok(RawSegmentRead::empty()),
+        }
     }
 
     fn read_log_range(
@@ -433,5 +547,80 @@ mod tests {
         let mut seg = Segment::create(dir.path(), 0).unwrap();
         seg.append(&sample_batch(0, 1, 42), 4096).unwrap();
         seg.flush().unwrap();
+    }
+
+    // ---- read_raw (decode-free) tests ----
+
+    fn test_segment() -> (tempfile::TempDir, Segment) {
+        let dir = tempdir().unwrap();
+        let seg = Segment::create(dir.path(), 0).unwrap();
+        (dir, seg)
+    }
+
+    fn test_batch_at(off: i64) -> RecordBatch {
+        let mut b = RecordBatch {
+            base_offset: off,
+            base_timestamp: 1_000,
+            max_timestamp: 1_000,
+            last_offset_delta: 0,
+            ..RecordBatch::default()
+        };
+        b.records.push(Record {
+            offset_delta: 0,
+            timestamp_delta: 0,
+            value: Some(Bytes::from(format!("v{off}"))),
+            ..Default::default()
+        });
+        b
+    }
+
+    #[test]
+    fn read_raw_is_byte_exact_and_multi_batch() {
+        let (dir, mut seg) = test_segment();
+        let mut wire = bytes::BytesMut::new();
+        for off in 0..3i64 {
+            let b = test_batch_at(off);
+            seg.append(&b, 0).unwrap();
+            b.encode(&mut wire).unwrap();
+        }
+        let wire = wire.freeze();
+        let r = seg.read_raw(0, 3, 10 * 1024 * 1024).unwrap();
+        assert_eq!(r.start_offset, 0);
+        assert_eq!(r.last_offset, 2);
+        assert_eq!(
+            &r.bytes[..],
+            &wire[..],
+            "raw bytes must equal the on-disk concatenation"
+        );
+        let mut cur: &[u8] = &r.bytes;
+        let mut n = 0;
+        while !cur.is_empty() {
+            crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
+            n += 1;
+        }
+        assert_eq!(n, 3);
+        drop(dir);
+    }
+
+    #[test]
+    fn read_raw_clamps_at_limit_offset() {
+        let (dir, mut seg) = test_segment();
+        for off in 0..3i64 {
+            seg.append(&test_batch_at(off), 0).unwrap();
+        }
+        let r = seg.read_raw(0, 2, 10 * 1024 * 1024).unwrap();
+        assert_eq!(r.last_offset, 1);
+        drop(dir);
+    }
+
+    #[test]
+    fn read_raw_returns_at_least_one_batch_over_budget() {
+        let (dir, mut seg) = test_segment();
+        seg.append(&test_batch_at(0), 0).unwrap();
+        let r = seg.read_raw(0, 1, 1).unwrap();
+        assert_eq!(r.start_offset, 0);
+        assert_eq!(r.last_offset, 0);
+        assert!(!r.bytes.is_empty());
+        drop(dir);
     }
 }

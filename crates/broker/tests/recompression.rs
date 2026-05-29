@@ -215,7 +215,8 @@ async fn fetch_first_batch(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Rec
     assert_eq!(part.error_code, 0, "Fetch error: {}", part.error_code);
     part.records
         .as_ref()
-        .and_then(|p| p.as_v2().cloned())
+        .and_then(|p| p.as_v2())
+        .and_then(|batches| batches.first().cloned())
         .expect("Fetch returned at least one v2 batch")
 }
 

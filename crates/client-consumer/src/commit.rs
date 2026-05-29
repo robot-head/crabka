@@ -72,7 +72,9 @@ impl Consumer {
     }
 }
 
-fn build_commit_topics(offsets: HashMap<(String, i32), i64>) -> Vec<OffsetCommitRequestTopic> {
+pub(crate) fn build_commit_topics(
+    offsets: HashMap<(String, i32), i64>,
+) -> Vec<OffsetCommitRequestTopic> {
     let mut by_topic: HashMap<String, Vec<(i32, i64)>> = HashMap::new();
     for ((t, p), off) in offsets {
         by_topic.entry(t).or_default().push((p, off));

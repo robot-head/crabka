@@ -253,13 +253,13 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
             })
             .await
             .expect("Fetch");
-        if let Some(batch) = r
+        if let Some(batches) = r
             .responses
             .first()
             .and_then(|t| t.partitions.first())
             .and_then(|p| p.records.as_ref())
             .and_then(|recs| recs.as_v2())
-            && let Some(first) = batch.records.first()
+            && let Some(first) = batches.first().and_then(|b| b.records.first())
         {
             break first.value.clone();
         }

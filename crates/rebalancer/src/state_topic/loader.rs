@@ -129,16 +129,18 @@ impl StateTopicLoader {
                     return Err(StateTopicError::FetchErrorCode { code: p.error_code });
                 }
                 let Some(payload) = &p.records else { continue };
-                let RecordsPayload::V2(batch) = payload else {
+                let RecordsPayload::V2(batches) = payload else {
                     continue;
                 };
-                for r in &batch.records {
-                    let off = batch.base_offset + i64::from(r.offset_delta);
-                    out.push((
-                        off,
-                        r.key.as_ref().map(|b| b.to_vec()),
-                        r.value.as_ref().map(|b| b.to_vec()),
-                    ));
+                for batch in batches {
+                    for r in &batch.records {
+                        let off = batch.base_offset + i64::from(r.offset_delta);
+                        out.push((
+                            off,
+                            r.key.as_ref().map(|b| b.to_vec()),
+                            r.value.as_ref().map(|b| b.to_vec()),
+                        ));
+                    }
                 }
             }
         }

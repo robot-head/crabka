@@ -358,7 +358,7 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
             .records
             .as_ref()
             .and_then(|rp| rp.as_v2())
-            .map_or(0, |b| b.records.len());
+            .map_or(0, |b| b.iter().map(|batch| batch.records.len()).sum());
         if count >= N_RECORDS as usize {
             break count;
         }
