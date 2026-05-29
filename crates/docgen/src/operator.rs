@@ -81,6 +81,13 @@ mod tests {
                 .body
                 .contains("| Field | Type | Required | Default | Description |")
         );
+        // Guard against render_field_table silently producing an empty table:
+        // a concrete, stable field from the Kafka CRD spec must be present.
+        assert!(
+            kafka.body.contains("| `kafkaVersion` |"),
+            "expected kafkaVersion field in kafka spec table:\n{}",
+            kafka.body
+        );
         assert_eq!(pages.len(), 5);
         let slugs: Vec<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
         for e in [

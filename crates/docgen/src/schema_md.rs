@@ -15,7 +15,7 @@ use std::fmt::Write;
 #[must_use]
 pub fn render_field_table(schema: &Value) -> String {
     let mut rows = String::new();
-    collect_rows(schema, schema, "", &mut rows);
+    collect_rows(schema, schema, "", 0, &mut rows);
     let mut out = String::from(
         "| Field | Type | Required | Default | Description |\n\
          |-------|------|----------|---------|-------------|\n",
@@ -31,10 +31,11 @@ fn resolve_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
     root.pointer(pointer)
 }
 
-/// Strip schemars' `Option<T>` wrappers, returning the underlying schema for a
-/// field: an `anyOf`/`allOf`/`oneOf` of `[T, null]` collapses to `T`, and a
-/// bare `$ref` is followed into `$defs`. Returns the resolved schema and
-/// whether a `$ref` was followed (the field is then an object).
+/// Resolve a field schema to its effective underlying schema. Follows a bare
+/// `$ref` into `$defs`/`definitions` and unwraps schemars' `Option<T>`-style
+/// wrappers — an `anyOf`/`allOf`/`oneOf` whose branches are `[T, null]`
+/// collapses to `T` (recursively). Returns a borrow of the effective schema
+/// `Value` (the field itself when no `$ref`/wrapper applies).
 fn effective_schema<'a>(root: &'a Value, field: &'a Value) -> &'a Value {
     if let Some(reference) = field.get("$ref").and_then(Value::as_str)
         && let Some(target) = resolve_ref(root, reference)
@@ -55,7 +56,12 @@ fn effective_schema<'a>(root: &'a Value, field: &'a Value) -> &'a Value {
     field
 }
 
-fn collect_rows(root: &Value, schema: &Value, prefix: &str, out: &mut String) {
+/// Maximum nesting depth for `$ref`/object recursion. Bounds work on
+/// self-referential or mutually-recursive schemas so rendering can't overflow
+/// the stack; deeper fields still emit their own row but aren't expanded.
+const MAX_DEPTH: usize = 12;
+
+fn collect_rows(root: &Value, schema: &Value, prefix: &str, depth: usize, out: &mut String) {
     let required: Vec<&str> = schema
         .get("required")
         .and_then(Value::as_array)
@@ -88,11 +94,14 @@ fn collect_rows(root: &Value, schema: &Value, prefix: &str, out: &mut String) {
             .or_else(|| resolved.get("description"))
             .and_then(Value::as_str)
             .unwrap_or("")
-            .replace('\n', " ");
+            .replace('\n', " ")
+            // Escape pipes so a description can't break the table's columns.
+            .replace('|', "\\|");
         let _ = writeln!(out, "| `{path}` | {ty} | {req} | {default} | {desc} |");
-        // Recurse into nested objects (inlined or resolved via $ref).
-        if resolved.get("properties").is_some() {
-            collect_rows(root, resolved, &path, out);
+        // Recurse into nested objects (inlined or resolved via $ref), but stop
+        // at MAX_DEPTH so cyclic/self-referential schemas can't overflow.
+        if resolved.get("properties").is_some() && depth < MAX_DEPTH {
+            collect_rows(root, resolved, &path, depth + 1, out);
         }
     }
 }
@@ -127,9 +136,11 @@ fn type_label(root: &Value, field: &Value) -> String {
 }
 
 fn render_default(v: &Value) -> String {
+    // Escape pipes so a default containing `|` can't break the table columns,
+    // even though the value is wrapped in a code span.
     match v {
-        Value::String(s) => format!("`{s}`"),
-        other => format!("`{other}`"),
+        Value::String(s) => format!("`{}`", s.replace('|', "\\|")),
+        other => format!("`{}`", other.to_string().replace('|', "\\|")),
     }
 }
 
@@ -201,5 +212,62 @@ mod tests {
         assert!(md.contains("| `tls.cert` | string | yes |"), "{md}");
         // array of $ref renders as an object-element array
         assert!(md.contains("| `listeners` | array<object> | no |"), "{md}");
+    }
+
+    /// A self-referential `$def` (a property that `$ref`s back to its own def)
+    /// must not recurse forever / overflow the stack. The cap bounds the work;
+    /// the top-level field row is still emitted.
+    #[test]
+    fn caps_recursion_on_cyclic_ref() {
+        let schema = json!({
+            "type": "object",
+            "$defs": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        // self-reference back into its own def
+                        "child": { "$ref": "#/$defs/Node" },
+                        "label": { "type": "string", "description": "Node label." }
+                    }
+                }
+            },
+            "properties": {
+                "root": { "$ref": "#/$defs/Node" }
+            }
+        });
+        // Returns (doesn't hang/overflow) and emits the top-level field row.
+        let md = render_field_table(&schema);
+        assert!(md.contains("| `root` | object | no |"), "{md}");
+        // It recurses some, but the cap keeps the path length bounded.
+        let deepest = md
+            .lines()
+            .filter_map(|l| l.split('`').nth(1))
+            .map(|path| path.matches('.').count())
+            .max()
+            .unwrap_or(0);
+        assert!(deepest <= MAX_DEPTH, "path nesting {deepest} exceeded cap");
+    }
+
+    #[test]
+    fn escapes_pipe_in_description() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "description": "one of: a | b | c"
+                }
+            }
+        });
+        let md = render_field_table(&schema);
+        let row = md.lines().find(|l| l.contains("`mode`")).expect("mode row");
+        // Pipes in the description are escaped...
+        assert!(row.contains("a \\| b \\| c"), "{row}");
+        // ...so the row keeps exactly the 5 columns (6 unescaped delimiters).
+        let unescaped_bars = row
+            .match_indices('|')
+            .filter(|(i, _)| *i == 0 || row.as_bytes()[i - 1] != b'\\')
+            .count();
+        assert_eq!(unescaped_bars, 6, "{row}");
     }
 }
