@@ -19,9 +19,18 @@ use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord};
 use crabka_raft::NodeId;
 use tracing::warn;
 
-use crate::config_keys::UNCLEAN_LEADER_ELECTION_ENABLE;
+use crate::config_keys::{
+    RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, resolve_recovery_strategy,
+};
 use crate::error::BrokerError;
 use crate::heartbeat::controller_state::ControllerLivenessState;
+
+/// Output of a failover scan: immediate metadata changes plus partitions
+/// that need asynchronous offset-aware recovery via the URM.
+pub(crate) struct FailoverPlan {
+    pub changes: Vec<MetadataRecord>,
+    pub recoveries: Vec<(String, i32, RecoveryStrategy)>,
+}
 
 /// Read `unclean.leader.election.enable` for a topic, defaulting to
 /// `false` when the key is unset or unparseable. Centralized so the
@@ -42,8 +51,9 @@ pub(crate) async fn compute_failover_changes(
     dead: NodeId,
     liveness: &ControllerLivenessState,
     metrics: &crate::metrics::BrokerMetrics,
-) -> Vec<MetadataRecord> {
+) -> FailoverPlan {
     let mut changes: Vec<MetadataRecord> = Vec::new();
+    let mut recoveries: Vec<(String, i32, RecoveryStrategy)> = Vec::new();
     for topic in image.topics() {
         for pr in image.partitions_of(&topic.name) {
             if !pr.replicas.contains(&dead) && !pr.isr.contains(&dead) {
@@ -70,47 +80,66 @@ pub(crate) async fn compute_failover_changes(
                         adding_replicas: pr.adding_replicas.clone(),
                         removing_replicas: pr.removing_replicas.clone(),
                     }));
-                } else if unclean_election_enabled(image, &pr.topic) {
-                    // KIP-841: ISR is dead but operator has opted into
-                    // possible data loss. Pick the first alive replica
-                    // (in or out of ISR) and elect with singleton-ISR.
-                    let mut elected: Option<NodeId> = None;
-                    for &n in &pr.replicas {
-                        if n != dead && liveness.is_alive(n).await {
-                            elected = Some(n);
-                            break;
+                } else {
+                    // ISR is empty after dropping the dead broker. How we
+                    // proceed depends on the topic's recovery strategy.
+                    match resolve_recovery_strategy(image, &pr.topic) {
+                        RecoveryStrategy::Balanced | RecoveryStrategy::Aggressive => {
+                            // KIP-966: defer to the offset-aware Unclean
+                            // Recovery Manager — it polls surviving replicas
+                            // for log state and elects the most complete log.
+                            // Don't make an immediate (blind) change here.
+                            recoveries.push((
+                                pr.topic.clone(),
+                                pr.partition,
+                                resolve_recovery_strategy(image, &pr.topic),
+                            ));
+                        }
+                        RecoveryStrategy::None if unclean_election_enabled(image, &pr.topic) => {
+                            // KIP-841 legacy path: ISR is dead but operator
+                            // has opted into possible data loss. Pick the
+                            // first alive replica (in or out of ISR) and
+                            // elect with singleton-ISR.
+                            let mut elected: Option<NodeId> = None;
+                            for &n in &pr.replicas {
+                                if n != dead && liveness.is_alive(n).await {
+                                    elected = Some(n);
+                                    break;
+                                }
+                            }
+                            if let Some(new_leader) = elected {
+                                warn!(
+                                    topic = %pr.topic, partition = pr.partition, leader = new_leader,
+                                    "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
+                                );
+                                // Slice 10c (KIP-841): account this election so
+                                // operators can alert on a non-zero rate of unclean
+                                // failovers in their cluster.
+                                metrics.record_unclean_leader_election();
+                                changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                                    topic: pr.topic.clone(),
+                                    partition: pr.partition,
+                                    leader: new_leader,
+                                    replicas: pr.replicas.clone(),
+                                    isr: vec![new_leader],
+                                    leader_epoch: pr.leader_epoch + 1,
+                                    adding_replicas: pr.adding_replicas.clone(),
+                                    removing_replicas: pr.removing_replicas.clone(),
+                                }));
+                            } else {
+                                warn!(
+                                    topic = %pr.topic, partition = pr.partition,
+                                    "unclean leader election enabled but no alive replica; partition unavailable"
+                                );
+                            }
+                        }
+                        RecoveryStrategy::None => {
+                            warn!(
+                                topic = %pr.topic, partition = pr.partition,
+                                "no live ISR replica; partition unavailable (strategy None, unclean.leader.election.enable=false)"
+                            );
                         }
                     }
-                    if let Some(new_leader) = elected {
-                        warn!(
-                            topic = %pr.topic, partition = pr.partition, leader = new_leader,
-                            "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
-                        );
-                        // KIP-841: account this election so
-                        // operators can alert on a non-zero rate of unclean
-                        // failovers in their cluster.
-                        metrics.record_unclean_leader_election();
-                        changes.push(MetadataRecord::V1Partition(PartitionRecord {
-                            topic: pr.topic.clone(),
-                            partition: pr.partition,
-                            leader: new_leader,
-                            replicas: pr.replicas.clone(),
-                            isr: vec![new_leader],
-                            leader_epoch: pr.leader_epoch + 1,
-                            adding_replicas: pr.adding_replicas.clone(),
-                            removing_replicas: pr.removing_replicas.clone(),
-                        }));
-                    } else {
-                        warn!(
-                            topic = %pr.topic, partition = pr.partition,
-                            "unclean leader election enabled but no alive replica; partition unavailable"
-                        );
-                    }
-                } else {
-                    warn!(
-                        topic = %pr.topic, partition = pr.partition,
-                        "no live ISR replica; partition unavailable (unclean.leader.election.enable=false)"
-                    );
                 }
             } else if alive_isr.len() < pr.isr.len() {
                 changes.push(MetadataRecord::V1Partition(PartitionRecord {
@@ -126,7 +155,10 @@ pub(crate) async fn compute_failover_changes(
             }
         }
     }
-    changes
+    FailoverPlan {
+        changes,
+        recoveries,
+    }
 }
 
 /// Called when the liveness ticker observes `AliveToDead(dead)`. Scans
@@ -141,6 +173,7 @@ pub(crate) async fn on_broker_dead(
     dead: NodeId,
     liveness: &Arc<ControllerLivenessState>,
     metrics: &crate::metrics::BrokerMetrics,
+    recovery: &crate::unclean_recovery::UncleanRecoveryHandle,
 ) -> Result<(), BrokerError> {
     let is_controller_leader = controller
         .watch_leader()
@@ -151,12 +184,26 @@ pub(crate) async fn on_broker_dead(
     }
 
     let image = controller.current_image();
-    let changes = compute_failover_changes(&image, dead, liveness, metrics).await;
-    if !changes.is_empty() {
+    let plan = compute_failover_changes(&image, dead, liveness, metrics).await;
+    if !plan.changes.is_empty() {
         controller
-            .submit_change(changes)
+            .submit_change(plan.changes)
             .await
             .map_err(|e| BrokerError::Replication(format!("submit_change: {e}")))?;
+    }
+    // KIP-966: partitions whose topic opted into an offset-aware recovery
+    // strategy are handed to the Unclean Recovery Manager, which polls
+    // surviving replicas for their log state before electing. Fire and
+    // forget — the failover path does not await the outcome.
+    for (topic, partition, strategy) in plan.recoveries {
+        recovery
+            .enqueue(crate::unclean_recovery::RecoveryJob {
+                topic,
+                partition,
+                strategy,
+                reply: None,
+            })
+            .await;
     }
     Ok(())
 }
@@ -526,7 +573,9 @@ mod tests {
     // ── KIP-841: automatic-failover + unclean.leader.election.enable ────────
 
     use super::compute_failover_changes;
-    use crate::config_keys::UNCLEAN_LEADER_ELECTION_ENABLE;
+    use crate::config_keys::{
+        RecoveryStrategy, UNCLEAN_LEADER_ELECTION_ENABLE, UNCLEAN_RECOVERY_STRATEGY,
+    };
     use crabka_metadata::TopicConfigRecord;
     use std::collections::BTreeMap;
 
@@ -563,14 +612,15 @@ mod tests {
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(
+        let plan = compute_failover_changes(
             &img,
             /*dead=*/ 1,
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        let pr = one_partition_change(&changes);
+        assert!(plan.recoveries.is_empty());
+        let pr = one_partition_change(&plan.changes);
         assert_eq!(pr.leader, 2);
         assert_eq!(pr.isr, vec![2, 3]);
         assert_eq!(pr.leader_epoch, 6, "leader_epoch must bump on election");
@@ -586,7 +636,7 @@ mod tests {
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(
+        let plan = compute_failover_changes(
             &img,
             /*dead=*/ 1,
             &l,
@@ -594,9 +644,11 @@ mod tests {
         )
         .await;
         assert!(
-            changes.is_empty(),
-            "default-off must not emit any change, got {changes:?}",
+            plan.changes.is_empty(),
+            "default-off must not emit any change, got {:?}",
+            plan.changes,
         );
+        assert!(plan.recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -611,8 +663,9 @@ mod tests {
             l.record_heartbeat(n).await;
         }
         let metrics = crate::metrics::BrokerMetrics::new();
-        let changes = compute_failover_changes(&img, /*dead=*/ 1, &l, &metrics).await;
-        let pr = one_partition_change(&changes);
+        let plan = compute_failover_changes(&img, /*dead=*/ 1, &l, &metrics).await;
+        assert!(plan.recoveries.is_empty());
+        let pr = one_partition_change(&plan.changes);
         assert_eq!(pr.leader, 2, "must elect first alive replica (broker 2)");
         assert_eq!(
             pr.isr,
@@ -646,7 +699,7 @@ mod tests {
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
         let l = ControllerLivenessState::new(Duration::from_secs(10));
         // No heartbeats — nobody alive.
-        let changes = compute_failover_changes(
+        let plan = compute_failover_changes(
             &img,
             /*dead=*/ 1,
             &l,
@@ -654,9 +707,11 @@ mod tests {
         )
         .await;
         assert!(
-            changes.is_empty(),
-            "no alive replica → no election, got {changes:?}",
+            plan.changes.is_empty(),
+            "no alive replica → no election, got {:?}",
+            plan.changes,
         );
+        assert!(plan.recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -668,14 +723,18 @@ mod tests {
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(
+        let plan = compute_failover_changes(
             &img,
             /*dead=*/ 1,
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert!(changes.is_empty(), "explicit `false` keeps safe default");
+        assert!(
+            plan.changes.is_empty(),
+            "explicit `false` keeps safe default"
+        );
+        assert!(plan.recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -687,14 +746,15 @@ mod tests {
         let l = ControllerLivenessState::new(Duration::from_secs(10));
         // Only broker 3 alive — broker 2 also dead.
         l.record_heartbeat(3).await;
-        let changes = compute_failover_changes(
+        let plan = compute_failover_changes(
             &img,
             /*dead=*/ 1,
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        let pr = one_partition_change(&changes);
+        assert!(plan.recoveries.is_empty());
+        let pr = one_partition_change(&plan.changes);
         assert_eq!(pr.leader, 3);
         assert_eq!(pr.isr, vec![3]);
     }
@@ -710,14 +770,15 @@ mod tests {
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(
+        let plan = compute_failover_changes(
             &img,
             /*dead=*/ 1,
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        let pr = one_partition_change(&changes);
+        assert!(plan.recoveries.is_empty());
+        let pr = one_partition_change(&plan.changes);
         assert_eq!(pr.leader, 2);
         assert_eq!(
             pr.isr,
@@ -736,19 +797,79 @@ mod tests {
         for n in [1u64, 3] {
             l.record_heartbeat(n).await;
         }
-        let changes = compute_failover_changes(
+        let plan = compute_failover_changes(
             &img,
             /*dead=*/ 2,
             &l,
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        let pr = one_partition_change(&changes);
+        assert!(plan.recoveries.is_empty());
+        let pr = one_partition_change(&plan.changes);
         assert_eq!(pr.leader, 1, "leader unchanged");
         assert_eq!(pr.isr, vec![1, 3]);
         assert_eq!(
             pr.leader_epoch, 5,
             "non-leader-change must NOT bump leader_epoch"
         );
+    }
+
+    // ── KIP-966: offset-aware recovery strategies defer to the URM ──────────
+
+    #[tokio::test]
+    async fn failover_balanced_strategy_requests_recovery_not_immediate_change() {
+        // Leader 1 dies, ISR shrinks to empty after dropping it; the topic
+        // opted into `unclean.recovery.strategy=Balanced`, so the failover
+        // scan must NOT make a blind immediate change — it hands the
+        // partition to the URM via `recoveries`.
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
+        set_topic_config(&mut img, "t", UNCLEAN_RECOVERY_STRATEGY, "Balanced");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let plan = compute_failover_changes(
+            &img,
+            /*dead=*/ 1,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(
+            plan.changes.is_empty(),
+            "Balanced strategy must defer to the URM, not elect immediately, got {:?}",
+            plan.changes,
+        );
+        assert_eq!(
+            plan.recoveries,
+            vec![("t".to_string(), 0, RecoveryStrategy::Balanced)],
+        );
+    }
+
+    #[tokio::test]
+    async fn failover_strategy_none_still_uses_legacy_enable_flag() {
+        // No recovery strategy set (defaults to None), but the legacy
+        // `unclean.leader.election.enable=true` flag is on. The scan keeps
+        // the KIP-841 behavior: blind pick of the first alive replica.
+        let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for n in [2u64, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let plan = compute_failover_changes(
+            &img,
+            /*dead=*/ 1,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(
+            plan.recoveries.is_empty(),
+            "strategy None must not enqueue an offset-aware recovery",
+        );
+        let pr = one_partition_change(&plan.changes);
+        assert_eq!(pr.leader, 2, "legacy path picks first alive replica");
+        assert_eq!(pr.isr, vec![2]);
     }
 }

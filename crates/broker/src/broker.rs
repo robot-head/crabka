@@ -66,6 +66,11 @@ pub struct Broker {
     /// to a plain `TcpStream::connect` — the new wiring is transparent
     /// for the legacy PLAINTEXT-only path.
     pub(crate) inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+    /// KIP-966 offset-aware unclean recovery. Cloneable handle for
+    /// enqueuing recovery jobs onto the Unclean Recovery Manager task.
+    /// Used by the `ElectLeaders UNCLEAN` handler (which awaits the
+    /// outcome) and the automatic failover path (fire-and-forget).
+    pub(crate) unclean_recovery: crate::unclean_recovery::UncleanRecoveryHandle,
     /// KIP-73 throttle buckets. Updated by the throttle refresh task and
     /// consulted by the Fetch handler and replicator.
     pub throttle_state: Arc<crate::throttle::ThrottleState>,
@@ -1446,6 +1451,24 @@ impl Broker {
             },
         ));
 
+        // 4d-2. KIP-966 Unclean Recovery Manager: the controller-side
+        //       orchestrator that polls surviving replicas for their log
+        //       state and elects the most-complete-log replica. Both the
+        //       automatic failover path (the ticker below) and the operator
+        //       `ElectLeaders UNCLEAN` handler enqueue jobs onto it. Built
+        //       here, before the ticker, so the ticker closure can capture a
+        //       clone of the handle. Reuses the same `Arc<InterBrokerClient>`
+        //       and inter-broker listener protocol as the heartbeat path.
+        let unclean_recovery = crate::unclean_recovery::UncleanRecoveryManager::spawn(
+            controller.clone(),
+            liveness.clone(),
+            config.node_id,
+            inter_broker_client.clone(),
+            inter_listener_proto,
+            metrics.clone(),
+            supervisor_shutdown.child_token(),
+        );
+
         // 4e. Controller-side liveness ticker: scans the heartbeat registry
         //     every second and fires leader_election callbacks on transitions.
         let liveness_for_ticker = liveness.clone();
@@ -1453,6 +1476,7 @@ impl Broker {
         let ticker_node_id = config.node_id;
         let ticker_shutdown = supervisor_shutdown.child_token();
         let metrics_for_ticker = metrics.clone();
+        let recovery_for_ticker = unclean_recovery.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
@@ -1473,6 +1497,7 @@ impl Broker {
                                 n,
                                 &liveness_for_ticker,
                                 &metrics_for_ticker,
+                                &recovery_for_ticker,
                             )
                             .await
                             {
@@ -2030,6 +2055,7 @@ impl Broker {
             liveness: liveness.clone(),
             tls_dynamic: tls_dynamic.clone(),
             inter_broker_client,
+            unclean_recovery,
             metrics: metrics.clone(),
             metrics_bound_addr,
             throttle_state,

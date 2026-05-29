@@ -1,6 +1,6 @@
 //! Topic-config whitelist for `AlterConfigs` / `IncrementalAlterConfigs`.
 //!
-//! Eleven keys are recognized. Five propagate live to `Log.config`
+//! Twelve keys are recognized. Five propagate live to `Log.config`
 //! (`retention.ms`, `retention.bytes`, `segment.bytes`, `cleanup.policy`,
 //! `compression.type`), plus the tiered-storage local-retention
 //! pair (`local.retention.ms`, `local.retention.bytes`). One is read by
@@ -11,7 +11,8 @@
 //! `follower.replication.throttled.replicas`) validated via
 //! `ThrottledReplicas::parse`. One is the KIP-841 unclean-recovery toggle
 //! (`unclean.leader.election.enable`) read by the controller's automatic
-//! failover path on ISR-empty.
+//! failover path on ISR-empty. One is the KIP-966 offset-aware recovery
+//! strategy (`unclean.recovery.strategy`) which supersedes it.
 //!
 //! Unknown keys are rejected with `INVALID_CONFIG`.
 
@@ -38,6 +39,38 @@ pub(crate) const MIN_INSYNC_REPLICAS: &str = "min.insync.replicas";
 /// `crate::leader_election::on_broker_dead` via
 /// [`MetadataImage::topic_config`].
 pub(crate) const UNCLEAN_LEADER_ELECTION_ENABLE: &str = "unclean.leader.election.enable";
+/// KIP-966: per-topic unclean-recovery strategy. Supersedes
+/// `unclean.leader.election.enable`: when set to `Balanced` or
+/// `Aggressive` the controller runs offset-aware recovery (polls
+/// surviving replicas for their log offsets and elects the most complete
+/// log). `None` (the default) falls back to the legacy enable-flag
+/// behavior. Consumed by `crate::unclean_recovery` and the failover /
+/// `ElectLeaders` paths.
+pub(crate) const UNCLEAN_RECOVERY_STRATEGY: &str = "unclean.recovery.strategy";
+
+/// Resolved value of `unclean.recovery.strategy` for a topic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RecoveryStrategy {
+    /// No offset-aware recovery. Defer to `unclean.leader.election.enable`.
+    None,
+    /// Wait for all currently-alive replicas (ELR is not tracked in
+    /// crabka), then elect the most complete log.
+    Balanced,
+    /// Elect the most complete log among the replicas that respond within
+    /// a short deadline; optimize availability.
+    Aggressive,
+}
+
+impl RecoveryStrategy {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "None" => Some(Self::None),
+            "Balanced" => Some(Self::Balanced),
+            "Aggressive" => Some(Self::Aggressive),
+            _ => None,
+        }
+    }
+}
 /// KIP-405: per-topic tiered-storage opt-in.
 pub(crate) const REMOTE_STORAGE_ENABLE: &str = "remote.storage.enable";
 /// KIP-405: per-topic local-retention time window for tiered partitions.
@@ -67,6 +100,11 @@ pub(crate) fn validate_topic_config(key: &str, value: &str) -> Result<(), String
                 "unclean.leader.election.enable={value} not supported; expected `true` or `false`"
             )),
         },
+        UNCLEAN_RECOVERY_STRATEGY => RecoveryStrategy::parse(value).map(|_| ()).ok_or_else(|| {
+            format!(
+                "unclean.recovery.strategy={value} not supported; expected `None`, `Balanced`, or `Aggressive`"
+            )
+        }),
         REMOTE_STORAGE_ENABLE => match value {
             "true" | "false" => Ok(()),
             _ => Err(format!(
@@ -123,7 +161,7 @@ fn parse_u64_at_least(min: u64, value: &str) -> Result<u64, String> {
     Ok(parsed)
 }
 
-/// Returns `true` if `key` is one of the eight whitelisted topic-config keys.
+/// Returns `true` if `key` is one of the recognized topic-config keys.
 /// Useful for `IncrementalAlterConfigs` DELETE-op validation without
 /// requiring a sentinel probe value.
 pub(crate) fn is_recognized(key: &str) -> bool {
@@ -136,12 +174,28 @@ pub(crate) fn is_recognized(key: &str) -> bool {
             | COMPRESSION_TYPE
             | MIN_INSYNC_REPLICAS
             | UNCLEAN_LEADER_ELECTION_ENABLE
+            | UNCLEAN_RECOVERY_STRATEGY
             | REMOTE_STORAGE_ENABLE
             | LOCAL_RETENTION_MS
             | LOCAL_RETENTION_BYTES
             | crate::throttle::LEADER_THROTTLED_REPLICAS_KEY
             | crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY
     )
+}
+
+/// Resolve `unclean.recovery.strategy` for `topic`, defaulting to
+/// `RecoveryStrategy::None` when unset or unparseable. Per-topic only
+/// for now (mirrors `unclean.leader.election.enable`); a cluster default
+/// can layer in later via the same `topic_config` lookup precedence.
+pub(crate) fn resolve_recovery_strategy(
+    image: &crabka_metadata::MetadataImage,
+    topic: &str,
+) -> RecoveryStrategy {
+    image
+        .topic_config(topic)
+        .and_then(|m| m.get(UNCLEAN_RECOVERY_STRATEGY))
+        .and_then(|v| RecoveryStrategy::parse(v))
+        .unwrap_or(RecoveryStrategy::None)
 }
 
 /// Merge `overrides` over `base` and return a fresh `LogConfig` to push
@@ -543,5 +597,61 @@ mod tests {
         o.insert(LOCAL_RETENTION_BYTES.into(), "-2".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
         assert_eq!(out.local_retention_bytes, None);
+    }
+
+    #[test]
+    fn recovery_strategy_accepts_valid_values() {
+        for v in ["None", "Balanced", "Aggressive"] {
+            assert!(
+                validate_topic_config(UNCLEAN_RECOVERY_STRATEGY, v).is_ok(),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_strategy_rejects_garbage() {
+        assert!(validate_topic_config(UNCLEAN_RECOVERY_STRATEGY, "fast").is_err());
+    }
+
+    #[test]
+    fn recovery_strategy_recognized() {
+        assert!(is_recognized(UNCLEAN_RECOVERY_STRATEGY));
+    }
+
+    #[test]
+    fn parse_recovery_strategy_maps_values() {
+        assert_eq!(
+            RecoveryStrategy::parse("None"),
+            Some(RecoveryStrategy::None)
+        );
+        assert_eq!(
+            RecoveryStrategy::parse("Balanced"),
+            Some(RecoveryStrategy::Balanced)
+        );
+        assert_eq!(
+            RecoveryStrategy::parse("Aggressive"),
+            Some(RecoveryStrategy::Aggressive)
+        );
+        assert_eq!(RecoveryStrategy::parse("bogus"), None);
+    }
+
+    #[test]
+    fn resolve_recovery_strategy_defaults_none_and_reads_override() {
+        use crabka_metadata::{MetadataImage, MetadataRecord, TopicConfigRecord};
+        use std::collections::BTreeMap;
+        use uuid::Uuid;
+        let mut img = MetadataImage::new(Uuid::nil());
+        assert_eq!(resolve_recovery_strategy(&img, "t"), RecoveryStrategy::None);
+        let mut overrides = BTreeMap::new();
+        overrides.insert(UNCLEAN_RECOVERY_STRATEGY.into(), "Balanced".into());
+        img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides,
+        }));
+        assert_eq!(
+            resolve_recovery_strategy(&img, "t"),
+            RecoveryStrategy::Balanced
+        );
     }
 }

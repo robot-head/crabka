@@ -61,20 +61,28 @@ fn finalized_feature_keys(image: &crabka_metadata::MetadataImage) -> Vec<Finaliz
         .collect()
 }
 
+macro_rules! v {
+    ($mod:ident) => {
+        ApiVersion {
+            api_key: crabka_protocol::owned::$mod::API_KEY,
+            min_version: crabka_protocol::owned::$mod::MIN_VERSION,
+            max_version: crabka_protocol::owned::$mod::MAX_VERSION,
+            ..Default::default()
+        }
+    };
+}
+
 /// Static table mirrored from each API's generated `MIN_VERSION`/`MAX_VERSION`
-/// constants. Update this when adding a handler.
+/// constants. Update this when adding a handler. Split into client-facing and
+/// admin halves only to keep each function within clippy's line budget.
 fn supported_apis() -> Vec<ApiVersion> {
+    let mut apis = client_facing_apis();
+    apis.extend(admin_apis());
+    apis
+}
+
+fn client_facing_apis() -> Vec<ApiVersion> {
     use crabka_protocol::owned;
-    macro_rules! v {
-        ($mod:ident) => {
-            ApiVersion {
-                api_key: owned::$mod::API_KEY,
-                min_version: owned::$mod::MIN_VERSION,
-                max_version: owned::$mod::MAX_VERSION,
-                ..Default::default()
-            }
-        };
-    }
     vec![
         v!(api_versions_request),
         ApiVersion {
@@ -116,6 +124,11 @@ fn supported_apis() -> Vec<ApiVersion> {
             max_version: 7,
             ..Default::default()
         },
+    ]
+}
+
+fn admin_apis() -> Vec<ApiVersion> {
+    vec![
         v!(create_topics_request),
         v!(delete_topics_request),
         v!(delete_records_request),
@@ -199,6 +212,10 @@ fn supported_apis() -> Vec<ApiVersion> {
         // KIP-848 next-gen consumer group protocol.
         v!(consumer_group_heartbeat_request),
         v!(consumer_group_describe_request),
+        // GetReplicaLogInfo (KIP-966) — inter-broker RPC the controller's
+        // unclean recovery manager uses to read each replica's LEO + leader
+        // epoch. Advertised so InterBrokerClient version negotiation succeeds.
+        v!(get_replica_log_info_request),
         // KIP-853 dynamic-quorum reconfiguration — `kafka-metadata-quorum
         // --add-controller / --remove-controller` and the controller
         // auto-join path.

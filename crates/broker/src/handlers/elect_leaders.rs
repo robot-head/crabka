@@ -18,13 +18,24 @@ use crabka_protocol::owned::elect_leaders_response::{
     ElectLeadersResponse, PartitionResult, ReplicaElectionResult,
 };
 
+use tokio::sync::oneshot;
+
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
+use crate::config_keys::{RecoveryStrategy, resolve_recovery_strategy};
 use crate::leader_election::{ElectError, ElectionType, select_new_leader_for_partition};
+use crate::unclean_recovery::{RecoveryJob, RecoveryOutcome};
 
 const WIRE_ELECTION_PREFERRED: i8 = 0;
 const WIRE_ELECTION_UNCLEAN: i8 = 1;
+
+/// Operator-triggered offset-aware recovery is bounded so the admin RPC
+/// can't hang on a stalled replica. Slightly above the URM's Balanced
+/// deadline (30s) would let the manager finish; we use 25s to fail the
+/// client request before the inter-broker poll's own cap and surface a
+/// retriable error.
+const OPERATOR_RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
@@ -109,6 +120,61 @@ pub(crate) async fn handle(
     for (topic, partitions) in &targets {
         let mut rows = Vec::with_capacity(partitions.len());
         for &p in partitions {
+            // KIP-966: an UNCLEAN election on a topic that opted into an
+            // offset-aware recovery strategy is routed through the Unclean
+            // Recovery Manager, which polls surviving replicas for their log
+            // state before electing. The URM owns `submit_change` for these,
+            // so we must NOT push a record into `to_submit` here — we just
+            // await the outcome and translate it to a per-partition row.
+            let use_offset_aware = matches!(election, ElectionType::Unclean)
+                && !matches!(
+                    resolve_recovery_strategy(&image, topic),
+                    RecoveryStrategy::None
+                );
+            if use_offset_aware {
+                let strategy = resolve_recovery_strategy(&image, topic);
+                let (tx, rx) = oneshot::channel();
+                broker
+                    .unclean_recovery
+                    .enqueue(RecoveryJob {
+                        topic: topic.clone(),
+                        partition: p,
+                        strategy,
+                        reply: Some(tx),
+                    })
+                    .await;
+                let row = match tokio::time::timeout(OPERATOR_RECOVERY_DEADLINE, rx).await {
+                    Ok(Ok(RecoveryOutcome::Elected(_))) => PartitionResult {
+                        partition_id: p,
+                        error_code: 0,
+                        error_message: None,
+                        ..Default::default()
+                    },
+                    Ok(Ok(RecoveryOutcome::NoEligibleReplica)) => PartitionResult {
+                        partition_id: p,
+                        error_code: codes::ELIGIBLE_LEADERS_NOT_AVAILABLE,
+                        error_message: Some("no eligible replica responded".into()),
+                        ..Default::default()
+                    },
+                    Ok(Ok(RecoveryOutcome::NotNeeded)) => PartitionResult {
+                        partition_id: p,
+                        error_code: codes::ELECTION_NOT_NEEDED,
+                        error_message: Some("partition already has a leader".into()),
+                        ..Default::default()
+                    },
+                    // Stale / InProgress, dropped reply channel, or the
+                    // operator deadline elapsed: surface a retriable error.
+                    _ => PartitionResult {
+                        partition_id: p,
+                        error_code: codes::ELIGIBLE_LEADERS_NOT_AVAILABLE,
+                        error_message: Some("unclean recovery in progress".into()),
+                        ..Default::default()
+                    },
+                };
+                rows.push(row);
+                continue;
+            }
+
             let result =
                 select_new_leader_for_partition(&image, &liveness, topic, p, election).await;
             match result {

@@ -168,6 +168,7 @@ pub mod throttle;
 pub(crate) mod time_util;
 pub(crate) mod tls_reload;
 mod txn;
+pub(crate) mod unclean_recovery;
 
 pub use broker::{Broker, BrokerHandle};
 pub use config::{BootstrapMode, BrokerConfig, KafkaRlmmConfig, RemoteStorageBackend};

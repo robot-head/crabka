@@ -1,0 +1,28 @@
+{
+  "apiKey": 93,
+  "type": "response",
+  "internal": true,
+  "name": "GetReplicaLogInfoResponse",
+  "validVersions": "0",
+  "flexibleVersions": "0+",
+  "fields": [
+    { "name": "BrokerEpoch", "type": "int64", "versions": "0+", "about": "The epoch of the broker." },
+    { "name": "TopicPartitionLogInfoList", "type": "[]TopicPartitionLogInfo", "versions": "0+",
+      "about": "The list of topic partition log info.", "fields": [
+      { "name": "TopicId", "type": "uuid", "versions": "0+", "about": "The unique topic ID." },
+      { "name": "PartitionLogInfo", "type": "[]PartitionLogInfo", "versions": "0+",
+        "about": "The log info of a partition.", "fields": [
+        { "name": "Partition", "type": "int32", "versions": "0+", "about": "The id of the partition." },
+        { "name": "LastWrittenLeaderEpoch", "type": "int32", "versions": "0+",
+          "about": "The last written leader epoch in the log." },
+        { "name": "CurrentLeaderEpoch", "type": "int32", "versions": "0+",
+          "about": "The current leader epoch for the partition from the broker point of view." },
+        { "name": "LogEndOffset", "type": "int64", "versions": "0+",
+          "about": "The log end offset for the partition." },
+        { "name": "ErrorCode", "type": "int16", "versions": "0+", "about": "The result error, or zero if there was no error." },
+        { "name": "ErrorMessage", "type": "string", "versions": "0+", "nullableVersions": "0+",
+          "default": "null", "about": "The result message, or null if there was no error." }
+      ]}
+    ]}
+  ]
+}

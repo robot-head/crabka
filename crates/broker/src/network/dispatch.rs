@@ -3982,6 +3982,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         80 => version >= owned::add_raft_voter_request::FLEXIBLE_MIN,
         81 => version >= owned::remove_raft_voter_request::FLEXIBLE_MIN,
         82 => version >= owned::update_raft_voter_request::FLEXIBLE_MIN,
+        // GetReplicaLogInfo (93, KIP-966) is flexible from v0.
+        93 => version >= owned::get_replica_log_info_request::FLEXIBLE_MIN,
         _ => false,
     }
 }
