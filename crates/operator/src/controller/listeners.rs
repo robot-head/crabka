@@ -2296,7 +2296,7 @@ mod tests {
         let g = gssapi_cfg_with_service("kafka");
         let l = gssapi_listener("ib", 9092, false, g);
         assert_eq!(
-            validate_inter_broker_gssapi(&[l.clone()], "ib", false)
+            validate_inter_broker_gssapi(std::slice::from_ref(&l), "ib", false)
                 .unwrap_err()
                 .reason(),
             "InterBrokerGssapiRequiresKerberosConfig"
@@ -4376,7 +4376,7 @@ mod toml_rendering_tests {
             &[l],
             &addrs,
             "gss",
-            &Default::default(),
+            &std::collections::BTreeMap::new(),
             None,
             None,
             false,
@@ -4406,7 +4406,7 @@ mod toml_rendering_tests {
             &[l],
             &addrs,
             "gss",
-            &Default::default(),
+            &std::collections::BTreeMap::new(),
             None,
             None,
             false,
