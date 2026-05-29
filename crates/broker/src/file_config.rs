@@ -112,6 +112,17 @@ pub struct FileConfig {
     /// the `BrokerConfig` default `[Controller, Broker]`.
     #[serde(default)]
     pub process: Option<FileProcessConfig>,
+
+    /// SASL/GSSAPI (Kerberos) accept-path config. Broker-global —
+    /// there is one `[gssapi]` block per broker. Relevant when a listener
+    /// enables the `GSSAPI` mechanism.
+    #[serde(default)]
+    pub gssapi: Option<FileGssapiConfig>,
+
+    /// Credentials this broker uses to authenticate *to* peer brokers
+    /// (inter-broker initiate path). Only the `gssapi` variant is supported.
+    #[serde(default)]
+    pub inter_broker_credentials: Option<FileInterBrokerCredentials>,
 }
 
 /// TOML shape of `[remote_storage]`. Maps to
@@ -423,6 +434,40 @@ pub struct FileOAuthBearerConfig {
     /// to true to accept them. Signed validator only.
     #[serde(default)]
     pub jwks_ignore_key_use: Option<bool>,
+}
+
+/// TOML shape of `[gssapi]`. Maps to
+/// [`crabka_security::gssapi::GssapiConfig`]. `principal_to_local_rules`
+/// are parsed into `name::Rule` at `apply_to` time.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileGssapiConfig {
+    pub keytab_path: std::path::PathBuf,
+    /// `sasl.kerberos.service.name`. Defaults to `"kafka"` when omitted.
+    #[serde(default)]
+    pub service_name: Option<String>,
+    /// `auth_to_local` rule specs, applied in order (first match wins).
+    #[serde(default)]
+    pub principal_to_local_rules: Vec<String>,
+    #[serde(default)]
+    pub realm: Option<String>,
+    #[serde(default)]
+    pub kdc: Option<String>,
+}
+
+/// TOML shape of `[inter_broker_credentials]`. A `type` discriminator
+/// selects the variant; only `gssapi` is implemented (PLAIN/SCRAM
+/// inter-broker over TOML is intentionally not exposed).
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum FileInterBrokerCredentials {
+    Gssapi {
+        keytab_path: std::path::PathBuf,
+        client_principal: String,
+        #[serde(default)]
+        service_name: Option<String>,
+        kdc_url: String,
+    },
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -884,6 +929,41 @@ impl FileConfig {
                 roles.push(role);
             }
             cfg.roles = roles;
+        }
+
+        if let Some(g) = self.gssapi {
+            let mut rules = Vec::with_capacity(g.principal_to_local_rules.len());
+            for spec in &g.principal_to_local_rules {
+                let rule = crabka_security::gssapi::name::Rule::parse(spec).map_err(|e| {
+                    FileConfigError::InvalidConfig(format!(
+                        "[gssapi]: invalid principal_to_local rule {spec:?}: {e}"
+                    ))
+                })?;
+                rules.push(rule);
+            }
+            cfg.gssapi = Some(crabka_security::gssapi::GssapiConfig {
+                keytab_path: g.keytab_path,
+                service_name: g.service_name.unwrap_or_else(|| "kafka".to_string()),
+                principal_to_local_rules: rules,
+                realm: g.realm,
+                kdc: g.kdc,
+            });
+        }
+
+        if let Some(ib) = self.inter_broker_credentials {
+            cfg.inter_broker_credentials = Some(match ib {
+                FileInterBrokerCredentials::Gssapi {
+                    keytab_path,
+                    client_principal,
+                    service_name,
+                    kdc_url,
+                } => crate::config::InterBrokerCredentials::Gssapi {
+                    keytab_path,
+                    client_principal,
+                    service_name: service_name.unwrap_or_else(|| "kafka".to_string()),
+                    kdc_url,
+                },
+            });
         }
 
         Ok(())
@@ -1959,5 +2039,99 @@ replica_selector = "nonsense"
         let cfg: FileConfig = toml::from_str(src).expect("parse");
         let mut broker = crate::config::BrokerConfig::default();
         assert!(cfg.apply_to(&mut broker).is_err());
+    }
+
+    #[test]
+    fn apply_to_gssapi_maps_all_fields() {
+        let src = r#"
+broker_id = 1
+[gssapi]
+keytab_path = "/etc/crabka/gssapi-keytab/keytab"
+service_name = "kafka"
+principal_to_local_rules = ["RULE:[1:$1@$0](.*@EXAMPLE.COM)s/@.*//", "DEFAULT"]
+realm = "EXAMPLE.COM"
+kdc = "tcp://kdc:88"
+"#;
+        let file: FileConfig = toml::from_str(src).expect("parse [gssapi]");
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).expect("apply [gssapi]");
+        let g = cfg.gssapi.expect("gssapi config present");
+        assert_eq!(
+            g.keytab_path,
+            std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
+        );
+        assert_eq!(g.service_name, "kafka");
+        assert_eq!(g.principal_to_local_rules.len(), 2);
+        assert_eq!(g.realm.as_deref(), Some("EXAMPLE.COM"));
+        assert_eq!(g.kdc.as_deref(), Some("tcp://kdc:88"));
+    }
+
+    #[test]
+    fn apply_to_gssapi_defaults_service_name_to_kafka() {
+        let src = r#"
+[gssapi]
+keytab_path = "/k/keytab"
+principal_to_local_rules = ["DEFAULT"]
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        assert_eq!(cfg.gssapi.unwrap().service_name, "kafka");
+    }
+
+    #[test]
+    fn apply_to_gssapi_rejects_malformed_rule() {
+        let src = r#"
+[gssapi]
+keytab_path = "/k/keytab"
+principal_to_local_rules = ["NOT_A_RULE:::"]
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        let err = file.apply_to(&mut cfg).unwrap_err();
+        assert!(matches!(err, FileConfigError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn apply_to_inter_broker_credentials_gssapi() {
+        let src = r#"
+[inter_broker_credentials]
+type = "gssapi"
+keytab_path = "/etc/crabka/gssapi-keytab/keytab"
+client_principal = "kafka@EXAMPLE.COM"
+service_name = "kafka"
+kdc_url = "tcp://kdc:88"
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        match cfg.inter_broker_credentials.expect("ib creds present") {
+            crate::config::InterBrokerCredentials::Gssapi {
+                keytab_path,
+                client_principal,
+                service_name,
+                kdc_url,
+            } => {
+                assert_eq!(
+                    keytab_path,
+                    std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
+                );
+                assert_eq!(client_principal, "kafka@EXAMPLE.COM");
+                assert_eq!(service_name, "kafka");
+                assert_eq!(kdc_url, "tcp://kdc:88");
+            }
+            other => panic!("expected Gssapi, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn apply_to_inter_broker_credentials_rejects_unknown_type() {
+        // Unknown `type` variants are rejected at TOML parse time because
+        // `FileInterBrokerCredentials` is a tagged enum with `deny_unknown_fields`.
+        let src = r#"
+[inter_broker_credentials]
+type = "carrier-pigeon"
+"#;
+        assert!(toml::from_str::<FileConfig>(src).is_err());
     }
 }
