@@ -5,12 +5,10 @@
 //! `inter.broker.protocol.version`. There is no
 //! `inter.broker.protocol.version` / `log.message.format.version` lineage.
 //!
-//! The broker has no runtime feature-level enforcement yet (the
-//! `UpdateFeatures` codec exists but no handler consumes it), so the
-//! resolved metadata version is rendered into the broker's inert
-//! `[server_properties]` config. All upgrade safety lives here, in the
-//! operator: the binary must always be `>= resolved metadata >= finalized
-//! metadata`, which is the downgrade window.
+//! The broker enforces metadata.version at runtime (`UpdateFeatures` handler +
+//! fail-fast range guard), consuming the value seeded by `crabka format
+//! --release-version`. The operator owns upgrade-window safety: the binary
+//! must always be `>= resolved metadata >= finalized metadata`.
 
 /// A parsed Kafka version. Ordering is by `(major, minor, patch)`, but
 /// metadata-version comparisons use only `(major, minor)` — Kafka feature

@@ -1540,6 +1540,38 @@ mod tests {
     }
 
     #[test]
+    fn statefulset_init_clamps_out_of_range_version_to_max() {
+        // kafka_version "4.1.0" normalises to "4.1", which is NOT yet in the
+        // broker's supported metadata.version table. Without clamping,
+        // `crabka format --release-version 4.1` would exit non-zero and
+        // crash-loop the init container. The clamp must silently fall back to
+        // the broker's MAX short form ("4.0") so the pod can boot.
+        let mut parent = parent_fixture("demo");
+        parent.spec.kafka_version = "4.1.0".into();
+        // No spec.metadata_version pin, no status.metadataVersion.
+        let pool = pool_fixture("brokers", "demo", 1);
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
+        let pod = sts.spec.unwrap().template.spec.unwrap();
+        let init = &pod.init_containers.expect("init containers")[0];
+        let env = init.env.as_ref().expect("init env");
+        let mv = env
+            .iter()
+            .find(|e| e.name == "CRABKA_METADATA_VERSION")
+            .expect("CRABKA_METADATA_VERSION env present");
+        let max_short = crabka_metadata::metadata_version::from_feature_level(
+            crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+        )
+        .unwrap()
+        .short();
+        assert_eq!(
+            mv.value.as_deref(),
+            Some(max_short),
+            "out-of-range kafka_version must clamp to MAX short form ({max_short}), \
+             not the unsupported \"4.1\""
+        );
+    }
+
+    #[test]
     fn validate_rejects_replicas_two() {
         let pool = pool_fixture("brokers", "demo", 2);
         let err = validate(&pool).unwrap_err();

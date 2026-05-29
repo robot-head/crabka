@@ -293,9 +293,10 @@ pub(crate) fn render_configmap(
     }
     let mut server_properties = owner.spec.config.clone().unwrap_or_default();
     // The operator owns `metadata.version` — the KRaft analog of
-    // `inter.broker.protocol.version`. Rendered into the broker's inert
-    // `[server_properties]` table (the broker has no runtime feature-level
-    // enforcement yet). Operator value wins over any user-supplied key.
+    // `inter.broker.protocol.version`. The broker now consumes the finalized
+    // metadata.version seeded via `crabka format --release-version`; this
+    // `[server_properties]` injection is retained for config-hash/roll
+    // behavior. Operator value wins over any user-supplied key.
     if let Some(mv) = metadata_version {
         server_properties.insert("metadata.version".to_string(), mv.to_string());
     }
