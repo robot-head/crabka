@@ -17,9 +17,11 @@
 //! ```
 //!
 //! It drives the full GSSAPI loop against the fixture: `alice@CRABKA.TEST`
-//! (password `alicepw`) initiates to the `kafka/localhost@CRABKA.TEST` service
-//! whose key lives in `kafka.keytab`, asserts the recovered source principal,
-//! then round-trips a wrapped RFC 4752 security-layer message.
+//! initiates *from a keytab* (`alice.keytab`, no password) to the
+//! `kafka/localhost@CRABKA.TEST` service whose key lives in `kafka.keytab`,
+//! asserts the recovered source principal, then round-trips a wrapped RFC 4752
+//! security-layer message. This exercises the vendored sspi keytab-client-auth
+//! path end-to-end against a real KDC.
 
 use crabka_security::gssapi::provider::{SspiAcceptor, SspiInitiator};
 use crabka_security::gssapi::{AcceptStep, GssAcceptor, GssInitiator, InitStep};
@@ -28,7 +30,7 @@ const KEYTAB_PATH: &str = "tests/fixtures/kdc/kafka.keytab";
 const SERVICE_NAME: &str = "kafka";
 const TARGET_SPN: &str = "kafka/localhost";
 const CLIENT_PRINCIPAL: &str = "alice@CRABKA.TEST";
-const CLIENT_PASSWORD: &str = "alicepw";
+const CLIENT_KEYTAB_PATH: &str = "tests/fixtures/kdc/alice.keytab";
 
 #[test]
 #[ignore = "requires the MIT KDC fixture (docker compose up) + exported KRB5_CONFIG/SSPI_KDC_URL"]
@@ -37,8 +39,9 @@ fn full_gssapi_handshake_and_wrap_roundtrip() {
         std::env::var("SSPI_KDC_URL").unwrap_or_else(|_| "tcp://localhost:88".to_string());
 
     let mut acceptor = SspiAcceptor::new(KEYTAB_PATH, SERVICE_NAME).expect("build acceptor");
-    let mut initiator = SspiInitiator::new(CLIENT_PRINCIPAL, CLIENT_PASSWORD, TARGET_SPN, &kdc_url)
-        .expect("build initiator");
+    let mut initiator =
+        SspiInitiator::new(CLIENT_KEYTAB_PATH, CLIENT_PRINCIPAL, TARGET_SPN, &kdc_url)
+            .expect("build initiator");
 
     // Drive the context-establishment loop: initiator produces a token, acceptor
     // consumes it, alternating until both sides report established.

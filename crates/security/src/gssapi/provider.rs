@@ -1,22 +1,19 @@
 //! `sspi`-rs-backed implementations of [`GssAcceptor`] and [`GssInitiator`].
 //!
-//! KEYTAB-CLIENT-AUTH DECISION: sspi 0.21's client AS-exchange derives the
-//! client's long-term key from a *password + salt* (`generate_key_from_password`
-//! in `kerberos/client/generators.rs`); its `Credentials` enum only carries
-//! `AuthIdentity{username,password}` or `SmartCard`. There is NO entry point to
-//! inject a raw keytab key for the *initiator*. The raw-key path
-//! (`Secret::new(..)`) exists only on `ServerProperties` (the acceptor). So
-//! [`SspiInitiator`] is PASSWORD-based here. CONCERN: the inter-broker initiate
-//! path (a later task) needs keytab-based client auth — an unresolved sspi gap.
-//! The acceptor, by contrast, uses the keytab key as designed.
+//! Both the acceptor and the initiator authenticate from a keytab: the
+//! acceptor uses the service key to decrypt incoming AP-REQs, and the
+//! initiator uses the client principal's long-term key (via the vendored
+//! `sspi::Credentials::Keytab` extension) to drive the AS/TGS exchange with no
+//! password. See `third_party/sspi` for the keytab-client-auth fork.
 
 use std::sync::Mutex;
 
 use sspi::kerberos::ServerProperties;
 use sspi::{
-    AuthIdentity, BufferType, ClientRequestFlags, CredentialUse, Credentials, CredentialsBuffers,
-    DataRepresentation, EncryptionFlags, Kerberos, KerberosConfig, Secret, SecurityBuffer,
-    SecurityBufferRef, SecurityStatus, ServerRequestFlags, Sspi, SspiImpl, Username,
+    BufferType, ClientRequestFlags, CredentialUse, Credentials, CredentialsBuffers,
+    DataRepresentation, EncryptionFlags, Kerberos, KerberosConfig, KeytabIdentity, Secret,
+    SecurityBuffer, SecurityBufferRef, SecurityStatus, ServerRequestFlags, Sspi, SspiImpl,
+    Username,
 };
 
 use super::keytab::{ENCTYPE_AES256_CTS_HMAC_SHA1_96, load_service_key};
@@ -177,11 +174,12 @@ impl GssAcceptor for SspiAcceptor {
     }
 }
 
-/// Client-side GSSAPI initiator backed by sspi.
+/// Client-side GSSAPI initiator backed by sspi + a keytab-extracted client key.
 ///
-/// PASSWORD-based (see the module-level decision comment): sspi 0.21 cannot
-/// initiate from a keytab key. The client context and credentials handle must
-/// persist across [`GssInitiator::step`] calls, so they live in this struct.
+/// Keytab-based (no password): the client principal's long-term key is loaded
+/// from a keytab and injected via the vendored `sspi::Credentials::Keytab`
+/// extension. The client context and credentials handle must persist across
+/// [`GssInitiator::step`] calls, so they live in this struct.
 pub struct SspiInitiator {
     client: Mutex<Kerberos>,
     cred_handle: Mutex<<Kerberos as SspiImpl>::CredentialsHandle>,
@@ -189,31 +187,51 @@ pub struct SspiInitiator {
 }
 
 impl SspiInitiator {
-    /// Build a password-based initiator.
+    /// Build a keytab-based initiator.
     ///
-    /// `client_principal` is e.g. `"alice@CRABKA.TEST"`, `target_spn` is the
-    /// service SPN without realm, e.g. `"kafka/localhost"`, and `kdc_url` is the
-    /// KDC endpoint (e.g. `"tcp://localhost:88"`).
+    /// Reads `keytab_path`, extracts the aes256 key for `client_principal`'s
+    /// first component, and builds an sspi client that authenticates as
+    /// `client_principal` (e.g. `"alice@CRABKA.TEST"` or
+    /// `"kafka/host@CRABKA.TEST"`). `target_spn` is the service SPN without
+    /// realm (e.g. `"kafka/localhost"`), and `kdc_url` is the KDC endpoint
+    /// (e.g. `"tcp://localhost:88"`).
     ///
     /// # Errors
     ///
-    /// Returns [`GssError::Context`] if sspi rejects the principal, credentials,
-    /// or client configuration.
+    /// Returns [`GssError::Keytab`] if the keytab cannot be read or has no
+    /// matching key, or [`GssError::Context`] if sspi rejects the principal,
+    /// credentials, or client configuration.
     pub fn new(
+        keytab_path: &str,
         client_principal: &str,
-        password: &str,
         target_spn: &str,
         kdc_url: &str,
     ) -> Result<Self, GssError> {
+        let principal = Username::parse(client_principal).map_err(ctx_err)?;
+        // The keytab is keyed by the principal's first component.
+        let first_component = principal
+            .account_name()
+            .split('/')
+            .next()
+            .unwrap_or_else(|| principal.account_name());
+
+        let bytes = std::fs::read(keytab_path)
+            .map_err(|e| GssError::Keytab(format!("reading {keytab_path}: {e}")))?;
+        let entry = load_service_key(&bytes, first_component, ENCTYPE_AES256_CTS_HMAC_SHA1_96)
+            .map_err(|e| GssError::Keytab(e.to_string()))?;
+
         let mut client = Kerberos::new_client_from_config(KerberosConfig::new(
             kdc_url,
             "crabka-broker".to_string(),
         ))
         .map_err(ctx_err)?;
 
-        let identity = AuthIdentity {
-            username: Username::parse(client_principal).map_err(ctx_err)?,
-            password: password.to_string().into(),
+        let identity = KeytabIdentity {
+            principal,
+            key: Secret::new(entry.key),
+            key_enctype: u8::try_from(entry.enctype).map_err(|_| {
+                GssError::Keytab(format!("enctype {} does not fit in u8", entry.enctype))
+            })?,
         };
         let creds: Credentials = identity.into();
         let cred_handle = client
