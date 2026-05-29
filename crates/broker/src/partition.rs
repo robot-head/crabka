@@ -427,8 +427,13 @@ impl Partition {
     /// Install (or reinstall) the ISR membership and seed non-leader
     /// follower entries to 0. Called by the replicator supervisor
     /// when this broker materializes a partition where it's the leader.
-    /// Idempotent: re-installing the same `(replicas, leader)` preserves
-    /// existing follower progress.
+    /// Idempotent: re-installing the same `(isr, replicas, leader)`
+    /// preserves existing follower progress.
+    ///
+    /// `isr` is the committed in-sync set; `replicas` is the full replica
+    /// assignment. Follower-progress tracking is keyed on `replicas` so a
+    /// replica catching up toward ISR re-admission keeps its progress
+    /// across reconciles — see [`crate::replica_state::ReplicaState::install_isr`].
     ///
     /// Recomputes HW under the new ISR and fires `hw_advance_notify`
     /// if HW advanced — necessary because an `AlterPartition` shrink
@@ -436,11 +441,16 @@ impl Partition {
     /// followers' LEOs (which were already being updated via fetch)
     /// can now satisfy a previously-blocked acks=-1 produce without
     /// waiting for the next fetch round.
-    pub async fn install_isr(&self, replicas: &[crabka_raft::NodeId], leader: crabka_raft::NodeId) {
+    pub async fn install_isr(
+        &self,
+        isr: &[crabka_raft::NodeId],
+        replicas: &[crabka_raft::NodeId],
+        leader: crabka_raft::NodeId,
+    ) {
         let leader_leo = self.log_end_offset();
         let mut st = self.replica_state.lock().await;
         let prev_hw = st.hw;
-        st.install_isr(replicas, leader);
+        st.install_isr(isr, replicas, leader);
         let new_hw = st.recompute_hw_for_leader_append(leader_leo);
         drop(st);
         if new_hw > prev_hw {
@@ -639,7 +649,7 @@ mod tests {
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
-        p.install_isr(&[1, 2, 3], 1).await;
+        p.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = p.replica_state.lock().await;
         assert_eq!(st.isr.len(), 3);
         assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
