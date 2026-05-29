@@ -7,7 +7,8 @@
 //! runtime can't drive both the broker's accept loop and the test body
 //! when the test makes synchronous-style blocking calls into the broker.
 
-use std::time::Duration;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use tempfile::TempDir;
@@ -78,6 +79,59 @@ async fn produce(client: &Client, topic: &str, values: &[&str]) {
                     topic_id,
                     partition_data: vec![PartitionProduceData {
                         index: 0,
+                        records: Some(record_batch_with_values(values).into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("produce");
+        let err = resp.responses[0].partition_responses[0].error_code;
+        if err == 0 {
+            return;
+        }
+        if err == 3 && attempt < 5 {
+            // UNKNOWN_TOPIC_OR_PARTITION — metadata-apply race; retry.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        panic!("produce failed after {attempt} attempt(s): {resp:?}");
+    }
+}
+
+async fn create_topic_with_partitions(client: &Client, name: &str, num_partitions: i32) {
+    let cr = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: name.into(),
+                num_partitions,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("CreateTopics");
+    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
+}
+
+/// Produce records to a specific partition index (the plain `produce` helper
+/// hardcodes partition 0).
+async fn produce_to_partition(client: &Client, topic: &str, partition: i32, values: &[&str]) {
+    let topic_id = topic_id_for(client, topic).await;
+    for attempt in 1..=5 {
+        let resp = client
+            .send(ProduceRequest {
+                acks: 1,
+                timeout_ms: 5_000,
+                topic_data: vec![TopicProduceData {
+                    name: topic.into(),
+                    topic_id,
+                    partition_data: vec![PartitionProduceData {
+                        index: partition,
                         records: Some(record_batch_with_values(values).into()),
                         ..Default::default()
                     }],
@@ -233,4 +287,112 @@ async fn offsets_survive_broker_restart() {
         consumer.close().await.unwrap();
         broker.shutdown().await;
     }
+}
+
+/// Two Range (eager) consumers share a 2-partition topic. When the second
+/// joins, the survivor sheds a partition through the coordinator's *eager*
+/// rejoin path; when it leaves, the survivor re-acquires the freed partition
+/// through that same path, which primes the re-acquired partition's fetch
+/// offset *before* republishing the assignment. Regression coverage for the
+/// prime-before-publish ordering in `coordinator.rs`'s eager branch (the
+/// cooperative branches are covered by `cooperative_rebalance.rs`). A poll
+/// racing the rejoin must not observe a re-acquired partition with no primed
+/// offset and fetch it from 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eager_rebalance_reacquires_and_primes() {
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let producer = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("p")
+        .build()
+        .await
+        .unwrap();
+    create_topic_with_partitions(&producer, "eagerrebal", 2).await;
+
+    let build = |client_id: &'static str| {
+        let bootstrap = bootstrap.clone();
+        async move {
+            Consumer::builder()
+                .bootstrap(&bootstrap)
+                .client_id(client_id)
+                .group_id("eager-grp")
+                .session_timeout(Duration::from_secs(30))
+                .rebalance_timeout(Duration::from_secs(2))
+                .heartbeat_interval(Duration::from_millis(500))
+                .auto_offset_reset(AutoOffsetReset::Earliest)
+                .subscribe(["eagerrebal".to_string()])
+                .build()
+                .await
+                .expect("build consumer")
+        }
+    };
+
+    // Build both members concurrently so they batch into the *first*
+    // rebalance round (the broker holds it open for INITIAL_REBALANCE_DELAY
+    // and only completes once both have joined). That avoids the
+    // follower-waits-on-a-late-leader deadlock you'd get by adding a second
+    // member to an already-stable group on a tight rebalance window. They
+    // split the two partitions 1/1.
+    let (mut m1, m2) = tokio::join!(build("m1"), build("m2"));
+    let settle = Instant::now() + Duration::from_secs(30);
+    loop {
+        if m1.assignment().await.len() == 1 && m2.assignment().await.len() == 1 {
+            break;
+        }
+        assert!(
+            Instant::now() < settle,
+            "group did not split 1+1 (m1={} m2={})",
+            m1.assignment().await.len(),
+            m2.assignment().await.len()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // m2 leaves → m1 becomes the sole member and re-acquires the freed
+    // partition via the coordinator's *eager* rejoin path, priming its fetch
+    // offset before the assignment is republished. m1 is its own leader here,
+    // so there is no follower-wait to race.
+    m2.close().await.unwrap();
+    let regain = Instant::now() + Duration::from_secs(30);
+    loop {
+        let _ = m1.poll(Duration::from_millis(200)).await;
+        if m1.assignment().await.len() == 2 {
+            break;
+        }
+        assert!(
+            Instant::now() < regain,
+            "m1 did not re-acquire both partitions, last={}",
+            m1.assignment().await.len()
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Produce a fresh record to each partition; m1 (sole owner again) must
+    // deliver both — proving the re-acquired partition primed correctly and
+    // poll() didn't get stuck on a missing next-offset entry.
+    produce_to_partition(&producer, "eagerrebal", 0, &["b0"]).await;
+    produce_to_partition(&producer, "eagerrebal", 1, &["b1"]).await;
+    let mut second: HashSet<String> = HashSet::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while second.len() < 2 && Instant::now() < deadline {
+        for r in m1.poll(Duration::from_millis(200)).await.unwrap() {
+            let v = String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned();
+            if v.starts_with('b') {
+                second.insert(v);
+            }
+        }
+    }
+    assert_eq!(
+        second.len(),
+        2,
+        "m1 delivered both second-wave records after re-acquiring: {second:?}"
+    );
+
+    m1.close().await.unwrap();
+    broker.shutdown().await;
 }
