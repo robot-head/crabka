@@ -291,6 +291,15 @@ pub(crate) fn parse_txn_index(bytes: &[u8]) -> Vec<AbortedTxnEntry> {
         .collect()
 }
 
+/// Whether an aborted-transaction entry overlaps the inclusive offset range
+/// `[from_offset, to_offset]`. Mirrors `TxnIndex::aborted_in_range`'s overlap
+/// test against an inclusive range: the entry's `[start, last]` intersects
+/// `[from, to]` iff `start <= to && last >= from`.
+#[must_use]
+pub(crate) fn txn_overlaps(entry: &AbortedTxnEntry, from_offset: i64, to_offset: i64) -> bool {
+    entry.start_offset <= to_offset && entry.last_offset >= from_offset
+}
+
 /// First entry whose `ts >= target_ts`, returning the relative offset, or
 /// `None` when none qualify.
 #[must_use]
@@ -491,6 +500,27 @@ mod tests {
     #[test]
     fn parse_txn_index_empty_is_empty() {
         assert!(parse_txn_index(&[]).is_empty());
+    }
+
+    #[test]
+    fn txn_overlaps_boundaries() {
+        let e = AbortedTxnEntry {
+            start_offset: 10,
+            last_offset: 14,
+            producer_id: 1,
+        };
+        // Range fully before the entry → excluded.
+        assert!(!txn_overlaps(&e, 0, 9), "range ends just before entry");
+        // Range touching the entry's first offset → included.
+        assert!(txn_overlaps(&e, 0, 10), "range ends on entry start");
+        // Range fully inside the entry → included.
+        assert!(txn_overlaps(&e, 11, 13), "range inside entry");
+        // Range touching the entry's last offset → included.
+        assert!(txn_overlaps(&e, 14, 100), "range starts on entry last");
+        // Range fully after the entry → excluded.
+        assert!(!txn_overlaps(&e, 15, 100), "range starts just after entry");
+        // Range fully covering the entry → included.
+        assert!(txn_overlaps(&e, 0, 100), "range covers entry");
     }
 
     // ── Integration tests against `LocalTieredStorage` +
