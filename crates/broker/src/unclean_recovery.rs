@@ -4,8 +4,6 @@
 //! epoch (`GetReplicaLogInfo`, `api_key` 93) and elects the most complete
 //! log. See docs/superpowers/specs/2026-05-28-crabka-unclean-recovery-kip966-design.md.
 
-#![allow(dead_code)]
-
 use crabka_raft::NodeId;
 
 /// One replica's reported log state, gathered from a `GetReplicaLogInfo`
@@ -230,15 +228,11 @@ impl UncleanRecoveryManager {
             let (host, port) = (reg.host.clone(), reg.port);
             let client = self.inter_broker_client.clone();
             let proto = self.listener_protocol;
-            let topic = job.topic.clone();
             let partition = job.partition;
             let my_id = i32::try_from(self.node_id).unwrap_or(-1);
             futs.push(
                 async move {
-                    query_replica(
-                        &client, proto, &host, port, my_id, topic_id, &topic, partition, r,
-                    )
-                    .await
+                    query_replica(&client, proto, &host, port, my_id, topic_id, partition, r).await
                 }
                 .boxed(),
             );
@@ -248,7 +242,7 @@ impl UncleanRecoveryManager {
             RecoveryStrategy::Aggressive | RecoveryStrategy::None => AGGRESSIVE_DEADLINE,
             RecoveryStrategy::Balanced => BALANCED_DEADLINE,
         };
-        let collected: Vec<ReplicaLogInfo> = gather_responses(futs, job.strategy, deadline).await;
+        let collected: Vec<ReplicaLogInfo> = gather_responses(futs, deadline).await;
 
         if has_newer_leader(&collected, known_epoch) {
             return RecoveryOutcome::Stale;
@@ -308,7 +302,6 @@ async fn query_replica(
     port: u16,
     my_broker_id: i32,
     topic_id: WireUuid,
-    _topic: &str,
     partition: i32,
     replica: NodeId,
 ) -> Option<ReplicaLogInfo> {
@@ -351,11 +344,7 @@ async fn query_replica(
 /// Drive the per-replica query futures concurrently. Returns when all futures
 /// resolve OR `deadline` elapses, whichever is first. On timeout, returns
 /// whatever responses arrived so far (never silently discards partial data).
-async fn gather_responses<F>(
-    futs: Vec<F>,
-    _strategy: RecoveryStrategy,
-    deadline: Duration,
-) -> Vec<ReplicaLogInfo>
+async fn gather_responses<F>(futs: Vec<F>, deadline: Duration) -> Vec<ReplicaLogInfo>
 where
     F: std::future::Future<Output = Option<ReplicaLogInfo>> + Send + 'static,
 {
@@ -452,12 +441,7 @@ mod urm_tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
             Some(info(2, 90))
         };
-        let got = gather_responses(
-            vec![f1.boxed(), f2.boxed()],
-            RecoveryStrategy::Balanced,
-            Duration::from_secs(5),
-        )
-        .await;
+        let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_secs(5)).await;
         assert_eq!(got.len(), 2);
         assert_eq!(select_best_replica(&got), Some(2));
     }
@@ -469,12 +453,7 @@ mod urm_tests {
             tokio::time::sleep(Duration::from_secs(10)).await;
             Some(info(2, 90))
         };
-        let got = gather_responses(
-            vec![f1.boxed(), f2.boxed()],
-            RecoveryStrategy::Balanced,
-            Duration::from_millis(50),
-        )
-        .await;
+        let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
         assert_eq!(got.len(), 1, "must return what arrived before the cap");
         assert_eq!(got[0].broker_id, 1);
     }
@@ -486,12 +465,7 @@ mod urm_tests {
             tokio::time::sleep(Duration::from_secs(10)).await;
             Some(info(2, 90))
         };
-        let got = gather_responses(
-            vec![f1.boxed(), f2.boxed()],
-            RecoveryStrategy::Aggressive,
-            Duration::from_millis(50),
-        )
-        .await;
+        let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
         assert_eq!(got, vec![info(1, 50)]);
     }
 }

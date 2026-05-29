@@ -164,8 +164,7 @@ pub(crate) async fn handle(
                     },
                     // Stale / InProgress, dropped reply channel, or the
                     // operator deadline elapsed: surface a retriable error.
-                    Ok(Ok(RecoveryOutcome::Stale | RecoveryOutcome::InProgress) | Err(_))
-                    | Err(_) => PartitionResult {
+                    _ => PartitionResult {
                         partition_id: p,
                         error_code: codes::ELIGIBLE_LEADERS_NOT_AVAILABLE,
                         error_message: Some("unclean recovery in progress".into()),

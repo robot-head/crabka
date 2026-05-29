@@ -160,7 +160,7 @@ fn parse_u64_at_least(min: u64, value: &str) -> Result<u64, String> {
     Ok(parsed)
 }
 
-/// Returns `true` if `key` is one of the eight whitelisted topic-config keys.
+/// Returns `true` if `key` is one of the recognized topic-config keys.
 /// Useful for `IncrementalAlterConfigs` DELETE-op validation without
 /// requiring a sentinel probe value.
 pub(crate) fn is_recognized(key: &str) -> bool {
