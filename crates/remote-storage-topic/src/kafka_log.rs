@@ -490,11 +490,7 @@ async fn partition_fetch_loop(
         security: state.security.clone().map(Box::new),
         ..Default::default()
     };
-    let connect = match &state.security {
-        Some(sec) => Connection::connect_secured(addr, opts, sec).await,
-        None => Connection::connect(addr, opts).await,
-    };
-    let conn = match connect {
+    let conn = match Connection::connect_with_options(addr, opts).await {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, partition, "metadata consumer: connect failed");
@@ -593,6 +589,7 @@ mod tests {
                     username: "u".into(),
                     password: "p".into(),
                 }),
+                sasl_host: None,
             }),
         };
         assert!(cfg.security.is_some());

@@ -96,6 +96,26 @@ impl Connection {
         Self::from_stream(Box::new(stream), options).await
     }
 
+    /// Connect to `addr` honouring `options.security`: a secured (TLS/SASL)
+    /// dial when a policy is set, plaintext otherwise.
+    ///
+    /// This is the single connect entry point for every metadata-client
+    /// site (pool, admin, RLMM fetch loop) so the plaintext-vs-secured
+    /// branch can't drift between them. The plaintext (`None`) path is
+    /// byte-identical to [`Self::connect`].
+    ///
+    /// # Errors
+    /// Propagates [`Self::connect`] / [`Self::connect_secured`] failures.
+    pub async fn connect_with_options(
+        addr: SocketAddr,
+        options: ConnectionOptions,
+    ) -> Result<Self, ClientError> {
+        match options.security.clone() {
+            Some(sec) => Self::connect_secured(addr, options, sec.as_ref()).await,
+            None => Self::connect(addr, options).await,
+        }
+    }
+
     /// Connect to `addr`, applying `security` (TLS then SASL) before the
     /// API-versions bootstrap. `Plaintext` is identical to [`Self::connect`].
     ///
@@ -143,10 +163,12 @@ impl Connection {
             let creds = security.sasl.as_ref().ok_or_else(|| {
                 ClientError::Io(std::io::Error::other("SASL protocol without credentials"))
             })?;
-            let server_name = security
-                .tls
-                .as_ref()
-                .map_or("localhost", |t| t.server_name.as_str());
+            // GSSAPI SPN host: explicit `sasl_host`, else TLS SNI, else the
+            // connection's target IP, else "localhost". The target IP is a
+            // last resort — for GSSAPI the caller should set `sasl_host` so
+            // the principal matches the broker's advertised hostname.
+            let target = addr.ip().to_string();
+            let server_name = security.sasl_handshake_host(Some(target.as_str()));
             crate::sasl::outbound_sasl(&mut *stream, creds, server_name)
                 .await
                 .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
@@ -578,6 +600,7 @@ mod secured_tests {
                 username: "u".into(),
                 password: "p".into(),
             }),
+            sasl_host: None,
         };
         let conn = Connection::connect_secured(addr, ConnectionOptions::default(), &security)
             .await

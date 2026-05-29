@@ -427,11 +427,9 @@ impl AdminClient {
         let addr = addrs
             .next()
             .ok_or_else(|| AdminError::Protocol(format!("no addresses for {host_port}")))?;
-        let conn = match opts.security.clone() {
-            Some(sec) => Connection::connect_secured(addr, opts, sec.as_ref()).await,
-            None => Connection::connect(addr, opts).await,
-        };
-        conn.map_err(AdminError::from)
+        Connection::connect_with_options(addr, opts)
+            .await
+            .map_err(AdminError::from)
     }
 
     /// Replace the underlying connection. Used internally by the
@@ -496,6 +494,7 @@ mod tests {
                 username: "u".into(),
                 password: "p".into(),
             }),
+            sasl_host: None,
         };
         // 127.0.0.1:1 has no listener; the secured connect must fail —
         // proving the security arg is threaded (not a type error).

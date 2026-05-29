@@ -413,6 +413,7 @@ mod security_arg_tests {
                 username: "u".into(),
                 password: "p".into(),
             }),
+            sasl_host: None,
         };
         // 127.0.0.1:1 is unroutable; the consumer build connects eagerly
         // (JoinGroup), so it must fail — proving the security arg is

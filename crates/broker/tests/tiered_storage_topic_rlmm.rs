@@ -420,6 +420,7 @@ async fn topic_rlmm_sasl_loopback_copy_then_fetch_round_trip() {
             username: "rlmm".into(),
             password: "rlmm-secret".into(),
         }),
+        sasl_host: None,
     };
     let client = build_client_secured(&broker, Some(security)).await;
     copy_then_fetch_round_trip(&broker, &client, remote_dir.path(), TOPIC).await;

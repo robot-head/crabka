@@ -163,6 +163,7 @@ mod security_arg_tests {
                 username: "u".into(),
                 password: "p".into(),
             }),
+            sasl_host: None,
         };
         // 127.0.0.1:1 is unroutable for a listener; with idempotence on the
         // build issues an InitProducerId, which must fail at connect —

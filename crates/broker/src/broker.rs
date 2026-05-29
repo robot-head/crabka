@@ -1843,20 +1843,18 @@ impl Broker {
                     inter.map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
                 // Plaintext inter-broker → no security (loopback unchanged).
                 let security = if proto.requires_tls() || proto.requires_sasl() {
+                    // Advertised host of the inter-broker listener. Used for
+                    // both the TLS SNI and the GSSAPI SPN host so they agree.
+                    let advertised_host = inter.map_or_else(
+                        || "localhost".to_string(),
+                        |l| parse_advertised_host_port(&l.advertised).0,
+                    );
                     let tls = if proto.requires_tls() {
                         config.tls_config.as_ref().map(|t| {
                             crabka_client_core::security::TlsConnectorConfig {
                                 trust_roots_pem: t.trust_roots_path.clone(),
                                 // SNI = the advertised host of the inter-broker listener.
-                                server_name: inter.map_or_else(
-                                    || "localhost".to_string(),
-                                    |l| {
-                                        l.advertised.rsplit_once(':').map_or_else(
-                                            || l.advertised.clone(),
-                                            |(h, _)| h.to_string(),
-                                        )
-                                    },
-                                ),
+                                server_name: advertised_host.clone(),
                             }
                         })
                     } else {
@@ -1865,11 +1863,16 @@ impl Broker {
                     let sasl = config
                         .inter_broker_credentials
                         .as_ref()
-                        .map(to_client_creds_from_inter_broker);
+                        .map(crate::network::client::to_client_creds);
+                    // GSSAPI SPN host: set for any SASL listener (SASL_PLAINTEXT
+                    // and SASL_SSL) so Kerberos gets the real advertised host
+                    // rather than falling back to "localhost".
+                    let sasl_host = proto.requires_sasl().then(|| advertised_host.clone());
                     Some(Box::new(crabka_client_core::security::ClientSecurity {
                         protocol: proto,
                         tls,
                         sasl,
+                        sasl_host,
                     }))
                 } else {
                     None
@@ -2183,15 +2186,6 @@ impl Broker {
 struct KafkaSwapKickoff {
     cfg: crate::config::KafkaRlmmConfig,
     broker_id: i32,
-}
-
-/// Map the broker's inter-broker credentials onto the client-core
-/// [`crabka_client_core::security::SaslCredentials`] for the metadata
-/// client, reusing the same mapping as the inter-broker dialer.
-fn to_client_creds_from_inter_broker(
-    c: &crate::config::InterBrokerCredentials,
-) -> crabka_client_core::security::SaslCredentials {
-    crate::network::client::to_client_creds(c)
 }
 
 /// The sorted, deduped set of `__remote_log_metadata` partitions this broker

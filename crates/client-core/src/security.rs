@@ -67,6 +67,37 @@ pub struct ClientSecurity {
     pub protocol: ListenerProtocol,
     pub tls: Option<TlsConnectorConfig>,
     pub sasl: Option<SaslCredentials>,
+    /// Canonical hostname for the SASL handshake — the GSSAPI service
+    /// principal host (`service_name/<sasl_host>`). Meaningful whenever
+    /// the protocol [`requires_sasl`], independent of TLS: a
+    /// `SASL_PLAINTEXT` listener has no `tls` to source the host from, so
+    /// without this GSSAPI would fall back to `localhost` and Kerberos
+    /// would reject the principal. `None` falls back to `tls.server_name`
+    /// then the connection's target host. PLAIN/SCRAM ignore it.
+    ///
+    /// [`requires_sasl`]: ListenerProtocol::requires_sasl
+    pub sasl_host: Option<String>,
+}
+
+impl ClientSecurity {
+    /// Resolve the hostname handed to the SASL handshake (the GSSAPI SPN
+    /// host). Prefers the explicit [`Self::sasl_host`], then the TLS SNI
+    /// ([`TlsConnectorConfig::server_name`]), then the connection's target
+    /// `host` if known, falling back to `"localhost"`.
+    ///
+    /// TLS SNI is unaffected — it is always sourced from `tls.server_name`.
+    #[must_use]
+    pub fn sasl_handshake_host<'a>(&'a self, target_host: Option<&'a str>) -> &'a str {
+        if let Some(h) = self.sasl_host.as_deref() {
+            h
+        } else if let Some(tls) = self.tls.as_ref() {
+            tls.server_name.as_str()
+        } else if let Some(h) = target_host {
+            h
+        } else {
+            "localhost"
+        }
+    }
 }
 
 #[cfg(test)]
@@ -80,6 +111,7 @@ mod tests {
             protocol: ListenerProtocol::Plaintext,
             tls: None,
             sasl: None,
+            sasl_host: None,
         };
         assert!(!s.protocol.requires_tls());
         assert!(!s.protocol.requires_sasl());
@@ -94,9 +126,53 @@ mod tests {
                 username: "u".into(),
                 password: "p".into(),
             }),
+            sasl_host: None,
         };
         assert!(s.protocol.requires_sasl());
         assert!(matches!(s.sasl, Some(SaslCredentials::Plain { .. })));
+    }
+
+    #[test]
+    fn sasl_handshake_host_prefers_explicit_field() {
+        // SASL_PLAINTEXT (no TLS) with an explicit host: GSSAPI must get
+        // the real SPN host, not "localhost" or the target host.
+        let s = ClientSecurity {
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls: None,
+            sasl: None,
+            sasl_host: Some("kdc-broker.example.com".into()),
+        };
+        assert_eq!(
+            s.sasl_handshake_host(Some("10.0.0.5")),
+            "kdc-broker.example.com"
+        );
+    }
+
+    #[test]
+    fn sasl_handshake_host_falls_back_to_tls_then_target_then_localhost() {
+        // No explicit sasl_host → TLS SNI wins.
+        let with_tls = ClientSecurity {
+            protocol: ListenerProtocol::SaslSsl,
+            tls: Some(TlsConnectorConfig {
+                trust_roots_pem: None,
+                server_name: "tls-host".into(),
+            }),
+            sasl: None,
+            sasl_host: None,
+        };
+        assert_eq!(with_tls.sasl_handshake_host(Some("10.0.0.5")), "tls-host");
+
+        // No sasl_host, no TLS → target host wins.
+        let no_tls = ClientSecurity {
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls: None,
+            sasl: None,
+            sasl_host: None,
+        };
+        assert_eq!(no_tls.sasl_handshake_host(Some("10.0.0.5")), "10.0.0.5");
+
+        // Nothing set at all → localhost.
+        assert_eq!(no_tls.sasl_handshake_host(None), "localhost");
     }
 
     #[test]
