@@ -44,7 +44,7 @@ pub(crate) const UNCLEAN_LEADER_ELECTION_ENABLE: &str = "unclean.leader.election
 /// surviving replicas for their log offsets and elects the most complete
 /// log). `None` (the default) falls back to the legacy enable-flag
 /// behavior. Consumed by `crate::unclean_recovery` and the failover /
-/// ElectLeaders paths.
+/// `ElectLeaders` paths.
 pub(crate) const UNCLEAN_RECOVERY_STRATEGY: &str = "unclean.recovery.strategy";
 
 /// Resolved value of `unclean.recovery.strategy` for a topic.
