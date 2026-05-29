@@ -12,7 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
-use dashmap::DashMap;
 
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::produce_request::{PartitionProduceData, ProduceRequest};
@@ -30,6 +29,7 @@ use crate::codes;
 use crate::config_keys::MIN_INSYNC_REPLICAS;
 use crate::error::BrokerError;
 use crate::partition::{Partition, ProduceJob, WriterMessage};
+use crate::partition_registry::PartitionRegistry;
 
 /// Resolve `min.insync.replicas` for a topic from the metadata image.
 /// Defaults to `1` (Kafka's default — every cluster has at least the
@@ -299,7 +299,7 @@ async fn process_partition(
     txn_id_denied: bool,
     acks: i16,
     timeout: Duration,
-    partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
+    partitions: &Arc<PartitionRegistry>,
     txn_coordinator: &Arc<crate::txn::coordinator::TxnCoordinator>,
     producer_state: &Arc<crate::producer_state::ProducerState>,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
@@ -323,57 +323,19 @@ async fn process_partition(
     }
 
     // Either there's a single decoded RecordBatch to append, or
-    // the field was null / undecodable → INVALID_REQUEST.
-    let Some(payload) = part_data.records else {
-        out.error_code = codes::INVALID_REQUEST;
-        return Ok(out);
-    };
-    let mut batch = match payload {
-        RecordsPayload::V2(batches) => {
-            let Some(rb) = batches.into_iter().next() else {
-                out.error_code = codes::INVALID_REQUEST;
-                return Ok(out);
-            };
-            rb
+    // the field was null / undecodable → INVALID_REQUEST / INVALID_RECORD.
+    let mut batch = match decode_single_batch(part_data.records, topic_name, metrics) {
+        Ok(rb) => rb,
+        Err(code) => {
+            out.error_code = code;
+            return Ok(out);
         }
-        RecordsPayload::Raw(bytes) => {
-            // A producer that sent verbatim v2 bytes: decode the sole batch.
-            let sole = RecordsPayload::from_bytes(bytes)
-                .ok()
-                .and_then(|p| match p {
-                    RecordsPayload::V2(mut v) => v.drain(..).next(),
-                    _ => None,
-                });
-            let Some(rb) = sole else {
-                out.error_code = codes::INVALID_REQUEST;
-                return Ok(out);
-            };
-            rb
-        }
-        RecordsPayload::Legacy(bytes) => match crabka_records_legacy::legacy_to_v2(&bytes) {
-            Ok(rb) => {
-                // Account this Produce-path up-conversion. Kept
-                // inside the success arm so failed conversions (counted as
-                // INVALID_RECORD errors) don't double-count.
-                if !topic_name.is_empty() {
-                    metrics.record_produce_message_conversion(topic_name);
-                }
-                rb
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "legacy_to_v2 failed");
-                out.error_code = codes::INVALID_RECORD;
-                return Ok(out);
-            }
-        },
     };
 
     let part = if topic_name.is_empty() {
         None
     } else {
-        partitions
-            .get(&(topic_name.to_string(), idx))
-            .map(|p| p.clone())
+        partitions.get(topic_name, idx)
     };
     let Some(part) = part else {
         out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
@@ -569,65 +531,27 @@ async fn process_partition(
 
     match tokio::time::timeout(timeout, ack_rx).await {
         Ok(Ok(Ok(base_offset))) => {
-            if acks == -1 {
-                let target = base_offset + i64::from(last_offset_delta) + 1;
-                let deadline = std::time::Instant::now() + timeout;
-                match part.await_hw_at_least(target, deadline).await {
-                    Ok(()) => {
-                        out.error_code = codes::NONE;
-                        out.base_offset = base_offset;
-                        if pid >= 0 {
-                            producer_state
-                                .commit(
-                                    topic_name,
-                                    idx,
-                                    pid,
-                                    epoch,
-                                    base_seq,
-                                    last_offset_delta,
-                                    base_offset,
-                                    max_timestamp,
-                                )
-                                .await;
-                        }
-                    }
-                    Err(_timeout) => {
-                        out.error_code = codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND;
-                        out.base_offset = base_offset;
-                        if pid >= 0 {
-                            producer_state
-                                .commit(
-                                    topic_name,
-                                    idx,
-                                    pid,
-                                    epoch,
-                                    base_seq,
-                                    last_offset_delta,
-                                    base_offset,
-                                    max_timestamp,
-                                )
-                                .await;
-                        }
-                    }
-                }
-            } else {
-                out.error_code = codes::NONE;
-                out.base_offset = base_offset;
-                if pid >= 0 {
-                    producer_state
-                        .commit(
-                            topic_name,
-                            idx,
-                            pid,
-                            epoch,
-                            base_seq,
-                            last_offset_delta,
-                            base_offset,
-                            max_timestamp,
-                        )
-                        .await;
-                }
-            }
+            // Single finalization site for a successful append: applies
+            // the `acks=-1` high-watermark gate and records the
+            // idempotent-producer commit exactly once.
+            finalize_ack(
+                &mut out,
+                &part,
+                acks,
+                timeout,
+                base_offset,
+                producer_state,
+                &CommitKey {
+                    topic: topic_name,
+                    partition: idx,
+                    pid,
+                    epoch,
+                    base_seq,
+                    last_offset_delta,
+                    max_timestamp,
+                },
+            )
+            .await;
         }
         Ok(Ok(Err(e))) => {
             out.error_code = codes::from_broker_error(&e);
@@ -643,6 +567,128 @@ async fn process_partition(
         }
     }
     Ok(out)
+}
+
+/// Borrowed bundle of the idempotent-producer dedup identity plus the
+/// fields needed to record a `producer_state.commit`. Groups the eight
+/// positional `commit` arguments into a single value so the commit call
+/// exists in exactly one place ([`finalize_ack`]).
+struct CommitKey<'a> {
+    topic: &'a str,
+    partition: i32,
+    pid: i64,
+    epoch: i16,
+    base_seq: i32,
+    last_offset_delta: i32,
+    max_timestamp: i64,
+}
+
+/// Finalize a successful writer append: apply the `acks=-1`
+/// high-watermark durability gate, set the response `error_code` /
+/// `base_offset`, and record the idempotent-producer commit (when
+/// `pid >= 0`) exactly once.
+///
+/// Behavior matches the previous three inlined sites verbatim:
+///   * `acks != -1`: NONE, then commit.
+///   * `acks == -1`, HW reaches target: NONE, then commit.
+///   * `acks == -1`, HW gate times out: `NOT_ENOUGH_REPLICAS_AFTER_APPEND`,
+///     then commit (the append is durable on the leader; the
+///     idempotent tracker must advance so a retry is recognized as a
+///     duplicate rather than out-of-order).
+///
+/// Note the commit happens on *both* the success and timeout `acks=-1`
+/// sub-paths — identical to the pre-refactor code — so it is performed
+/// unconditionally here once the `error_code`/`base_offset` are decided.
+async fn finalize_ack(
+    out: &mut PartitionProduceResponse,
+    part: &Arc<Partition>,
+    acks: i16,
+    timeout: Duration,
+    base_offset: i64,
+    producer_state: &Arc<crate::producer_state::ProducerState>,
+    key: &CommitKey<'_>,
+) {
+    if acks == -1 {
+        let target = base_offset + i64::from(key.last_offset_delta) + 1;
+        let deadline = std::time::Instant::now() + timeout;
+        out.error_code = match part.await_hw_at_least(target, deadline).await {
+            Ok(()) => codes::NONE,
+            Err(_timeout) => codes::NOT_ENOUGH_REPLICAS_AFTER_APPEND,
+        };
+    } else {
+        out.error_code = codes::NONE;
+    }
+    out.base_offset = base_offset;
+    if key.pid >= 0 {
+        producer_state
+            .commit(
+                key.topic,
+                key.partition,
+                key.pid,
+                key.epoch,
+                key.base_seq,
+                key.last_offset_delta,
+                base_offset,
+                key.max_timestamp,
+            )
+            .await;
+    }
+}
+
+/// Extract the single [`RecordBatch`] to append from a partition's
+/// `records` field, up-converting legacy v0/v1 `MessageSet` payloads.
+///
+/// Returns the error *code* to write into the response on failure:
+///   * `INVALID_REQUEST` — null field or an empty v2 batch sequence.
+///   * `INVALID_RECORD` — legacy up-conversion failed.
+///
+/// Produce-request decoding (`RecordsPayload::decode` → `from_bytes`)
+/// only ever yields `V2` or `Legacy`; the `Raw` variant is produced
+/// solely on the Fetch *response* pass-through path and never arrives
+/// here. It is handled defensively for totality.
+fn decode_single_batch(
+    records: Option<RecordsPayload>,
+    topic_name: &str,
+    metrics: &crate::metrics::BrokerMetrics,
+) -> Result<crabka_protocol::records::RecordBatch, i16> {
+    let Some(payload) = records else {
+        return Err(codes::INVALID_REQUEST);
+    };
+    match payload {
+        RecordsPayload::V2(batches) => batches.into_iter().next().ok_or(codes::INVALID_REQUEST),
+        RecordsPayload::Raw(bytes) => {
+            // PERF/dead-code: `Raw` is unreachable on the produce path —
+            // the request decoder eagerly parses v2 bytes into `V2`
+            // (see crate `records::payload::RecordsPayload::from_bytes`,
+            // invoked by the generated `PartitionProduceData::decode`),
+            // so the already-parsed batch is consumed in the `V2` arm
+            // above with no second decode. This arm exists only for
+            // totality and preserves the prior decode-the-sole-batch
+            // behavior should a `Raw` ever reach here.
+            RecordsPayload::from_bytes(bytes)
+                .ok()
+                .and_then(|p| match p {
+                    RecordsPayload::V2(mut v) => v.drain(..).next(),
+                    RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => None,
+                })
+                .ok_or(codes::INVALID_REQUEST)
+        }
+        RecordsPayload::Legacy(bytes) => match crabka_records_legacy::legacy_to_v2(&bytes) {
+            Ok(rb) => {
+                // Account this Produce-path up-conversion. Kept inside the
+                // success arm so failed conversions (counted as
+                // INVALID_RECORD errors) don't double-count.
+                if !topic_name.is_empty() {
+                    metrics.record_produce_message_conversion(topic_name);
+                }
+                Ok(rb)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "legacy_to_v2 failed");
+                Err(codes::INVALID_RECORD)
+            }
+        },
+    }
 }
 
 #[allow(

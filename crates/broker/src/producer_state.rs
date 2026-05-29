@@ -19,6 +19,11 @@ pub struct ProducerEntry {
     /// Retained for future slice work (metrics / compaction).
     #[allow(dead_code)]
     pub last_timestamp: i64,
+    /// Wall-clock millis of the last `commit` that touched this entry.
+    /// Used by [`ProducerState::expire_older_than`] to evict idle
+    /// idempotent-producer state, matching Kafka's
+    /// `producer.id.expiration.ms` (KAFKA: expire by inactivity).
+    pub last_activity_ms: i64,
 }
 
 #[derive(Debug, Default)]
@@ -43,17 +48,23 @@ pub enum Decision {
     Fenced,
 }
 
+/// Per-partition idempotent-producer state, nested under the owning
+/// topic. Keyed by partition index (`i32`, `Copy`) so per-call lookups
+/// allocate nothing; the outer topic map is keyed by `String` but its
+/// `get`/`entry` accept a borrowed `&str` and only allocate the owned
+/// topic key on the first produce to a previously-unseen topic.
+type PartitionMap = DashMap<i32, Arc<Mutex<PartitionProducerState>>>;
+
 #[derive(Debug, Default)]
 pub struct ProducerState {
-    #[allow(clippy::type_complexity)]
-    by_partition: Arc<DashMap<(String, i32), Arc<Mutex<PartitionProducerState>>>>,
+    by_topic: Arc<DashMap<String, Arc<PartitionMap>>>,
 }
 
 impl ProducerState {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            by_partition: Arc::new(DashMap::new()),
+            by_topic: Arc::new(DashMap::new()),
         }
     }
 
@@ -121,13 +132,29 @@ impl ProducerState {
                 last_offset,
                 base_offset,
                 last_timestamp,
+                last_activity_ms: crate::txn::util::now_millis(),
             },
         );
     }
 
+    /// Resolve (creating on miss) the per-partition state handle. The
+    /// outer topic lookup borrows `&str` and only allocates an owned
+    /// `String` key when the topic is seen for the first time; the inner
+    /// partition lookup is keyed by `i32` and never allocates.
     fn handle(&self, topic: &str, partition: i32) -> Arc<Mutex<PartitionProducerState>> {
-        self.by_partition
-            .entry((topic.to_string(), partition))
+        // `get` first to avoid allocating the topic `String` on the hot
+        // path (the topic almost always already exists).
+        let parts = if let Some(existing) = self.by_topic.get(topic) {
+            existing.value().clone()
+        } else {
+            self.by_topic
+                .entry(topic.to_string())
+                .or_insert_with(|| Arc::new(DashMap::new()))
+                .value()
+                .clone()
+        };
+        parts
+            .entry(partition)
             .or_insert_with(|| Arc::new(Mutex::new(PartitionProducerState::default())))
             .value()
             .clone()
@@ -146,15 +173,71 @@ impl ProducerState {
     pub async fn snapshot(&self, topic: &str, partition: i32) -> Vec<(i64, ProducerEntry)> {
         // Cheaper to bypass `handle` (which inserts on miss): a snapshot
         // for an unknown partition should report "no producers", not
-        // wire up an empty entry. `get` returns `None` for un-tracked
-        // partitions, which we map to an empty result.
-        let Some(entry_ref) = self.by_partition.get(&(topic.to_string(), partition)) else {
+        // wire up an empty entry. The borrowed `&str` / `i32` lookups
+        // allocate nothing and map a miss to an empty result.
+        let Some(topic_ref) = self.by_topic.get(topic) else {
             return Vec::new();
         };
-        let handle = entry_ref.value().clone();
-        drop(entry_ref);
+        let parts = topic_ref.value().clone();
+        drop(topic_ref);
+        let Some(part_ref) = parts.get(&partition) else {
+            return Vec::new();
+        };
+        let handle = part_ref.value().clone();
+        drop(part_ref);
         let state = handle.lock().await;
         state.entries.iter().map(|(pid, e)| (*pid, *e)).collect()
+    }
+
+    /// Evict idempotent-producer entries whose last activity is older
+    /// than `ttl_ms` relative to `now_ms`, mirroring Kafka's
+    /// `producer.id.expiration.ms` (default `86_400_000` ms = 24h). Kafka
+    /// expires by *inactivity*: an entry that keeps receiving produces
+    /// is retained; one that has gone quiet past the window is dropped so
+    /// the map doesn't grow unbounded.
+    ///
+    /// Empty partition maps (and empty topic maps) are removed once their
+    /// last entry expires so stale `(topic, partition)` keys don't leak.
+    /// Returns the number of producer-id entries evicted.
+    ///
+    /// This provides the mechanism only; the periodic caller (a broker
+    /// maintenance loop) is wired separately.
+    pub async fn expire_older_than(&self, now_ms: i64, ttl_ms: i64) -> usize {
+        let mut evicted = 0usize;
+        // Snapshot the (topic -> partition-map) refs first so we don't
+        // hold a DashMap shard guard across the per-partition `.await`.
+        let topics: Vec<(String, Arc<PartitionMap>)> = self
+            .by_topic
+            .iter()
+            .map(|e| (e.key().clone(), e.value().clone()))
+            .collect();
+        for (topic, parts) in topics {
+            let partition_refs: Vec<(i32, Arc<Mutex<PartitionProducerState>>)> = parts
+                .iter()
+                .map(|e| (*e.key(), e.value().clone()))
+                .collect();
+            for (partition, handle) in partition_refs {
+                let mut state = handle.lock().await;
+                let before = state.entries.len();
+                state
+                    .entries
+                    .retain(|_pid, entry| now_ms.saturating_sub(entry.last_activity_ms) < ttl_ms);
+                evicted += before - state.entries.len();
+                let now_empty = state.entries.is_empty();
+                drop(state);
+                if now_empty {
+                    // Only drop the partition slot if it's *still* empty
+                    // under the removal guard, so a concurrent commit that
+                    // re-populated it isn't lost.
+                    parts.remove_if(&partition, |_, h| {
+                        h.try_lock().is_ok_and(|s| s.entries.is_empty())
+                    });
+                }
+            }
+            // Drop the topic slot if all its partitions are gone.
+            self.by_topic.remove_if(&topic, |_, p| p.is_empty());
+        }
+        evicted
     }
 }
 
@@ -203,5 +286,60 @@ mod tests {
         s.commit("t", 0, 1000, 5, 0, 4, 0, 1).await;
         let d = s.check("t", 0, 1000, 4, 5, 2).await;
         assert_eq!(d, Decision::Fenced);
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_committed_entries() {
+        let s = ProducerState::new();
+        s.commit("t", 3, 1000, 0, 0, 4, 7, 1).await;
+        let snap = s.snapshot("t", 3).await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].0, 1000);
+        assert_eq!(snap[0].1.base_offset, 7);
+        // Untouched partition / topic report empty without panicking.
+        assert!(s.snapshot("t", 0).await.is_empty());
+        assert!(s.snapshot("other", 3).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn expire_evicts_only_idle_entries() {
+        let s = ProducerState::new();
+        // Two producers on the same partition with controlled activity
+        // timestamps: we commit, then overwrite last_activity_ms directly
+        // to simulate age without sleeping.
+        s.commit("t", 0, 1, 0, 0, 0, 0, 0).await;
+        s.commit("t", 0, 2, 0, 0, 0, 0, 0).await;
+        {
+            let h = s.handle("t", 0);
+            let mut st = h.lock().await;
+            st.entries.get_mut(&1).unwrap().last_activity_ms = 1_000; // old
+            st.entries.get_mut(&2).unwrap().last_activity_ms = 9_000; // recent
+        }
+        // now = 10_000, ttl = 5_000 → pid 1 (age 9_000) expires, pid 2
+        // (age 1_000) survives.
+        let evicted = s.expire_older_than(10_000, 5_000).await;
+        assert_eq!(evicted, 1);
+        let snap = s.snapshot("t", 0).await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].0, 2, "only the recently-active producer survives");
+    }
+
+    #[tokio::test]
+    async fn expire_drops_empty_partition_and_topic_slots() {
+        let s = ProducerState::new();
+        s.commit("t", 0, 1, 0, 0, 0, 0, 0).await;
+        {
+            let h = s.handle("t", 0);
+            h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 0;
+        }
+        let evicted = s.expire_older_than(1_000_000, 1).await;
+        assert_eq!(evicted, 1);
+        // The empty partition and topic maps are pruned.
+        assert!(
+            s.by_topic.get("t").is_none(),
+            "empty topic slot must be removed"
+        );
+        // A subsequent produce still works after pruning.
+        assert_eq!(s.check("t", 0, 1, 0, 0, 0).await, Decision::Append);
     }
 }

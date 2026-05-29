@@ -181,7 +181,9 @@ async fn handle_session_tick(
     if evicted.is_empty() {
         return Ok(());
     }
-    state.bump_epoch();
+    // `evict_expired` → `remove_member` already set `dirty`. Let the
+    // reconciler own the single `bump_epoch` (via `reconcile_if_dirty`); an
+    // explicit pre-bump here would double-advance `group_epoch` per eviction.
     run_reconcile(state, config, metadata);
     let mut pending = PendingRecords {
         group_metadata: Some(GroupMetadataValue {
@@ -200,7 +202,7 @@ async fn handle_session_tick(
         pending.current_per_member.push((mid.clone(), None));
     }
     let now_ms = chrono_now_ms();
-    if let Err(e) = flush_pending(state, &pending, offsets_log, coordinator, now_ms).await {
+    if let Err(e) = flush_pending(state, pending, offsets_log, coordinator, now_ms).await {
         tracing::warn!(
             group_id = %state.group_id,
             error = %e,
@@ -227,6 +229,7 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             client_host: meta.client_host,
             subscribed_topic_names: sub,
             subscribed_topic_regex: meta.subscribed_topic_regex,
+            compiled_regex: None,
             server_assignor: meta.server_assignor,
             rebalance_timeout: Duration::from_millis(
                 u64::try_from(meta.rebalance_timeout_ms.max(0)).unwrap_or(60_000),
@@ -307,7 +310,7 @@ async fn handle_heartbeat(
         run_reconcile(state, config, metadata);
         state.advance_member_epoch(&new_member_id);
         let pending = snapshot_pending_after_change(state, std::slice::from_ref(&new_member_id));
-        flush_pending(state, &pending, offsets_log, coordinator, now_ms).await?;
+        flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
         return Ok(build_assignment_resp(state, &new_member_id, config));
     }
 
@@ -330,7 +333,7 @@ async fn handle_heartbeat(
     let any_change = update_member_state(state, config, metadata, req, now, cur_epoch);
     if any_change {
         let pending = snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id));
-        flush_pending(state, &pending, offsets_log, coordinator, now_ms).await?;
+        flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
     }
     Ok(build_assignment_resp(state, &req.member_id, config))
 }
@@ -362,8 +365,10 @@ fn update_member_state(
         // changes; the client re-sends the same regex on every
         // heartbeat as long as the subscription is stable.
         if req.subscribed_topic_regex != m.subscribed_topic_regex {
-            m.subscribed_topic_regex
-                .clone_from(&req.subscribed_topic_regex);
+            // Recompile the cached regex only here — the one place the
+            // pattern actually changes (the client re-sends the same regex
+            // every heartbeat while the subscription is stable).
+            m.set_regex(req.subscribed_topic_regex.clone());
             state.dirty = true;
         }
         if let Some(ref tp) = req.topic_partitions {
@@ -413,11 +418,19 @@ async fn handle_leave(
     pending.group_metadata = Some(GroupMetadataValue {
         epoch: state.group_epoch,
     });
-    flush_pending(state, &pending, offsets_log, coordinator, now_ms).await?;
+    flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
     Ok(base_resp(0, req.member_epoch, config))
 }
 
 fn run_reconcile(state: &mut GroupState, config: &NextGenConfig, metadata: &dyn MetadataProvider) {
+    // `metadata.snapshot()` rebuilds HashMaps over every cluster topic /
+    // partition — far too expensive to run on a steady-state no-op
+    // heartbeat. `reconcile_if_dirty` early-returns when `!dirty`, so gate
+    // the snapshot on the same condition: only pay for it when we will
+    // actually recompute. Behavior when dirty is identical to before.
+    if !state.dirty {
+        return;
+    }
     let input = metadata.snapshot();
     let assignor = pick_assignor(state, config);
     reconciler::reconcile_if_dirty(state, &input, &*assignor);
@@ -461,6 +474,7 @@ fn build_member(
         client_host: host.into(),
         subscribed_topic_names: subs,
         subscribed_topic_regex: req.subscribed_topic_regex.clone(),
+        compiled_regex: None,
         server_assignor: req.server_assignor.clone(),
         rebalance_timeout: Duration::from_millis(
             u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(60_000),
@@ -572,7 +586,7 @@ use super::persistence::{
     TargetAssignmentMemberValue, TargetAssignmentMetadataValue, encode_key,
 };
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub(crate) struct PendingRecords {
     pub group_metadata: Option<GroupMetadataValue>,
     /// `Some(value)` writes the record; `None` writes a tombstone (null value).
@@ -656,15 +670,19 @@ impl PendingRecords {
             ..RecordBatch::default()
         }
     }
-
-    /// Build a batch without consuming self.
-    pub fn clone_into_batch(&self, group_id: &str, now_ms: i64) -> RecordBatch {
-        self.clone().into_batch(group_id, now_ms)
-    }
 }
 
 /// Snapshot a `GroupState` into a `GroupSeed` suitable for restoring a
 /// freshly-respawned actor. Mirrors what bootstrap replay would produce.
+///
+// PERF: this deep-clones EVERY member's subscriptions/assignments into a
+// fresh `GroupSeed` on every persisted heartbeat, even when only one member
+// changed. An incremental cache update — applying just the affected-member
+// delta computed by `snapshot_pending_after_change` — would avoid the
+// full-group re-clone, but `NextGenCoordinator::update_cache` (mod.rs) only
+// exposes a whole-seed replace and `GroupSeed` is consumed wholesale by
+// replay/scrub. Adding a delta-apply API would ripple into mod.rs, which is
+// out of scope here; left as the remaining full-clone for a follow-up.
 pub(crate) fn snapshot_seed(state: &super::group_state::GroupState) -> super::GroupSeed {
     use crate::coordinator::next_gen::persistence as p;
     let mut members = std::collections::HashMap::new();
@@ -815,7 +833,7 @@ fn snapshot_pending_after_change(
 
 async fn flush_pending(
     state: &super::group_state::GroupState,
-    pending: &PendingRecords,
+    pending: PendingRecords,
     offsets_log: &dyn OffsetsLog,
     coordinator: &super::NextGenCoordinator,
     now_ms: i64,
@@ -823,7 +841,9 @@ async fn flush_pending(
     if pending.is_empty() {
         return Ok(());
     }
-    let batch = pending.clone_into_batch(&state.group_id, now_ms);
+    // Consume `pending` by value: `into_batch` moves the per-member
+    // record vectors straight into the batch instead of deep-cloning them.
+    let batch = pending.into_batch(&state.group_id, now_ms);
     offsets_log.append(batch).await?;
     coordinator.update_cache(&state.group_id, snapshot_seed(state));
     Ok(())
@@ -1163,6 +1183,65 @@ mod tests {
         let batch = p.into_batch("g", 0);
         assert_eq!(batch.records.len(), 1);
         assert!(batch.records[0].value.is_none());
+    }
+
+    /// Regression for the epoch double-bump: a single session-timeout
+    /// eviction must advance `group_epoch` by exactly 1. The fix removed the
+    /// explicit `state.bump_epoch()` in `handle_session_tick`, leaving the
+    /// reconciler (`reconcile_if_dirty`) as the sole bump.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn single_eviction_advances_epoch_by_one() {
+        use crate::coordinator::next_gen::group_state::GroupState;
+
+        let (coord, log) = make_coordinator();
+        // Tiny session timeout so a member whose `last_seen` is a few ms in
+        // the past counts as expired — avoids subtracting a large duration
+        // from `Instant::now()`, which `checked_sub` rejects on low-uptime
+        // CI runners (e.g. a freshly-booted Windows agent).
+        let config = NextGenConfig {
+            session_timeout: Duration::from_millis(1),
+            ..NextGenConfig::default()
+        };
+        let metadata = empty_metadata();
+
+        // Seed a member and reconcile once so the join settles into a clean
+        // (non-dirty) baseline epoch.
+        let mut state = GroupState::new("g");
+        let mut m = build_member(
+            "m1",
+            &ConsumerGroupHeartbeatRequest {
+                subscribed_topic_names: Some(vec!["t".into()]),
+                rebalance_timeout_ms: 60_000,
+                ..Default::default()
+            },
+            "h",
+            Instant::now(),
+        );
+        // Force the member to look session-expired. 50ms is always within
+        // `Instant`'s range (no underflow on any host) yet far exceeds the
+        // 1ms `session_timeout` set above.
+        m.last_seen = Instant::now()
+            .checked_sub(Duration::from_millis(50))
+            .expect("50ms is always within Instant range");
+        state.add_or_update_member(m);
+        run_reconcile(&mut state, &config, &*metadata);
+        assert!(!state.dirty, "baseline must be clean before eviction");
+        let epoch_before = state.group_epoch;
+
+        // One eviction tick.
+        handle_session_tick(&mut state, &config, &*metadata, &*log, &coord)
+            .await
+            .expect("tick should succeed");
+
+        assert!(
+            state.members.is_empty(),
+            "expired member must have been evicted"
+        );
+        assert_eq!(
+            state.group_epoch,
+            epoch_before + 1,
+            "a single eviction must advance the group epoch by exactly 1"
+        );
     }
 
     // ---------------------------------------------------------------------

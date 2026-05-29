@@ -8,15 +8,15 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crabka_raft::NodeId;
-use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::partition::Partition;
+use crate::partition_registry::PartitionRegistry;
 
 pub(crate) struct Config {
     pub node_id: NodeId,
-    pub partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    pub partitions: Arc<PartitionRegistry>,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub replica_lag_time_max: Duration,
     pub broker_id: i32,
@@ -27,17 +27,21 @@ pub(crate) struct Config {
 
 pub(crate) async fn run(cfg: Config) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Reused across ticks to avoid re-allocating the snapshot Vec each second.
+    // Holds cheap `Arc<Partition>` clones (no String allocation, no second
+    // registry lookup). Cleared and refilled each tick.
+    let mut snapshot: Vec<Arc<Partition>> = Vec::new();
     loop {
         tokio::select! {
             _ = tick.tick() => {},
             () = cfg.shutdown.cancelled() => return,
         }
-        // Snapshot the keys to avoid holding the DashMap iterator across awaits.
-        let keys: Vec<(String, i32)> = cfg.partitions.iter().map(|e| e.key().clone()).collect();
-        for key in keys {
-            let Some(part) = cfg.partitions.get(&key).map(|e| e.value().clone()) else {
-                continue;
-            };
+        // Snapshot the partition values as cheap Arc clones in a single
+        // iteration, then iterate the owned `Vec` so we never hold a shard
+        // guard across a yield point.
+        snapshot.clear();
+        snapshot.extend(cfg.partitions.arcs());
+        for part in snapshot.drain(..) {
             if part
                 .current_leader
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -45,20 +49,19 @@ pub(crate) async fn run(cfg: Config) {
             {
                 continue;
             }
-            let Some((new_isr, leader_epoch)) =
-                compute_proposal(&part, cfg.replica_lag_time_max).await
-            else {
+            let Some(proposal) = compute_proposal(&part, cfg.replica_lag_time_max).await else {
                 continue;
             };
-            // Classify the proposal as shrink/expand by
-            // comparing membership against the pre-proposal ISR.
-            // `compute_proposal` already filtered for "actually
-            // changed", so at least one of these bumps fires.
-            let prev_isr: std::collections::HashSet<NodeId> = {
-                let st = part.replica_state.lock().await;
-                st.isr.iter().copied().collect()
-            };
-            let next_isr: std::collections::HashSet<NodeId> = new_isr.iter().copied().collect();
+            // Classify the proposal as shrink/expand using the ISRs captured
+            // inside `compute_proposal`'s single lock scope. `compute_proposal`
+            // already filtered for "actually changed", so at least one of these
+            // bumps fires. Reusing its captured `prev_isr` avoids a second
+            // `replica_state` lock and closes the TOCTOU window where the ISR
+            // could change between the two acquisitions.
+            let prev_isr: std::collections::HashSet<NodeId> =
+                proposal.prev_isr.iter().copied().collect();
+            let next_isr: std::collections::HashSet<NodeId> =
+                proposal.new_isr.iter().copied().collect();
             if prev_isr.difference(&next_isr).next().is_some() {
                 cfg.metrics.isr_shrinks_total.inc();
             }
@@ -68,28 +71,42 @@ pub(crate) async fn run(cfg: Config) {
             if let Err(e) = send_alter_partition(
                 &cfg.controller,
                 cfg.broker_id,
-                &key.0,
-                key.1,
-                new_isr,
-                leader_epoch,
+                &part.topic,
+                part.partition_id,
+                proposal.new_isr,
+                proposal.leader_epoch,
             )
             .await
             {
-                warn!(topic = %key.0, partition = key.1, error = %e,
+                warn!(topic = %part.topic, partition = part.partition_id, error = %e,
                     "AlterPartition propose failed");
             }
         }
     }
 }
 
-/// Returns `Some((new_isr, leader_epoch))` if the ISR should change,
-/// else `None`.
-async fn compute_proposal(part: &Partition, lag_max: Duration) -> Option<(Vec<NodeId>, i32)> {
+/// A computed ISR change proposal. All fields are captured within
+/// `compute_proposal`'s single `replica_state` lock scope so the caller
+/// can classify shrink/expand and submit the proposal without re-locking
+/// (and without a TOCTOU window where the ISR shifts between locks).
+struct Proposal {
+    /// The pre-proposal ISR (sorted), used by the caller for shrink/expand
+    /// metric classification.
+    prev_isr: Vec<NodeId>,
+    /// The proposed new ISR (sorted). Guaranteed `!= prev_isr`.
+    new_isr: Vec<NodeId>,
+    /// Leader epoch to stamp on the `AlterPartition` request.
+    leader_epoch: i32,
+}
+
+/// Returns `Some(Proposal)` if the ISR should change, else `None`.
+async fn compute_proposal(part: &Partition, lag_max: Duration) -> Option<Proposal> {
     let st = part.replica_state.lock().await;
     let now = Instant::now();
-    let mut new_isr: Vec<NodeId> = st.isr.iter().copied().collect();
-    // Sort for deterministic comparisons later.
-    new_isr.sort_unstable();
+    // Capture the pre-proposal ISR (sorted) once, inside this lock scope.
+    let mut prev_isr: Vec<NodeId> = st.isr.iter().copied().collect();
+    prev_isr.sort_unstable();
+    let mut new_isr: Vec<NodeId> = prev_isr.clone();
     // Shrink: drop followers lagging > lag_max.
     new_isr.retain(|n| {
         st.per_follower
@@ -107,13 +124,15 @@ async fn compute_proposal(part: &Partition, lag_max: Duration) -> Option<(Vec<No
         }
     }
     new_isr.sort_unstable();
-    let mut current_isr: Vec<NodeId> = st.isr.iter().copied().collect();
-    current_isr.sort_unstable();
-    let no_change = new_isr == current_isr;
+    let no_change = new_isr == prev_isr;
     if no_change {
         None
     } else {
-        Some((new_isr, st.current_leader_epoch))
+        Some(Proposal {
+            prev_isr,
+            new_isr,
+            leader_epoch: st.current_leader_epoch,
+        })
     }
 }
 

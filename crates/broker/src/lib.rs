@@ -152,6 +152,7 @@ pub mod network;
 pub(crate) mod oauth_introspection;
 pub(crate) mod oauth_jwks;
 mod partition;
+pub(crate) mod partition_registry;
 mod partition_writer;
 mod producer_id_manager;
 mod producer_state;

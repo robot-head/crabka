@@ -23,7 +23,7 @@ use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
 
 use crate::error::BrokerError;
-use crate::partition::Partition;
+use crate::partition_registry::PartitionRegistry;
 use crate::txn::bootstrap;
 use crate::txn::partitioner::partition_for_tid;
 use crate::txn::state::TxnEntry;
@@ -32,7 +32,7 @@ use crate::txn::state::TxnEntry;
 /// and shared via `Arc` with the transaction wire handlers.
 pub(crate) struct TxnCoordinator {
     pub(crate) node_id: crabka_metadata::NodeId,
-    pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    pub(crate) partitions: Arc<PartitionRegistry>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     /// Live in-memory state: `transactional_id` → locked `TxnEntry`.
     state: DashMap<String, Arc<Mutex<TxnEntry>>>,
@@ -46,7 +46,7 @@ pub(crate) struct TxnCoordinator {
 impl TxnCoordinator {
     pub(crate) fn new(
         node_id: crabka_metadata::NodeId,
-        partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+        partitions: Arc<PartitionRegistry>,
         producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     ) -> Self {
         Self {
@@ -130,10 +130,8 @@ impl TxnCoordinator {
         let p = self.partition_for(&tid);
         let part = self
             .partitions
-            .get(&(bootstrap::TOPIC.to_string(), p))
-            .ok_or_else(|| BrokerError::Txn(format!("__transaction_state-{p} not local")))?
-            .value()
-            .clone();
+            .get(bootstrap::TOPIC, p)
+            .ok_or_else(|| BrokerError::Txn(format!("__transaction_state-{p} not local")))?;
 
         // Serialize the entry using the serde-wincode codec (same as TxnEntry
         // test in state.rs).
@@ -177,11 +175,7 @@ impl TxnCoordinator {
             .collect();
 
         for p in local_partitions {
-            let Some(part) = self
-                .partitions
-                .get(&(bootstrap::TOPIC.to_string(), p))
-                .map(|e| e.value().clone())
-            else {
+            let Some(part) = self.partitions.get(bootstrap::TOPIC, p) else {
                 // Partition is not yet open locally (no log dir / not yet created).
                 continue;
             };

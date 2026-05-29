@@ -51,13 +51,13 @@ pub(crate) fn handle(
                     ..Default::default()
                 };
 
-                let Some(p) = partitions.get(&(topic.topic.clone(), part.partition)) else {
+                let Some(p) = partitions.get(&topic.topic, part.partition) else {
                     out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
                     parts_out.push(out);
                     continue;
                 };
 
-                let current_epoch = p.value().current_leader_epoch.load(Ordering::Acquire);
+                let current_epoch = p.current_leader_epoch.load(Ordering::Acquire);
 
                 if part.leader_epoch > current_epoch {
                     // Follower is ahead of us — stale metadata on our side.
@@ -69,7 +69,7 @@ pub(crate) fn handle(
                     // leader_epoch == current_epoch (the epoch is still
                     // open), or the start-offset of the next epoch (which
                     // is the truncation point) for older epochs.
-                    let log = p.value().log.lock().expect("log mutex poisoned");
+                    let log = p.log.lock().expect("log mutex poisoned");
                     let leo = log.log_end_offset();
                     let end_offset = log
                         .epoch_checkpoint()

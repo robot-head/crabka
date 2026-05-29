@@ -29,6 +29,7 @@ use tracing::{debug, warn};
 use crate::error::BrokerError;
 use crate::log_dir;
 use crate::partition::{Partition, SwapOutcome, WriterMessage};
+use crate::partition_registry::PartitionRegistry;
 
 /// One in-progress intra-broker log-dir move. Inserted into
 /// `Broker.future_logs` keyed by `(topic, partition)`.
@@ -117,7 +118,7 @@ const MOVE_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 /// returns `Ok(())` without spawning a second task. A move with a
 /// *different* target returns `Err(MoveError::AlreadyMoving)`.
 pub fn start_move(
-    partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
+    partitions: &Arc<PartitionRegistry>,
     future_logs: &Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
     all_log_dirs: &[PathBuf],
     log_config: &LogConfig,
@@ -139,8 +140,7 @@ pub fn start_move(
     // (2) Partition must be hosted on this broker.
     let key = (topic.to_string(), partition);
     let part = partitions
-        .get(&key)
-        .map(|e| e.value().clone())
+        .get(topic, partition)
         .ok_or(MoveError::ReplicaNotAvailable)?;
 
     // (3) Already in the target dir? No-op success.
@@ -182,17 +182,15 @@ pub fn start_move(
 /// and re-spawns the replicator, picking up at whatever offset the
 /// future log already holds.
 pub fn resume_move(
-    partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
+    partitions: &Arc<PartitionRegistry>,
     future_logs: &Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
     target_log_dir: &Path,
     log_config: &LogConfig,
     topic: &str,
     partition: i32,
 ) -> Result<(), MoveError> {
-    let key = (topic.to_string(), partition);
     let part = partitions
-        .get(&key)
-        .map(|e| e.value().clone())
+        .get(topic, partition)
         .ok_or(MoveError::ReplicaNotAvailable)?;
     let future_path = log_dir::future_partition_dir(target_log_dir, topic, partition);
     let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
@@ -214,7 +212,7 @@ pub fn resume_move(
 /// per-move replicator task.
 #[allow(clippy::too_many_arguments)]
 fn spawn_move(
-    partitions: &Arc<DashMap<(String, i32), Arc<Partition>>>,
+    partitions: &Arc<PartitionRegistry>,
     future_logs: &Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
     target_log_dir: &Path,
     future_path: PathBuf,
@@ -257,7 +255,7 @@ async fn replicator_loop(
     target_partition_path: PathBuf,
     target_log_dir: PathBuf,
     cancel: CancellationToken,
-    _partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    _partitions: Arc<PartitionRegistry>,
     future_logs: Arc<DashMap<(String, i32), Arc<FutureLogState>>>,
     topic: String,
     partition: i32,
@@ -362,9 +360,11 @@ fn catch_up(
     // Snapshot offsets cheaply; the partition log mutex is dropped
     // immediately after each helper.
     let current_leo = part.log_end_offset();
+    // Recover the guard if a panic elsewhere poisoned the mutex rather
+    // than killing this (discarded-JoinHandle) replicator task.
     let future_leo = future_log
         .lock()
-        .expect("future log mutex poisoned")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .log_end_offset();
     if future_leo >= current_leo {
         return Ok(CatchUpProgress { caught_up: true });
@@ -372,7 +372,10 @@ fn catch_up(
 
     // Pull the next chunk of batches from the source.
     let read = {
-        let log = part.log.lock().expect("log mutex poisoned");
+        let log = part
+            .log
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         log.read(future_leo, MOVE_READ_CHUNK_BYTES)?
     };
     if read.batches.is_empty() {
@@ -385,7 +388,9 @@ fn catch_up(
         return Ok(CatchUpProgress { caught_up: true });
     }
 
-    let mut future = future_log.lock().expect("future log mutex poisoned");
+    let mut future = future_log
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     for mut batch in read.batches {
         let base = batch.base_offset;
         future
@@ -413,7 +418,7 @@ mod tests {
         // Empty broker — no partitions, no log dirs. `start_move`
         // returns LogDirNotFound before it ever looks at the
         // partition map.
-        let partitions = Arc::new(DashMap::new());
+        let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
         let log_dirs: Vec<PathBuf> = vec![];
         let bogus = tempdir().unwrap();
@@ -432,7 +437,7 @@ mod tests {
 
     #[test]
     fn move_error_replica_not_available_when_partition_missing() {
-        let partitions = Arc::new(DashMap::new());
+        let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
         let dir = tempdir().unwrap();
         let err = start_move(
@@ -471,10 +476,10 @@ mod tests {
         let primary = tempdir().unwrap();
         let extra = tempdir().unwrap();
         let log_dirs = vec![primary.path().to_path_buf(), extra.path().to_path_buf()];
-        let partitions = Arc::new(DashMap::new());
+        let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
         let part = fixture_partition(primary.path(), "t", 0);
-        partitions.insert(("t".to_string(), 0), part);
+        partitions.insert("t".to_string(), 0, part);
 
         start_move(
             &partitions,
@@ -500,10 +505,10 @@ mod tests {
         let primary = tempdir().unwrap();
         let extra = tempdir().unwrap();
         let log_dirs = vec![primary.path().to_path_buf(), extra.path().to_path_buf()];
-        let partitions = Arc::new(DashMap::new());
+        let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
         let part = fixture_partition(primary.path(), "t", 0);
-        partitions.insert(("t".to_string(), 0), part);
+        partitions.insert("t".to_string(), 0, part);
 
         // Plant a registry entry as if a prior ARLD already kicked off
         // a move — exercises the "already moving, same target" branch
@@ -549,10 +554,10 @@ mod tests {
             extra.path().to_path_buf(),
             third.path().to_path_buf(),
         ];
-        let partitions = Arc::new(DashMap::new());
+        let partitions = Arc::new(PartitionRegistry::new());
         let future_logs = Arc::new(DashMap::new());
         let part = fixture_partition(primary.path(), "t", 0);
-        partitions.insert(("t".to_string(), 0), part);
+        partitions.insert("t".to_string(), 0, part);
 
         // Plant a registry entry pointing at `extra`.
         let future_path = log_dir::future_partition_dir(extra.path(), "t", 0);

@@ -147,6 +147,15 @@ async fn fetch_once(
         return None;
     }
 
+    // No new records: the controller had nothing past `fetch_offset`. Skip the
+    // expensive full-image clone entirely — the no-op path below would only
+    // discard it (`new_offset` would stay equal to `fetch_offset`).
+    if resp.records.is_empty() {
+        return Some(fetch_offset);
+    }
+
+    // There are records to apply, so clone the current image, mutate it, and
+    // publish exactly as before.
     let mut next: MetadataImage = (**image_tx.borrow()).clone();
     let mut new_offset = fetch_offset;
     let mut buf: &[u8] = &resp.records;

@@ -13,7 +13,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dashmap::DashMap;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -27,12 +26,13 @@ use crabka_protocol::owned::offset_for_leader_epoch_request::{
     OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::records::RecordsPayload;
 use crabka_raft::NodeId;
 use crabka_security::ListenerProtocol;
 
 use crate::broker::spawn_partition;
 use crate::codes;
-use crate::partition::Partition;
+use crate::partition_registry::PartitionRegistry;
 use crate::throttle::{ThrottleState, TopicThrottle};
 
 const FETCH_MAX_BYTES: i32 = 1 << 20;
@@ -56,7 +56,7 @@ pub(crate) struct Config {
     /// endpoint when available, otherwise the legacy broker host).
     pub leader_host: String,
     pub leader_port: u16,
-    pub partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+    pub partitions: Arc<PartitionRegistry>,
     pub log_dirs: Vec<PathBuf>,
     pub log_config: LogConfig,
     pub client_id: String,
@@ -110,29 +110,26 @@ pub(crate) async fn run(cfg: Config) {
 /// Build (or recover) the on-disk `Partition` for this follower, inserting
 /// it into the broker's shared `partitions` map. Idempotent.
 fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
-    if cfg
-        .partitions
-        .contains_key(&(cfg.topic.clone(), cfg.partition))
-    {
-        return Ok(());
-    }
-    let dir = crate::log_dir::place_partition_dir(&cfg.log_dirs, &cfg.topic, cfg.partition);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
-    let log = Log::open(&dir, cfg.log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
-    let owning_dir = dir
-        .parent()
-        .expect("placed partition dir always has a parent log.dir")
-        .to_path_buf();
-    let part = spawn_partition(
-        cfg.topic.clone(),
-        cfg.partition,
-        owning_dir,
-        log,
-        cfg.log_dir_status.clone(),
-    );
+    // `materialize_if_vacant` runs the build under the per-key lock, so two
+    // concurrent replicators for the same partition can never both build it.
     cfg.partitions
-        .insert((cfg.topic.clone(), cfg.partition), part);
-    Ok(())
+        .materialize_if_vacant(&cfg.topic, cfg.partition, || {
+            let dir = crate::log_dir::place_partition_dir(&cfg.log_dirs, &cfg.topic, cfg.partition);
+            std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+            let log =
+                Log::open(&dir, cfg.log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
+            let owning_dir = dir
+                .parent()
+                .expect("placed partition dir always has a parent log.dir")
+                .to_path_buf();
+            Ok(spawn_partition(
+                cfg.topic.clone(),
+                cfg.partition,
+                owning_dir,
+                log,
+                cfg.log_dir_status.clone(),
+            ))
+        })
 }
 
 async fn run_inner(cfg: &Config) -> Result<(), String> {
@@ -148,9 +145,9 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
         let fetch_offset = {
             let entry = cfg
                 .partitions
-                .get(&(cfg.topic.clone(), cfg.partition))
+                .get(&cfg.topic, cfg.partition)
                 .ok_or_else(|| "local partition missing".to_string())?;
-            entry.value().log_end_offset()
+            entry.log_end_offset()
         };
 
         // KIP-73: follower-side throttle. Check the current metadata image
@@ -216,7 +213,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
             }
         };
 
-        match handle_response(&resp, cfg).await {
+        match handle_response(resp, cfg).await {
             LoopAction::Continue => {}
             LoopAction::StopNotLeader => {
                 info!(topic = %cfg.topic, partition = cfg.partition,
@@ -245,10 +242,9 @@ fn build_fetch_request(
 ) -> FetchRequest {
     let leader_epoch = cfg
         .partitions
-        .get(&(cfg.topic.clone(), cfg.partition))
+        .get(&cfg.topic, cfg.partition)
         .map_or(-1, |entry| {
             entry
-                .value()
                 .current_leader_epoch
                 .load(std::sync::atomic::Ordering::Acquire)
         });
@@ -288,21 +284,25 @@ enum LoopAction {
     StopNotLeader,
 }
 
-async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
+async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
     // The replicator only ever requests one (topic, partition) per Fetch.
     // Match by either `topic` (v ≤ 12) or `topic_id` (v ≥ 13) so that
     // when the negotiated wire format drops the topic-name field
     // (KIP-516) we still find our partition. Without this fallback
     // every fetch silently no-ops at v ≥ 13 because `t.topic == ""`.
+    //
+    // Take `resp` BY VALUE and resolve the matching partition by *mutable*
+    // reference so the record batches can be moved out (via `records.take()`)
+    // and handed to the writer without a deep clone per batch.
     let Some(part_resp) = resp
         .responses
-        .iter()
+        .iter_mut()
         .find(|t| {
             t.topic == cfg.topic || (cfg.topic_id != WireUuid::ZERO && t.topic_id == cfg.topic_id)
         })
         .and_then(|t| {
             t.partitions
-                .iter()
+                .iter_mut()
                 .find(|p| p.partition_index == cfg.partition)
         })
     else {
@@ -311,17 +311,27 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
 
     match part_resp.error_code {
         codes::NONE => {
-            let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
+            let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) else {
                 warn!(topic = %cfg.topic, partition = cfg.partition,
                     "replicator: local partition vanished between fetches");
                 return LoopAction::Continue;
             };
-            if let Some(batches) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
+            // Move the parsed v2 batches out of the owned response so each
+            // batch can be handed to the writer BY VALUE — no per-batch deep
+            // clone. `take()` leaves `None` behind; the response is dropped at
+            // the end of this call so nothing is read from `records` again.
+            // `Raw`/`Legacy` payloads were never processed here (the old
+            // `as_v2()` returned `None` for them), so they are ignored.
+            if let Some(RecordsPayload::V2(batches)) = part_resp.records.take() {
                 for batch in batches {
                     // Capture byte count before the move into replicate_batch
                     // so the metrics update only fires on a successful append.
+                    // PERF: `encoded_len()` is computed here for the metric and
+                    // again inside the append path; threading a single
+                    // computation through would save the re-walk, but that
+                    // touches the writer API (cross-file) so it's left as-is.
                     let batch_bytes = batch.encoded_len();
-                    if let Err(e) = entry.value().replicate_batch(batch.clone()).await {
+                    if let Err(e) = part.replicate_batch(batch).await {
                         warn!(error = %e, topic = %cfg.topic, partition = cfg.partition,
                             "replicator: replicate_batch failed");
                         break;
@@ -336,10 +346,7 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
             // KIP-392: record the leader's high watermark so consumer reads
             // served from this follower are bounded correctly. Done on every
             // successful response, including empty ones.
-            entry
-                .value()
-                .set_follower_hw(part_resp.high_watermark)
-                .await;
+            part.set_follower_hw(part_resp.high_watermark).await;
             LoopAction::Continue
         }
         codes::OFFSET_OUT_OF_RANGE => {
@@ -360,8 +367,8 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
                 leader_log_start,
                 "replicator.out_of_range; resetting local log to leader log_start"
             );
-            if let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition))
-                && let Err(e) = entry.value().reset_to(leader_log_start).await
+            if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition)
+                && let Err(e) = part.reset_to(leader_log_start).await
             {
                 warn!(error = %e, "replicator: reset_to(leader_log_start) failed");
             }
@@ -404,14 +411,13 @@ async fn handle_response(resp: &FetchResponse, cfg: &Config) -> LoopAction {
 /// replies with `end_offset` = the first offset of the next epoch,
 /// which is the safe truncation point.
 async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
-    let Some(entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
+    let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) else {
         return Ok(());
     };
-    let our_epoch = entry
-        .value()
+    let our_epoch = part
         .current_leader_epoch
         .load(std::sync::atomic::Ordering::Acquire);
-    drop(entry);
+    drop(part);
 
     let opts = ConnectionOptions {
         client_id: cfg.client_id.clone(),
@@ -460,11 +466,9 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
         return Ok(());
     };
 
-    let Some(part_entry) = cfg.partitions.get(&(cfg.topic.clone(), cfg.partition)) else {
+    let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) else {
         return Ok(());
     };
-    let part = part_entry.value().clone();
-    drop(part_entry);
 
     if end_offset >= 0 {
         // Truncate to the epoch boundary.

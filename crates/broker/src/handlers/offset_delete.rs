@@ -279,11 +279,7 @@ fn rewrite_success_as(topics: Vec<OffsetDeleteResponseTopic>, code: i16) -> Offs
 }
 
 async fn append_tombstones(broker: &Broker, batch: RecordBatch) -> Result<(), i16> {
-    let Some(part_handle) = broker
-        .partitions
-        .get(&(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION))
-        .map(|e| e.value().clone())
-    else {
+    let Some(part_handle) = broker.partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
         return Err(codes::UNKNOWN_SERVER_ERROR);
     };
     let (ack_tx, ack_rx) = oneshot::channel();

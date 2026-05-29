@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dashmap::DashMap;
 use tokio::sync::oneshot;
 
 use crabka_protocol::records::RecordBatch;
 
 use crate::error::BrokerError;
-use crate::partition::{Partition, ProduceJob, WriterMessage};
+use crate::partition::{ProduceJob, WriterMessage};
+use crate::partition_registry::PartitionRegistry;
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
 pub const OFFSETS_PARTITION: i32 = 0;
@@ -21,13 +21,13 @@ pub trait OffsetsLog: Send + Sync + std::fmt::Debug {
 /// is registered by bootstrap *after* `NextGenCoordinator` is constructed,
 /// so a snapshot taken at construction time would be permanently empty.
 #[derive(Debug)]
-pub struct ProductionOffsetsLog {
-    partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
+pub(crate) struct ProductionOffsetsLog {
+    partitions: Arc<PartitionRegistry>,
 }
 
 impl ProductionOffsetsLog {
     #[must_use]
-    pub fn new(partitions: Arc<DashMap<(String, i32), Arc<Partition>>>) -> Self {
+    pub(crate) fn new(partitions: Arc<PartitionRegistry>) -> Self {
         Self { partitions }
     }
 }
@@ -35,11 +35,7 @@ impl ProductionOffsetsLog {
 #[async_trait]
 impl OffsetsLog for ProductionOffsetsLog {
     async fn append(&self, batch: RecordBatch) -> Result<(), BrokerError> {
-        let Some(partition) = self
-            .partitions
-            .get(&(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION))
-            .map(|e| e.value().clone())
-        else {
+        let Some(partition) = self.partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
             return Err(BrokerError::PartitionWriterDied {
                 topic: OFFSETS_TOPIC.into(),
                 partition: OFFSETS_PARTITION,

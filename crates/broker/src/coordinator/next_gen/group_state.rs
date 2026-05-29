@@ -4,6 +4,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use regex::Regex;
+
 use crabka_protocol::primitives::uuid::Uuid;
 
 use super::persistence::MemberAssignmentState;
@@ -23,6 +25,22 @@ pub struct MemberState {
     /// the client re-supplies it on every heartbeat so a coordinator
     /// failover loses at most one heartbeat interval of state.
     pub subscribed_topic_regex: Option<String>,
+    /// Compiled form of `subscribed_topic_regex`, cached so the reconciler
+    /// doesn't recompile the pattern for this member on every recompute.
+    /// `Some(Some(re))` = pattern compiled OK; `Some(None)` = pattern set
+    /// but failed to compile (cached negative — don't retry every reconcile);
+    /// `None` = no pattern. Always kept in sync via [`MemberState::set_regex`]
+    /// — never set `subscribed_topic_regex` directly.
+    ///
+    /// `Regex` is `Clone` + `Debug` but NOT `PartialEq`/`Eq`. `MemberState`
+    /// derives only `Clone`/`Debug` (no `PartialEq`), so this field needs no
+    /// special handling; if `PartialEq` is ever added, compare on the pattern
+    /// string instead and skip this cached field.
+    ///
+    /// Public only so cross-module struct literals can initialize it to
+    /// `None`; treat it as private and mutate exclusively via
+    /// [`MemberState::set_regex`] / [`MemberState::sync_regex_cache`].
+    pub compiled_regex: Option<Option<Regex>>,
     pub server_assignor: Option<String>,
     pub rebalance_timeout: Duration,
     pub member_epoch: i32,
@@ -31,6 +49,43 @@ pub struct MemberState {
     pub assigned_partitions: HashMap<Uuid, Vec<i32>>,
     pub partitions_pending_revocation: HashMap<Uuid, Vec<i32>>,
     pub last_seen: Instant,
+}
+
+impl MemberState {
+    /// Set `subscribed_topic_regex` and (re)compile the cached `Regex`.
+    /// The compile is performed exactly once per distinct pattern — call
+    /// this only when the pattern actually changes. An invalid pattern is
+    /// cached as `Some(None)` (warned once) so the reconciler neither
+    /// retries the compile nor treats it as "match everything".
+    pub fn set_regex(&mut self, pattern: Option<String>) {
+        self.compiled_regex = pattern.as_deref().map(|pat| match Regex::new(pat) {
+            Ok(re) => Some(re),
+            Err(e) => {
+                tracing::warn!(
+                    pattern = %pat, error = %e,
+                    "consumer-group: subscribed_topic_regex failed to compile; ignored"
+                );
+                None
+            }
+        });
+        self.subscribed_topic_regex = pattern;
+    }
+
+    /// (Re)compile the cache from whatever is currently in
+    /// `subscribed_topic_regex`. For construction sites that set the pattern
+    /// field via a struct literal (cross-module, so they can't call the
+    /// setter inline); call this once afterwards to populate the cache.
+    pub fn sync_regex_cache(&mut self) {
+        let pattern = self.subscribed_topic_regex.take();
+        self.set_regex(pattern);
+    }
+
+    /// The successfully-compiled subscription regex, if any. Returns `None`
+    /// both when there is no pattern and when the pattern failed to compile.
+    #[must_use]
+    pub fn compiled_regex(&self) -> Option<&Regex> {
+        self.compiled_regex.as_ref().and_then(Option::as_ref)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -66,7 +121,12 @@ impl GroupState {
         self.dirty = true;
     }
 
-    pub fn add_or_update_member(&mut self, m: MemberState) {
+    pub fn add_or_update_member(&mut self, mut m: MemberState) {
+        // Ensure the cached compiled regex matches the pattern the caller
+        // supplied. Construction sites set `subscribed_topic_regex` via a
+        // struct literal and leave `compiled_regex` as `None`; recompile once
+        // here so the reconciler never has to.
+        m.sync_regex_cache();
         if let Some(iid) = m.instance_id.clone() {
             self.instance_to_member.insert(iid, m.member_id.clone());
         }
@@ -171,6 +231,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: HashSet::new(),
             subscribed_topic_regex: None,
+            compiled_regex: None,
             server_assignor: None,
             rebalance_timeout: Duration::from_mins(1),
             member_epoch: 0,
@@ -265,6 +326,47 @@ mod tests {
         g.bump_epoch();
         assert_eq!(g.group_epoch, 1);
         assert!(g.dirty);
+    }
+
+    #[test]
+    fn set_regex_compiles_and_caches() {
+        let mut m = member("m1");
+        m.set_regex(Some("^orders-.*".into()));
+        assert_eq!(m.subscribed_topic_regex.as_deref(), Some("^orders-.*"));
+        let re = m.compiled_regex().expect("valid regex must compile");
+        assert!(re.is_match("orders-eu"));
+        assert!(!re.is_match("shipments"));
+    }
+
+    #[test]
+    fn set_regex_caches_invalid_as_none() {
+        let mut m = member("m1");
+        m.set_regex(Some("*invalid".into()));
+        // Pattern string is retained, but no compiled regex is exposed —
+        // the reconciler treats this as names-only, not match-everything.
+        assert_eq!(m.subscribed_topic_regex.as_deref(), Some("*invalid"));
+        assert!(m.compiled_regex().is_none());
+    }
+
+    #[test]
+    fn set_regex_none_clears_cache() {
+        let mut m = member("m1");
+        m.set_regex(Some("^a".into()));
+        assert!(m.compiled_regex().is_some());
+        m.set_regex(None);
+        assert!(m.subscribed_topic_regex.is_none());
+        assert!(m.compiled_regex().is_none());
+    }
+
+    #[test]
+    fn sync_regex_cache_populates_from_literal_field() {
+        // Mimics a cross-module struct literal: pattern set, cache left None.
+        let mut m = member("m1");
+        m.subscribed_topic_regex = Some("^a".into());
+        m.compiled_regex = None;
+        m.sync_regex_cache();
+        assert_eq!(m.subscribed_topic_regex.as_deref(), Some("^a"));
+        assert!(m.compiled_regex().expect("synced").is_match("apple"));
     }
 
     #[test]

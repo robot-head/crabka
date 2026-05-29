@@ -30,6 +30,28 @@ use crate::network::codec::{self, MAX_FRAME_BYTES};
 
 const API_VERSIONS_KEY: i16 = 18;
 
+/// Process-lifetime ANONYMOUS principal. `RequestContext` only borrows
+/// `&Principal`, so the defensive fallback (SASL pre-auth, where
+/// `auth.principal()` is `None`) can hand out a `&'static Principal` instead of
+/// allocating a fresh `String`/`Vec` per Produce/Fetch. `Principal` carries a
+/// `Vec<String>` so it can't be a `const`; `LazyLock` builds it once on first
+/// use.
+static ANONYMOUS_PRINCIPAL: std::sync::LazyLock<crabka_security::Principal> =
+    std::sync::LazyLock::new(|| crabka_security::Principal {
+        name: "ANONYMOUS".to_string(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    });
+
+/// Borrow the connection's authenticated principal, falling back to the shared
+/// process-lifetime ANONYMOUS singleton when the connection has no principal
+/// yet (defensive SASL pre-auth case). Avoids a per-request `Principal` clone.
+fn principal_or_anonymous(
+    auth: &crate::network::auth::ConnectionAuth,
+) -> &crabka_security::Principal {
+    auth.principal().unwrap_or(&ANONYMOUS_PRINCIPAL)
+}
+
 /// Returns a future that resolves at `deadline` if `Some`, or never resolves
 /// if `None`. Used in `tokio::select!` to disarm the timer arm for non-OAuth
 /// connections (which have no session expiry).
@@ -350,1077 +372,225 @@ async fn serve_connection_stream<S>(
             }
             continue;
         }
-        // AlterUserScramCredentials (51) needs the connection's authenticated
-        // principal and the peer `SocketAddr` so it can enforce the Cluster
-        // Alter ACL gate. The handler table signature passes only `&Broker`,
-        // so this case is intercepted inline like the SASL frames are.
-        // Returning `Some` short-circuits the normal `dispatch_one()` path
-        // for this frame.
-        // AlterReplicaLogDirs (34) needs the connection's authenticated
-        // principal and the peer `SocketAddr` so it can enforce the
-        // Cluster Alter ACL gate (KIP-113). Intercepted inline like
-        // AlterUserScramCredentials (51).
-        if peek_api_key(&frame).ok() == Some(34) {
-            match handle_alter_replica_log_dirs_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during ARLD, closing");
+        // Inline-intercept api_keys. These RPCs need the connection's
+        // authenticated principal and/or peer `SocketAddr` for ACL gating,
+        // which the `&Broker`-only handler-table signature can't carry, so
+        // each is dispatched here instead of via `dispatch_one()`. The
+        // api_key is peeked ONCE; arm order is preserved exactly (the
+        // data-plane keys 0/1/3 stay ahead of the admin RPCs, as before). A
+        // matching arm writes its response inline and `continue`s the loop;
+        // any handler or send error closes the connection. Non-intercepted
+        // keys (and a frame too short to peek) fall through to the
+        // `dispatch_one()` path below.
+        //
+        // `intercept!` factors out the identical Ok/Err send-or-close body
+        // that was previously duplicated across all 47 arms. `concat!`
+        // rebuilds the exact per-RPC log-message literals so tracing output
+        // is byte-for-byte unchanged.
+        macro_rules! intercept {
+            ($call:expr, $label:literal) => {{
+                match $call.instrument(req_span.clone()).await {
+                    Ok(bytes) => {
+                        if let Err(e) = framed.send(bytes).await {
+                            tracing::warn!(error = %e, concat!("framed.send error during ", $label, ", closing"));
+                            break;
+                        }
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, concat!($label, " dispatch error, closing connection"));
                         break;
                     }
-                    continue;
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "ARLD dispatch error, closing connection");
-                    break;
-                }
-            }
+            }};
         }
-        if peek_api_key(&frame).ok() == Some(51) {
-            match handle_alter_user_scram_credentials_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during AUSCR, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "AUSCR dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // UpdateFeatures (api_key 57, KIP-584) needs the authenticated
-        // principal AND the peer `SocketAddr` for the Cluster:Alter ACL gate,
-        // which the `&Broker`-only handler-table signature can't carry, so it
-        // intercepts inline.
-        if peek_api_key(&frame).ok() == Some(57) {
-            match handle_update_features_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during UpdateFeatures, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "UpdateFeatures dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // Produce (0) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // batch-authorize every topic in the request for `Write` and
-        // emit TOPIC_AUTHORIZATION_FAILED on the per-partition rows of
-        // any topic that comes back `Deny`. The `&Broker`-only handler
-        // table signature can't carry that context, so this api_key
-        // intercepts inline.
-        if peek_api_key(&frame).ok() == Some(0) {
-            match handle_produce_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during Produce, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Produce dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // Fetch (1) needs both the authenticated principal
-        // AND the peer's `SocketAddr` so the handler can batch-authorize
-        // every topic in the request for `Read` and emit
-        // TOPIC_AUTHORIZATION_FAILED on the per-partition rows of any
-        // topic that comes back `Deny`. The `&Broker`-only handler table
-        // signature can't carry that context, so this api_key intercepts
-        // inline.
-        if peek_api_key(&frame).ok() == Some(1) {
-            match handle_fetch_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during Fetch, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Fetch dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // Metadata (3) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // batch-authorize every candidate topic for `Describe`.
-        // Asymmetric behaviour: named-topic Deny surfaces
-        // TOPIC_AUTHORIZATION_FAILED on the topic row; fetch-all Deny
-        // silently omits the topic from the response. The
-        // `&Broker`-only handler table signature can't carry the
-        // principal+peer context, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(3) {
-            match handle_metadata_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during Metadata, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "Metadata dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // CreateTopics (19) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Create` on `Cluster("kafka-cluster")` and emit
-        // CLUSTER_AUTHORIZATION_FAILED on every topic row on Deny. The
-        // `&Broker`-only handler table signature can't carry that context,
-        // so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(19) {
-            match handle_create_topics_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during CreateTopics, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "CreateTopics dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DeleteTopics (20) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // batch-authorize every topic for `Delete` and emit
-        // TOPIC_AUTHORIZATION_FAILED on denied topic rows. The
-        // `&Broker`-only handler table signature can't carry that context,
-        // so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(20) {
-            match handle_delete_topics_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DeleteTopics, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DeleteTopics dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // AlterConfigs (33) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `AlterConfigs` per resource: Topic resources check
-        // against `ResourceType::Topic(resource_name)` and emit
-        // TOPIC_AUTHORIZATION_FAILED on Deny; Broker resources check
-        // against `Cluster("kafka-cluster")` and emit
-        // CLUSTER_AUTHORIZATION_FAILED on Deny.
-        if peek_api_key(&frame).ok() == Some(33) {
-            match handle_alter_configs_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during AlterConfigs, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "AlterConfigs dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // IncrementalAlterConfigs (44) — same shape as
-        // AlterConfigs: needs both the authenticated principal and the peer
-        // `SocketAddr` for per-resource ACL enforcement.
-        if peek_api_key(&frame).ok() == Some(44) {
-            match handle_incremental_alter_configs_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(
-                            error = %e,
-                            "framed.send error during IncrementalAlterConfigs, closing"
-                        );
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "IncrementalAlterConfigs dispatch error, closing connection"
-                    );
-                    break;
-                }
-            }
-        }
-        // DeleteRecords (21) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // batch-authorize every topic in the request for `Delete` and emit
-        // TOPIC_AUTHORIZATION_FAILED on the per-partition rows of any
-        // topic that comes back `Deny`. The `&Broker`-only handler table
-        // signature can't carry that context, so this api_key intercepts
-        // inline.
-        if peek_api_key(&frame).ok() == Some(21) {
-            match handle_delete_records_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DeleteRecords, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DeleteRecords dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // CreatePartitions (37) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // batch-authorize every topic in the request for `Alter` and emit
-        // TOPIC_AUTHORIZATION_FAILED on the topic row of any topic that
-        // comes back `Deny`. The `&Broker`-only handler table signature
-        // can't carry that context, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(37) {
-            match handle_create_partitions_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during CreatePartitions, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "CreatePartitions dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeGroups (15) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Describe` per group and emit
-        // GROUP_AUTHORIZATION_FAILED on denied group rows. The
-        // `&Broker`-only handler table signature can't carry that context,
-        // so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(15) {
-            match handle_describe_groups_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeGroups, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeGroups dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // ListGroups (16) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // silently filter out groups denied `Describe`. The
-        // `&Broker`-only handler table signature can't carry that context,
-        // so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(16) {
-            match handle_list_groups_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during ListGroups, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "ListGroups dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DeleteGroups (42) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Delete` per group and emit
-        // GROUP_AUTHORIZATION_FAILED on denied group rows. The
-        // `&Broker`-only handler table signature can't carry that context,
-        // so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(42) {
-            match handle_delete_groups_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DeleteGroups, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DeleteGroups dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // JoinGroup (11) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Read` on `Group(group_id)` and emit
-        // GROUP_AUTHORIZATION_FAILED on the whole response on Deny. The
-        // `&Broker`-only handler table signature can't carry that context,
-        // so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(11) {
-            match handle_join_group_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during JoinGroup, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "JoinGroup dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // OffsetCommit (8) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Read` on `Group(group_id)` (whole-response deny =
-        // GROUP_AUTHORIZATION_FAILED) and then per-topic `Read` (per-partition
-        // deny = TOPIC_AUTHORIZATION_FAILED). The `&Broker`-only handler
-        // table signature can't carry that context, so this api_key
-        // intercepts inline.
-        if peek_api_key(&frame).ok() == Some(8) {
-            match handle_offset_commit_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during OffsetCommit, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "OffsetCommit dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // OffsetFetch (9) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Describe` on `Group(group_id)` (whole-response deny =
-        // GROUP_AUTHORIZATION_FAILED) and then per-topic `Read` (per-topic
-        // deny = TOPIC_AUTHORIZATION_FAILED). The `topics: None` fetch-all
-        // sentinel also applies the per-topic check across committed-offsets
-        // topics. The `&Broker`-only handler table signature can't carry that
-        // context, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(9) {
-            match handle_offset_fetch_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during OffsetFetch, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "OffsetFetch dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // OffsetDelete (47, KIP-496) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Delete` on `Group(group_id)` (whole-response deny =
-        // GROUP_AUTHORIZATION_FAILED) and then per-topic `Read` (per-partition
-        // deny = TOPIC_AUTHORIZATION_FAILED). The `&Broker`-only handler
-        // table signature can't carry that context, so this api_key
-        // intercepts inline.
-        if peek_api_key(&frame).ok() == Some(47) {
-            match handle_offset_delete_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during OffsetDelete, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "OffsetDelete dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeCluster (60) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Describe` on `Cluster("kafka-cluster")` and emit
-        // CLUSTER_AUTHORIZATION_FAILED on the whole response on Deny. The
-        // `&Broker`-only handler table signature can't carry that context,
-        // so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(60) {
-            match handle_describe_cluster_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeCluster, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeCluster dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeProducers (61, KIP-664) needs the principal + peer
-        // for per-topic `Read` ACL evaluation. Intercepts inline with
-        // the other principal-aware describe-style handlers.
-        if peek_api_key(&frame).ok() == Some(61) {
-            match handle_describe_producers_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeProducers, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeProducers dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeTransactions (65, KIP-664) needs the principal + peer
-        // for per-tid `Describe` ACL on `TransactionalId`.
-        if peek_api_key(&frame).ok() == Some(65) {
-            match handle_describe_transactions_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeTransactions, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeTransactions dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // ListTransactions (66, KIP-664) needs the principal + peer for
-        // per-tid `Describe` ACL on `TransactionalId`; denied entries
-        // are silently filtered out.
-        if peek_api_key(&frame).ok() == Some(66) {
-            match handle_list_transactions_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during ListTransactions, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "ListTransactions dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // UnregisterBroker (64, KIP-185) needs the principal + peer for
-        // Cluster:Alter ACL evaluation.
-        if peek_api_key(&frame).ok() == Some(64) {
-            match handle_unregister_broker_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during UnregisterBroker, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "UnregisterBroker dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeTopicPartitions (75, KIP-966) needs the principal +
-        // peer for per-topic `Describe` ACL evaluation, so it intercepts
-        // inline alongside DescribeCluster / DescribeGroups.
-        if peek_api_key(&frame).ok() == Some(75) {
-            match handle_describe_topic_partitions_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeTopicPartitions, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeTopicPartitions dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // ListConfigResources (74, KIP-1142) needs the principal + peer
-        // for a whole-request `Cluster` `Describe` ACL gate. Mirrors
-        // DescribeCluster's pattern.
-        if peek_api_key(&frame).ok() == Some(74) {
-            match handle_list_config_resources_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during ListConfigResources, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "ListConfigResources dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeQuorum (55, KIP-595) needs the principal + peer for the
-        // whole-request `Cluster` `Describe` ACL gate.
-        if peek_api_key(&frame).ok() == Some(55) {
-            match handle_describe_quorum_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeQuorum, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeQuorum dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // AddRaftVoter / RemoveRaftVoter / UpdateRaftVoter (80/81/82,
-        // KIP-853) are cluster-wide reconfiguration RPCs needing the
-        // principal + peer for the `Cluster` `Alter` ACL gate, so they
-        // intercept inline alongside UnregisterBroker.
-        if peek_api_key(&frame).ok() == Some(80) {
-            match handle_add_raft_voter_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during AddRaftVoter, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "AddRaftVoter dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        if peek_api_key(&frame).ok() == Some(81) {
-            match handle_remove_raft_voter_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during RemoveRaftVoter, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "RemoveRaftVoter dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        if peek_api_key(&frame).ok() == Some(82) {
-            match handle_update_raft_voter_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during UpdateRaftVoter, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "UpdateRaftVoter dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeAcls (29) needs both the authenticated
-        // principal AND the peer's `SocketAddr` for host-based ACL
-        // matching; neither is reachable from the `&Broker`-only handler
-        // table signature, so it intercepts inline.
-        if peek_api_key(&frame).ok() == Some(29) {
-            match handle_describe_acls_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeAcls, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeAcls dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // CreateAcls (30) — same shape as DescribeAcls: needs
-        // both the authenticated principal and the peer `SocketAddr` for
-        // host-based ACL matching on the `Alter` cluster gate.
-        if peek_api_key(&frame).ok() == Some(30) {
-            match handle_create_acls_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during CreateAcls, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "CreateAcls dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DeleteAcls (31) — same shape as CreateAcls: needs
-        // both the authenticated principal and the peer `SocketAddr` for
-        // host-based ACL matching on the `Alter` cluster gate.
-        if peek_api_key(&frame).ok() == Some(31) {
-            match handle_delete_acls_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DeleteAcls, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DeleteAcls dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // ElectLeaders (43) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Alter` on `Cluster("kafka-cluster")` and emit
-        // CLUSTER_AUTHORIZATION_FAILED on every per-partition row on Deny.
-        // The `&Broker`-only handler table signature can't carry that
-        // context, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(43) {
-            match handle_elect_leaders_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during ElectLeaders, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "ElectLeaders dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // AlterPartitionReassignments (45) needs both the
-        // authenticated principal AND the peer's `SocketAddr` so the handler
-        // can authorize `Alter` on `Cluster("kafka-cluster")` and emit
-        // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
-        // signature can't carry that context, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(45) {
-            match handle_alter_partition_reassignments_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during AlterPartitionReassignments, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "AlterPartitionReassignments dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // ListPartitionReassignments (46) needs both the
-        // authenticated principal AND the peer's `SocketAddr` so the handler
-        // can authorize `Describe` on `Cluster("kafka-cluster")` and emit
-        // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
-        // signature can't carry that context, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(46) {
-            match handle_list_partition_reassignments_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during ListPartitionReassignments, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "ListPartitionReassignments dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeClientQuotas (48) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can authorize
-        // `Describe` on `Cluster("kafka-cluster")` and emit
-        // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
-        // signature can't carry that context, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(48) {
-            match handle_describe_client_quotas_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeClientQuotas, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeClientQuotas dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // AlterClientQuotas (49) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can authorize
-        // `Alter` on `Cluster("kafka-cluster")` and emit
-        // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
-        // signature can't carry that context, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(49) {
-            match handle_alter_client_quotas_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during AlterClientQuotas, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "AlterClientQuotas dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeUserScramCredentials (50) needs both the
-        // authenticated principal AND the peer's `SocketAddr` so the handler
-        // can authorize `Alter` on `Cluster("kafka-cluster")` and emit
-        // CLUSTER_AUTHORIZATION_FAILED. The `&Broker`-only handler table
-        // signature can't carry that context, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(50) {
-            match handle_describe_user_scram_credentials_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeUserScramCredentials, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeUserScramCredentials dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // CreateDelegationToken (38) needs the broker's
-        // delegation-token master HMAC key plus the per-connection
-        // `auth` so the handler can enforce KIP-48's
-        // "token-creating-token disallowed" rule via
-        // `ConnectionAuth::Authenticated.authenticated_via_token`.
-        // The `&Broker`-only handler table signature can't carry those
-        // extra params, so this api_key intercepts inline.
-        if peek_api_key(&frame).ok() == Some(38) {
-            match handle_create_delegation_token_frame(&broker, &frame, &auth)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during CreateDelegationToken, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "CreateDelegationToken dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // RenewDelegationToken (39) — needs the per-connection
-        // `auth` so the handler can pull the calling principal for the
-        // owner/renewer authorization check. Inline intercept matches
-        // CreateDelegationToken (38) above.
-        if peek_api_key(&frame).ok() == Some(39) {
-            match handle_renew_delegation_token_frame(&broker, &frame, &auth)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during RenewDelegationToken, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "RenewDelegationToken dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // ExpireDelegationToken (40) — same shape as Renew;
-        // handler needs `auth` for the owner-or-renewer gate.
-        if peek_api_key(&frame).ok() == Some(40) {
-            match handle_expire_delegation_token_frame(&broker, &frame, &auth)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during ExpireDelegationToken, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "ExpireDelegationToken dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // DescribeDelegationToken (41) — handler needs
-        // `auth` for the visibility rules (token-authed callers see
-        // only their own tokens; non-token callers see tokens they
-        // own OR are listed as a renewer on).
-        if peek_api_key(&frame).ok() == Some(41) {
-            match handle_describe_delegation_token_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during DescribeDelegationToken, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "DescribeDelegationToken dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // InitProducerId (22) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Write` on `TransactionalId` (transactional path) or
-        // `IdempotentWrite` on `Cluster` (idempotent-only path). On Deny
-        // the handler returns a whole-response error_code = 53 or 31.
-        if peek_api_key(&frame).ok() == Some(22) {
-            match handle_init_producer_id_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during InitProducerId, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "InitProducerId dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // AddPartitionsToTxn (24) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Write` on `TransactionalId` (whole-txn deny =
-        // TRANSACTIONAL_ID_AUTHORIZATION_FAILED) and per-topic `Write` on
-        // `Topic` (per-row deny = TOPIC_AUTHORIZATION_FAILED).
-        if peek_api_key(&frame).ok() == Some(24) {
-            match handle_add_partitions_to_txn_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during AddPartitionsToTxn, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "AddPartitionsToTxn dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // EndTxn (26) needs both the authenticated principal
-        // AND the peer's `SocketAddr` so the handler can authorize
-        // `Write` on `TransactionalId`. On Deny → whole-response
-        // TRANSACTIONAL_ID_AUTHORIZATION_FAILED.
-        if peek_api_key(&frame).ok() == Some(26) {
-            match handle_end_txn_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during EndTxn, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "EndTxn dispatch error, closing connection");
-                    break;
-                }
-            }
-        }
-        // TxnOffsetCommit (28) needs both the authenticated
-        // principal AND the peer's `SocketAddr` so the handler can
-        // authorize `Write` on `TransactionalId` + `Read` on `Group` +
-        // per-topic `Read` on `Topic`.
-        if peek_api_key(&frame).ok() == Some(28) {
-            match handle_txn_offset_commit_frame(&broker, &frame, &auth, &peer)
-                .instrument(req_span.clone())
-                .await
-            {
-                Ok(bytes) => {
-                    if let Err(e) = framed.send(bytes).await {
-                        tracing::warn!(error = %e, "framed.send error during TxnOffsetCommit, closing");
-                        break;
-                    }
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "TxnOffsetCommit dispatch error, closing connection");
-                    break;
-                }
-            }
+        match peek_api_key(&frame).ok() {
+            Some(34) => intercept!(
+                handle_alter_replica_log_dirs_frame(&broker, &frame, &auth, &peer),
+                "ARLD"
+            ),
+            Some(51) => intercept!(
+                handle_alter_user_scram_credentials_frame(&broker, &frame, &auth, &peer),
+                "AUSCR"
+            ),
+            Some(57) => intercept!(
+                handle_update_features_frame(&broker, &frame, &auth, &peer),
+                "UpdateFeatures"
+            ),
+            Some(0) => intercept!(
+                handle_produce_frame(&broker, &frame, &auth, &peer),
+                "Produce"
+            ),
+            Some(1) => intercept!(handle_fetch_frame(&broker, &frame, &auth, &peer), "Fetch"),
+            Some(3) => intercept!(
+                handle_metadata_frame(&broker, &frame, &auth, &peer),
+                "Metadata"
+            ),
+            Some(19) => intercept!(
+                handle_create_topics_frame(&broker, &frame, &auth, &peer),
+                "CreateTopics"
+            ),
+            Some(20) => intercept!(
+                handle_delete_topics_frame(&broker, &frame, &auth, &peer),
+                "DeleteTopics"
+            ),
+            Some(33) => intercept!(
+                handle_alter_configs_frame(&broker, &frame, &auth, &peer),
+                "AlterConfigs"
+            ),
+            Some(44) => intercept!(
+                handle_incremental_alter_configs_frame(&broker, &frame, &auth, &peer),
+                "IncrementalAlterConfigs"
+            ),
+            Some(21) => intercept!(
+                handle_delete_records_frame(&broker, &frame, &auth, &peer),
+                "DeleteRecords"
+            ),
+            Some(37) => intercept!(
+                handle_create_partitions_frame(&broker, &frame, &auth, &peer),
+                "CreatePartitions"
+            ),
+            Some(15) => intercept!(
+                handle_describe_groups_frame(&broker, &frame, &auth, &peer),
+                "DescribeGroups"
+            ),
+            Some(16) => intercept!(
+                handle_list_groups_frame(&broker, &frame, &auth, &peer),
+                "ListGroups"
+            ),
+            Some(42) => intercept!(
+                handle_delete_groups_frame(&broker, &frame, &auth, &peer),
+                "DeleteGroups"
+            ),
+            Some(11) => intercept!(
+                handle_join_group_frame(&broker, &frame, &auth, &peer),
+                "JoinGroup"
+            ),
+            Some(8) => intercept!(
+                handle_offset_commit_frame(&broker, &frame, &auth, &peer),
+                "OffsetCommit"
+            ),
+            Some(9) => intercept!(
+                handle_offset_fetch_frame(&broker, &frame, &auth, &peer),
+                "OffsetFetch"
+            ),
+            Some(47) => intercept!(
+                handle_offset_delete_frame(&broker, &frame, &auth, &peer),
+                "OffsetDelete"
+            ),
+            Some(60) => intercept!(
+                handle_describe_cluster_frame(&broker, &frame, &auth, &peer),
+                "DescribeCluster"
+            ),
+            Some(61) => intercept!(
+                handle_describe_producers_frame(&broker, &frame, &auth, &peer),
+                "DescribeProducers"
+            ),
+            Some(65) => intercept!(
+                handle_describe_transactions_frame(&broker, &frame, &auth, &peer),
+                "DescribeTransactions"
+            ),
+            Some(66) => intercept!(
+                handle_list_transactions_frame(&broker, &frame, &auth, &peer),
+                "ListTransactions"
+            ),
+            Some(64) => intercept!(
+                handle_unregister_broker_frame(&broker, &frame, &auth, &peer),
+                "UnregisterBroker"
+            ),
+            Some(75) => intercept!(
+                handle_describe_topic_partitions_frame(&broker, &frame, &auth, &peer),
+                "DescribeTopicPartitions"
+            ),
+            Some(74) => intercept!(
+                handle_list_config_resources_frame(&broker, &frame, &auth, &peer),
+                "ListConfigResources"
+            ),
+            Some(55) => intercept!(
+                handle_describe_quorum_frame(&broker, &frame, &auth, &peer),
+                "DescribeQuorum"
+            ),
+            Some(80) => intercept!(
+                handle_add_raft_voter_frame(&broker, &frame, &auth, &peer),
+                "AddRaftVoter"
+            ),
+            Some(81) => intercept!(
+                handle_remove_raft_voter_frame(&broker, &frame, &auth, &peer),
+                "RemoveRaftVoter"
+            ),
+            Some(82) => intercept!(
+                handle_update_raft_voter_frame(&broker, &frame, &auth, &peer),
+                "UpdateRaftVoter"
+            ),
+            Some(29) => intercept!(
+                handle_describe_acls_frame(&broker, &frame, &auth, &peer),
+                "DescribeAcls"
+            ),
+            Some(30) => intercept!(
+                handle_create_acls_frame(&broker, &frame, &auth, &peer),
+                "CreateAcls"
+            ),
+            Some(31) => intercept!(
+                handle_delete_acls_frame(&broker, &frame, &auth, &peer),
+                "DeleteAcls"
+            ),
+            Some(43) => intercept!(
+                handle_elect_leaders_frame(&broker, &frame, &auth, &peer),
+                "ElectLeaders"
+            ),
+            Some(45) => intercept!(
+                handle_alter_partition_reassignments_frame(&broker, &frame, &auth, &peer),
+                "AlterPartitionReassignments"
+            ),
+            Some(46) => intercept!(
+                handle_list_partition_reassignments_frame(&broker, &frame, &auth, &peer),
+                "ListPartitionReassignments"
+            ),
+            Some(48) => intercept!(
+                handle_describe_client_quotas_frame(&broker, &frame, &auth, &peer),
+                "DescribeClientQuotas"
+            ),
+            Some(49) => intercept!(
+                handle_alter_client_quotas_frame(&broker, &frame, &auth, &peer),
+                "AlterClientQuotas"
+            ),
+            Some(50) => intercept!(
+                handle_describe_user_scram_credentials_frame(&broker, &frame, &auth, &peer),
+                "DescribeUserScramCredentials"
+            ),
+            Some(38) => intercept!(
+                handle_create_delegation_token_frame(&broker, &frame, &auth),
+                "CreateDelegationToken"
+            ),
+            Some(39) => intercept!(
+                handle_renew_delegation_token_frame(&broker, &frame, &auth),
+                "RenewDelegationToken"
+            ),
+            Some(40) => intercept!(
+                handle_expire_delegation_token_frame(&broker, &frame, &auth),
+                "ExpireDelegationToken"
+            ),
+            Some(41) => intercept!(
+                handle_describe_delegation_token_frame(&broker, &frame, &auth, &peer),
+                "DescribeDelegationToken"
+            ),
+            Some(22) => intercept!(
+                handle_init_producer_id_frame(&broker, &frame, &auth, &peer),
+                "InitProducerId"
+            ),
+            Some(24) => intercept!(
+                handle_add_partitions_to_txn_frame(&broker, &frame, &auth, &peer),
+                "AddPartitionsToTxn"
+            ),
+            Some(26) => intercept!(
+                handle_end_txn_frame(&broker, &frame, &auth, &peer),
+                "EndTxn"
+            ),
+            Some(28) => intercept!(
+                handle_txn_offset_commit_frame(&broker, &frame, &auth, &peer),
+                "TxnOffsetCommit"
+            ),
+            _ => {}
         }
         // KIP-124 request_percentage enforcement — fallback HandlerTable path only.
         // Intercept arms (admin RPCs: ACLs, ElectLeaders, AlterPartitionReassignments,
@@ -1759,17 +929,10 @@ async fn handle_alter_user_scram_credentials_frame(
             &mut cur, api_version,
         )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -1808,17 +971,10 @@ async fn handle_update_features_frame(
         api_version,
     )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -1850,17 +1006,10 @@ async fn handle_describe_cluster_frame(
     debug_assert_eq!(api_key, 60);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -1891,17 +1040,10 @@ async fn handle_describe_producers_frame(
     debug_assert_eq!(api_key, 61);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -1935,17 +1077,10 @@ async fn handle_describe_transactions_frame(
     debug_assert_eq!(api_key, 65);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -1978,17 +1113,10 @@ async fn handle_list_transactions_frame(
     debug_assert_eq!(api_key, 66);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2016,17 +1144,10 @@ async fn handle_unregister_broker_frame(
     debug_assert_eq!(api_key, 64);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2053,17 +1174,10 @@ async fn handle_add_raft_voter_frame(
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     debug_assert_eq!(api_key, 80);
     let body_flexible = handler_body_flexible(api_key, api_version);
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2089,17 +1203,10 @@ async fn handle_remove_raft_voter_frame(
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     debug_assert_eq!(api_key, 81);
     let body_flexible = handler_body_flexible(api_key, api_version);
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2125,17 +1232,10 @@ async fn handle_update_raft_voter_frame(
     let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
     debug_assert_eq!(api_key, 82);
     let body_flexible = handler_body_flexible(api_key, api_version);
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2165,17 +1265,10 @@ async fn handle_describe_topic_partitions_frame(
     debug_assert_eq!(api_key, 75);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2210,17 +1303,10 @@ async fn handle_list_config_resources_frame(
     debug_assert_eq!(api_key, 74);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2254,17 +1340,10 @@ async fn handle_describe_quorum_frame(
     debug_assert_eq!(api_key, 55);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2298,17 +1377,10 @@ async fn handle_produce_frame(
     debug_assert_eq!(api_key, 0);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2341,17 +1413,10 @@ async fn handle_fetch_frame(
     debug_assert_eq!(api_key, 1);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2385,17 +1450,10 @@ async fn handle_metadata_frame(
     debug_assert_eq!(api_key, 3);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2428,17 +1486,10 @@ async fn handle_create_topics_frame(
     debug_assert_eq!(api_key, 19);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2472,17 +1523,10 @@ async fn handle_delete_topics_frame(
     debug_assert_eq!(api_key, 20);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2524,17 +1568,10 @@ async fn handle_describe_acls_frame(
         api_version,
     )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2571,17 +1608,10 @@ async fn handle_create_acls_frame(
         api_version,
     )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2618,17 +1648,10 @@ async fn handle_delete_acls_frame(
         api_version,
     )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2665,17 +1688,10 @@ async fn handle_elect_leaders_frame(
         api_version,
     )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2712,17 +1728,10 @@ async fn handle_alter_partition_reassignments_frame(
         api_version,
     )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2761,17 +1770,10 @@ async fn handle_list_partition_reassignments_frame(
         api_version,
     )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2811,17 +1813,10 @@ async fn handle_describe_client_quotas_frame(
         api_version,
     )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2861,17 +1856,10 @@ async fn handle_alter_client_quotas_frame(
             api_version,
         )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -2910,17 +1898,10 @@ async fn handle_describe_user_scram_credentials_frame(
         api_version,
     )?;
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3122,17 +2103,10 @@ async fn handle_alter_configs_frame(
     debug_assert_eq!(api_key, 33);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3164,17 +2138,10 @@ async fn handle_incremental_alter_configs_frame(
     debug_assert_eq!(api_key, 44);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3211,17 +2178,10 @@ async fn handle_delete_records_frame(
     debug_assert_eq!(api_key, 21);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3253,17 +2213,10 @@ async fn handle_create_partitions_frame(
     debug_assert_eq!(api_key, 37);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3294,17 +2247,10 @@ async fn handle_describe_groups_frame(
     debug_assert_eq!(api_key, 15);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3335,17 +2281,10 @@ async fn handle_list_groups_frame(
     debug_assert_eq!(api_key, 16);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3376,17 +2315,10 @@ async fn handle_delete_groups_frame(
     debug_assert_eq!(api_key, 42);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3417,17 +2349,10 @@ async fn handle_join_group_frame(
     debug_assert_eq!(api_key, 11);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3459,17 +2384,10 @@ async fn handle_offset_commit_frame(
     debug_assert_eq!(api_key, 8);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3502,17 +2420,10 @@ async fn handle_offset_fetch_frame(
     debug_assert_eq!(api_key, 9);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3544,17 +2455,10 @@ async fn handle_offset_delete_frame(
     debug_assert_eq!(api_key, 47);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3586,17 +2490,10 @@ async fn handle_init_producer_id_frame(
     debug_assert_eq!(api_key, 22);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3627,17 +2524,10 @@ async fn handle_add_partitions_to_txn_frame(
     debug_assert_eq!(api_key, 24);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3672,17 +2562,10 @@ async fn handle_end_txn_frame(
     debug_assert_eq!(api_key, 26);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3713,17 +2596,10 @@ async fn handle_txn_offset_commit_frame(
     debug_assert_eq!(api_key, 28);
     let body_flexible = handler_body_flexible(api_key, api_version);
 
-    let principal = auth
-        .principal()
-        .cloned()
-        .unwrap_or_else(|| crabka_security::Principal {
-            name: "ANONYMOUS".to_string(),
-            auth_method: crabka_security::AuthMethod::Anonymous,
-            groups: vec![],
-        });
+    let principal = principal_or_anonymous(auth);
     let client_id = peek_client_id(frame).unwrap_or("");
     let ctx = crate::handlers::RequestContext {
-        principal: &principal,
+        principal,
         peer,
         client_id,
     };
@@ -3998,6 +2874,18 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
 
 /// Prepend the response header (`corr_id` + optional tagged-fields byte)
 /// in front of the handler's body bytes.
+///
+// PERF: this copies the whole body to prepend a 4-5 byte header. A
+// `bytes::Buf::chain(header, body)` would avoid the copy, but the sink is a
+// `Framed<S, LengthDelimitedCodec>` and `LengthDelimitedCodec` only implements
+// `Encoder<Bytes>` (a single concrete impl) — `framed.send` therefore requires
+// a contiguous `Bytes` and will not accept a `Chain`/`impl Buf`. Worse, that
+// `Encoder::encode` itself does `dst.extend_from_slice(&data[..])`, i.e. it
+// copies the body into the codec's write buffer regardless. Eliminating the
+// copy here would require swapping the codec for a custom `Encoder<impl Buf>`
+// that vectored-writes header+body, which ripples through `codec.rs`, the
+// roundtrip test, and all ~50 `framed.send(bytes)` call sites in this file.
+// Out of scope for a single-file change; left as-is to keep wire bytes exact.
 fn encode_response(api_key: i16, correlation_id: i32, body_flexible: bool, body: &[u8]) -> Bytes {
     let header_v1 = body_flexible && api_key != API_VERSIONS_KEY;
     let header_len = if header_v1 { 5 } else { 4 };

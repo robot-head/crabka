@@ -40,6 +40,32 @@ fn flag_storage_failure(
     }
 }
 
+/// Lock the partition log, recovering the guard if the mutex was
+/// poisoned by a panic in some other critical section.
+///
+/// In this greenfield single-writer model the log data is consistent
+/// enough to keep serving after a poison — the alternative (`expect`)
+/// silently kills the writer task (its `JoinHandle` is discarded),
+/// taking the whole partition offline. Recovering via `into_inner`
+/// keeps the partition live.
+fn lock_log(log: &Mutex<Log>) -> std::sync::MutexGuard<'_, Log> {
+    log.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Build a `BrokerError` standing in for a panic inside a
+/// `spawn_blocking` storage closure. A panic during `write_all` /
+/// `fsync` is a credible "the disk just went sideways" signal, so we
+/// model it as a `LogError::Io` — which `flag_storage_failure` then
+/// recognizes and uses to mark the owning log dir offline.
+fn storage_failure_error(
+    context: &str,
+    join_err: &tokio::task::JoinError,
+) -> crate::error::BrokerError {
+    let io = std::io::Error::other(format!("{context}: {join_err}"));
+    crate::error::BrokerError::Log(crabka_log::LogError::Io(io))
+}
+
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 /// Exits when the channel closes (every sender dropped).
 #[allow(clippy::too_many_lines)]
@@ -62,23 +88,42 @@ pub async fn run(
                 // `RecordBatch::encode` path inside `Log::append`
                 // re-compresses the records body according to the
                 // attributes we set here.
-                let target = log
-                    .lock()
-                    .expect("log mutex poisoned")
-                    .config_snapshot()
-                    .compression_type;
+                let target = lock_log(&log).config_snapshot().compression_type;
                 if let Some(target) = target {
                     let current = batch.attributes.compression();
                     if current != target {
                         batch.attributes = batch.attributes.with_compression(target);
                     }
                 }
-                // Hold the lock only for the duration of `append`. Readers
-                // take this same mutex very briefly.
-                let result = {
-                    let mut log = log.lock().expect("log mutex poisoned");
-                    log.append(&mut batch)
-                        .map_err(crate::error::BrokerError::from)
+                // Run the blocking `write_all` + `fsync` off the reactor.
+                // The loop is a single serial task per partition, so the
+                // `.await` on the `JoinHandle` preserves append ordering.
+                // We fold the post-append LEO read into the same closure
+                // (it needs the lock anyway) and return it alongside the
+                // append result.
+                let log_for_blocking = log.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    let mut guard = lock_log(&log_for_blocking);
+                    let result = guard
+                        .append(&mut batch)
+                        .map_err(crate::error::BrokerError::from);
+                    // LEO is only meaningful on success; read it under the
+                    // same lock so the HW recompute below sees this append.
+                    let leo = result.as_ref().ok().map(|_| guard.log_end_offset());
+                    (result, leo)
+                });
+                let (result, leo) = match join.await {
+                    Ok(v) => v,
+                    Err(join_err) => {
+                        // A panic inside the closure poisoned/aborted the
+                        // append. Treat it as a storage failure for this
+                        // message rather than propagating the panic and
+                        // killing the writer task.
+                        let err = storage_failure_error("append task panicked", &join_err);
+                        flag_storage_failure(&err, &log_dir, &log_dir_status);
+                        let _ = ack.send(Err(err));
+                        continue;
+                    }
                 };
                 let ok = result.is_ok();
                 if let Err(ref e) = result {
@@ -89,11 +134,10 @@ pub async fn run(
                 let _ = ack.send(result);
                 if ok {
                     append_notify.notify_waiters();
-                    // Re-lock log briefly to read LEO, then update HW.
-                    // The log mutex is std::sync (sync callers), held only
-                    // during the LEO read. The replica_state mutex is
-                    // tokio::sync so we .await it cooperatively.
-                    let leader_leo = log.lock().expect("log mutex poisoned").log_end_offset();
+                    // Update HW from the LEO read inside the blocking
+                    // closure. The replica_state mutex is tokio::sync so
+                    // we .await it cooperatively.
+                    let leader_leo = leo.expect("LEO present on successful append");
                     let advanced = {
                         let mut st = replica_state.lock().await;
                         let prev = st.hw;
@@ -111,10 +155,22 @@ pub async fn run(
                 // `OffsetMismatch` if it doesn't line up with the local
                 // log's end.
                 let offset = batch.base_offset;
-                let result = {
-                    let mut log = log.lock().expect("log mutex poisoned");
-                    log.append_at(&mut batch, offset)
+                // Run the blocking `write_all` + `fsync` off the reactor;
+                // serial loop + `.await` preserves ordering.
+                let log_for_blocking = log.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    lock_log(&log_for_blocking)
+                        .append_at(&mut batch, offset)
                         .map_err(crate::error::BrokerError::from)
+                });
+                let result = match join.await {
+                    Ok(v) => v,
+                    Err(join_err) => {
+                        let err = storage_failure_error("replicate task panicked", &join_err);
+                        flag_storage_failure(&err, &log_dir, &log_dir_status);
+                        let _ = ack.send(Err(err));
+                        continue;
+                    }
                 };
                 let ok = result.is_ok();
                 if let Err(ref e) = result {
@@ -126,10 +182,22 @@ pub async fn run(
                 }
             }
             WriterMessage::Truncate { offset, ack } => {
-                let result = {
-                    let mut log = log.lock().expect("log mutex poisoned");
-                    log.truncate_to(offset)
+                // Truncate rewrites segment files + fsyncs — run it off
+                // the reactor like the append paths.
+                let log_for_blocking = log.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    lock_log(&log_for_blocking)
+                        .truncate_to(offset)
                         .map_err(crate::error::BrokerError::from)
+                });
+                let result = match join.await {
+                    Ok(v) => v,
+                    Err(join_err) => {
+                        let err = storage_failure_error("truncate task panicked", &join_err);
+                        flag_storage_failure(&err, &log_dir, &log_dir_status);
+                        let _ = ack.send(Err(err));
+                        continue;
+                    }
                 };
                 if let Err(ref e) = result {
                     flag_storage_failure(e, &log_dir, &log_dir_status);
@@ -138,10 +206,20 @@ pub async fn run(
                 // No `append_notify` — truncate doesn't deliver new data.
             }
             WriterMessage::ResetTo { new_base, ack } => {
-                let result = {
-                    let mut log = log.lock().expect("log mutex poisoned");
-                    log.reset_to(new_base)
+                let log_for_blocking = log.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    lock_log(&log_for_blocking)
+                        .reset_to(new_base)
                         .map_err(crate::error::BrokerError::from)
+                });
+                let result = match join.await {
+                    Ok(v) => v,
+                    Err(join_err) => {
+                        let err = storage_failure_error("reset_to task panicked", &join_err);
+                        flag_storage_failure(&err, &log_dir, &log_dir_status);
+                        let _ = ack.send(Err(err));
+                        continue;
+                    }
                 };
                 if let Err(ref e) = result {
                     flag_storage_failure(e, &log_dir, &log_dir_status);
@@ -151,10 +229,20 @@ pub async fn run(
                 // delivering it.
             }
             WriterMessage::TrimToOffset { new_start, ack } => {
-                let result = {
-                    let mut log = log.lock().expect("log mutex poisoned");
-                    log.trim_to_offset(new_start)
+                let log_for_blocking = log.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    lock_log(&log_for_blocking)
+                        .trim_to_offset(new_start)
                         .map_err(crate::error::BrokerError::from)
+                });
+                let result = match join.await {
+                    Ok(v) => v,
+                    Err(join_err) => {
+                        let err = storage_failure_error("trim_to_offset task panicked", &join_err);
+                        flag_storage_failure(&err, &log_dir, &log_dir_status);
+                        let _ = ack.send(Err(err));
+                        continue;
+                    }
                 };
                 if let Err(ref e) = result {
                     flag_storage_failure(e, &log_dir, &log_dir_status);
@@ -163,13 +251,25 @@ pub async fn run(
                 // No `append_notify` — trim drops data rather than producing it.
             }
             WriterMessage::SetLogConfig { config, ack } => {
-                log.lock().expect("log mutex poisoned").set_config(config);
+                lock_log(&log).set_config(config);
                 let _ = ack.send(());
             }
             WriterMessage::Compact { ack } => {
-                let result = {
-                    let mut log = log.lock().expect("log mutex poisoned");
-                    log.compact().map_err(crate::error::BrokerError::from)
+                // Compaction rewrites segments + fsyncs — off the reactor.
+                let log_for_blocking = log.clone();
+                let join = tokio::task::spawn_blocking(move || {
+                    lock_log(&log_for_blocking)
+                        .compact()
+                        .map_err(crate::error::BrokerError::from)
+                });
+                let result = match join.await {
+                    Ok(v) => v,
+                    Err(join_err) => {
+                        let err = storage_failure_error("compact task panicked", &join_err);
+                        flag_storage_failure(&err, &log_dir, &log_dir_status);
+                        let _ = ack.send(Err(err));
+                        continue;
+                    }
                 };
                 if let Err(ref e) = result {
                     flag_storage_failure(e, &log_dir, &log_dir_status);
@@ -181,11 +281,9 @@ pub async fn run(
             }
             #[cfg(any(test, feature = "test-helpers"))]
             WriterMessage::TestSetLogStart { new_start, ack } => {
-                let result = {
-                    let mut log = log.lock().expect("log mutex poisoned");
-                    log.set_log_start_offset(new_start)
-                        .map_err(crate::error::BrokerError::from)
-                };
+                let result = lock_log(&log)
+                    .set_log_start_offset(new_start)
+                    .map_err(crate::error::BrokerError::from);
                 let _ = ack.send(result);
             }
             WriterMessage::SwapFutureLog {
@@ -232,10 +330,10 @@ fn swap_future_log(
     // the caught-up invariant. If the future log fell behind between
     // the caller's check and this cycle, refuse the swap and let the
     // replicator catch up.
-    let mut log_guard = log.lock().expect("log mutex poisoned");
+    let mut log_guard = lock_log(log);
     let config = log_guard.config_snapshot();
     let current_leo = log_guard.log_end_offset();
-    let mut future_guard = future_log.lock().expect("future log mutex poisoned");
+    let mut future_guard = lock_log(future_log);
     if future_guard.log_end_offset() < current_leo {
         return Ok(SwapOutcome::NotCaughtUp);
     }

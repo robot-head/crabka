@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crabka_protocol::primitives::uuid::Uuid;
 
 use super::assignor::{Assignor, MemberSubscription, TopicMetadata};
-use super::group_state::GroupState;
+use super::group_state::{GroupState, MemberState};
 
 #[derive(Debug, Clone, Default)]
 pub struct ReconcileInput {
@@ -39,11 +39,7 @@ pub fn reconcile_if_dirty(
         .map(|m| MemberSubscription {
             member_id: m.member_id.clone(),
             rack_id: m.rack_id.clone(),
-            subscribed_topic_ids: resolve_subscribed_topic_ids(
-                &m.subscribed_topic_names,
-                m.subscribed_topic_regex.as_deref(),
-                &input.topic_id_by_name,
-            ),
+            subscribed_topic_ids: resolve_subscribed_topic_ids(m, &input.topic_id_by_name),
         })
         .collect();
     let topics = TopicMetadata {
@@ -57,40 +53,44 @@ pub fn reconcile_if_dirty(
     ReconcileOutcome::Recomputed
 }
 
-/// Resolve a member's effective topic-id subscription. Unions exact-name
-/// lookups (`subscribed_topic_names`) with regex matches against every
-/// topic in the current metadata image. KIP-848 v1+: the regex is
-/// supplied as a Java `Pattern`-syntax string — Crabka compiles it with
-/// Rust's RE2-based `regex` crate, which differs only in extended
-/// constructs (lookaround) that aren't expected in operator-facing
-/// subscription patterns. Invalid patterns are silently dropped (logged
-/// at warn) so a bad regex never poisons the rest of the assignment.
-fn resolve_subscribed_topic_ids(
-    names: &HashSet<String>,
-    regex_pattern: Option<&str>,
+/// Insert every topic-id a member subscribes to — via exact name and via
+/// its cached compiled regex — into `out`. The single source of truth for
+/// "what does this member subscribe to", shared by `reconcile_if_dirty`
+/// and `membership_topic_ids`.
+///
+/// KIP-848 v1+: the regex is supplied as a Java `Pattern`-syntax string —
+/// Crabka compiles it with Rust's RE2-based `regex` crate (differing only
+/// in extended constructs like lookaround, not expected in operator-facing
+/// subscription patterns). Compilation happens once, when the pattern
+/// changes, and is cached on `MemberState`; invalid patterns compile to
+/// `None` (warned once at set time) so a bad regex never poisons the rest
+/// of the assignment and is never recompiled on the hot path.
+fn collect_subscribed_topic_ids(
+    member: &MemberState,
     topic_id_by_name: &HashMap<String, Uuid>,
-) -> Vec<Uuid> {
-    let mut out: HashSet<Uuid> = names
-        .iter()
-        .filter_map(|n| topic_id_by_name.get(n).copied())
-        .collect();
-    if let Some(pat) = regex_pattern {
-        match regex::Regex::new(pat) {
-            Ok(re) => {
-                for (name, id) in topic_id_by_name {
-                    if re.is_match(name) {
-                        out.insert(*id);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    pattern = %pat, error = %e,
-                    "consumer-group: subscribed_topic_regex failed to compile; ignored"
-                );
+    out: &mut HashSet<Uuid>,
+) {
+    for name in &member.subscribed_topic_names {
+        if let Some(id) = topic_id_by_name.get(name) {
+            out.insert(*id);
+        }
+    }
+    if let Some(re) = member.compiled_regex() {
+        for (name, id) in topic_id_by_name {
+            if re.is_match(name) {
+                out.insert(*id);
             }
         }
     }
+}
+
+/// Resolve a member's effective topic-id subscription as a vector.
+fn resolve_subscribed_topic_ids(
+    member: &MemberState,
+    topic_id_by_name: &HashMap<String, Uuid>,
+) -> Vec<Uuid> {
+    let mut out = HashSet::new();
+    collect_subscribed_topic_ids(member, topic_id_by_name, &mut out);
     out.into_iter().collect()
 }
 
@@ -98,20 +98,7 @@ fn resolve_subscribed_topic_ids(
 pub fn membership_topic_ids(group: &GroupState, input: &ReconcileInput) -> HashSet<Uuid> {
     let mut out = HashSet::new();
     for m in group.members.values() {
-        for name in &m.subscribed_topic_names {
-            if let Some(id) = input.topic_id_by_name.get(name) {
-                out.insert(*id);
-            }
-        }
-        if let Some(pat) = &m.subscribed_topic_regex
-            && let Ok(re) = regex::Regex::new(pat)
-        {
-            for (name, id) in &input.topic_id_by_name {
-                if re.is_match(name) {
-                    out.insert(*id);
-                }
-            }
-        }
+        collect_subscribed_topic_ids(m, &input.topic_id_by_name, &mut out);
     }
     out
 }
@@ -135,6 +122,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: sub,
             subscribed_topic_regex: None,
+            compiled_regex: None,
             server_assignor: None,
             rebalance_timeout: Duration::from_mins(1),
             member_epoch: 0,
@@ -245,6 +233,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: sub,
             subscribed_topic_regex: regex.map(String::from),
+            compiled_regex: None,
             server_assignor: None,
             rebalance_timeout: Duration::from_mins(1),
             member_epoch: 0,

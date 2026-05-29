@@ -125,20 +125,17 @@ pub(crate) async fn handle(
                 topic_id
                     .map(|tid| {
                         partitions
-                            .iter()
-                            .filter(|e| e.key().0 == name)
-                            .filter(|e| {
-                                e.value()
-                                    .log
-                                    .lock()
-                                    .is_ok_and(|log| log.config_snapshot().remote_storage_enable)
+                            .partitions_of(&name)
+                            .into_iter()
+                            .filter(|&idx| {
+                                partitions.get(&name, idx).is_some_and(|p| {
+                                    p.log.lock().is_ok_and(|log| {
+                                        log.config_snapshot().remote_storage_enable
+                                    })
+                                })
                             })
-                            .map(|e| {
-                                crabka_remote_storage::TopicIdPartition::new(
-                                    tid,
-                                    name.clone(),
-                                    e.key().1,
-                                )
+                            .map(|idx| {
+                                crabka_remote_storage::TopicIdPartition::new(tid, name.clone(), idx)
                             })
                             .collect()
                     })
@@ -156,16 +153,11 @@ pub(crate) async fn handle(
         let error_code = match res {
             Ok(()) => {
                 // Committed to quorum — tear down in-memory state and dirs.
-                let keys: Vec<(String, i32)> = partitions
-                    .iter()
-                    .map(|e| e.key().clone())
-                    .filter(|(t, _)| t == &name)
-                    .collect();
-                for k in keys {
-                    partitions.remove(&k);
+                for idx in partitions.partitions_of(&name) {
+                    partitions.remove(&name, idx);
                     // JBOD: the partition may live in any log dir; resolve
                     // its actual location (existing-location wins).
-                    let dir = log_dir::place_partition_dir(&log_dirs, &k.0, k.1);
+                    let dir = log_dir::place_partition_dir(&log_dirs, &name, idx);
                     let _ = std::fs::remove_dir_all(dir);
                 }
                 // Now that the local tear-down is done, fire off

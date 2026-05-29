@@ -161,9 +161,7 @@ pub(crate) async fn handle(
 
 async fn append_txn_batch(
     req: &TxnOffsetCommitRequest,
-    partitions: &std::sync::Arc<
-        dashmap::DashMap<(String, i32), std::sync::Arc<crate::partition::Partition>>,
-    >,
+    partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,
     now_ms: i64,
     denied_topics: &std::collections::HashSet<String>,
 ) -> Result<(), i16> {
@@ -208,10 +206,7 @@ async fn append_txn_batch(
 
     batch.last_offset_delta = (delta - 1).max(0);
 
-    let Some(part_handle) = partitions
-        .get(&(OFFSETS_TOPIC.to_string(), OFFSETS_PARTITION))
-        .map(|e| e.value().clone())
-    else {
+    let Some(part_handle) = partitions.get(OFFSETS_TOPIC, OFFSETS_PARTITION) else {
         // __consumer_offsets not hosted here — report NOT_COORDINATOR.
         return Err(codes::NOT_COORDINATOR);
     };
