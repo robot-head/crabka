@@ -460,8 +460,10 @@ async fn partition_fetch_loop(
     use std::net::ToSocketAddrs;
 
     // Dedicated connection for this partition's fetch loop. Resolve the
-    // bootstrap address; on failure, warn and exit (the manager's
-    // wait_for_targets will then time out, matching prior behavior).
+    // bootstrap address; on failure, warn and exit. The partition then
+    // never advances past its resume offset, so the manager's readiness
+    // gate keeps returning `NotReady` (retryable) for reads that hash
+    // there until a later reconcile re-establishes the fetch loop.
     let Some(addr) = state
         .bootstrap
         .to_socket_addrs()

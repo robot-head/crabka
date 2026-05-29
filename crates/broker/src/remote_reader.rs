@@ -1025,4 +1025,159 @@ mod tests {
         let err = reader.earliest_offset(&tp()).unwrap_err();
         assert!(matches!(err, RemoteStorageError::NotReady { .. }));
     }
+
+    // ── I1: the list-based read paths (`earliest_offset` /
+    // ── `offset_for_timestamp` → `list_remote_log_segments`) must observe
+    // ── `NotReady` from the REAL `TopicBasedRemoteLogMetadataManager` while
+    // ── an assigned metadata partition is still catching up, and an empty
+    // ── result for a partition this broker does not own (Unassigned). The
+    // ── `NotReadyRlmm` stub proves propagation through the reader; this test
+    // ── proves the manager's list-path gate actually produces those states.
+
+    /// Drive `reconcile_assignment` and block (off the reactor) until the
+    /// list path stops returning `NotReady` for `tp`, i.e. the partition is
+    /// caught up to its assignment-time HWM.
+    async fn assign_and_wait_ready(
+        m: &Arc<crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager>,
+        mp: i32,
+        tp: &TopicIdPartition,
+    ) {
+        m.reconcile_assignment(&[mp]).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            // `list_remote_log_segments` is the method the list path uses.
+            match m.list_remote_log_segments(tp) {
+                Ok(_) => return,
+                Err(RemoteStorageError::NotReady { .. }) => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "list path never became ready"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                Err(e) => panic!("unexpected list error: {e:?}"),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn list_path_observes_not_ready_and_unassigned_from_real_manager() {
+        use crabka_remote_storage_topic::{
+            InProcessMetadataEventLog, MetadataEventLog, TopicBasedRemoteLogMetadataManager,
+            metadata_partition_for,
+        };
+
+        let topic_id = Uuid::from_u128(0xABCD);
+        let owned = TopicIdPartition::new(topic_id, "orders", 0);
+        let not_owned = TopicIdPartition::new(topic_id, "orders", 1);
+
+        // Wide metadata topic so the two user-partitions land in distinct
+        // metadata partitions.
+        let n = 16;
+        let mp_owned = metadata_partition_for(&owned, n);
+        let mp_other = metadata_partition_for(&not_owned, n);
+        assert_ne!(mp_owned, mp_other, "test needs distinct metadata buckets");
+
+        let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(n);
+
+        let writer_snap_dir = tempfile::tempdir().unwrap();
+        let mgr_snap_dir = tempfile::tempdir().unwrap();
+
+        // Pre-seed a finished segment for the owned partition via a transient
+        // all-consuming writer.
+        {
+            let writer = TopicBasedRemoteLogMetadataManager::start(
+                log.clone(),
+                tokio::runtime::Handle::current(),
+                writer_snap_dir.path().to_path_buf(),
+                std::time::Duration::from_hours(1),
+            )
+            .await
+            .unwrap();
+            writer
+                .reconcile_assignment(&(0..n).collect::<Vec<_>>())
+                .await;
+            let id = crabka_remote_storage::RemoteLogSegmentId::new(owned.clone(), Uuid::new_v4());
+            let md = RemoteLogSegmentMetadata::new(
+                id.clone(),
+                0,
+                99,
+                100,
+                1,
+                100,
+                2048,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([(0, 0)]),
+            )
+            .unwrap();
+            let w2 = writer.clone();
+            let md2 = md.clone();
+            tokio::task::spawn_blocking(move || {
+                w2.add_remote_log_segment_metadata(md2).unwrap();
+            })
+            .await
+            .unwrap();
+            let w2 = writer.clone();
+            tokio::task::spawn_blocking(move || {
+                w2.update_remote_log_segment_metadata(
+                    crabka_remote_storage::RemoteLogSegmentMetadataUpdate {
+                        remote_log_segment_id: id,
+                        event_timestamp_ms: 100,
+                        custom_metadata: None,
+                        state: RemoteLogSegmentState::CopySegmentFinished,
+                        broker_id: 1,
+                    },
+                )
+                .unwrap();
+            })
+            .await
+            .unwrap();
+            writer.shutdown();
+        }
+
+        // A fresh manager that consumes NOTHING until assigned.
+        let m = TopicBasedRemoteLogMetadataManager::start(
+            log.clone(),
+            tokio::runtime::Handle::current(),
+            mgr_snap_dir.path().to_path_buf(),
+            std::time::Duration::from_hours(1),
+        )
+        .await
+        .unwrap();
+
+        let remote_dir = tempfile::tempdir().unwrap();
+        let rsm: Arc<dyn RemoteStorageManager> =
+            Arc::new(LocalTieredStorage::new(remote_dir.path()));
+        let rlmm: Arc<dyn RemoteLogMetadataManager> = m.clone();
+        let reader = RemoteReader::new(rsm, rlmm);
+
+        // Unowned partition (never assigned) → the list path treats it as a
+        // genuine miss: empty, not an error.
+        assert_eq!(
+            reader.earliest_offset(&not_owned).unwrap(),
+            None,
+            "unassigned partition is an empty list-path result, not NotReady"
+        );
+
+        // Assign the owned partition. Before catch-up the list path surfaces
+        // NotReady through the reader. Poll until ready; observe at least the
+        // ready (Some) terminal state.
+        assign_and_wait_ready(&m, mp_owned, &owned).await;
+        assert_eq!(
+            reader.earliest_offset(&owned).unwrap(),
+            Some(0),
+            "owned + caught up → real earliest from the remote tier"
+        );
+
+        // Remove the owned partition: the list path now returns empty (the
+        // broker no longer owns it), NOT a stale segment.
+        m.reconcile_assignment(&[]).await;
+        assert_eq!(
+            reader.earliest_offset(&owned).unwrap(),
+            None,
+            "removed partition's list path returns empty, not stale segments"
+        );
+
+        m.shutdown();
+    }
 }

@@ -46,8 +46,19 @@ use crate::log::{AssignmentHandle, MetadataEventLog, MetadataEventStream, Partit
 use crate::partitioning::metadata_partition_for;
 use crate::serde::MetadataEvent;
 
-/// Outcome of the per-metadata-partition readiness check that gates
-/// [`RemoteLogMetadataManager::remote_log_segment_metadata`].
+/// Sentinel target HWM meaning "this partition is assigned but its real
+/// high-water mark is not yet known" (the `high_water_marks` RPC failed,
+/// or the partition had no entry in the returned index). The gate treats
+/// it as `NotReady` (a real applied offset can never reach `i64::MAX`),
+/// and the next `reconcile_assignment` re-attempts the HWM fetch to
+/// replace it with the real target.
+const HWM_UNKNOWN: i64 = i64::MAX;
+
+/// Outcome of the per-metadata-partition readiness check that gates the
+/// gated [`RemoteLogMetadataManager`] read methods
+/// ([`RemoteLogMetadataManager::remote_log_segment_metadata`],
+/// [`RemoteLogMetadataManager::list_remote_log_segments`],
+/// [`RemoteLogMetadataManager::highest_offset_for_epoch`]).
 enum ReadGate {
     /// This broker does not consume the metadata partition (neither leads
     /// nor follows any covered user-partition) → answer `Ok(None)`.
@@ -350,8 +361,18 @@ impl TopicBasedRemoteLogMetadataManager {
         if target == 0 {
             return ReadGate::Ready; // empty partition: nothing to catch up to
         }
+        // A sentinel target means the real HWM is not yet known (the
+        // assignment-time fetch failed); the partition is assigned but the
+        // answer is unknown → retryable, never a false `Ok(None)`.
+        if target == HWM_UNKNOWN {
+            return ReadGate::NotReady;
+        }
         let Ok(idx) = usize::try_from(mp) else {
-            return ReadGate::Ready;
+            // Defensive: a metadata partition index that doesn't fit in
+            // usize is nonsensical, but if it ever happens we must NOT
+            // fail open into `Ready` (which would serve a possibly-stale
+            // or false-miss answer). Treat it as still catching up.
+            return ReadGate::NotReady;
         };
         let applied = self.applied.lock().expect("applied mutex poisoned");
         if idx < applied.len() && applied[idx] >= target - 1 {
@@ -390,26 +411,73 @@ impl TopicBasedRemoteLogMetadataManager {
     /// added partition's assignment-time HWM so reads gate on `NotReady`
     /// until the pump catches up.
     ///
+    /// HWM-fetch failure fails CLOSED: a partition whose real high-water
+    /// mark could not be obtained is recorded with the [`HWM_UNKNOWN`]
+    /// sentinel target so the gate returns `NotReady` (retryable), never a
+    /// false `Ok(None)`. Such partitions are re-attempted on every
+    /// subsequent reconcile (which the broker drives on each image change /
+    /// reconciler tick), so a transient `high_water_marks` failure
+    /// self-heals: the sentinel is replaced with the real target as soon as
+    /// the fetch succeeds.
+    ///
+    /// MUST be driven by a SINGLE task. This method is not internally
+    /// serialized — it interleaves `.await` points with reads/writes of the
+    /// `ready_targets` map under short, non-overlapping locks — so two
+    /// concurrent callers could race the add/remove/refresh logic.
+    /// Correctness relies on the broker invoking it from exactly one
+    /// reconciler task.
+    ///
     /// Async because it reads the log's high-water marks; the broker calls
     /// it from its reconciler task (on the runtime), never from a
     /// `spawn_blocking` thread.
     pub async fn reconcile_assignment(&self, desired: &[i32]) {
         use std::collections::HashSet;
         let want: HashSet<i32> = desired.iter().copied().collect();
-        let have: HashSet<i32> = self
+        // Snapshot the current per-partition targets so we can both diff the
+        // assigned set and find partitions still carrying the HWM-unknown
+        // sentinel (which need a refresh). Lock released before the `.await`.
+        let current: std::collections::HashMap<i32, i64> = self
             .ready_targets
             .lock()
             .expect("ready_targets poisoned")
-            .keys()
-            .copied()
-            .collect();
+            .clone();
+        let have: HashSet<i32> = current.keys().copied().collect();
 
-        // Snapshot HWMs once for any additions.
         let needs_add = want.difference(&have).copied().collect::<Vec<_>>();
-        let hwms = if needs_add.is_empty() {
-            Vec::new()
+        // Partitions still assigned (in want) whose recorded target is the
+        // sentinel: their HWM is still unknown, so re-attempt the fetch.
+        let needs_refresh = want
+            .iter()
+            .copied()
+            .filter(|mp| current.get(mp) == Some(&HWM_UNKNOWN))
+            .collect::<Vec<_>>();
+
+        // One HWM snapshot covers both additions and sentinel refreshes.
+        let needs_hwm = !needs_add.is_empty() || !needs_refresh.is_empty();
+        let hwms = if needs_hwm {
+            match self.log.high_water_marks().await {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    warn!(error = ?e, "topic-based RLMM: high_water_marks fetch failed; \
+                          assigned partitions gate NotReady until a later reconcile refreshes");
+                    None
+                }
+            }
         } else {
-            self.log.high_water_marks().await.unwrap_or_default()
+            None
+        };
+
+        // Resolve a partition's target HWM from the (maybe-missing) snapshot.
+        // A failed fetch (`None`) or a missing per-partition entry both yield
+        // the sentinel so the gate stays NotReady — never fail open to 0.
+        let target_for = |mp: i32| -> i64 {
+            match &hwms {
+                Some(h) => usize::try_from(mp)
+                    .ok()
+                    .and_then(|i| h.get(i).copied())
+                    .unwrap_or(HWM_UNKNOWN),
+                None => HWM_UNKNOWN,
+            }
         };
 
         for mp in needs_add {
@@ -420,14 +488,27 @@ impl TopicBasedRemoteLogMetadataManager {
                 partition: mp,
                 start_offset,
             });
-            let target = usize::try_from(mp)
-                .ok()
-                .and_then(|i| hwms.get(i).copied())
-                .unwrap_or(0);
+            // Assign-but-NotReady when the HWM is unknown: the broker DOES
+            // own this partition, so leaving it Unassigned would wrongly
+            // return Ok(None). The sentinel makes the gate return NotReady.
             self.ready_targets
                 .lock()
                 .expect("ready_targets poisoned")
-                .insert(mp, target);
+                .insert(mp, target_for(mp));
+        }
+        // Replace the sentinel for already-assigned partitions whose HWM is
+        // now known (the partition stays assigned; only its target changes).
+        for mp in needs_refresh {
+            let target = target_for(mp);
+            if target != HWM_UNKNOWN {
+                let mut guard = self.ready_targets.lock().expect("ready_targets poisoned");
+                // Only refresh if still assigned with the sentinel (a
+                // concurrent remove would have dropped it — see the
+                // single-task contract above).
+                if guard.get(&mp) == Some(&HWM_UNKNOWN) {
+                    guard.insert(mp, target);
+                }
+            }
         }
         for mp in have.difference(&want).copied() {
             self.assignment.remove(mp);
@@ -546,15 +627,28 @@ impl RemoteLogMetadataManager for TopicBasedRemoteLogMetadataManager {
         topic_id_partition: &TopicIdPartition,
         leader_epoch: i32,
     ) -> Result<Option<i64>, RemoteStorageError> {
-        self.inner
-            .highest_offset_for_epoch(topic_id_partition, leader_epoch)
+        let mp = metadata_partition_for(topic_id_partition, self.log.partition_count());
+        match self.metadata_partition_gate(mp) {
+            ReadGate::Unassigned => Ok(None),
+            ReadGate::NotReady => Err(RemoteStorageError::NotReady { partition: mp }),
+            ReadGate::Ready => self
+                .inner
+                .highest_offset_for_epoch(topic_id_partition, leader_epoch),
+        }
     }
 
     fn list_remote_log_segments(
         &self,
         topic_id_partition: &TopicIdPartition,
     ) -> Result<Vec<RemoteLogSegmentMetadata>, RemoteStorageError> {
-        self.inner.list_remote_log_segments(topic_id_partition)
+        let mp = metadata_partition_for(topic_id_partition, self.log.partition_count());
+        match self.metadata_partition_gate(mp) {
+            // Not this broker's partition → it does not own it, so it must
+            // not serve any stale segments it happened to consume earlier.
+            ReadGate::Unassigned => Ok(Vec::new()),
+            ReadGate::NotReady => Err(RemoteStorageError::NotReady { partition: mp }),
+            ReadGate::Ready => self.inner.list_remote_log_segments(topic_id_partition),
+        }
     }
 
     fn list_remote_log_segments_by_epoch(
@@ -634,7 +728,52 @@ mod tests {
 
     use crabka_remote_storage::{CustomMetadata, RemoteLogSegmentId, RemotePartitionDeleteState};
 
-    use crate::log::InProcessMetadataEventLog;
+    use crate::error::MetadataLogError;
+    use crate::log::{AssignmentHandle, InProcessMetadataEventLog, MetadataEventStream};
+
+    /// Test double that delegates to an inner [`InProcessMetadataEventLog`]
+    /// but can be told to fail `high_water_marks()` on demand. The
+    /// in-process fixture's HWM RPC always succeeds, which is why the rest
+    /// of the suite cannot exercise the C1 fail-closed path.
+    struct HwmFlakyLog {
+        inner: Arc<InProcessMetadataEventLog>,
+        fail_hwm: std::sync::atomic::AtomicBool,
+    }
+
+    impl HwmFlakyLog {
+        fn new(partition_count: i32) -> Arc<Self> {
+            Arc::new(Self {
+                inner: InProcessMetadataEventLog::new(partition_count),
+                fail_hwm: std::sync::atomic::AtomicBool::new(false),
+            })
+        }
+        fn set_fail_hwm(&self, fail: bool) {
+            self.fail_hwm
+                .store(fail, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataEventLog for HwmFlakyLog {
+        fn partition_count(&self) -> i32 {
+            self.inner.partition_count()
+        }
+        async fn publish(&self, partition: i32, event: Bytes) -> Result<i64, MetadataLogError> {
+            self.inner.publish(partition, event).await
+        }
+        fn subscribe(
+            &self,
+            assignment: Vec<PartitionStart>,
+        ) -> (MetadataEventStream, Arc<dyn AssignmentHandle>) {
+            self.inner.subscribe(assignment)
+        }
+        async fn high_water_marks(&self) -> Result<Vec<i64>, MetadataLogError> {
+            if self.fail_hwm.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(MetadataLogError::Other("injected HWM failure".into()));
+            }
+            self.inner.high_water_marks().await
+        }
+    }
 
     static SNAP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -981,6 +1120,21 @@ mod tests {
         // The manager exposes the same committed offset via its canonical
         // accessor (what 48q's reconciler will read).
         assert_eq!(fresh.committed_offset(p), committed);
+        // Assign every partition and wait for catch-up so the gated read
+        // methods delegate to the (snapshot-seeded) inner cache. The orders
+        // partition has no backlog past `committed`, so it is ready as soon
+        // as the assignment-time HWM is recorded.
+        fresh
+            .reconcile_assignment(&(0..log.partition_count()).collect::<Vec<_>>())
+            .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !fresh.metadata_partition_ready(p) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fresh manager did not catch up on the orders partition"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
         let post_cache = fresh.list_remote_log_segments(&tp()).unwrap();
         assert_eq!(
             post_cache, pre_cache,
@@ -1215,6 +1369,95 @@ mod tests {
         );
         assert_eq!(listed[0].remote_log_segment_id().id, Uuid::from_u128(10));
         // The finished state survived (no half-applied duplicate update).
+        assert_eq!(m.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(99));
+
+        m.shutdown();
+    }
+
+    /// C1: a HWM-fetch failure must fail CLOSED. When `high_water_marks`
+    /// errors at assignment time, the newly-added partition must gate
+    /// `NotReady` (retryable) — NEVER `Ok(None)` (a false end-of-tier) —
+    /// and the sentinel must self-heal on a later reconcile once the HWM
+    /// fetch succeeds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hwm_fetch_failure_gates_not_ready_then_self_heals() {
+        use crate::partitioning::metadata_partition_for;
+
+        let flaky = HwmFlakyLog::new(4);
+        let log: Arc<dyn MetadataEventLog> = flaky.clone();
+
+        // Pre-seed a finished segment for `tp()` via a healthy writer (HWM
+        // not failing yet), so a ready read would return Some.
+        {
+            let writer = start_manager_all(log.clone()).await;
+            let w2 = writer.clone();
+            on_blocking(move || {
+                w2.add_remote_log_segment_metadata(started(10, 0, 99))
+                    .unwrap();
+            })
+            .await;
+            let w2 = writer.clone();
+            on_blocking(move || w2.update_remote_log_segment_metadata(finish(10)).unwrap()).await;
+            writer.shutdown();
+        }
+
+        let mp = metadata_partition_for(&tp(), log.partition_count());
+        let m = start_manager(log).await;
+
+        // Assign the partition WHILE the HWM RPC is failing. The partition
+        // must be added (the broker owns it) but recorded with the sentinel
+        // target so the gate returns NotReady, not Ok(None).
+        flaky.set_fail_hwm(true);
+        m.reconcile_assignment(&[mp]).await;
+        assert_eq!(
+            m.assigned_metadata_partitions(),
+            vec![mp],
+            "partition is assigned even though HWM is unknown (broker owns it)"
+        );
+
+        // Give the pump ample time to drain the backlog. Even fully caught
+        // up, the read must stay NotReady because the real HWM is unknown —
+        // it must NEVER collapse to Ok(None).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            match m.remote_log_segment_metadata(&tp(), 0, 42) {
+                Err(RemoteStorageError::NotReady { partition }) => assert_eq!(partition, mp),
+                other => panic!("HWM-unknown partition must read NotReady, got {other:?}"),
+            }
+            // The list path is gated the same way.
+            match m.list_remote_log_segments(&tp()) {
+                Err(RemoteStorageError::NotReady { partition }) => assert_eq!(partition, mp),
+                other => panic!("HWM-unknown partition list must be NotReady, got {other:?}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // Recover: HWM fetch now succeeds. A subsequent reconcile (which the
+        // broker drives on each image change / tick) must replace the
+        // sentinel with the real target. Once the pump has caught up the read
+        // returns Some.
+        flaky.set_fail_hwm(false);
+        m.reconcile_assignment(&[mp]).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match m.remote_log_segment_metadata(&tp(), 0, 42) {
+                Ok(Some(md)) => {
+                    assert_eq!(md.remote_log_segment_id().id, Uuid::from_u128(10));
+                    break;
+                }
+                Err(RemoteStorageError::NotReady { partition }) => {
+                    assert_eq!(partition, mp);
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "partition never became ready after HWM recovered"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+                other => panic!("unexpected read outcome after recovery: {other:?}"),
+            }
+        }
+        // The list path is now Ready too.
+        assert_eq!(m.list_remote_log_segments(&tp()).unwrap().len(), 1);
         assert_eq!(m.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(99));
 
         m.shutdown();
