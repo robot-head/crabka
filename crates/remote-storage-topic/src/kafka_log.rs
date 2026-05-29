@@ -83,6 +83,10 @@ pub struct KafkaMetadataLogConfig {
     pub replication: i32,
     /// `client_id` for the producer and consumer (diagnostic).
     pub client_id: String,
+    /// Client TLS/SASL security applied to the producer, the raw client,
+    /// the admin client, and every per-partition fetch connection.
+    /// `None` = plaintext loopback (default).
+    pub security: Option<crabka_client_core::security::ClientSecurity>,
 }
 
 impl KafkaMetadataLogConfig {
@@ -95,6 +99,7 @@ impl KafkaMetadataLogConfig {
             num_partitions: DEFAULT_NUM_PARTITIONS,
             replication: DEFAULT_REPLICATION,
             client_id: "crabka-rlmm".to_string(),
+            security: None,
         }
     }
 }
@@ -108,6 +113,7 @@ pub struct KafkaMetadataEventLog {
     partition_count: i32,
     bootstrap: String,
     client_id: String,
+    security: Option<crabka_client_core::security::ClientSecurity>,
     subscriptions: tokio::sync::Mutex<Vec<Arc<ConsumerState>>>,
 }
 
@@ -132,6 +138,7 @@ impl KafkaMetadataEventLog {
             .client_id(format!("{}-producer", cfg.client_id))
             .acks(Acks::All)
             .enable_idempotence(true)
+            .maybe_security(cfg.security.clone())
             .build()
             .await
             .map_err(|e| MetadataLogError::Other(format!("producer build failed: {e}")))?;
@@ -140,6 +147,7 @@ impl KafkaMetadataEventLog {
         let client = Client::builder()
             .bootstrap(cfg.bootstrap.clone())
             .client_id(format!("{}-client", cfg.client_id))
+            .maybe_security(cfg.security.clone())
             .build()
             .await
             .map_err(|e| MetadataLogError::Other(format!("client build failed: {e}")))?;
@@ -152,6 +160,7 @@ impl KafkaMetadataEventLog {
             partition_count,
             bootstrap: cfg.bootstrap,
             client_id: cfg.client_id,
+            security: cfg.security,
             subscriptions: tokio::sync::Mutex::new(Vec::new()),
         }))
     }
@@ -180,6 +189,7 @@ impl Drop for KafkaMetadataEventLog {
 struct ConsumerState {
     bootstrap: String,
     client_id: String,
+    security: Option<crabka_client_core::security::ClientSecurity>,
     topic: String,
     topic_id: WireUuid,
     tx: mpsc::Sender<MetadataEventRecord>,
@@ -284,6 +294,7 @@ impl MetadataEventLog for KafkaMetadataEventLog {
         let state = Arc::new(ConsumerState {
             bootstrap: self.bootstrap.clone(),
             client_id: format!("{}-consumer", self.client_id),
+            security: self.security.clone(),
             topic: self.topic.clone(),
             topic_id: self.topic_id,
             tx,
@@ -354,9 +365,10 @@ impl MetadataEventLog for KafkaMetadataEventLog {
 /// topic's id is re-read with a second metadata round-trip (the
 /// `CreateTopics` outcome does not reliably carry it).
 async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), MetadataLogError> {
-    let mut admin = AdminClient::connect(std::slice::from_ref(&cfg.bootstrap))
-        .await
-        .map_err(|e| MetadataLogError::Other(format!("admin connect failed: {e}")))?;
+    let mut admin =
+        AdminClient::connect_secured(std::slice::from_ref(&cfg.bootstrap), cfg.security.clone())
+            .await
+            .map_err(|e| MetadataLogError::Other(format!("admin connect failed: {e}")))?;
 
     let topic_ref = cfg.topic.as_str();
     let meta = admin
@@ -475,9 +487,14 @@ async fn partition_fetch_loop(
     };
     let opts = ConnectionOptions {
         client_id: state.client_id.clone(),
+        security: state.security.clone(),
         ..Default::default()
     };
-    let conn = match Connection::connect(addr, opts).await {
+    let connect = match &state.security {
+        Some(sec) => Connection::connect_secured(addr, opts, sec).await,
+        None => Connection::connect(addr, opts).await,
+    };
+    let conn = match connect {
         Ok(c) => c,
         Err(e) => {
             warn!(error = %e, partition, "metadata consumer: connect failed");
@@ -556,5 +573,28 @@ mod tests {
         assert_eq!(cfg.num_partitions, 50);
         assert_eq!(cfg.replication, 3);
         assert_eq!(cfg.bootstrap, "127.0.0.1:9092");
+        assert!(cfg.security.is_none());
+    }
+
+    #[test]
+    fn config_carries_security() {
+        use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+        use crabka_security::ListenerProtocol;
+        let cfg = KafkaMetadataLogConfig {
+            bootstrap: "127.0.0.1:9092".into(),
+            topic: METADATA_TOPIC.into(),
+            num_partitions: 1,
+            replication: 1,
+            client_id: "x".into(),
+            security: Some(ClientSecurity {
+                protocol: ListenerProtocol::SaslPlaintext,
+                tls: None,
+                sasl: Some(SaslCredentials::Plain {
+                    username: "u".into(),
+                    password: "p".into(),
+                }),
+            }),
+        };
+        assert!(cfg.security.is_some());
     }
 }

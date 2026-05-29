@@ -2172,6 +2172,7 @@ async fn bootstrap_topic_rlmm(
         num_partitions: cfg.cfg.num_partitions,
         replication: cfg.cfg.replication,
         client_id: format!("crabka-rlmm-broker-{}", cfg.broker_id),
+        security: None,
     };
     let log = match crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg).await {
         Ok(log) => log,

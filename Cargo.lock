@@ -1543,6 +1543,7 @@ dependencies = [
  "crabka-client-producer",
  "crabka-protocol",
  "crabka-remote-storage",
+ "crabka-security",
  "futures-util",
  "thiserror 2.0.18",
  "tokio",
