@@ -34,8 +34,8 @@ Distributed under the Apache License 2.0 as a derivative work.
   no JVM and no GC pauses. `unsafe_code = "forbid"` across the workspace.
 - **Single static binary.** No JDK, no ZooKeeper, no separate controller process.
 - **KRaft-native.** Metadata lives in an `openraft`-backed quorum from day one.
-- **Modern crypto.** TLS via `rustls`; SASL/SCRAM-SHA-256/512, SASL/PLAIN, and
-  SASL/OAUTHBEARER (signed-JWT / JWKS) out of the box.
+- **Modern crypto.** TLS via `rustls`; SASL/SCRAM-SHA-256/512, SASL/PLAIN,
+  SASL/OAUTHBEARER (signed-JWT / JWKS), and SASL/GSSAPI (Kerberos) out of the box.
 - **Batteries included.** Native producer/consumer/admin clients, a Kubernetes
   operator, and an automated rebalancer live in the same workspace.
 
@@ -48,17 +48,21 @@ oracle and JVM acceptance tests.
 
 What works today:
 
-- Single-broker and multi-broker clusters with KRaft metadata, replication, ISR
-  maintenance, leader election, partition reassignment, JBOD (multi-log-dir)
-  with intra-broker log-dir reassignment (`AlterReplicaLogDirs`, KIP-113).
+- Single-broker and multi-broker clusters with KRaft metadata (including Raft
+  snapshots, KIP-630, dynamic quorum reconfiguration, KIP-853, and separate
+  `process.roles` controller-only / broker-only nodes with observer metadata
+  fetch), replication, ISR maintenance, leader election (including offset-aware
+  unclean recovery, KIP-966 / KIP-841), fetch-from-follower / rack-aware reads
+  (KIP-392), partition reassignment, JBOD (multi-log-dir) with intra-broker
+  log-dir reassignment (`AlterReplicaLogDirs`, KIP-113).
 - Idempotent and transactional produce/consume (exactly-once), consumer groups
   with both the classic (eager) and cooperative-incremental (KIP-429) rebalance
   protocols, static membership (KIP-345), incremental fetch sessions (KIP-227),
   and log compaction.
 - TLS / mTLS, SASL (PLAIN, SCRAM-256/512, OAUTHBEARER with JWKS / signed-JWT
-  and opaque-token introspection), SASL re-authentication (KIP-368), delegation
-  tokens (KIP-48 / KIP-373), ACL authorization, the OPA cluster-authorizer
-  bridge (slice 53), and the full client-quota surface.
+  and opaque-token introspection, GSSAPI/Kerberos), SASL re-authentication
+  (KIP-368), delegation tokens (KIP-48 / KIP-373), ACL authorization, the OPA
+  cluster-authorizer bridge, and the full client-quota surface.
 - Native Rust producer / consumer / admin clients.
 - A Kubernetes operator (Strimzi-equivalent CRDs, including a tiered-storage
   surface) and a Cruise-Control-equivalent rebalancer.
@@ -66,12 +70,13 @@ What works today:
 Notable gaps (see the [KIP matrix](#kip-implementation-status) for detail): the
 next-gen consumer group protocol (KIP-848) is in progress — broker-side
 foundations, `__consumer_offsets` persistence, a rack-aware `UniformAssignor`,
-and `subscribed_topic_regex` are in tree; classic→next-gen group migration and
-the pluggable server-side assignor surface are still pending. Tiered storage
+the pluggable server-side assignor surface, and `subscribed_topic_regex` are in
+tree, and GA `group.protocol=consumer` clients (kafka-clients 4.0) now consume
+end to end; classic→next-gen group migration is still pending. Tiered storage
 (KIP-405) is partial: the `crabka-remote-storage-topic` (KIP-405 production
 RLMM) crate is in tree but not yet wired into the broker. Share groups /
-queues (KIP-932) and dynamic KRaft quorum membership
-(KIP-853) are not yet implemented. ZooKeeper mode and ZK→KRaft migration are
+queues (KIP-932) and a Kafka Connect / Streams / MirrorMaker equivalent are not
+yet implemented. ZooKeeper mode and ZK→KRaft migration are
 deliberately out of scope — Crabka is KRaft-only.
 
 ## Architecture
@@ -188,8 +193,8 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Auto preferred-replica rebalance | ✅ |
 | `AlterPartitionReassignments` / `ListPartitionReassignments` (KIP-455) | ✅ |
 | KIP-73 throttled replication | ✅ |
-| Fetch-from-follower / rack-aware reads (KIP-392) | ❌ |
-| KIP-841 force-elect / unclean recovery toggle | ❌ |
+| Fetch-from-follower / rack-aware reads (KIP-392) | ✅ |
+| Offset-aware unclean recovery + force-elect toggle (KIP-966 / KIP-841) | ✅ |
 | Cruise-Control-equivalent rebalancer (advisor + executor) | ✅ |
 
 ### Metadata quorum (KRaft)
@@ -198,9 +203,11 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 |---------|:------:|
 | KRaft controller quorum (raft-based, `openraft`) | ✅ |
 | Metadata image + delta apply | ✅ |
+| Metadata snapshots + `FetchSnapshot` (KIP-630) | ✅ |
 | Controller bootstrap via `crabka format` | ✅ |
+| Separate `process.roles` (controller-only / broker-only) + observer metadata fetch | ✅ |
 | `metadata.version` feature level (KIP-584) | ⚠️ |
-| Dynamic quorum voters (KIP-853) | ❌ |
+| Dynamic quorum voters — `Add`/`Remove`/`UpdateRaftVoter` (KIP-853) | ✅ |
 | ZooKeeper mode / ZK→KRaft migration | ⛔ (KRaft only) |
 
 ### Admin & operator surface
@@ -373,11 +380,12 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-101](https://cwiki.apache.org/confluence/display/KAFKA/KIP-101) | Leader-epoch-based truncation | ✅ |
 | [KIP-279](https://cwiki.apache.org/confluence/display/KAFKA/KIP-279) | Fix leader/follower log divergence | ✅ |
 | [KIP-320](https://cwiki.apache.org/confluence/display/KAFKA/KIP-320) | Detect & handle log truncation (leader epoch in fetch) | ⚠️ |
-| [KIP-392](https://cwiki.apache.org/confluence/display/KAFKA/KIP-392) | Fetch from closest replica (rack-aware) | ❌ |
+| [KIP-392](https://cwiki.apache.org/confluence/display/KAFKA/KIP-392) | Fetch from closest replica (rack-aware) | ✅ |
 | [KIP-455](https://cwiki.apache.org/confluence/display/KAFKA/KIP-455) | Replica reassignment admin API | ✅ |
 | [KIP-460](https://cwiki.apache.org/confluence/display/KAFKA/KIP-460) | Admin leader election (`ElectLeaders`) | ✅ |
 | [KIP-497](https://cwiki.apache.org/confluence/display/KAFKA/KIP-497) | Inter-broker `AlterPartition` (AlterIsr) | ✅ |
-| [KIP-841](https://cwiki.apache.org/confluence/display/KAFKA/KIP-841) | Fence stale-epoch replicas / unclean recovery toggle | ❌ |
+| [KIP-841](https://cwiki.apache.org/confluence/display/KAFKA/KIP-841) | Fence stale-epoch replicas / unclean recovery toggle | ✅ |
+| [KIP-966](https://cwiki.apache.org/confluence/display/KAFKA/KIP-966) | Eligible leader replicas / offset-aware unclean recovery | ✅ |
 | [KIP-996](https://cwiki.apache.org/confluence/display/KAFKA/KIP-996) | Pre-vote | ❌ |
 
 ### KRaft metadata quorum
@@ -386,11 +394,11 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 |-----|-------|:------:|
 | [KIP-500](https://cwiki.apache.org/confluence/display/KAFKA/KIP-500) | Replace ZooKeeper with a self-managed metadata quorum | ✅ |
 | [KIP-595](https://cwiki.apache.org/confluence/display/KAFKA/KIP-595) | A Raft protocol for the metadata quorum | ⚠️ |
-| [KIP-630](https://cwiki.apache.org/confluence/display/KAFKA/KIP-630) | Kafka Raft snapshot | ❌ |
+| [KIP-630](https://cwiki.apache.org/confluence/display/KAFKA/KIP-630) | Kafka Raft snapshot | ✅ |
 | [KIP-631](https://cwiki.apache.org/confluence/display/KAFKA/KIP-631) | The quorum-based Kafka controller (metadata records) | ✅ |
 | [KIP-584](https://cwiki.apache.org/confluence/display/KAFKA/KIP-584) | Versioning scheme for features (`metadata.version`) | ⚠️ |
 | [KIP-778](https://cwiki.apache.org/confluence/display/KAFKA/KIP-778) | KRaft-to-KRaft upgrades | ⚠️ |
-| [KIP-853](https://cwiki.apache.org/confluence/display/KAFKA/KIP-853) | KRaft controller membership changes (dynamic voters) | ❌ |
+| [KIP-853](https://cwiki.apache.org/confluence/display/KAFKA/KIP-853) | KRaft controller membership changes (dynamic voters) | ✅ |
 | [KIP-1022](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1022) | Formatting and updating features | ⚠️ |
 | [KIP-866](https://cwiki.apache.org/confluence/display/KAFKA/KIP-866) | ZooKeeper-to-KRaft migration | ⛔ |
 

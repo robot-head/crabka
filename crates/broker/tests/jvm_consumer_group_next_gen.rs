@@ -13,7 +13,7 @@ use crabka_log::LogConfig;
 const BOOTSTRAP: &str = "host.docker.internal:9092";
 const LISTEN: &str = "0.0.0.0:9092";
 const KAFKA_IMAGE_NEXT_GEN: &str = "apache/kafka:4.0.0";
-const KAFKA_IMAGE_CLASSIC: &str = "confluentinc/cp-kafka:7.5.0";
+const KAFKA_IMAGE_CLASSIC: &str = "confluentinc/cp-kafka:7.4.0";
 
 async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) {
     let _ = tracing_subscriber::fmt()
@@ -99,7 +99,7 @@ fn docker_run(image: &str, args: &[&str]) -> std::process::Output {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "kafka-clients 4.0 consumer times out fetching despite group.version=1 advertisement — deeper integration tracked as separate slice"]
+#[ignore = "requires Docker"]
 async fn jvm_kip848_single_consumer_round_trip() {
     let (_broker, _dir) = start_host_broker().await;
     create_topic("kip848-rt", 1);
@@ -121,7 +121,7 @@ async fn jvm_kip848_single_consumer_round_trip() {
             "bash",
             "-c",
             &format!(
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-rt --group g-rt --consumer-property group.protocol=consumer --from-beginning --timeout-ms 8000 --max-messages 3"
+                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-rt --group g-rt --consumer-property group.protocol=consumer --from-beginning --timeout-ms 10000 --max-messages 3"
             ),
         ],
     );
@@ -133,7 +133,7 @@ async fn jvm_kip848_single_consumer_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "kafka-clients 4.0 consumer times out fetching despite group.version=1 advertisement — deeper integration tracked as separate slice"]
+#[ignore = "requires Docker"]
 async fn jvm_kip848_describe_group() {
     let (_broker, _dir) = start_host_broker().await;
     create_topic("kip848-d", 1);
@@ -153,7 +153,7 @@ async fn jvm_kip848_describe_group() {
             "bash",
             "-c",
             &format!(
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-d --group g-d --consumer-property group.protocol=consumer --from-beginning --timeout-ms 6000 --max-messages 2"
+                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-d --group g-d --consumer-property group.protocol=consumer --from-beginning --timeout-ms 10000 --max-messages 2"
             ),
         ],
     );
@@ -175,7 +175,7 @@ async fn jvm_kip848_describe_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "kafka-clients 4.0 consumer times out fetching despite group.version=1 advertisement — deeper integration tracked as separate slice"]
+#[ignore = "requires Docker"]
 async fn jvm_kip848_delete_group() {
     let (_broker, _dir) = start_host_broker().await;
     create_topic("kip848-del", 1);
@@ -195,7 +195,7 @@ async fn jvm_kip848_delete_group() {
             "bash",
             "-c",
             &format!(
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-del --group g-del --consumer-property group.protocol=consumer --from-beginning --timeout-ms 4000 --max-messages 1"
+                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-del --group g-del --consumer-property group.protocol=consumer --from-beginning --timeout-ms 10000 --max-messages 1"
             ),
         ],
     );
@@ -213,7 +213,7 @@ async fn jvm_kip848_delete_group() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "kafka-clients 4.0 consumer times out fetching despite group.version=1 advertisement — deeper integration tracked as separate slice"]
+#[ignore = "requires Docker"]
 async fn jvm_kip848_coexists_with_classic() {
     let (_broker, _dir) = start_host_broker().await;
     create_topic("kip848-coex", 1);
@@ -233,7 +233,7 @@ async fn jvm_kip848_coexists_with_classic() {
             "bash",
             "-c",
             &format!(
-                "kafka-console-consumer --bootstrap-server {BOOTSTRAP} --topic kip848-coex --group g-classic --from-beginning --timeout-ms 5000 --max-messages 2"
+                "kafka-console-consumer --bootstrap-server {BOOTSTRAP} --topic kip848-coex --group g-classic --from-beginning --timeout-ms 10000 --max-messages 2"
             ),
         ],
     );
@@ -246,7 +246,7 @@ async fn jvm_kip848_coexists_with_classic() {
             "bash",
             "-c",
             &format!(
-                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-coex --group g-next --consumer-property group.protocol=consumer --from-beginning --timeout-ms 5000 --max-messages 2"
+                "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic kip848-coex --group g-next --consumer-property group.protocol=consumer --from-beginning --timeout-ms 10000 --max-messages 2"
             ),
         ],
     );

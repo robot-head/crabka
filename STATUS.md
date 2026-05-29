@@ -4619,10 +4619,6 @@ introspection metadata).
   carried but not yet invoked by `broker-jvm-acceptance` until the
   next-gen integration depth lands.
 - Out of scope (follow-up slices):
-  - JVM-client end-to-end engagement: `group.version=1` is advertised
-    but kafka-clients 4.0 still times out fetching. Deeper integration
-    (response shape, fetch behavior for next-gen consumers) tracked as
-    a separate slice.
   - Rack-aware `UniformAssignor` (64b).
   - Group migration policy classic → next-gen (64d).
   - Share groups KIP-932.
@@ -4754,14 +4750,14 @@ introspection metadata).
     write batching, unchanged-heartbeat no-op, leave-tombstone batching,
     actor-exit-on-write-failure.
   - 2 previously-ignored persistence-replay tests now passing.
-  - 4 JVM-acceptance tests remain `#[ignore]`d. The `group.version=1`
-    advertisement is in place, but the kafka-clients 4.0 consumer still
-    fails with `TimeoutException: null` while fetching. Depth required to
-    drive the JVM client to completion is larger than this slice's scope
-    and tracked as a separate follow-up.
+  - 4 JVM-acceptance tests were `#[ignore]`d at this slice (the
+    `group.version=1` advertisement was in place but the kafka-clients 4.0
+    consumer still failed with `TimeoutException: null` while fetching).
+    Resolved by slice 64e below: the four `jvm_kip848_*` tests now pass and
+    run in CI.
 - CI: `broker-jvm-acceptance` continues to run `jvm_acceptance` only;
   `jvm_consumer_group_next_gen` is back in source as `#[ignore]`d
-  documentation of intent.
+  documentation of intent (also resolved by slice 64e).
 ## Slice 64c — KIP-848 custom server-side assignor plugin point (2026-05-28)
 
 - `NextGenConfig.assignors` is now `Vec<Arc<dyn Assignor>>` (was
@@ -4852,3 +4848,24 @@ introspection metadata).
     layer when an authenticated connection's `expires_at_ms`
     elapses; a separate counter family there is a small
     follow-up slice.
+
+## Slice 64e — KIP-848 JVM-client engagement (2026-05-29)
+
+- **Root cause.** GA `kafka-clients 4.0` (`group.protocol=consumer`)
+  generates its own member UUID and sends it with `member_epoch=0` on first
+  join. Crabka's first-join detection required an *empty* `member_id` (an
+  obsolete KIP-848 draft where the server minted IDs), so every heartbeat
+  returned `UNKNOWN_MEMBER_ID` (25) and the consumer looped ~10k req/s with no
+  assignment until `TimeoutException`. Diagnosed by tracing every request from
+  a live `apache/kafka:4.0.0` consumer.
+- **Fix.** First-join triggers on `member_epoch == 0` for any not-yet-known
+  member, adopting the client-supplied `member_id`; an empty id falls back to
+  a server-minted UUID (preserves raw-RPC callers).
+- **Tests.** 2 new actor unit tests (client-id adoption, known-id-epoch-0
+  stale); 1 raw-RPC integration test (echo + assignment); the 4 `jvm_kip848_*`
+  acceptance tests now pass against `apache/kafka:4.0.0`. They stay
+  `#[ignore = "requires Docker"]` (matching `jvm_acceptance`) so the default
+  `cargo test` pass skips them; the `broker-jvm-acceptance` CI job runs them
+  via `--test jvm_consumer_group_next_gen ... -- --ignored --test-threads=1`.
+- **Image alignment.** `jvm_consumer_group_next_gen` classic image moved from
+  `cp-kafka:7.5.0` to `cp-kafka:7.4.0` to match the existing CI preload.
