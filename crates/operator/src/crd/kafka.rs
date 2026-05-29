@@ -107,6 +107,16 @@ pub struct KafkaSpec {
     /// PVC support pairs with the production RLMM.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tiered_storage: Option<TieredStorage>,
+    /// Inter-broker Kerberos initiate config. Required when
+    /// `interBrokerListenerName` resolves to a `type: gssapi` listener;
+    /// supplies the shared client principal + KDC. The keytab is reused
+    /// from that listener's `keytabSecretRef`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inter_broker_kerberos: Option<InterBrokerKerberos>,
+    /// Optional process-wide `krb5.conf`. Mounted into broker pods and
+    /// pointed at via `KRB5_CONFIG`; serves both accept and initiate paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub krb5_conf_secret_ref: Option<Krb5ConfSecretRef>,
     /// Distributed-tracing wiring for the broker pods. When
     /// `Some`, the operator renders the matching `CRABKA_OTLP_*` env
     /// vars onto every broker pod — the broker's telemetry
@@ -116,6 +126,29 @@ pub struct KafkaSpec {
     /// default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracing: Option<Tracing>,
+}
+
+/// Inter-broker GSSAPI initiate config. Single shared client principal
+/// cluster-wide (no per-broker host-templated SPNs).
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct InterBrokerKerberos {
+    /// Principal every broker authenticates as when dialing peers, e.g.
+    /// `kafka@EXAMPLE.COM`. Must exist in the shared keytab.
+    pub client_principal: String,
+    /// Target SPN primary. Defaults to `kafka`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// KDC endpoint, e.g. `tcp://kdc:88`.
+    pub kdc_url: String,
+}
+
+/// Reference to a Secret holding a `krb5.conf`.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Krb5ConfSecretRef {
+    pub secret_name: String,
+    pub key: String,
 }
 
 /// KIP-405: cluster-wide tiered-storage configuration.
@@ -742,6 +775,8 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );
@@ -772,6 +807,8 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );
@@ -885,6 +922,8 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );
@@ -923,6 +962,8 @@ mod tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );

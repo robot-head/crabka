@@ -17,12 +17,14 @@ use crabka_security::ca::SubjectAltName;
 use crabka_security::{ListenerProtocol, SaslMechanism};
 
 pub(crate) fn listener_protocol(l: &Listener) -> ListenerProtocol {
-    use ListenerAuthentication::{OAuth, ScramSha256, ScramSha512, Tls};
+    use ListenerAuthentication::{Gssapi, OAuth, ScramSha256, ScramSha512, Tls};
     match (l.tls, &l.authentication) {
         (false, None) => ListenerProtocol::Plaintext,
         (true, None | Some(Tls)) => ListenerProtocol::Ssl,
-        (false, Some(ScramSha512 | ScramSha256 | OAuth(_))) => ListenerProtocol::SaslPlaintext,
-        (true, Some(ScramSha512 | ScramSha256 | OAuth(_))) => ListenerProtocol::SaslSsl,
+        (false, Some(ScramSha512 | ScramSha256 | OAuth(_) | Gssapi(_))) => {
+            ListenerProtocol::SaslPlaintext
+        }
+        (true, Some(ScramSha512 | ScramSha256 | OAuth(_) | Gssapi(_))) => ListenerProtocol::SaslSsl,
         (false, Some(Tls)) => unreachable!(
             "validation rejects mTLS without transport TLS; saw listener '{}'",
             l.name
@@ -41,6 +43,7 @@ fn sasl_mechanism(auth: &ListenerAuthentication) -> Option<SaslMechanism> {
                 None
             }
         }
+        ListenerAuthentication::Gssapi(_) => Some(SaslMechanism::Gssapi),
         ListenerAuthentication::Tls => None,
     }
 }
@@ -931,6 +934,8 @@ mod service_rendering_tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );

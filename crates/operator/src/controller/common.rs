@@ -786,6 +786,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         let h = combined_config_hash(&spec_a, None, None, None);
@@ -832,6 +834,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         let h_off = combined_config_hash(&spec_off, None, None, None);
@@ -880,6 +884,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         let h_none = combined_config_hash(&spec, None, None, None);
@@ -919,6 +925,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
@@ -947,6 +955,8 @@ mod config_hash_tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );
@@ -1004,6 +1014,8 @@ mod config_hash_tests {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         };
         // No explicit pin => hash collapse preserved (== config_hash of
@@ -1040,6 +1052,8 @@ mod config_hash_tests {
                 delegation_token: None,
                 authorization: None,
                 tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
                 tracing: None,
             },
         );

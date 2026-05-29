@@ -48,6 +48,8 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         },
     );
@@ -78,6 +80,8 @@ fn kafka_cr_byo(name: &str, namespace: &str) -> Kafka {
             delegation_token: None,
             authorization: None,
             tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
             tracing: None,
         },
     );
