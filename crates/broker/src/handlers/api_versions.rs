@@ -327,7 +327,7 @@ mod tests {
             .iter()
             .find(|k| k.name == "metadata.version")
             .expect("metadata.version advertised");
-        assert_eq!(mv.min_version, 1);
+        assert_eq!(mv.min_version, crate::features::METADATA_VERSION_MIN);
         assert_eq!(mv.max_version, crate::features::METADATA_VERSION_MAX);
     }
 

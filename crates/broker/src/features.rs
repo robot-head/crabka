@@ -2,20 +2,16 @@
 //! `supported_features` advertisement and the `UpdateFeatures` validation
 //! path so the two can never disagree about what this broker supports.
 //!
-//! `metadata.version` is advertised at a single conservative level (1 =
-//! `3.0-IV1`). JVM clients validate finalized + supported `metadata.version`
-//! levels via `MetadataVersion.fromFeatureLevel(N)` and throw on a level
-//! their enum doesn't know; level 1 is known to every KRaft-aware client
-//! (Kafka >= 3.0). Raising `METADATA_VERSION_MAX` REQUIRES re-running the
-//! Docker `jvm_acceptance` suite — see the slice plan's compatibility note.
+//! The canonical `metadata.version` string/level table lives in
+//! [`crabka_metadata::metadata_version`]; this module re-exports the three
+//! constants so local code keeps its short `crate::features::*` paths.
 
 /// The `metadata.version` feature name (KIP-584 / KIP-778).
-pub(crate) const METADATA_VERSION: &str = "metadata.version";
+pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_FEATURE as METADATA_VERSION;
+/// Maximum supported `metadata.version` level.
+pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MAX;
 /// Minimum supported `metadata.version` level.
-pub(crate) const METADATA_VERSION_MIN: i16 = 1;
-/// Maximum supported `metadata.version` level. Conservative on purpose —
-/// see the module note before raising it.
-pub(crate) const METADATA_VERSION_MAX: i16 = 1;
+pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MIN;
 
 /// One row of the supported-feature table.
 #[derive(Debug, Clone, Copy)]
@@ -43,6 +39,16 @@ pub(crate) fn lookup(name: &str) -> Option<SupportedFeature> {
         .find(|f| f.name == name)
 }
 
+/// True when a feature requiring `required_level` must be blocked given
+/// the `finalized` metadata.version. A missing finalized level (`None`,
+/// `MetadataVersion.UNKNOWN`) is permissive — there is no level to gate
+/// against — matching the runtime range guard's treatment.
+// Consumed by Batch 4 handlers; allow dead_code until then.
+#[allow(dead_code)]
+pub(crate) fn metadata_version_blocks(finalized: Option<i16>, required_level: i16) -> bool {
+    finalized.is_some_and(|level| level < required_level)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -50,8 +56,23 @@ mod tests {
     #[test]
     fn metadata_version_is_supported() {
         let f = lookup(METADATA_VERSION).expect("metadata.version supported");
-        assert_eq!(f.min_version, 1);
-        assert_eq!(f.max_version, METADATA_VERSION_MAX);
+        assert_eq!(
+            f.min_version,
+            crabka_metadata::metadata_version::METADATA_VERSION_MIN
+        );
+        assert_eq!(
+            f.max_version,
+            crabka_metadata::metadata_version::METADATA_VERSION_MAX
+        );
+        assert_eq!(f.min_version, 7);
+        assert_eq!(f.max_version, 25);
         assert!(lookup("not.a.feature").is_none());
+    }
+
+    #[test]
+    fn metadata_version_blocks_is_permissive_on_unknown() {
+        assert!(!metadata_version_blocks(None, 11));
+        assert!(metadata_version_blocks(Some(10), 11));
+        assert!(!metadata_version_blocks(Some(11), 11));
     }
 }
