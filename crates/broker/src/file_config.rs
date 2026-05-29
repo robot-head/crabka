@@ -7,6 +7,7 @@
 
 use std::net::SocketAddr;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crabka_security::ListenerProtocol;
@@ -40,7 +41,7 @@ pub enum FileConfigError {
 /// Top-level shape of `broker.toml`. `serde(deny_unknown_fields)` is
 /// off — new fields may be added and old binaries should warn rather
 /// than refuse to start.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 pub struct FileConfig {
     pub broker_id: Option<i32>,
     pub log_dir: Option<String>,
@@ -65,6 +66,7 @@ pub struct FileConfig {
     /// Controller listener security protocol. When `Some(Ssl)`
     /// the controller listener terminates TLS using `tls_config`.
     #[serde(default)]
+    #[schemars(with = "Option<String>")]
     pub controller_listener_protocol: Option<ListenerProtocol>,
 
     /// TLS material for the controller listener (and any
@@ -131,7 +133,7 @@ pub struct FileConfig {
 /// Exactly one of `storage_dir` (local filesystem) or `[remote_storage.s3]`
 /// (S3-compatible object store) should be set. Setting both errors at
 /// load time.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileRemoteStorageConfig {
     /// Root directory for the local `LocalTieredStorage` backend.
@@ -146,7 +148,7 @@ pub struct FileRemoteStorageConfig {
 
 /// TOML shape of `[remote_storage.kafka_metadata]`. Maps to
 /// [`crate::config::KafkaRlmmConfig`].
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileKafkaRlmmConfig {
     /// `host:port` the manager dials to reach its own broker.
@@ -165,7 +167,7 @@ pub struct FileKafkaRlmmConfig {
 
 /// TOML shape of `[remote_storage.s3]`. Maps to
 /// [`crabka_remote_storage::S3Config`].
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileRemoteStorageS3Config {
     /// S3 bucket name.
@@ -213,7 +215,7 @@ pub struct FileRemoteStorageS3Config {
 /// `deny_unknown_fields` so a misspelled `super_user` typo at the top
 /// of the `[authorization]` block is rejected at parse time rather
 /// than silently producing the wrong authorizer.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileAuthorizationConfig {
     #[serde(rename = "type", default)]
@@ -230,7 +232,7 @@ pub struct FileAuthorizationConfig {
 /// Which [`crate::authorizer::Authorizer`] impl to instantiate.
 /// `snake_case` to match the spec's `type = "allow_all" | "simple" |
 /// "opa"` wire shape.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthzType {
     #[default]
@@ -243,7 +245,7 @@ pub enum AuthzType {
 /// arguments of [`crate::authorizer::opa::OpaAuthorizer::new`]. Defaults
 /// are picked to match Strimzi's `KafkaAuthorizationOpa` (`50_000` LRU
 /// entries, 1 h TTL, fail-closed on OPA error).
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FileOpaConfig {
     /// OPA decision endpoint URL — must include the data-API path,
@@ -271,7 +273,7 @@ fn default_opa_expire_after_ms() -> i64 {
 
 /// TOML shape of `[delegation_token]`. Maps to the three `delegation_token_*`
 /// fields on [`crate::BrokerConfig`].
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileDelegationTokenConfig {
     /// HMAC master key. Overridden by `CRABKA_DELEGATION_TOKEN_SECRET_KEY`
@@ -290,7 +292,7 @@ pub struct FileDelegationTokenConfig {
 }
 
 /// `[process]` TOML section — `KRaft` `process.roles`.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileProcessConfig {
     /// Role strings: `"controller"`, `"broker"` (case-insensitive). Empty
@@ -306,7 +308,7 @@ pub struct FileProcessConfig {
 /// validator; the two endpoint URIs are mutually
 /// exclusive. With neither set, the unsecured-JWS validator
 /// (development only) is used.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 pub struct FileOAuthBearerConfig {
     /// Claim whose value becomes the principal name. Default `sub`.
     #[serde(default)]
@@ -442,7 +444,7 @@ const DEFAULT_KERBEROS_SERVICE_NAME: &str = "kafka";
 /// TOML shape of `[gssapi]`. Maps to
 /// [`crabka_security::gssapi::GssapiConfig`]. `principal_to_local_rules`
 /// are parsed into `name::Rule` at `apply_to` time.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileGssapiConfig {
     pub keytab_path: std::path::PathBuf,
@@ -464,7 +466,7 @@ pub struct FileGssapiConfig {
 /// TOML shape of `[inter_broker_credentials]`. A `type` discriminator
 /// selects the variant; only `gssapi` is implemented (PLAIN/SCRAM
 /// inter-broker over TOML is intentionally not exposed).
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum FileInterBrokerCredentials {
     Gssapi {
@@ -476,7 +478,7 @@ pub enum FileInterBrokerCredentials {
     },
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 pub struct FileTlsConfig {
     pub cert_path: std::path::PathBuf,
     pub key_path: std::path::PathBuf,
@@ -486,7 +488,7 @@ pub struct FileTlsConfig {
     pub client_auth: FileClientAuthMode,
 }
 
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, JsonSchema, PartialEq, Eq)]
 pub enum FileClientAuthMode {
     #[default]
     Disabled,
@@ -494,9 +496,10 @@ pub enum FileClientAuthMode {
     Required,
 }
 
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema, PartialEq)]
 pub struct FileListenerSaslConfig {
     #[serde(default, deserialize_with = "deserialize_sasl_mechanisms")]
+    #[schemars(with = "Vec<String>")]
     pub enabled_mechanisms: Vec<crabka_security::SaslMechanism>,
 }
 
@@ -517,11 +520,13 @@ where
         .collect()
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq)]
 pub struct FileListener {
     pub name: String,
+    #[schemars(with = "String")]
     pub bind_addr: SocketAddr,
     pub advertised: String,
+    #[schemars(with = "String")]
     pub protocol: ListenerProtocol,
     #[serde(default)]
     pub tls_config: Option<FileTlsConfig>,
@@ -2172,5 +2177,15 @@ kdc_url = "tcp://kdc:88"
             }
             other => panic!("expected Gssapi, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn file_config_schema_generates() {
+        let schema = schemars::schema_for!(FileConfig);
+        let value = serde_json::to_value(&schema).expect("schema serializes");
+        assert!(
+            value.get("properties").is_some(),
+            "FileConfig schema has properties"
+        );
     }
 }

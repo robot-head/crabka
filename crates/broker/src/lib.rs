@@ -120,6 +120,7 @@
 
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 
+pub mod api_catalog;
 pub mod authorizer;
 pub(crate) mod auto_join;
 pub mod bootstrap;
@@ -172,5 +173,6 @@ pub(crate) mod unclean_recovery;
 
 pub use broker::{Broker, BrokerHandle};
 pub use config::{BootstrapMode, BrokerConfig, KafkaRlmmConfig, RemoteStorageBackend};
+pub use config_keys::{TopicConfigDoc, topic_config_docs};
 pub use crabka_raft::NodeId;
 pub use error::BrokerError;
