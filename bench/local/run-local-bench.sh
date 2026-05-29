@@ -201,8 +201,9 @@ run_one() {
   # Inject locally-measured resource numbers + startup time into the
   # RunOutput so crabka-bench-report renders msgs/s-per-core and
   # working-set MB.
-  CPU_DELTA="$(awk -v a="$cpu_after" -v b="$cpu_before" 'BEGIN{d=a-b; if(d<0)d=0; printf "%.3f", d}')" \
-  PEAK_RSS="$peak_rss" STARTUP_MS="$startup_ms" \
+  local cpu_delta
+  cpu_delta="$(awk -v a="$cpu_after" -v b="$cpu_before" 'BEGIN{d=a-b; if(d<0)d=0; printf "%.3f", d}')"
+  CPU_DELTA="$cpu_delta" PEAK_RSS="$peak_rss" STARTUP_MS="$startup_ms" \
   python3 - "$out" <<'PY'
 import json, os, sys
 path = sys.argv[1]
@@ -220,9 +221,9 @@ with open(path, "w") as f:
     json.dump(o, f, indent=2)
 PY
 
-  local mps cpu_s
+  local mps
   mps="$(python3 -c "import json;print(round(json.load(open('$out'))['throughput']['producer_msgs_per_sec']))")"
-  log "$stack/$name done: ${mps} msgs/s, broker cpu=${CPU_DELTA}s peak_rss=$((peak_rss/1024/1024))MiB"
+  log "$stack/$name done: ${mps} msgs/s, broker cpu=${cpu_delta}s peak_rss=$((peak_rss/1024/1024))MiB"
 }
 
 for scenario in "${SCENARIOS[@]}"; do
