@@ -96,6 +96,7 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
 /// Emit a standalone `.rs` file body for a top-level `commonStruct` entry.
 /// The file has the same imports as a primary message file but contains ONLY
 /// the struct definition + Encode/Decode impls for that single struct.
+#[allow(clippy::too_many_lines)]
 fn emit_common_struct_file(
     struct_name: &str,
     fields: &[FieldSpec],
