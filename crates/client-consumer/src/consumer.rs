@@ -13,10 +13,12 @@ use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::Client;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
+use crabka_protocol::owned::join_group_response::JoinGroupResponse;
 use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
+use crabka_protocol::owned::sync_group_response::SyncGroupResponse;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::assignor::Assignor;
@@ -24,7 +26,7 @@ use crate::builder::{
     AutoOffsetReset, IsolationLevel, decode_assignment, decode_subscription, encode_assignment,
     encode_subscription,
 };
-use crate::coordinator::CoordinatorState;
+use crate::coordinator::{COORDINATOR_RETRY_TIMEOUT, CoordinatorState, with_coordinator_retry};
 use crate::error::ConsumerError;
 
 /// Subscribe-style consumer handle. Construct via [`Consumer::builder`].
@@ -116,21 +118,36 @@ impl Consumer {
 
         // 1. First JoinGroup — empty member_id, expect MEMBER_ID_REQUIRED (79)
         //    or a regular response; either way the broker hands us a member_id.
-        let r1 = client
-            .send(JoinGroupRequest {
-                group_id: group_id.clone(),
-                protocol_type: "consumer".into(),
-                member_id: String::new(),
-                session_timeout_ms,
-                rebalance_timeout_ms,
-                protocols: vec![JoinGroupRequestProtocol {
-                    name: protocol_name.clone(),
-                    metadata: subscription_bytes.clone(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .await?;
+        //    Retry a cold/relocating coordinator (14/15/16) with backoff.
+        let r1 = with_coordinator_retry(
+            COORDINATOR_RETRY_TIMEOUT,
+            |r: &JoinGroupResponse| r.error_code,
+            || {
+                let group_id = group_id.clone();
+                let protocol_name = protocol_name.clone();
+                let subscription_bytes = subscription_bytes.clone();
+                let client = &client;
+                async move {
+                    client
+                        .send(JoinGroupRequest {
+                            group_id,
+                            protocol_type: "consumer".into(),
+                            member_id: String::new(),
+                            session_timeout_ms,
+                            rebalance_timeout_ms,
+                            protocols: vec![JoinGroupRequestProtocol {
+                                name: protocol_name,
+                                metadata: subscription_bytes,
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(ConsumerError::from)
+                }
+            },
+        )
+        .await?;
         let member_id = if r1.error_code == 79 || r1.error_code == 0 {
             r1.member_id.clone()
         } else {
@@ -143,21 +160,36 @@ impl Consumer {
         }
 
         // 2. Second JoinGroup with the assigned member_id.
-        let r2 = client
-            .send(JoinGroupRequest {
-                group_id: group_id.clone(),
-                protocol_type: "consumer".into(),
-                member_id: member_id.clone(),
-                session_timeout_ms,
-                rebalance_timeout_ms,
-                protocols: vec![JoinGroupRequestProtocol {
-                    name: protocol_name.clone(),
-                    metadata: subscription_bytes.clone(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .await?;
+        let r2 = with_coordinator_retry(
+            COORDINATOR_RETRY_TIMEOUT,
+            |r: &JoinGroupResponse| r.error_code,
+            || {
+                let group_id = group_id.clone();
+                let protocol_name = protocol_name.clone();
+                let subscription_bytes = subscription_bytes.clone();
+                let member_id = member_id.clone();
+                let client = &client;
+                async move {
+                    client
+                        .send(JoinGroupRequest {
+                            group_id,
+                            protocol_type: "consumer".into(),
+                            member_id,
+                            session_timeout_ms,
+                            rebalance_timeout_ms,
+                            protocols: vec![JoinGroupRequestProtocol {
+                                name: protocol_name,
+                                metadata: subscription_bytes,
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(ConsumerError::from)
+                }
+            },
+        )
+        .await?;
         if r2.error_code != 0 {
             return Err(ConsumerError::Server(r2.error_code));
         }
@@ -216,18 +248,34 @@ impl Consumer {
         };
 
         // 4. SyncGroup — leader installs assignments; everyone receives
-        //    their own assignment in the response.
-        let r3 = client
-            .send(SyncGroupRequest {
-                group_id: group_id.clone(),
-                generation_id: r2.generation_id,
-                member_id: member_id.clone(),
-                protocol_type: Some("consumer".into()),
-                protocol_name: Some(protocol_name.clone()),
-                assignments: assignments_for_sync,
-                ..Default::default()
-            })
-            .await?;
+        //    their own assignment in the response. Retry a cold coordinator.
+        let r3 = with_coordinator_retry(
+            COORDINATOR_RETRY_TIMEOUT,
+            |r: &SyncGroupResponse| r.error_code,
+            || {
+                let group_id = group_id.clone();
+                let protocol_name = protocol_name.clone();
+                let member_id = member_id.clone();
+                let assignments_for_sync = assignments_for_sync.clone();
+                let generation_id = r2.generation_id;
+                let client = &client;
+                async move {
+                    client
+                        .send(SyncGroupRequest {
+                            group_id,
+                            generation_id,
+                            member_id,
+                            protocol_type: Some("consumer".into()),
+                            protocol_name: Some(protocol_name),
+                            assignments: assignments_for_sync,
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(ConsumerError::from)
+                }
+            },
+        )
+        .await?;
         if r3.error_code != 0 {
             return Err(ConsumerError::Server(r3.error_code));
         }
