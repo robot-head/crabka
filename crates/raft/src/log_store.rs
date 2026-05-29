@@ -102,7 +102,7 @@ impl RaftLogStore {
         self.log.lock().await.size_bytes()
     }
 
-    pub(crate) async fn read_range<R: RangeBounds<u64>>(&self, range: R) -> Vec<Entry<TypeConfig>> {
+    pub async fn read_range<R: RangeBounds<u64>>(&self, range: R) -> Vec<Entry<TypeConfig>> {
         self.cache
             .lock()
             .await
@@ -110,6 +110,20 @@ impl RaftLogStore {
             .range(range)
             .map(|(_, e)| e.clone())
             .collect()
+    }
+
+    /// Lowest log index currently retained in the store, or `0` if the
+    /// log is empty. Tracks raft log truncation/snapshotting; an observer
+    /// that has fallen behind this offset must rebuild from a snapshot.
+    pub async fn log_start_index(&self) -> u64 {
+        self.cache
+            .lock()
+            .await
+            .entries
+            .keys()
+            .next()
+            .copied()
+            .unwrap_or(0)
     }
 
     pub(crate) async fn append(&self, entries: Vec<Entry<TypeConfig>>) -> Result<(), RaftError> {
@@ -338,5 +352,29 @@ mod tests {
                 .iter()
                 .all(|e| e.log_id.index > 3)
         );
+    }
+
+    #[tokio::test]
+    async fn read_range_and_log_start_index() {
+        let dir = TempDir::new().unwrap();
+        let store = RaftLogStore::open(dir.path().to_path_buf()).await.unwrap();
+        assert_eq!(store.log_start_index().await, 0);
+
+        let entries: Vec<Entry<TypeConfig>> = (1..=3)
+            .map(|i| Entry {
+                log_id: LogId {
+                    leader_id: LeaderId::new(1, 1),
+                    index: i,
+                },
+                payload: EntryPayload::<TypeConfig>::Blank,
+            })
+            .collect();
+        store.append(entries).await.unwrap();
+
+        assert_eq!(store.log_start_index().await, 1);
+        let got = store.read_range(2..=3).await;
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].log_id.index, 2);
+        assert_eq!(got[1].log_id.index, 3);
     }
 }

@@ -10,7 +10,6 @@ use std::time::Duration;
 
 use crabka_client_core::ConnectionOptions;
 use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
-use crabka_raft::ControllerHandle;
 use crabka_security::ListenerProtocol;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -18,7 +17,7 @@ use tracing::{debug, warn};
 pub(crate) struct Config {
     pub broker_id: i32,
     pub interval: Duration,
-    pub controller: Arc<ControllerHandle>,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub shutdown: CancellationToken,
     /// Shared inter-broker dialer used to reach the controller leader.
     /// Runs TLS / SASL when the inter-broker listener requires them,

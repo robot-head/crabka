@@ -49,7 +49,7 @@ pub(crate) struct AutoJoinParams {
     /// Protocol of the bootstrap server's data-plane listener (the
     /// inter-broker listener protocol) — `AddRaftVoter` is served there.
     pub listener_protocol: crabka_security::ListenerProtocol,
-    pub controller: Arc<crabka_raft::ControllerHandle>,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
 }
 

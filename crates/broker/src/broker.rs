@@ -25,9 +25,12 @@ use crate::partition::{Partition, WriterMessage};
 #[allow(dead_code)]
 pub struct Broker {
     pub(crate) config: BrokerConfig,
-    /// Quorum-backed metadata controller. Every metadata read goes through
-    /// [`crabka_raft::ControllerHandle::current_image`].
-    pub(crate) controller: Arc<crabka_raft::ControllerHandle>,
+    /// Metadata authority for this broker. For combined/controller nodes
+    /// this is a live openraft `ControllerHandle`; for broker-only nodes it
+    /// is an observer-backed source that fetches `__cluster_metadata` and
+    /// forwards writes to the controller quorum. Handlers reach it via the
+    /// `MetadataSource` trait, so the concrete backing is invisible to them.
+    pub(crate) controller: Arc<dyn crate::metadata_source::MetadataSource>,
     /// Wrapped in `Arc` so handlers cloning the field share the same
     /// underlying map. `DashMap::clone` is a deep copy by default.
     pub(crate) partitions: Arc<DashMap<(String, i32), Arc<Partition>>>,
@@ -114,7 +117,7 @@ impl Broker {
     /// Test-only: clone the controller handle so the `auto_join` unit test can
     /// build `AutoJoinParams` without reaching into private fields.
     #[cfg(test)]
-    pub(crate) fn controller_for_test(&self) -> Arc<crabka_raft::ControllerHandle> {
+    pub(crate) fn controller_for_test(&self) -> Arc<dyn crate::metadata_source::MetadataSource> {
         self.controller.clone()
     }
 
@@ -551,6 +554,18 @@ impl BrokerHandle {
         self._broker.controller.current_image()
     }
 
+    /// Test-only: the raft voter set this node's metadata source reports.
+    /// A controller/combined node returns the openraft membership; a
+    /// broker-only (observer) node returns an empty set since it never
+    /// joins the quorum. Used by the role-separation test to assert a
+    /// broker-only node is absent from the controller's voters.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn quorum_voters_for_test(&self) -> Vec<crabka_raft::NodeId> {
+        self._broker.controller.quorum_state().voters
+    }
+
     /// Test-only: clone the inner `Arc<Broker>`. Used by the `auto_join`
     /// unit test (and dynamic-voters integration tests) that need to drive
     /// broker-internal background routines directly.
@@ -787,7 +802,7 @@ impl BrokerHandle {
 /// [`crate::leader_rebalance::ControllerLike`] trait required by the
 /// auto-rebalance background task.
 struct ControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
     node_id: crabka_raft::NodeId,
 }
 
@@ -816,7 +831,7 @@ impl crate::leader_rebalance::ControllerLike for ControllerAdapter {
 /// [`crate::reassignment::ReassignmentController`] trait required by the
 /// reassignment-completion background task.
 struct ReassignmentControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
     node_id: crabka_raft::NodeId,
 }
 
@@ -850,7 +865,7 @@ impl crate::reassignment::ReassignmentController for ReassignmentControllerAdapt
 /// background task. Every broker runs this (not just the controller leader)
 /// since each broker manages its own throttle buckets.
 struct ThrottleControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 impl crate::throttle::ImageWatcher for ThrottleControllerAdapter {
@@ -868,7 +883,7 @@ impl crate::throttle::ImageWatcher for ThrottleControllerAdapter {
 /// background task. Every broker runs this (not just the controller leader)
 /// since each broker enforces its own quotas via its own buckets.
 struct QuotaControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 impl crate::quota::ImageWatcher for QuotaControllerAdapter {
@@ -886,7 +901,7 @@ impl crate::quota::ImageWatcher for QuotaControllerAdapter {
 /// trait required by the delegation-token expiry sweep. Every broker runs
 /// the sweep; raft serializes duplicate tombstones so each becomes a no-op.
 struct DelegationTokenCleanupControllerAdapter {
-    handle: Arc<crabka_raft::ControllerHandle>,
+    handle: Arc<dyn crate::metadata_source::MetadataSource>,
 }
 
 #[async_trait::async_trait]
@@ -1033,85 +1048,124 @@ impl Broker {
         // them once here so the cold-boot voter set feeds `ControllerConfig`;
         // the same records are submitted through raft after a leader is
         // elected (step 2b below). A `Join` node has no seed set and relies
-        // on `bootstrap_servers` + auto-join instead.
+        // on `bootstrap_servers` + auto-join instead. Broker-only nodes never
+        // run a controller, so the records stay unused (step 2b is gated on
+        // having a non-empty set and `Bootstrap` mode).
         let mut bootstrap_records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
-        let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
 
-        // KIP-853 standalone self-bootstrap: a `Bootstrap` node with no seeded
-        // `VotersRecord` (an in-process/single-node start that didn't run
-        // `format --standalone`) forms a single-voter cluster of itself. Seed
-        // both the openraft membership (`initial_voters`) and the metadata log
-        // (a `V1Voters` record submitted after election in step 2b) so the two
-        // stay in lockstep. Multi-node clusters seed voters via `format` or
-        // grow via auto-join (`BootstrapMode::Join`), so neither path lands here.
-        if initial_voters.is_empty()
-            && matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = if config.is_controller()
         {
-            let self_voter = crabka_metadata::Voter {
-                id: config.node_id,
-                directory_id: config.directory_id,
-                endpoints: vec![crabka_metadata::VoterEndpoint {
-                    name: "CONTROLLER".to_string(),
-                    host: config.controller_listen_addr.ip().to_string(),
-                    port: config.controller_listen_addr.port(),
-                }],
-                kraft_version: crabka_metadata::KRaftVersionRange::default(),
-            };
-            let voters = crabka_metadata::VoterSet::from_voters([self_voter]);
-            tracing::info!(
-                node_id = config.node_id,
-                "KIP-853 standalone self-bootstrap: forming single-voter cluster"
-            );
-            bootstrap_records.insert(
-                0,
-                crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
-                    voters: voters.clone(),
-                }),
-            );
-            bootstrap_records.insert(
-                0,
-                crabka_metadata::MetadataRecord::V1KRaftVersion(
-                    crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
-                ),
-            );
-            initial_voters = voters;
-        }
+            let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
 
-        let controller_cfg = crabka_raft::ControllerConfig {
-            node_id: config.node_id,
-            bootstrap_servers: config.bootstrap_servers.clone(),
-            directory_id: config.directory_id,
-            auto_join: config.auto_join,
-            observer_lag_bound: config.observer_lag_bound,
-            initial_voters,
-            controller_listen_addr: config.controller_listen_addr,
-            log_dir: config.log_dir.join("__cluster_metadata"),
-            // Sourced from `BrokerConfig` — see the docstrings there for
-            // the production-vs-test tradeoff. Crucially this also sets
-            // openraft's `leader_lease` to `election_timeout × 2`, which
-            // is the floor on how fast a 3-broker cluster can elect a
-            // replacement when the controller leader dies.
-            election_timeout: config.controller_election_timeout,
-            heartbeat_interval: config.controller_heartbeat_interval,
-            client_id: format!("crabka-broker-{}-controller", config.broker_id),
-            bootstrap_mode: config.bootstrap_mode,
-            cluster_id: config.cluster_id,
-            dialer: raft_dialer,
-            handshake: handshake_opt,
-            max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
-            max_snapshot_interval: config.metadata_max_snapshot_interval,
+            // KIP-853 standalone self-bootstrap: a `Bootstrap` node with no
+            // seeded `VotersRecord` (an in-process/single-node start that
+            // didn't run `format --standalone`) forms a single-voter cluster
+            // of itself. Seed both the openraft membership (`initial_voters`)
+            // and the metadata log (a `V1Voters` record submitted after
+            // election in step 2b) so the two stay in lockstep. Multi-node
+            // clusters seed voters via `format` or grow via auto-join
+            // (`BootstrapMode::Join`), so neither path lands here.
+            if initial_voters.is_empty()
+                && matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
+            {
+                let self_voter = crabka_metadata::Voter {
+                    id: config.node_id,
+                    directory_id: config.directory_id,
+                    endpoints: vec![crabka_metadata::VoterEndpoint {
+                        name: "CONTROLLER".to_string(),
+                        host: config.controller_listen_addr.ip().to_string(),
+                        port: config.controller_listen_addr.port(),
+                    }],
+                    kraft_version: crabka_metadata::KRaftVersionRange::default(),
+                };
+                let voters = crabka_metadata::VoterSet::from_voters([self_voter]);
+                tracing::info!(
+                    node_id = config.node_id,
+                    "KIP-853 standalone self-bootstrap: forming single-voter cluster"
+                );
+                bootstrap_records.insert(
+                    0,
+                    crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
+                        voters: voters.clone(),
+                    }),
+                );
+                bootstrap_records.insert(
+                    0,
+                    crabka_metadata::MetadataRecord::V1KRaftVersion(
+                        crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
+                    ),
+                );
+                initial_voters = voters;
+            }
+
+            let controller_cfg = crabka_raft::ControllerConfig {
+                node_id: config.node_id,
+                bootstrap_servers: config.bootstrap_servers.clone(),
+                directory_id: config.directory_id,
+                auto_join: config.auto_join,
+                observer_lag_bound: config.observer_lag_bound,
+                initial_voters,
+                controller_listen_addr: config.controller_listen_addr,
+                log_dir: config.log_dir.join("__cluster_metadata"),
+                // Sourced from `BrokerConfig` — see the docstrings there for
+                // the production-vs-test tradeoff. Crucially this also sets
+                // openraft's `leader_lease` to `election_timeout × 2`, which
+                // is the floor on how fast a 3-broker cluster can elect a
+                // replacement when the controller leader dies.
+                election_timeout: config.controller_election_timeout,
+                heartbeat_interval: config.controller_heartbeat_interval,
+                client_id: format!("crabka-broker-{}-controller", config.broker_id),
+                bootstrap_mode: config.bootstrap_mode,
+                cluster_id: config.cluster_id,
+                dialer: raft_dialer.clone(),
+                handshake: handshake_opt,
+                max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
+                max_snapshot_interval: config.metadata_max_snapshot_interval,
+            };
+            let handle = Arc::new(
+                crabka_raft::Controller::start_with_listener(controller_cfg, controller_listener)
+                    .await
+                    .map_err(|e| BrokerError::Startup(e.to_string()))?,
+            );
+            // Populate the late-bound controller handle so the inbound
+            // `BrokerRaftHandshake` (already wired into the controller's
+            // accept loop) can perform SCRAM credential lookups on the next
+            // authenticated connection. The `set` cannot fail in practice
+            // because we hold the only writer; swallow the `SetError` defensively.
+            let _ = controller_cell.set(handle.clone());
+            handle as Arc<dyn crate::metadata_source::MetadataSource>
+        } else {
+            // Broker-only node: no openraft voter. Keep the `MetadataImage`
+            // current by fetching `__cluster_metadata` from the controller
+            // quorum (the observer), and forward writes to the quorum leader.
+            // `controller_cell` is left unset — a broker-only node runs no
+            // controller listener, so nothing performs SCRAM lookups on it.
+            // The caller-supplied `controller_listener` (if any) goes unused.
+            drop(controller_listener);
+            let dialer = raft_dialer
+                .clone()
+                .expect("broker-only node requires a raft dialer");
+            let observer = crate::metadata_observer::MetadataObserver::start(
+                crate::metadata_observer::ObserverConfig {
+                    voters: config.controller_quorum_voters.clone(),
+                    dialer: dialer.clone(),
+                    client_id: format!("crabka-broker-{}-observer", config.broker_id),
+                    cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
+                    max_bytes: 1_048_576,
+                    poll_interval: std::time::Duration::from_millis(100),
+                },
+            );
+            let forwarder = crate::metadata_source::QuorumForwarder {
+                voters: config.controller_quorum_voters.clone(),
+                dialer,
+                client_id: format!("crabka-broker-{}-writer", config.broker_id),
+                leader: observer.watch_leader(),
+            };
+            Arc::new(crate::metadata_source::ObserverSource::new(
+                observer,
+                Arc::new(forwarder),
+            )) as Arc<dyn crate::metadata_source::MetadataSource>
         };
-        let controller = Arc::new(
-            crabka_raft::Controller::start_with_listener(controller_cfg, controller_listener)
-                .await
-                .map_err(|e| BrokerError::Startup(e.to_string()))?,
-        );
-        // Populate the late-bound controller handle so the inbound
-        // `BrokerRaftHandshake` (already wired into the controller's
-        // accept loop) can perform SCRAM credential lookups on the next
-        // authenticated connection. The `set` cannot fail in practice
-        // because we hold the only writer; swallow the `SetError` defensively.
-        let _ = controller_cell.set(controller.clone());
 
         // 1b. KIP-853 controller auto-join. Spawned BEFORE the leader-wait in
         //     step 2: a `Join` broker's empty raft log keeps it in openraft's
@@ -1129,59 +1183,32 @@ impl Broker {
         // data-plane listener (where api_key 80 is served), so it speaks the
         // inter-broker listener protocol — not the controller-listener
         // protocol that openraft RPCs use.
-        let auto_join_protocol = config
-            .effective_listeners()
-            .iter()
-            .find(|l| l.name == config.inter_broker_listener_name)
-            .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
-        tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
-            auto_join: config.auto_join,
-            node_id: config.node_id,
-            directory_id: config.directory_id,
-            cluster_id: config.cluster_id,
-            bootstrap_servers: config.bootstrap_servers.clone(),
-            listener_protocol: auto_join_protocol,
-            controller: controller.clone(),
-            inter_broker_client: inter_broker_client.clone(),
-        }));
+        // Auto-join grows the controller *voter* quorum, so only nodes that
+        // run a controller participate. A broker-only node is a pure observer
+        // and never joins the quorum.
+        if config.is_controller() {
+            let auto_join_protocol = config
+                .effective_listeners()
+                .iter()
+                .find(|l| l.name == config.inter_broker_listener_name)
+                .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
+            tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
+                auto_join: config.auto_join,
+                node_id: config.node_id,
+                directory_id: config.directory_id,
+                cluster_id: config.cluster_id,
+                bootstrap_servers: config.bootstrap_servers.clone(),
+                listener_protocol: auto_join_protocol,
+                controller: controller.clone(),
+                inter_broker_client: inter_broker_client.clone(),
+            }));
+        }
 
         // 2. Wait for a leader, then submit a self-registration record so
         //    other brokers can discover us. Best-effort: if the submit
         //    fails the next caller's request will surface the error and
         //    membership reconciliation can retry later.
         {
-            // Per-listener endpoints: every configured listener's
-            // advertised `host:port` + protocol becomes a `BrokerEndpoint`
-            // on the broker's self-registration record. Clients on
-            // `Metadata` v9+ pick the right endpoint for their connection;
-            // legacy callers continue reading the top-level `host`/`port`.
-            let endpoints: Vec<crabka_metadata::BrokerEndpoint> = config
-                .effective_listeners()
-                .iter()
-                .map(|l| {
-                    let (host, port) = parse_advertised_host_port(&l.advertised);
-                    crabka_metadata::BrokerEndpoint {
-                        name: l.name.clone(),
-                        host,
-                        port,
-                        protocol: l.protocol,
-                    }
-                })
-                .collect();
-            let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
-                crabka_metadata::BrokerRegistrationRecord {
-                    node_id: config.node_id,
-                    host: config
-                        .advertised_listener
-                        .split(':')
-                        .next()
-                        .unwrap_or("127.0.0.1")
-                        .to_string(),
-                    port: config.listen_addr.port(),
-                    rack: None,
-                    endpoints,
-                },
-            );
             let mut leader_rx = controller.watch_leader();
             let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
             while leader_rx.borrow().is_none() {
@@ -1196,8 +1223,45 @@ impl Broker {
                 )
                 .await;
             }
-            if let Err(e) = controller.submit_change(vec![self_reg]).await {
-                tracing::warn!(error = %e, "self-registration failed; continuing");
+
+            // Controller-only nodes never register — they host no data and
+            // must not appear as brokers in Metadata/DescribeCluster.
+            if config.is_broker() {
+                // Per-listener endpoints (Task 11): every configured listener's
+                // advertised `host:port` + protocol becomes a `BrokerEndpoint`
+                // on the broker's self-registration record. Clients on
+                // `Metadata` v9+ pick the right endpoint for their connection;
+                // legacy callers continue reading the top-level `host`/`port`.
+                let endpoints: Vec<crabka_metadata::BrokerEndpoint> = config
+                    .effective_listeners()
+                    .iter()
+                    .map(|l| {
+                        let (host, port) = parse_advertised_host_port(&l.advertised);
+                        crabka_metadata::BrokerEndpoint {
+                            name: l.name.clone(),
+                            host,
+                            port,
+                            protocol: l.protocol,
+                        }
+                    })
+                    .collect();
+                let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
+                    crabka_metadata::BrokerRegistrationRecord {
+                        node_id: config.node_id,
+                        host: config
+                            .advertised_listener
+                            .split(':')
+                            .next()
+                            .unwrap_or("127.0.0.1")
+                            .to_string(),
+                        port: config.listen_addr.port(),
+                        rack: config.rack.clone(),
+                        endpoints,
+                    },
+                );
+                if let Err(e) = controller.submit_change(vec![self_reg]).await {
+                    tracing::warn!(error = %e, "self-registration failed; continuing");
+                }
             }
 
             // 2b. First-start bootstrap-records submit.
@@ -1249,18 +1313,22 @@ impl Broker {
         //    fail the whole startup on the first IO error, and we want
         //    to keep recovering partitions on the surviving dirs.
         let partitions: Arc<DashMap<(String, i32), Arc<Partition>>> = Arc::new(DashMap::new());
-        let scan_dirs = log_dir_status.online_subset(&config.all_log_dirs());
-        for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
-            let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
-            let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
-            let part = spawn_partition(
-                topic.clone(),
-                partition_id,
-                owning_dir,
-                log,
-                log_dir_status.clone(),
-            );
-            partitions.insert((topic.clone(), partition_id), part);
+        // Controller-only nodes host no data partitions, so they skip the
+        // disk scan/recovery entirely.
+        if config.is_broker() {
+            let scan_dirs = log_dir_status.online_subset(&config.all_log_dirs());
+            for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
+                let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
+                let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
+                let part = spawn_partition(
+                    topic.clone(),
+                    partition_id,
+                    owning_dir,
+                    log,
+                    log_dir_status.clone(),
+                );
+                partitions.insert((topic.clone(), partition_id), part);
+            }
         }
 
         // Group coordinator bootstrap.
