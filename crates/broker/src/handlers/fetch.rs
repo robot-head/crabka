@@ -1013,6 +1013,31 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
             // `log_start_offset` / HW / LSO stay at whatever `do_read`
             // wrote out (the local view); the remote tier doesn't change
             // those pointers.
+
+            // KIP-405 read-committed: surface the aborted-transaction list
+            // from the segment's `.txnindex` so the consumer drops aborted
+            // records client-side, exactly as the local path does at the
+            // `aborted_in_range` call in `do_read`. `Some(empty)` is the
+            // correct read-committed signal (read-uncommitted leaves it
+            // `None`). The batch's inclusive last offset bounds the query.
+            if p.read_committed && !p.is_follower_fetch {
+                let batch_last_offset = batch.base_offset + i64::from(batch.last_offset_delta);
+                let aborts = reader
+                    .aborted_transactions(&tp, leader_epoch, p.fetch_offset, batch_last_offset)
+                    .await
+                    .unwrap_or_default();
+                p.out.aborted_transactions = Some(
+                    aborts
+                        .into_iter()
+                        .map(|e| AbortedTransaction {
+                            producer_id: e.producer_id,
+                            first_offset: e.start_offset,
+                            ..Default::default()
+                        })
+                        .collect(),
+                );
+            }
+
             p.out.records = Some(batch.into());
             Some(bytes_est)
         }
