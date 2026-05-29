@@ -1,0 +1,20 @@
+# Single-box throughput ceiling at a realistic 1 KiB record size.
+# Two producers + two consumers in one group push the broker while the
+# driver, broker, and OS all share the same 4-core machine — so the
+# absolute numbers are "this laptop-class box", but the crabka-vs-kafka
+# comparison is apples-to-apples (identical load, identical host).
+name: local-1kb-saturate
+mode_tag: ci
+msg_size_bytes: 1024
+partitions: 6
+replication_factor: 1
+producers: 2
+consumers: 2
+mode:
+  kind: saturate
+acks: leader
+compression: none
+linger_ms: 5
+batch_size: 65536
+warmup_s: 10
+duration_s: 45

@@ -341,7 +341,7 @@ async fn run_producer(
                 dropped: 0,
                 recovery_unix_ms: 0,
                 latency_spike_max_us: 0,
-                error: format!("producer-{idx}-build: {e}"),
+                error: format!("producer-{idx}-build: {e:#}"),
             };
         }
     };
@@ -463,7 +463,7 @@ async fn run_consumer(
                 latency: hist::new(),
                 msgs: 0,
                 bytes: 0,
-                error: format!("consumer-{idx}-build: {e}"),
+                error: format!("consumer-{idx}-build: {e:#}"),
             };
         }
     };
