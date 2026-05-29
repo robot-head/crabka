@@ -2,7 +2,7 @@
 changelog_update = true
 git_release_enable = true
 git_tag_enable = true
-publish = false
+publish = true
 release = true
 changelog_config = "release-plz-changelog.toml"
 git_release_type = "auto"
@@ -10,17 +10,28 @@ semver_check = false
 pr_branch_prefix = "release-plz-"
 pr_labels = ["release"]
 
+# Internal build/dev tooling — never published to crates.io and not released.
 [[package]]
 name = "crabka-protocol-codegen"
 publish = false
 release = false
 
 [[package]]
-name = "crabka-compression"
+name = "crabka-docgen"
 publish = false
+release = false
+
+[[package]]
+name = "crabka-log-iobench"
+publish = false
+release = false
+
+[[package]]
+name = "crabka-compression"
+publish = true
 release = true
 
 [[package]]
 name = "crabka-protocol"
-publish = false
+publish = true
 release = true
