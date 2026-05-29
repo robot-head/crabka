@@ -1,6 +1,7 @@
 {
   "apiKey": 93,
   "type": "response",
+  "internal": true,
   "name": "GetReplicaLogInfoResponse",
   "validVersions": "0",
   "flexibleVersions": "0+",

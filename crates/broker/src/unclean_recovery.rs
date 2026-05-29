@@ -468,3 +468,222 @@ mod urm_tests {
         assert_eq!(got, vec![info(1, 50)]);
     }
 }
+
+#[cfg(test)]
+mod run_recovery_tests {
+    use super::*;
+    use crate::heartbeat::controller_state::ControllerLivenessState;
+    use crate::metadata_source::MetadataSource;
+    use crabka_metadata::{
+        BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
+    };
+    use crabka_raft::{
+        AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, UpdateVoter,
+    };
+    use std::collections::BTreeSet;
+    use std::net::SocketAddr;
+    use tokio::sync::watch;
+    use uuid::Uuid;
+
+    /// Minimal `MetadataSource` for driving `run_recovery`'s control flow. Only
+    /// `watch_leader`, `current_image`, and `submit_change` are exercised; the
+    /// rest are never reached on these paths.
+    struct MockSource {
+        leader_rx: watch::Receiver<Option<NodeId>>,
+        _leader_tx: watch::Sender<Option<NodeId>>,
+        image: Arc<MetadataImage>,
+    }
+
+    impl MockSource {
+        fn new(leader: Option<NodeId>, image: MetadataImage) -> Self {
+            let (tx, rx) = watch::channel(leader);
+            Self {
+                leader_rx: rx,
+                _leader_tx: tx,
+                image: Arc::new(image),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl MetadataSource for MockSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image.clone()
+        }
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            unimplemented!()
+        }
+        fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+            self.leader_rx.clone()
+        }
+        fn quorum_state(&self) -> QuorumState {
+            unimplemented!()
+        }
+        async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+            Ok(())
+        }
+        async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+            unimplemented!()
+        }
+        async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
+            unimplemented!()
+        }
+        fn controller_bound_addr(&self) -> SocketAddr {
+            unimplemented!()
+        }
+        async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+            unimplemented!()
+        }
+        async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+            unimplemented!()
+        }
+        async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
+            unimplemented!()
+        }
+        async fn cancel(&self) {
+            unimplemented!()
+        }
+    }
+
+    const NODE: NodeId = 10;
+
+    fn image_with_partition(leader: NodeId, replicas: &[NodeId]) -> MetadataImage {
+        let mut img = MetadataImage::new(Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: Uuid::nil(),
+            partitions: 1,
+            replication_factor: i16::try_from(replicas.len()).unwrap(),
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader,
+            replicas: replicas.to_vec(),
+            isr: replicas.to_vec(),
+            leader_epoch: 5,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+        }));
+        img
+    }
+
+    fn register_broker(img: &mut MetadataImage, node_id: NodeId, host: &str, port: u16) {
+        img.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id,
+                host: host.into(),
+                port,
+                rack: None,
+                endpoints: vec![],
+            },
+        ));
+    }
+
+    async fn liveness_with_alive(alive: &[NodeId]) -> Arc<ControllerLivenessState> {
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for &n in alive {
+            l.record_heartbeat(n).await;
+        }
+        Arc::new(l)
+    }
+
+    fn manager(
+        source: MockSource,
+        liveness: Arc<ControllerLivenessState>,
+    ) -> UncleanRecoveryManager {
+        UncleanRecoveryManager {
+            controller: Arc::new(source),
+            liveness,
+            node_id: NODE,
+            inter_broker_client: Arc::new(InterBrokerClient::new(None, None)),
+            listener_protocol: crabka_security::ListenerProtocol::Plaintext,
+            metrics: crate::metrics::BrokerMetrics::new(),
+            in_flight: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    fn job() -> RecoveryJob {
+        RecoveryJob {
+            topic: "t".into(),
+            partition: 0,
+            strategy: RecoveryStrategy::None,
+            reply: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn not_controller_leader_is_not_needed() {
+        let mgr = manager(
+            MockSource::new(Some(99), image_with_partition(1, &[1, 2])),
+            liveness_with_alive(&[]).await,
+        );
+        assert_eq!(mgr.run_recovery(&job()).await, RecoveryOutcome::NotNeeded);
+    }
+
+    #[tokio::test]
+    async fn missing_partition_is_not_needed() {
+        let mgr = manager(
+            MockSource::new(Some(NODE), MetadataImage::new(Uuid::nil())),
+            liveness_with_alive(&[]).await,
+        );
+        assert_eq!(mgr.run_recovery(&job()).await, RecoveryOutcome::NotNeeded);
+    }
+
+    #[tokio::test]
+    async fn live_leader_is_not_needed() {
+        let mgr = manager(
+            MockSource::new(Some(NODE), image_with_partition(1, &[1, 2])),
+            liveness_with_alive(&[1]).await,
+        );
+        assert_eq!(mgr.run_recovery(&job()).await, RecoveryOutcome::NotNeeded);
+    }
+
+    #[tokio::test]
+    async fn dead_leader_no_alive_replicas_is_no_eligible() {
+        // Leader 1 is dead and no replica is alive: nothing to query.
+        let mgr = manager(
+            MockSource::new(Some(NODE), image_with_partition(1, &[1, 2])),
+            liveness_with_alive(&[]).await,
+        );
+        assert_eq!(
+            mgr.run_recovery(&job()).await,
+            RecoveryOutcome::NoEligibleReplica
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_leader_all_queries_fail_is_no_eligible() {
+        // Replica 2 is alive but its endpoint refuses connections, so the
+        // query returns no log info and no winner can be selected.
+        let mut img = image_with_partition(1, &[1, 2]);
+        register_broker(&mut img, 2, "127.0.0.1", 1);
+        let mgr = manager(
+            MockSource::new(Some(NODE), img),
+            liveness_with_alive(&[2]).await,
+        );
+        assert_eq!(
+            mgr.run_recovery(&job()).await,
+            RecoveryOutcome::NoEligibleReplica
+        );
+    }
+
+    #[tokio::test]
+    async fn recover_one_dedups_in_flight_job() {
+        let mgr = Arc::new(manager(
+            MockSource::new(Some(NODE), image_with_partition(1, &[1, 2])),
+            liveness_with_alive(&[]).await,
+        ));
+        // Pre-mark this partition as already recovering.
+        mgr.in_flight.lock().await.insert(("t".to_string(), 0));
+        let (tx, rx) = oneshot::channel();
+        let j = RecoveryJob {
+            topic: "t".into(),
+            partition: 0,
+            strategy: RecoveryStrategy::None,
+            reply: Some(tx),
+        };
+        mgr.clone().recover_one(j).await;
+        assert_eq!(rx.await.unwrap(), RecoveryOutcome::InProgress);
+    }
+}

@@ -19,6 +19,12 @@ pub struct MessageSpec {
     pub fields: Vec<FieldSpec>,
     #[serde(default)]
     pub common_structs: Vec<CommonStruct>,
+    /// crabka-internal RPC with no upstream Apache Kafka equivalent (e.g.
+    /// the KIP-966 `GetReplicaLogInfo` controller↔broker RPC). Such messages
+    /// are excluded from the JVM differential sweep — the oracle has no
+    /// matching message class and crabka owns their wire shape outright.
+    #[serde(default)]
+    pub internal: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]

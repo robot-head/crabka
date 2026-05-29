@@ -1,6 +1,7 @@
 {
   "apiKey": 93,
   "type": "request",
+  "internal": true,
   "listeners": ["broker"],
   "name": "GetReplicaLogInfoRequest",
   "validVersions": "0",

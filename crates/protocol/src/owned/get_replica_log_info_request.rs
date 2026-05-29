@@ -64,27 +64,4 @@ mod tests {
         assert_eq!(decoded, msg);
         assert!(cur.is_empty(), "decoder left trailing bytes");
     }
-
-    #[test]
-    fn get_replica_log_info_round_trip_v0() {
-        use crate::primitives::uuid::Uuid;
-
-        let req = GetReplicaLogInfoRequest {
-            broker_id: 7,
-            topic_partitions: vec![TopicPartitions {
-                topic_id: Uuid([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12, 0x34]),
-                partitions: vec![0, 3, 5],
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let mut buf = BytesMut::new();
-        req.encode(&mut buf, 0).expect("encode");
-        let mut cur: &[u8] = &buf;
-        let decoded = GetReplicaLogInfoRequest::decode(&mut cur, 0).expect("decode");
-        assert_eq!(decoded.broker_id, 7);
-        assert_eq!(decoded.topic_partitions.len(), 1);
-        assert_eq!(decoded.topic_partitions[0].partitions, vec![0, 3, 5]);
-        assert!(cur.is_empty(), "decoder left trailing bytes");
-    }
 }

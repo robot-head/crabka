@@ -63,6 +63,10 @@ fn emit_cases_table(out: &mut String, specs: &[MessageSpec]) {
         if s.valid_versions.is_empty() {
             continue;
         }
+        // crabka-internal RPCs have no JVM oracle equivalent — never diff them.
+        if s.internal {
+            continue;
+        }
         let kind_str = match s.message_type {
             MessageType::Request => "Kind::Request",
             MessageType::Response => "Kind::Response",
@@ -98,7 +102,7 @@ fn emit_encode_default(out: &mut String, specs: &[MessageSpec]) {
     .unwrap();
     writeln!(out, "    match name {{").unwrap();
     for s in specs {
-        if s.valid_versions.is_empty() {
+        if s.valid_versions.is_empty() || s.internal {
             continue;
         }
         match s.message_type {
@@ -143,7 +147,7 @@ fn emit_default_json_for(out: &mut String, specs: &[MessageSpec]) {
     .unwrap();
     writeln!(out, "    match name {{").unwrap();
     for s in specs {
-        if s.valid_versions.is_empty() {
+        if s.valid_versions.is_empty() || s.internal {
             continue;
         }
         match s.message_type {

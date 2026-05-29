@@ -59,6 +59,7 @@ mod tests {
             flexible_versions: crate::ir::FlexibleVersions::None,
             fields: vec![],
             common_structs: vec![],
+            internal: false,
         }
     }
 
