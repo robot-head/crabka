@@ -26,10 +26,12 @@ use tokio_util::sync::CancellationToken;
 use crabka_client_core::Client;
 use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
+use crabka_protocol::owned::join_group_response::JoinGroupResponse;
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
+use crabka_protocol::owned::sync_group_response::SyncGroupResponse;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::assignor::{Assignor, RebalanceProtocol};
@@ -392,26 +394,39 @@ async fn join_and_sync(
     );
     let protocol_name = state.assignor.protocol_name().to_string();
 
-    let make_join = |member_id: String| JoinGroupRequest {
-        group_id: state.group_id.clone(),
-        protocol_type: "consumer".into(),
-        member_id,
-        session_timeout_ms,
-        rebalance_timeout_ms,
-        protocols: vec![JoinGroupRequestProtocol {
-            name: protocol_name.clone(),
-            metadata: subscription_bytes.clone(),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-
-    // First join: if we have no member_id, expect MEMBER_ID_REQUIRED (79)
-    // and capture the broker-assigned id, then issue a second join.
-    let r1 = state
-        .client
-        .send(make_join(state.member_id.clone()))
-        .await?;
+    // First join: if we have no member_id, expect MEMBER_ID_REQUIRED (79) and
+    // capture the broker-assigned id, then issue a second join. Retry a cold or
+    // relocating coordinator (14/15/16) with backoff on each send.
+    let r1 = with_coordinator_retry(
+        COORDINATOR_RETRY_TIMEOUT,
+        |r: &JoinGroupResponse| r.error_code,
+        || {
+            let group_id = state.group_id.clone();
+            let member_id = state.member_id.clone();
+            let protocol_name = protocol_name.clone();
+            let subscription_bytes = subscription_bytes.clone();
+            let client = &state.client;
+            async move {
+                client
+                    .send(JoinGroupRequest {
+                        group_id,
+                        protocol_type: "consumer".into(),
+                        member_id,
+                        session_timeout_ms,
+                        rebalance_timeout_ms,
+                        protocols: vec![JoinGroupRequestProtocol {
+                            name: protocol_name,
+                            metadata: subscription_bytes,
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(ConsumerError::from)
+            }
+        },
+    )
+    .await?;
     let join_resp = if r1.error_code == 0 {
         r1
     } else if r1.error_code == 79 {
@@ -422,7 +437,36 @@ async fn join_and_sync(
             ));
         }
         state.member_id.clone_from(&assigned_id);
-        let r2 = state.client.send(make_join(assigned_id)).await?;
+        let r2 = with_coordinator_retry(
+            COORDINATOR_RETRY_TIMEOUT,
+            |r: &JoinGroupResponse| r.error_code,
+            || {
+                let group_id = state.group_id.clone();
+                let assigned_id = assigned_id.clone();
+                let protocol_name = protocol_name.clone();
+                let subscription_bytes = subscription_bytes.clone();
+                let client = &state.client;
+                async move {
+                    client
+                        .send(JoinGroupRequest {
+                            group_id,
+                            protocol_type: "consumer".into(),
+                            member_id: assigned_id,
+                            session_timeout_ms,
+                            rebalance_timeout_ms,
+                            protocols: vec![JoinGroupRequestProtocol {
+                                name: protocol_name,
+                                metadata: subscription_bytes,
+                                ..Default::default()
+                            }],
+                            ..Default::default()
+                        })
+                        .await
+                        .map_err(ConsumerError::from)
+                }
+            },
+        )
+        .await?;
         if r2.error_code != 0 {
             return Err(ConsumerError::Server(r2.error_code));
         }
@@ -498,22 +542,36 @@ async fn join_and_sync(
         Vec::new()
     };
 
-    let sync = state
-        .client
-        .send(SyncGroupRequest {
-            group_id: state.group_id.clone(),
-            generation_id,
-            member_id: state.member_id.clone(),
-            protocol_type: Some("consumer".into()),
-            protocol_name: Some(chosen_protocol.clone()),
-            assignments: assignments_for_sync,
-            ..Default::default()
-        })
-        .await?;
-    if sync.error_code != 0 {
-        return Err(ConsumerError::Server(sync.error_code));
+    let sync_resp = with_coordinator_retry(
+        COORDINATOR_RETRY_TIMEOUT,
+        |r: &SyncGroupResponse| r.error_code,
+        || {
+            let group_id = state.group_id.clone();
+            let member_id = state.member_id.clone();
+            let chosen_protocol = chosen_protocol.clone();
+            let assignments_for_sync = assignments_for_sync.clone();
+            let client = &state.client;
+            async move {
+                client
+                    .send(SyncGroupRequest {
+                        group_id,
+                        generation_id,
+                        member_id,
+                        protocol_type: Some("consumer".into()),
+                        protocol_name: Some(chosen_protocol),
+                        assignments: assignments_for_sync,
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(ConsumerError::from)
+            }
+        },
+    )
+    .await?;
+    if sync_resp.error_code != 0 {
+        return Err(ConsumerError::Server(sync_resp.error_code));
     }
-    let my_assignment = decode_assignment(&sync.assignment);
+    let my_assignment = decode_assignment(&sync_resp.assignment);
     Ok((my_assignment, generation_id, chosen_protocol))
 }
 
