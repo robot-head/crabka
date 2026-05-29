@@ -73,7 +73,7 @@ pub trait OutboundDialer: Send + Sync {
 /// Default no-op dialer: opens a raw `TcpStream` via
 /// `Connection::connect`. Used when the broker hasn't injected a
 /// `InterBrokerClient`-backed dialer (legacy PLAINTEXT path).
-pub(crate) struct PlaintextDialer;
+pub struct PlaintextDialer;
 
 #[async_trait::async_trait]
 impl OutboundDialer for PlaintextDialer {

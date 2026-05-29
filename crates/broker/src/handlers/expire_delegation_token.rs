@@ -24,7 +24,6 @@ use crabka_metadata::{
 };
 use crabka_protocol::owned::expire_delegation_token_request::ExpireDelegationTokenRequest;
 use crabka_protocol::owned::expire_delegation_token_response::ExpireDelegationTokenResponse;
-use crabka_raft::ControllerHandle;
 use crabka_security::SecretBytes;
 
 use crate::network::auth::ConnectionAuth;
@@ -34,7 +33,7 @@ pub(crate) async fn handle<S: BuildHasher>(
     req: &ExpireDelegationTokenRequest,
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
-    controller: &ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
     super_users: &HashSet<String, S>,
 ) -> ExpireDelegationTokenResponse {
     if secret_key.is_none() {
@@ -126,6 +125,7 @@ fn token_to_record(t: &DelegationToken) -> DelegationTokenRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -216,7 +216,7 @@ mod tests {
             &req,
             &authed("alice"),
             None,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -255,7 +255,7 @@ mod tests {
             &req,
             &authed("alice"),
             Some(&secret),
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -301,7 +301,7 @@ mod tests {
             &req,
             &authed("alice"),
             Some(&secret),
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -342,7 +342,7 @@ mod tests {
             &req,
             &authed("eve"),
             Some(&secret),
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -393,7 +393,7 @@ mod tests {
             &req,
             &authed("admin"),
             Some(&secret),
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -442,7 +442,7 @@ mod tests {
             &req,
             &authed("eve"),
             Some(&secret),
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;

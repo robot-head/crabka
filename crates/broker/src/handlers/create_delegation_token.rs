@@ -24,7 +24,6 @@ use std::hash::BuildHasher;
 use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
 use crabka_protocol::owned::create_delegation_token_request::CreateDelegationTokenRequest;
 use crabka_protocol::owned::create_delegation_token_response::CreateDelegationTokenResponse;
-use crabka_raft::ControllerHandle;
 use crabka_security::{KafkaPrincipal, SecretBytes};
 
 use crate::network::auth::ConnectionAuth;
@@ -44,7 +43,7 @@ pub(crate) async fn handle<S: BuildHasher>(
     secret_key: Option<&SecretBytes>,
     max_lifetime_ms: i64,
     default_renew_period_ms: i64,
-    controller: &ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
     super_users: &HashSet<String, S>,
 ) -> CreateDelegationTokenResponse {
     let Some(secret_key) = secret_key else {
@@ -184,6 +183,7 @@ fn err_response(code: i16) -> CreateDelegationTokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -252,7 +252,7 @@ mod tests {
             None,
             1_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -281,7 +281,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -323,7 +323,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -351,7 +351,7 @@ mod tests {
             Some(&secret),
             ceiling_ms,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -390,7 +390,7 @@ mod tests {
             Some(&secret),
             one_hour,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -425,7 +425,7 @@ mod tests {
             Some(&secret),
             seven_days,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -464,7 +464,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &empty_super_users(),
         )
         .await;
@@ -494,7 +494,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -537,7 +537,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -571,7 +571,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -590,7 +590,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;
@@ -620,7 +620,7 @@ mod tests {
             Some(&secret),
             60_000,
             RENEW_24H_MS,
-            &controller,
+            &*controller,
             &super_users_with(&["admin"]),
         )
         .await;

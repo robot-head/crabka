@@ -374,7 +374,7 @@ pub fn handle_authenticate_plain<S: BuildHasher>(
 pub fn handle_authenticate_scram(
     req: &SaslAuthenticateRequest,
     auth: &mut ConnectionAuth,
-    controller: &crabka_raft::ControllerHandle,
+    controller: &dyn crate::metadata_source::MetadataSource,
 ) -> SaslAuthenticateResponse {
     // Round-1 case: still in `ScramPending` — build the exchange now that
     // we have the client-first bytes (and thus the username).
@@ -1433,7 +1433,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut auth,
-                &controller,
+                &*controller,
             );
             assert_eq!(
                 resp1.error_code, 0,
@@ -1533,7 +1533,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut auth,
-                &controller,
+                &*controller,
             );
             assert_eq!(
                 resp.error_code, SASL_AUTHENTICATION_FAILED,
@@ -1572,7 +1572,7 @@ mod tests {
                     ..Default::default()
                 },
                 &mut auth,
-                &controller,
+                &*controller,
             );
             assert_eq!(
                 resp.error_code, SASL_AUTHENTICATION_FAILED,

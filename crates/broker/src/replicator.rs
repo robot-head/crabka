@@ -27,7 +27,7 @@ use crabka_protocol::owned::offset_for_leader_epoch_request::{
     OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-use crabka_raft::{ControllerHandle, NodeId};
+use crabka_raft::NodeId;
 use crabka_security::ListenerProtocol;
 
 use crate::broker::spawn_partition;
@@ -71,7 +71,7 @@ pub(crate) struct Config {
     pub throttle_state: Arc<ThrottleState>,
     /// Controller handle used to read the current metadata image each
     /// Fetch round (for `follower.replication.throttled.replicas` lookup).
-    pub controller: Arc<ControllerHandle>,
+    pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     /// KIP-113 runtime offline-dir registry. Forwarded into
     /// `spawn_partition` so the per-partition writer can flip the
     /// owning dir offline on a segment-write / fsync failure.

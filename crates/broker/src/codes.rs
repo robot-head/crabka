@@ -239,6 +239,8 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::Txn(_)
         | BrokerError::ListenerConflict { .. }
         | BrokerError::InvalidInterBrokerListener { .. }
+        | BrokerError::EmptyRoles
+        | BrokerError::NonControllerIsVoter { .. }
         | BrokerError::SaslListenerNoMechanisms { .. }
         | BrokerError::Tls(_)
         | BrokerError::BootstrapFile { .. }

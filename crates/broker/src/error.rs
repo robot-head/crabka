@@ -122,6 +122,15 @@ pub enum BrokerError {
     #[error("inter_broker_listener_name {name} not in listeners list")]
     InvalidInterBrokerListener { name: String },
 
+    /// `process.roles` was empty — a node must be at least one of
+    /// `controller` / `broker`.
+    #[error("process.roles must list at least one role")]
+    EmptyRoles,
+
+    /// A non-controller node lists itself in `controller_quorum_voters`.
+    #[error("node {node_id} is not a controller but appears in its own controller_quorum_voters")]
+    NonControllerIsVoter { node_id: crabka_raft::NodeId },
+
     /// A SASL listener is declared but `enabled_sasl_mechanisms` is empty.
     #[error("SASL listener {name} declared but enabled_sasl_mechanisms is empty")]
     SaslListenerNoMechanisms { name: String },

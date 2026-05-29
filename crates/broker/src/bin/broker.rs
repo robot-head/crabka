@@ -8,6 +8,21 @@ use clap::Parser;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_log::LogConfig;
 
+/// Parse `--process-roles` string values into `NodeRole`s.
+fn parse_roles_arg(roles: &[String]) -> Result<Vec<crabka_broker::config::NodeRole>, String> {
+    use crabka_broker::config::NodeRole;
+    roles
+        .iter()
+        .map(|r| match r.to_ascii_lowercase().as_str() {
+            "controller" => Ok(NodeRole::Controller),
+            "broker" => Ok(NodeRole::Broker),
+            other => Err(format!(
+                "unknown --process-roles value `{other}` (expected `controller` or `broker`)"
+            )),
+        })
+        .collect()
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "crabka-broker",
@@ -56,6 +71,17 @@ struct Args {
     /// Numeric broker id.
     #[arg(long, default_value_t = 1)]
     broker_id: i32,
+
+    /// `KRaft` `process.roles`, comma-separated (`controller`, `broker`).
+    /// Defaults to the combined set when unset. The operator normally sets
+    /// this via the `[process]` section of `--config-file` instead.
+    #[arg(
+        long,
+        env = "CRABKA_PROCESS_ROLES",
+        value_delimiter = ',',
+        num_args = 0..
+    )]
+    process_roles: Vec<String>,
 
     /// Cluster UUID. Every broker in the same cluster must share this
     /// value. Set via env `CRABKA_CLUSTER_ID` from the operator
@@ -170,6 +196,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         partition_disk_scan_interval_secs: args.partition_disk_scan_interval_secs,
         ..BrokerConfig::default()
     };
+    if !args.process_roles.is_empty() {
+        config.roles = parse_roles_arg(&args.process_roles)?;
+    }
     if let Some(fc) = file_config {
         fc.apply_to(&mut config)?;
     }
@@ -246,6 +275,22 @@ mod tests {
     fn detect_bootstrap_when_log_dir_is_empty() {
         let dir = tempdir().unwrap();
         assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+    }
+
+    #[test]
+    fn parse_roles_arg_maps_strings() {
+        assert_eq!(
+            parse_roles_arg(&["controller".to_string(), "broker".to_string()]).unwrap(),
+            vec![
+                crabka_broker::config::NodeRole::Controller,
+                crabka_broker::config::NodeRole::Broker
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_roles_arg_rejects_unknown() {
+        assert!(parse_roles_arg(&["nope".to_string()]).is_err());
     }
 
     #[test]

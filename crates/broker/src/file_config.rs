@@ -107,6 +107,11 @@ pub struct FileConfig {
     /// `type = "opa"`, the `[authorization.opa]` subtable is required.
     #[serde(default)]
     pub authorization: Option<FileAuthorizationConfig>,
+
+    /// `[process]` section — `KRaft` `process.roles`. Absent / empty leaves
+    /// the `BrokerConfig` default `[Controller, Broker]`.
+    #[serde(default)]
+    pub process: Option<FileProcessConfig>,
 }
 
 /// TOML shape of `[remote_storage]`. Maps to
@@ -271,6 +276,16 @@ pub struct FileDelegationTokenConfig {
     /// `RenewDelegationToken.renew_period_ms == -1`. Distinct from
     /// `max_lifetime_ms` (the absolute ceiling). Default 24 hours.
     pub default_renew_period_ms: Option<i64>,
+}
+
+/// `[process]` TOML section — `KRaft` `process.roles`.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FileProcessConfig {
+    /// Role strings: `"controller"`, `"broker"` (case-insensitive). Empty
+    /// or absent leaves the `BrokerConfig` default `[Controller, Broker]`.
+    #[serde(default)]
+    pub roles: Vec<String>,
 }
 
 /// TOML shape of `[oauthbearer]`. Maps to
@@ -848,6 +863,27 @@ impl FileConfig {
                     std::sync::Arc::new(built)
                 }
             };
+        }
+
+        // KRaft `process.roles`. Absent / empty leaves the BrokerConfig
+        // default (`[Controller, Broker]`).
+        if let Some(p) = &self.process
+            && !p.roles.is_empty()
+        {
+            let mut roles = Vec::with_capacity(p.roles.len());
+            for r in &p.roles {
+                let role = match r.to_ascii_lowercase().as_str() {
+                    "controller" => crate::config::NodeRole::Controller,
+                    "broker" => crate::config::NodeRole::Broker,
+                    other => {
+                        return Err(FileConfigError::InvalidConfig(format!(
+                            "unknown process.role `{other}` (expected `controller` or `broker`)"
+                        )));
+                    }
+                };
+                roles.push(role);
+            }
+            cfg.roles = roles;
         }
 
         Ok(())
@@ -1840,6 +1876,62 @@ expire_after_ms = 60000
         assert_eq!(
             cfg.authorizer.authorize(&img, &req),
             AuthorizationResult::Allow
+        );
+    }
+
+    #[test]
+    fn process_roles_controller_only_from_toml() {
+        let toml = r#"
+            [process]
+            roles = ["controller"]
+        "#;
+        let fc: FileConfig = toml::from_str(toml).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        fc.apply_to(&mut cfg).expect("apply");
+        assert_eq!(cfg.roles, vec![crate::config::NodeRole::Controller]);
+    }
+
+    #[test]
+    fn process_roles_both_from_toml() {
+        let toml = r#"
+            [process]
+            roles = ["broker", "controller"]
+        "#;
+        let fc: FileConfig = toml::from_str(toml).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        fc.apply_to(&mut cfg).expect("apply");
+        assert_eq!(
+            cfg.roles,
+            vec![
+                crate::config::NodeRole::Broker,
+                crate::config::NodeRole::Controller
+            ]
+        );
+    }
+
+    #[test]
+    fn process_roles_rejects_unknown_role() {
+        let toml = r#"
+            [process]
+            roles = ["wizard"]
+        "#;
+        let fc: FileConfig = toml::from_str(toml).expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        let err = fc.apply_to(&mut cfg).expect_err("unknown role rejected");
+        assert!(matches!(err, FileConfigError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn process_section_absent_leaves_default_roles() {
+        let fc: FileConfig = toml::from_str("").expect("parse");
+        let mut cfg = crate::config::BrokerConfig::default();
+        fc.apply_to(&mut cfg).expect("apply");
+        assert_eq!(
+            cfg.roles,
+            vec![
+                crate::config::NodeRole::Controller,
+                crate::config::NodeRole::Broker
+            ]
         );
     }
 
