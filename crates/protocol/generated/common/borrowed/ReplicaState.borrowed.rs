@@ -3,7 +3,7 @@
 use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i32, get_i64, put_i32, put_i64};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,11 +45,21 @@ impl ReplicaState {
 impl Encode for ReplicaState {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.replica_id) }
-        if version >= 2 { crate::primitives::uuid::put_uuid(buf, self.replica_directory_id) }
-        if version >= 0 { put_i64(buf, self.log_end_offset) }
-        if version >= 1 { put_i64(buf, self.last_fetch_timestamp) }
-        if version >= 1 { put_i64(buf, self.last_caught_up_timestamp) }
+        if version >= 0 {
+            put_i32(buf, self.replica_id);
+        }
+        if version >= 2 {
+            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id);
+        }
+        if version >= 0 {
+            put_i64(buf, self.log_end_offset);
+        }
+        if version >= 1 {
+            put_i64(buf, self.last_fetch_timestamp);
+        }
+        if version >= 1 {
+            put_i64(buf, self.last_caught_up_timestamp);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -59,11 +69,21 @@ impl Encode for ReplicaState {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 2 { n += 16; }
-        if version >= 0 { n += 8; }
-        if version >= 1 { n += 8; }
-        if version >= 1 { n += 8; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 2 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 1 {
+            n += 8;
+        }
+        if version >= 1 {
+            n += 8;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -76,15 +96,23 @@ impl<'de> DecodeBorrow<'de> for ReplicaState {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.replica_id = get_i32(buf)?; }
-        if version >= 2 { out.replica_directory_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.log_end_offset = get_i64(buf)?; }
-        if version >= 1 { out.last_fetch_timestamp = get_i64(buf)?; }
-        if version >= 1 { out.last_caught_up_timestamp = get_i64(buf)?; }
+        if version >= 0 {
+            out.replica_id = get_i32(buf)?;
+        }
+        if version >= 2 {
+            out.replica_directory_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.log_end_offset = get_i64(buf)?;
+        }
+        if version >= 1 {
+            out.last_fetch_timestamp = get_i64(buf)?;
+        }
+        if version >= 1 {
+            out.last_caught_up_timestamp = get_i64(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
@@ -95,11 +123,21 @@ impl ReplicaState {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.replica_id = 1i32; }
-        if version >= 2 { m.replica_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.log_end_offset = 1i64; }
-        if version >= 1 { m.last_fetch_timestamp = 1i64; }
-        if version >= 1 { m.last_caught_up_timestamp = 1i64; }
+        if version >= 0 {
+            m.replica_id = 1i32;
+        }
+        if version >= 2 {
+            m.replica_directory_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.log_end_offset = 1i64;
+        }
+        if version >= 1 {
+            m.last_fetch_timestamp = 1i64;
+        }
+        if version >= 1 {
+            m.last_caught_up_timestamp = 1i64;
+        }
         m
     }
 }

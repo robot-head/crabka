@@ -6,10 +6,9 @@ use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
     get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 57;
@@ -18,7 +17,9 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdateFeaturesResponse {
@@ -28,17 +29,36 @@ pub struct UpdateFeaturesResponse {
     pub results: Vec<UpdatableFeatureResult>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for UpdateFeaturesResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message.as_deref()) } else { put_nullable_string(buf, self.error_message.as_deref()) } }
-        if version >= 0 && version <= 1 { { crate::primitives::array::put_array_len(buf, (self.results).len(), flex); for it in &self.results { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
+        if (0..=1).contains(&version) {
+            {
+                crate::primitives::array::put_array_len(buf, (self.results).len(), flex);
+                for it in &self.results {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -48,10 +68,30 @@ impl Encode for UpdateFeaturesResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message.as_deref()) } else { nullable_string_len(self.error_message.as_deref()) }; }
-        if version >= 0 && version <= 1 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.results).len(), flex); let body: usize = (self.results).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message.as_deref())
+            } else {
+                nullable_string_len(self.error_message.as_deref())
+            };
+        }
+        if (0..=1).contains(&version) {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.results).len(), flex);
+                let body: usize = (self.results)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -59,40 +99,65 @@ impl Encode for UpdateFeaturesResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for UpdateFeaturesResponse {
+impl Decode<'_> for UpdateFeaturesResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 && version <= 1 { out.results = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(UpdatableFeatureResult::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if (0..=1).contains(&version) {
+            out.results = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(UpdatableFeatureResult::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl UpdateFeaturesResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x".to_string()); }
-        if version >= 0 && version <= 1 { m.results = vec![UpdatableFeatureResult::populated(version)]; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x".to_string());
+        }
+        if (0..=1).contains(&version) {
+            m.results = vec![UpdatableFeatureResult::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdatableFeatureResult {
     pub feature: String,
@@ -100,13 +165,26 @@ pub struct UpdatableFeatureResult {
     pub error_message: Option<String>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for UpdatableFeatureResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, &self.feature) } else { put_string(buf, &self.feature) } }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message.as_deref()) } else { put_nullable_string(buf, self.error_message.as_deref()) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.feature);
+            } else {
+                put_string(buf, &self.feature);
+            }
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -116,9 +194,23 @@ impl Encode for UpdatableFeatureResult {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.feature) } else { string_len(&self.feature) }; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message.as_deref()) } else { nullable_string_len(self.error_message.as_deref()) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.feature)
+            } else {
+                string_len(&self.feature)
+            };
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message.as_deref())
+            } else {
+                nullable_string_len(self.error_message.as_deref())
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -126,31 +218,47 @@ impl Encode for UpdatableFeatureResult {
         n
     }
 }
-
-impl<'de> Decode<'de> for UpdatableFeatureResult {
+impl Decode<'_> for UpdatableFeatureResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.feature = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
+        if version >= 0 {
+            out.feature = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl UpdatableFeatureResult {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.feature = "x".to_string(); }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 {
+            m.feature = "x".to_string();
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x".to_string());
+        }
         m
     }
 }

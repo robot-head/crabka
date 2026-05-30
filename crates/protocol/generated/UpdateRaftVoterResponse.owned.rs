@@ -4,10 +4,12 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
-use crate::tagged_fields::{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{
+    WriteTaggedFields, encode_to_bytes, read_tagged_fields, tagged_fields_len,
+};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 82;
@@ -16,7 +18,9 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdateRaftVoterResponse {
@@ -25,19 +29,28 @@ pub struct UpdateRaftVoterResponse {
     pub current_leader: CurrentLeader,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for UpdateRaftVoterResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.current_leader)) {
-                let payload = encode_to_bytes(self.current_leader.encoded_len(version), |b| { self.current_leader.encode(b, version)?; Ok(()) });
+                let payload = encode_to_bytes(self.current_leader.encoded_len(version), |b| {
+                    self.current_leader.encode(b, version)?;
+                    Ok(())
+                });
                 tagged.add(0, payload);
             }
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -47,8 +60,12 @@ impl Encode for UpdateRaftVoterResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
             if !(crate::codegen_helpers::is_default(&self.current_leader)) {
@@ -59,43 +76,58 @@ impl Encode for UpdateRaftVoterResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for UpdateRaftVoterResponse {
+impl Decode<'_> for UpdateRaftVoterResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
         if flex {
-            // Pre-declare typed slots for known tagged fields.
             let mut tag_current_leader = None;
-            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| {
-                match tag {
-                0 => { tag_current_leader = Some({ let b: &mut &[u8] = payload; CurrentLeader::decode(b, version)? }); Ok(true) }
-                    _ => Ok(false),
+            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
+                0 => {
+                    tag_current_leader = Some({
+                        let b: &mut &[u8] = payload;
+                        CurrentLeader::decode(b, version)?
+                    });
+                    Ok(true)
                 }
+                _ => Ok(false),
             })?;
-            if let Some(v) = tag_current_leader { out.current_leader = v; }
+            if let Some(v) = tag_current_leader {
+                out.current_leader = v;
+            }
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl UpdateRaftVoterResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.current_leader = CurrentLeader::populated(version); }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.current_leader = CurrentLeader::populated(version);
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentLeader {
     pub leader_id: i32,
@@ -104,7 +136,6 @@ pub struct CurrentLeader {
     pub port: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for CurrentLeader {
     fn default() -> Self {
         Self {
@@ -116,14 +147,25 @@ impl Default for CurrentLeader {
         }
     }
 }
-
 impl Encode for CurrentLeader {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.leader_id) }
-        if version >= 0 { put_i32(buf, self.leader_epoch) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) } }
-        if version >= 0 { put_i32(buf, self.port) }
+        if version >= 0 {
+            put_i32(buf, self.leader_id);
+        }
+        if version >= 0 {
+            put_i32(buf, self.leader_epoch);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.host);
+            } else {
+                put_string(buf, &self.host);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.port);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -133,10 +175,22 @@ impl Encode for CurrentLeader {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) }; }
-        if version >= 0 { n += 4; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -144,33 +198,49 @@ impl Encode for CurrentLeader {
         n
     }
 }
-
-impl<'de> Decode<'de> for CurrentLeader {
+impl Decode<'_> for CurrentLeader {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.leader_id = get_i32(buf)?; }
-        if version >= 0 { out.leader_epoch = get_i32(buf)?; }
-        if version >= 0 { out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.port = get_i32(buf)?; }
+        if version >= 0 {
+            out.leader_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.leader_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.port = get_i32(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl CurrentLeader {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.leader_id = 1i32; }
-        if version >= 0 { m.leader_epoch = 1i32; }
-        if version >= 0 { m.host = "x".to_string(); }
-        if version >= 0 { m.port = 1i32; }
+        if version >= 0 {
+            m.leader_id = 1i32;
+        }
+        if version >= 0 {
+            m.leader_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.host = "x".to_string();
+        }
+        if version >= 0 {
+            m.port = 1i32;
+        }
         m
     }
 }
@@ -183,6 +253,16 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
-    obj.insert("currentLeader".to_string(), { let mut m = ::serde_json::Map::new(); m.insert("leaderId".to_string(), ::serde_json::json!(-1)); m.insert("leaderEpoch".to_string(), ::serde_json::json!(-1)); m.insert("host".to_string(), ::serde_json::Value::String(String::new())); m.insert("port".to_string(), ::serde_json::json!(0)); ::serde_json::Value::Object(m) });
+    obj.insert("currentLeader".to_string(), {
+        let mut m = ::serde_json::Map::new();
+        m.insert("leaderId".to_string(), ::serde_json::json!(-1));
+        m.insert("leaderEpoch".to_string(), ::serde_json::json!(-1));
+        m.insert(
+            "host".to_string(),
+            ::serde_json::Value::String(String::new()),
+        );
+        m.insert("port".to_string(), ::serde_json::json!(0));
+        ::serde_json::Value::Object(m)
+    });
     ::serde_json::Value::Object(obj)
 }

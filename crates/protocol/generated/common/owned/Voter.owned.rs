@@ -3,7 +3,7 @@
 use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i32, put_i32};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -16,8 +16,12 @@ pub struct Voter {
 impl Encode for Voter {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.voter_id) }
-        if version >= 1 { crate::primitives::uuid::put_uuid(buf, self.voter_directory_id) }
+        if version >= 0 {
+            put_i32(buf, self.voter_id);
+        }
+        if version >= 1 {
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -27,8 +31,12 @@ impl Encode for Voter {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 1 { n += 16; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 1 {
+            n += 16;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -37,16 +45,18 @@ impl Encode for Voter {
     }
 }
 
-impl<'de> Decode<'de> for Voter {
+impl Decode<'_> for Voter {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.voter_id = get_i32(buf)?; }
-        if version >= 1 { out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?; }
+        if version >= 0 {
+            out.voter_id = get_i32(buf)?;
+        }
+        if version >= 1 {
+            out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
@@ -57,8 +67,12 @@ impl Voter {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.voter_id = 1i32; }
-        if version >= 1 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 {
+            m.voter_id = 1i32;
+        }
+        if version >= 1 {
+            m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
         m
     }
 }

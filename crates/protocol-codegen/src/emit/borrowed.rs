@@ -228,18 +228,18 @@ fn emit_common_struct_file_borrowed(
 
 // ── helpers shared with owned ──────────────────────────────────────────────
 
-fn flex_min(spec: &MessageSpec) -> i16 {
+pub(crate) fn flex_min(spec: &MessageSpec) -> i16 {
     match spec.flexible_versions {
         FlexibleVersions::Range(r) => r.min,
         FlexibleVersions::None => i16::MAX,
     }
 }
 
-fn base_type(t: &str) -> &str {
+pub(crate) fn base_type(t: &str) -> &str {
     t.strip_prefix("[]").unwrap_or(t)
 }
 
-fn is_struct_type(t: &str) -> bool {
+pub(crate) fn is_struct_type(t: &str) -> bool {
     t.chars().next().is_some_and(char::is_uppercase)
 }
 
@@ -249,7 +249,10 @@ fn is_struct_type(t: &str) -> bool {
 ///
 /// `res_map` is consulted for common-struct references (`PascalCase` where `f.fields.is_empty()`)
 /// to check whether that common struct was generated with `<'a>`.
-fn needs_lifetime(fields: &[crate::ir::FieldSpec], res_map: &HashMap<String, Resolution>) -> bool {
+pub(crate) fn needs_lifetime(
+    fields: &[crate::ir::FieldSpec],
+    res_map: &HashMap<String, Resolution>,
+) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
         matches!(base, "string" | "bytes" | "records")  // records borrows via RecordsPayloadBorrowed<'a>
@@ -261,14 +264,17 @@ fn needs_lifetime(fields: &[crate::ir::FieldSpec], res_map: &HashMap<String, Res
     })
 }
 
-fn is_tagged(f: &FieldSpec) -> bool {
+pub(crate) fn is_tagged(f: &FieldSpec) -> bool {
     f.tag.is_some()
 }
 
 /// Returns true if the top-level struct needs a `'a` lifetime parameter.
 /// Only non-tagged fields contribute borrowed lifetimes; tagged fields that have
 /// string/struct content use owned types to avoid escape from the payload closure.
-fn spec_needs_lifetime(spec: &MessageSpec, res_map: &HashMap<String, Resolution>) -> bool {
+pub(crate) fn spec_needs_lifetime(
+    spec: &MessageSpec,
+    res_map: &HashMap<String, Resolution>,
+) -> bool {
     let non_tagged: Vec<&FieldSpec> = spec.fields.iter().filter(|f| !is_tagged(f)).collect();
     non_tagged.iter().any(|f| {
         let base = base_type(&f.field_type);
@@ -283,7 +289,10 @@ fn spec_needs_lifetime(spec: &MessageSpec, res_map: &HashMap<String, Resolution>
 /// Returns true if a tagged field's content cannot be zero-copy decoded
 /// (because string/bytes data in its payload would escape the closure).
 /// In that case the field must use the owned type.
-fn tagged_field_needs_owned(f: &FieldSpec, res_map: &HashMap<String, Resolution>) -> bool {
+pub(crate) fn tagged_field_needs_owned(
+    f: &FieldSpec,
+    res_map: &HashMap<String, Resolution>,
+) -> bool {
     if !is_tagged(f) {
         return false;
     }
@@ -304,7 +313,7 @@ fn tagged_field_needs_owned(f: &FieldSpec, res_map: &HashMap<String, Resolution>
     true
 }
 
-fn is_nullable(f: &FieldSpec) -> bool {
+pub(crate) fn is_nullable(f: &FieldSpec) -> bool {
     f.nullable_versions.is_some()
 }
 
@@ -315,7 +324,7 @@ fn is_nullable(f: &FieldSpec) -> bool {
 /// codec must switch between nullable and non-nullable per version. Returns
 /// `Some(cond)` for that boundary expression, or `None` when nullability is
 /// constant across the whole field range (use `is_nullable(f)` directly).
-fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
+pub(crate) fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
     let r = f.nullable_versions?;
     let need_lower = r.min > f.versions.min;
     let need_upper = r.max < f.versions.max;
@@ -332,7 +341,7 @@ fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
     Some(parts.join(" && "))
 }
 
-fn has_any_flex(spec: &MessageSpec) -> bool {
+pub(crate) fn has_any_flex(spec: &MessageSpec) -> bool {
     matches!(spec.flexible_versions, FlexibleVersions::Range(_))
 }
 
@@ -381,7 +390,7 @@ fn uses_fixed_type(types: &[String], t: &str) -> bool {
 
 /// Returns true if any field (recursively) is `float64`.
 /// Used to suppress the `Eq` derive since `f64` does not implement `Eq`.
-fn has_float64_recursive(fields: &[FieldSpec]) -> bool {
+pub(crate) fn has_float64_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
         base == "float64" || has_float64_recursive(&f.fields)
@@ -457,7 +466,10 @@ fn uses_nullable_struct_recursive(fields: &[FieldSpec]) -> bool {
 /// Returns the Rust type path for a struct-typed field in borrowed flavor.
 /// Includes `<'a>` only when the nested struct actually has borrowed fields.
 /// `type_map::borrowed_type` will use the path verbatim (no automatic `<'a>` addition).
-fn struct_path_for(f: &FieldSpec, res_map: &HashMap<String, Resolution>) -> Option<String> {
+pub(crate) fn struct_path_for(
+    f: &FieldSpec,
+    res_map: &HashMap<String, Resolution>,
+) -> Option<String> {
     let base = base_type(&f.field_type);
     if is_struct_type(base) {
         res_map.get(base).map(|r| {
@@ -482,7 +494,7 @@ fn struct_path_for(f: &FieldSpec, res_map: &HashMap<String, Resolution>) -> Opti
 /// Returns the fully-qualified owned-flavor type path for a struct-typed field,
 /// used when a tagged field must store owned data (because borrowed data would escape
 /// the `read_tagged_fields` closure).
-fn owned_struct_path_for(
+pub(crate) fn owned_struct_path_for(
     f: &FieldSpec,
     parent_module: &str,
     res_map: &HashMap<String, Resolution>,
@@ -531,7 +543,7 @@ fn resolved_to_owned_path(
     }
 }
 
-fn version_cond(r: VersionRange, version_var: &str) -> String {
+pub(crate) fn version_cond(r: VersionRange, version_var: &str) -> String {
     if r.max == i16::MAX {
         format!("{version_var} >= {}", r.min)
     } else {
@@ -542,7 +554,11 @@ fn version_cond(r: VersionRange, version_var: &str) -> String {
 // ── imports ────────────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_lines)]
-fn emit_imports(out: &mut String, spec: &MessageSpec, res_map: &HashMap<String, Resolution>) {
+pub(crate) fn emit_imports(
+    out: &mut String,
+    spec: &MessageSpec,
+    res_map: &HashMap<String, Resolution>,
+) {
     let types = used_field_types_recursive(&spec.fields);
     let tagged = has_any_tagged_in_spec(spec);
     let flex = has_any_flex(spec);
@@ -737,7 +753,7 @@ use crate::primitives::string_bytes_borrowed::{{
 
 // ── constants ──────────────────────────────────────────────────────────────
 
-fn emit_constants(out: &mut String, spec: &MessageSpec) {
+pub(crate) fn emit_constants(out: &mut String, spec: &MessageSpec) {
     let min_version = spec.valid_versions.min;
     let max_version = spec.valid_versions.max;
     let flex = flex_min(spec);
@@ -861,7 +877,10 @@ impl{lt} Default for {type_name}{lt} {{
 }
 
 /// Returns a Rust expression for the default value of a borrowed field.
-fn borrowed_default_expr(f: &FieldSpec, _res_map: &HashMap<String, Resolution>) -> String {
+pub(crate) fn borrowed_default_expr(
+    f: &FieldSpec,
+    _res_map: &HashMap<String, Resolution>,
+) -> String {
     let base = base_type(&f.field_type);
     let is_array = f.field_type.starts_with("[]");
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
@@ -992,7 +1011,7 @@ impl{impl_lt} {type_name}{lt} {{
 }
 
 #[allow(clippy::only_used_in_recursion, unused_variables)]
-fn to_owned_field_expr(
+pub(crate) fn to_owned_field_expr(
     schema_type: &str,
     expr: &str,
     nullable: bool,
@@ -1182,7 +1201,7 @@ fn encoded_len_struct_body(
 
 /// Returns `true` if this field has `"flexibleVersions": "none"` (per-field override),
 /// meaning it must always use the legacy (non-compact) codec even in flex message versions.
-fn field_forces_non_flex(f: &FieldSpec) -> bool {
+pub(crate) fn field_forces_non_flex(f: &FieldSpec) -> bool {
     matches!(f.flexible_versions, Some(FlexibleVersions::None))
 }
 
@@ -1269,7 +1288,7 @@ fn emit_encoded_len_one(
 
 /// Encode a field whose Rust type is `Option<T>` but wire format is non-nullable.
 /// Treats None as empty/default for the underlying type.
-fn encode_call_option_as_non_nullable(
+pub(crate) fn encode_call_option_as_non_nullable(
     schema_type: &str,
     expr: &str,
     res_map: &HashMap<String, Resolution>,
@@ -1314,7 +1333,7 @@ fn encode_call_option_as_non_nullable(
 }
 
 /// Compute `encoded_len` for a field whose Rust type is `Option<T>` but wire is non-nullable.
-fn encoded_len_expr_option_as_non_nullable(
+pub(crate) fn encoded_len_expr_option_as_non_nullable(
     schema_type: &str,
     expr: &str,
     res_map: &HashMap<String, Resolution>,
@@ -1360,7 +1379,7 @@ fn encoded_len_expr_option_as_non_nullable(
 
 /// Returns a Rust boolean expression that is `true` when the tagged field
 /// equals its schema-specified default. Mirrors `owned::tagged_is_default_cond`.
-fn tagged_is_default_cond(f: &FieldSpec) -> String {
+pub(crate) fn tagged_is_default_cond(f: &FieldSpec) -> String {
     let field = name_conv::field_name(&f.name);
     let base = base_type(&f.field_type);
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
@@ -1388,7 +1407,7 @@ fn tagged_is_default_cond(f: &FieldSpec) -> String {
 
 /// Like `encoded_len_expr` but uses owned-type conventions (`.as_deref()`).
 /// Used for tagged fields stored as `String`/`Bytes` (owned) in borrowed structs.
-fn owned_encoded_len_expr(
+pub(crate) fn owned_encoded_len_expr(
     schema_type: &str,
     expr: &str,
     nullable: bool,
@@ -1418,7 +1437,7 @@ fn owned_encoded_len_expr(
 /// Like `encode_call` but uses owned-type conventions (`.as_deref()`, `&expr`).
 /// Used for tagged fields that are stored as `String`/`Bytes` (owned) in the
 /// borrowed struct because their data can't borrow from the input buffer.
-fn owned_encode_call(
+pub(crate) fn owned_encode_call(
     schema_type: &str,
     expr: &str,
     nullable: bool,
@@ -1917,7 +1936,7 @@ fn emit_borrowed_populated_field(
 }
 
 /// Build the populated-value expression for one borrowed field.
-fn borrowed_populated_value(
+pub(crate) fn borrowed_populated_value(
     f: &FieldSpec,
     res_map: &HashMap<String, Resolution>,
     parent_module: &str,
@@ -1978,7 +1997,7 @@ fn borrowed_populated_scalar(
 // ── primitive encode/decode call generators ────────────────────────────────
 
 #[allow(clippy::only_used_in_recursion)]
-fn encode_call(
+pub(crate) fn encode_call(
     schema_type: &str,
     expr: &str,
     nullable: bool,
@@ -2072,7 +2091,7 @@ fn encode_call(
 }
 
 #[allow(clippy::only_used_in_recursion)]
-fn encoded_len_expr(
+pub(crate) fn encoded_len_expr(
     schema_type: &str,
     expr: &str,
     nullable: bool,
@@ -2163,7 +2182,7 @@ fn encoded_len_expr(
 }
 
 #[allow(clippy::only_used_in_recursion)]
-fn decode_borrow_call(
+pub(crate) fn decode_borrow_call(
     schema_type: &str,
     nullable: bool,
     res_map: &HashMap<String, Resolution>,
@@ -2258,7 +2277,7 @@ fn decode_borrow_call(
 /// Generate a decode call that produces an **owned** value (using `Decode`, not `DecodeBorrow`).
 /// Used for tagged fields whose content cannot be zero-copy decoded (strings, owned structs).
 #[allow(clippy::only_used_in_recursion)]
-fn decode_owned_call(
+pub(crate) fn decode_owned_call(
     schema_type: &str,
     nullable: bool,
     parent_module: &str,

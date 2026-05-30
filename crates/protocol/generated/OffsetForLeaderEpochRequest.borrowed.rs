@@ -6,10 +6,8 @@ use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 23;
@@ -18,7 +16,9 @@ pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 4;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetForLeaderEpochRequest<'a> {
@@ -26,8 +26,7 @@ pub struct OffsetForLeaderEpochRequest<'a> {
     pub topics: Vec<OffsetForLeaderTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for OffsetForLeaderEpochRequest<'a> {
+impl Default for OffsetForLeaderEpochRequest<'_> {
     fn default() -> Self {
         Self {
             replica_id: -2i32,
@@ -36,25 +35,40 @@ impl<'a> Default for OffsetForLeaderEpochRequest<'a> {
         }
     }
 }
-
-impl<'a> OffsetForLeaderEpochRequest<'a> {
-    pub fn to_owned(&self) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest {
+impl OffsetForLeaderEpochRequest<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest {
         crate::owned::offset_for_leader_epoch_request::OffsetForLeaderEpochRequest {
             replica_id: (self.replica_id),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(OffsetForLeaderTopic::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for OffsetForLeaderEpochRequest<'a> {
+impl Encode for OffsetForLeaderEpochRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 3 { put_i32(buf, self.replica_id) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topics).len(), flex); for it in &self.topics { it.encode(buf, version)?; } } }
+        if version >= 3 {
+            put_i32(buf, self.replica_id);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
+                for it in &self.topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -64,8 +78,17 @@ impl<'a> Encode for OffsetForLeaderEpochRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 3 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex); let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 3 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -73,68 +96,85 @@ impl<'a> Encode for OffsetForLeaderEpochRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for OffsetForLeaderEpochRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 3 { out.replica_id = get_i32(buf)?; }
-        if version >= 0 { out.topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(OffsetForLeaderTopic::decode_borrow(buf, version)?); } v }; }
+        if version >= 3 {
+            out.replica_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(OffsetForLeaderTopic::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> OffsetForLeaderEpochRequest<'a> {
+impl OffsetForLeaderEpochRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 3 { m.replica_id = 1i32; }
-        if version >= 0 { m.topics = vec![OffsetForLeaderTopic::populated(version)]; }
+        if version >= 3 {
+            m.replica_id = 1i32;
+        }
+        if version >= 0 {
+            m.topics = vec![OffsetForLeaderTopic::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetForLeaderTopic<'a> {
     pub topic: &'a str,
     pub partitions: Vec<OffsetForLeaderPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for OffsetForLeaderTopic<'a> {
-    fn default() -> Self {
-        Self {
-            topic: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> OffsetForLeaderTopic<'a> {
+impl OffsetForLeaderTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderTopic {
         crate::owned::offset_for_leader_epoch_request::OffsetForLeaderTopic {
             topic: (self.topic).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(OffsetForLeaderPartition::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for OffsetForLeaderTopic<'a> {
+impl Encode for OffsetForLeaderTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
-        if version >= 0 { if flex { put_compact_string(buf, self.topic) } else { put_string(buf, self.topic) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.topic);
+            } else {
+                put_string(buf, self.topic);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -144,8 +184,24 @@ impl<'a> Encode for OffsetForLeaderTopic<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 4;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.topic) } else { string_len(self.topic) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.topic)
+            } else {
+                string_len(self.topic)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -153,33 +209,47 @@ impl<'a> Encode for OffsetForLeaderTopic<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for OffsetForLeaderTopic<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
-        if version >= 0 { out.topic = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(OffsetForLeaderPartition::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.topic = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(OffsetForLeaderPartition::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> OffsetForLeaderTopic<'a> {
+impl OffsetForLeaderTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.topic = "x"; }
-        if version >= 0 { m.partitions = vec![OffsetForLeaderPartition::populated(version)]; }
+        if version >= 0 {
+            m.topic = "x";
+        }
+        if version >= 0 {
+            m.partitions = vec![OffsetForLeaderPartition::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OffsetForLeaderPartition {
     pub partition: i32,
@@ -187,7 +257,6 @@ pub struct OffsetForLeaderPartition {
     pub leader_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for OffsetForLeaderPartition {
     fn default() -> Self {
         Self {
@@ -198,9 +267,10 @@ impl Default for OffsetForLeaderPartition {
         }
     }
 }
-
 impl OffsetForLeaderPartition {
-    pub fn to_owned(&self) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderPartition {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::offset_for_leader_epoch_request::OffsetForLeaderPartition {
         crate::owned::offset_for_leader_epoch_request::OffsetForLeaderPartition {
             partition: (self.partition),
             current_leader_epoch: (self.current_leader_epoch),
@@ -209,13 +279,18 @@ impl OffsetForLeaderPartition {
         }
     }
 }
-
 impl Encode for OffsetForLeaderPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
-        if version >= 0 { put_i32(buf, self.partition) }
-        if version >= 2 { put_i32(buf, self.current_leader_epoch) }
-        if version >= 0 { put_i32(buf, self.leader_epoch) }
+        if version >= 0 {
+            put_i32(buf, self.partition);
+        }
+        if version >= 2 {
+            put_i32(buf, self.current_leader_epoch);
+        }
+        if version >= 0 {
+            put_i32(buf, self.leader_epoch);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -225,9 +300,15 @@ impl Encode for OffsetForLeaderPartition {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 4;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 2 { n += 4; }
-        if version >= 0 { n += 4; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 2 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -235,31 +316,39 @@ impl Encode for OffsetForLeaderPartition {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for OffsetForLeaderPartition {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
-        if version >= 0 { out.partition = get_i32(buf)?; }
-        if version >= 2 { out.current_leader_epoch = get_i32(buf)?; }
-        if version >= 0 { out.leader_epoch = get_i32(buf)?; }
+        if version >= 0 {
+            out.partition = get_i32(buf)?;
+        }
+        if version >= 2 {
+            out.current_leader_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.leader_epoch = get_i32(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl OffsetForLeaderPartition {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.partition = 1i32; }
-        if version >= 2 { m.current_leader_epoch = 1i32; }
-        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 {
+            m.partition = 1i32;
+        }
+        if version >= 2 {
+            m.current_leader_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.leader_epoch = 1i32;
+        }
         m
     }
 }

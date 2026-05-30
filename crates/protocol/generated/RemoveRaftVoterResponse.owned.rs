@@ -4,12 +4,10 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 81;
@@ -18,7 +16,9 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RemoveRaftVoterResponse {
@@ -27,16 +27,28 @@ pub struct RemoveRaftVoterResponse {
     pub error_message: Option<String>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for RemoveRaftVoterResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message.as_deref()) } else { put_nullable_string(buf, self.error_message.as_deref()) } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -46,9 +58,19 @@ impl Encode for RemoveRaftVoterResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message.as_deref()) } else { nullable_string_len(self.error_message.as_deref()) }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message.as_deref())
+            } else {
+                nullable_string_len(self.error_message.as_deref())
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -56,34 +78,49 @@ impl Encode for RemoveRaftVoterResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for RemoveRaftVoterResponse {
+impl Decode<'_> for RemoveRaftVoterResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl RemoveRaftVoterResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x".to_string()); }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x".to_string());
+        }
         m
     }
 }

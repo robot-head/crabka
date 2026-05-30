@@ -4,10 +4,10 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 66;
@@ -16,7 +16,9 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListTransactionsResponse {
@@ -26,17 +28,45 @@ pub struct ListTransactionsResponse {
     pub transaction_states: Vec<TransactionState>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for ListTransactionsResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.unknown_state_filters).len(), flex); for it in &self.unknown_state_filters { if flex { put_compact_string(buf, &*it) } else { put_string(buf, &*it) }; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.transaction_states).len(), flex); for it in &self.transaction_states { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(
+                    buf,
+                    (self.unknown_state_filters).len(),
+                    flex,
+                );
+                for it in &self.unknown_state_filters {
+                    if flex {
+                        put_compact_string(buf, it);
+                    } else {
+                        put_string(buf, it);
+                    }
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.transaction_states).len(), flex);
+                for it in &self.transaction_states {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -46,10 +76,44 @@ impl Encode for ListTransactionsResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.unknown_state_filters).len(), flex); let body: usize = (self.unknown_state_filters).iter().map(|it| if flex { compact_string_len(&*it) } else { string_len(&*it) }).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.transaction_states).len(), flex); let body: usize = (self.transaction_states).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.unknown_state_filters).len(),
+                    flex,
+                );
+                let body: usize = (self.unknown_state_filters)
+                    .iter()
+                    .map(|it| {
+                        if flex {
+                            compact_string_len(it)
+                        } else {
+                            string_len(it)
+                        }
+                    })
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.transaction_states).len(),
+                    flex,
+                );
+                let body: usize = (self.transaction_states)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -57,40 +121,72 @@ impl Encode for ListTransactionsResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for ListTransactionsResponse {
+impl Decode<'_> for ListTransactionsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.unknown_state_filters = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }); } v }; }
-        if version >= 0 { out.transaction_states = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(TransactionState::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.unknown_state_filters = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(if flex {
+                        get_compact_string_owned(buf)?
+                    } else {
+                        get_string_owned(buf)?
+                    });
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.transaction_states = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(TransactionState::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ListTransactionsResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.unknown_state_filters = vec!["x".to_string()]; }
-        if version >= 0 { m.transaction_states = vec![TransactionState::populated(version)]; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.unknown_state_filters = vec!["x".to_string()];
+        }
+        if version >= 0 {
+            m.transaction_states = vec![TransactionState::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransactionState {
     pub transactional_id: String,
@@ -98,13 +194,26 @@ pub struct TransactionState {
     pub transaction_state: String,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for TransactionState {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, &self.transactional_id) } else { put_string(buf, &self.transactional_id) } }
-        if version >= 0 { put_i64(buf, self.producer_id) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.transaction_state) } else { put_string(buf, &self.transaction_state) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.transactional_id);
+            } else {
+                put_string(buf, &self.transactional_id);
+            }
+        }
+        if version >= 0 {
+            put_i64(buf, self.producer_id);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.transaction_state);
+            } else {
+                put_string(buf, &self.transaction_state);
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -114,9 +223,23 @@ impl Encode for TransactionState {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.transactional_id) } else { string_len(&self.transactional_id) }; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += if flex { compact_string_len(&self.transaction_state) } else { string_len(&self.transaction_state) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.transactional_id)
+            } else {
+                string_len(&self.transactional_id)
+            };
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.transaction_state)
+            } else {
+                string_len(&self.transaction_state)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -124,31 +247,47 @@ impl Encode for TransactionState {
         n
     }
 }
-
-impl<'de> Decode<'de> for TransactionState {
+impl Decode<'_> for TransactionState {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.transactional_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.producer_id = get_i64(buf)?; }
-        if version >= 0 { out.transaction_state = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
+        if version >= 0 {
+            out.transactional_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.producer_id = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.transaction_state = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl TransactionState {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.transactional_id = "x".to_string(); }
-        if version >= 0 { m.producer_id = 1i64; }
-        if version >= 0 { m.transaction_state = "x".to_string(); }
+        if version >= 0 {
+            m.transactional_id = "x".to_string();
+        }
+        if version >= 0 {
+            m.producer_id = 1i64;
+        }
+        if version >= 0 {
+            m.transaction_state = "x".to_string();
+        }
         m
     }
 }
@@ -161,7 +300,13 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
-    obj.insert("unknownStateFilters".to_string(), ::serde_json::Value::Array(vec![]));
-    obj.insert("transactionStates".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert(
+        "unknownStateFilters".to_string(),
+        ::serde_json::Value::Array(vec![]),
+    );
+    obj.insert(
+        "transactionStates".to_string(),
+        ::serde_json::Value::Array(vec![]),
+    );
     ::serde_json::Value::Object(obj)
 }

@@ -4,10 +4,10 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -20,8 +20,21 @@ pub struct TopicPartition {
 impl Encode for TopicPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, &self.topic) } else { put_string(buf, &self.topic) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { put_i32(buf, *it); } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.topic);
+            } else {
+                put_string(buf, &self.topic);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    put_i32(buf, *it);
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -31,8 +44,21 @@ impl Encode for TopicPartition {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.topic) } else { string_len(&self.topic) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|_| 4).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.topic)
+            } else {
+                string_len(&self.topic)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions).iter().map(|_| 4).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -41,16 +67,29 @@ impl Encode for TopicPartition {
     }
 }
 
-impl<'de> Decode<'de> for TopicPartition {
+impl Decode<'_> for TopicPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.topic = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i32(buf)?); } v }; }
+        if version >= 0 {
+            out.topic = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i32(buf)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
@@ -61,8 +100,12 @@ impl TopicPartition {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.topic = "x".to_string(); }
-        if version >= 0 { m.partitions = vec![1i32]; }
+        if version >= 0 {
+            m.topic = "x".to_string();
+        }
+        if version >= 0 {
+            m.partitions = vec![1i32];
+        }
         m
     }
 }

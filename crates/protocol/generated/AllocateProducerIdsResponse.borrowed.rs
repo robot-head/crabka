@@ -3,7 +3,7 @@
 use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 67;
@@ -12,9 +12,11 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AllocateProducerIdsResponse {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -22,21 +24,10 @@ pub struct AllocateProducerIdsResponse {
     pub producer_id_len: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for AllocateProducerIdsResponse {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            producer_id_start: 0i64,
-            producer_id_len: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl AllocateProducerIdsResponse {
-    pub fn to_owned(&self) -> crate::owned::allocate_producer_ids_response::AllocateProducerIdsResponse {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::allocate_producer_ids_response::AllocateProducerIdsResponse {
         crate::owned::allocate_producer_ids_response::AllocateProducerIdsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
@@ -46,17 +37,27 @@ impl AllocateProducerIdsResponse {
         }
     }
 }
-
 impl Encode for AllocateProducerIdsResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { put_i64(buf, self.producer_id_start) }
-        if version >= 0 { put_i32(buf, self.producer_id_len) }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            put_i64(buf, self.producer_id_start);
+        }
+        if version >= 0 {
+            put_i32(buf, self.producer_id_len);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -66,10 +67,18 @@ impl Encode for AllocateProducerIdsResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 4; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 4;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -77,36 +86,51 @@ impl Encode for AllocateProducerIdsResponse {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for AllocateProducerIdsResponse {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.producer_id_start = get_i64(buf)?; }
-        if version >= 0 { out.producer_id_len = get_i32(buf)?; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.producer_id_start = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.producer_id_len = get_i32(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl AllocateProducerIdsResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.producer_id_start = 1i64; }
-        if version >= 0 { m.producer_id_len = 1i32; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.producer_id_start = 1i64;
+        }
+        if version >= 0 {
+            m.producer_id_len = 1i32;
+        }
         m
     }
 }

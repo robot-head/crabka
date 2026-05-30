@@ -2,12 +2,14 @@
 
 use bytes::{Buf, BufMut};
 
-use crate::primitives::fixed::{get_i16, get_i32, get_i64, get_i8, put_i16, put_i32, put_i64, put_i8};
-use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+use crate::primitives::fixed::{
+    get_i8, get_i16, get_i32, get_i64, put_i8, put_i16, put_i32, put_i64,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes::{
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
+};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 85;
@@ -16,7 +18,9 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WriteShareGroupStateRequest {
@@ -24,15 +28,30 @@ pub struct WriteShareGroupStateRequest {
     pub topics: Vec<WriteStateData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for WriteShareGroupStateRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_string(buf, &self.group_id) } else { put_string(buf, &self.group_id) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topics).len(), flex); for it in &self.topics { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.group_id);
+            } else {
+                put_string(buf, &self.group_id);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
+                for it in &self.topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -42,8 +61,21 @@ impl Encode for WriteShareGroupStateRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.group_id) } else { string_len(&self.group_id) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex); let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.group_id)
+            } else {
+                string_len(&self.group_id)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -51,48 +83,73 @@ impl Encode for WriteShareGroupStateRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for WriteShareGroupStateRequest {
+impl Decode<'_> for WriteShareGroupStateRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.group_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(WriteStateData::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(WriteStateData::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl WriteShareGroupStateRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.group_id = "x".to_string(); }
-        if version >= 0 { m.topics = vec![WriteStateData::populated(version)]; }
+        if version >= 0 {
+            m.group_id = "x".to_string();
+        }
+        if version >= 0 {
+            m.topics = vec![WriteStateData::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WriteStateData {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for WriteStateData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { crate::primitives::uuid::put_uuid(buf, self.topic_id) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -102,8 +159,20 @@ impl Encode for WriteStateData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 16; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -111,33 +180,43 @@ impl Encode for WriteStateData {
         n
     }
 }
-
-impl<'de> Decode<'de> for WriteStateData {
+impl Decode<'_> for WriteStateData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.topic_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(PartitionData::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.topic_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(PartitionData::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl WriteStateData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        if version >= 0 {
+            m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.partitions = vec![PartitionData::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionData {
     pub partition: i32,
@@ -148,7 +227,6 @@ pub struct PartitionData {
     pub state_batches: Vec<StateBatch>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for PartitionData {
     fn default() -> Self {
         Self {
@@ -162,16 +240,32 @@ impl Default for PartitionData {
         }
     }
 }
-
 impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.partition) }
-        if version >= 0 { put_i32(buf, self.state_epoch) }
-        if version >= 0 { put_i32(buf, self.leader_epoch) }
-        if version >= 0 { put_i64(buf, self.start_offset) }
-        if version >= 1 { put_i32(buf, self.delivery_complete_count) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.state_batches).len(), flex); for it in &self.state_batches { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.partition);
+        }
+        if version >= 0 {
+            put_i32(buf, self.state_epoch);
+        }
+        if version >= 0 {
+            put_i32(buf, self.leader_epoch);
+        }
+        if version >= 0 {
+            put_i64(buf, self.start_offset);
+        }
+        if version >= 1 {
+            put_i32(buf, self.delivery_complete_count);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.state_batches).len(), flex);
+                for it in &self.state_batches {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -181,12 +275,34 @@ impl Encode for PartitionData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 8; }
-        if version >= 1 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.state_batches).len(), flex); let body: usize = (self.state_batches).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 1 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.state_batches).len(),
+                    flex,
+                );
+                let body: usize = (self.state_batches)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -194,41 +310,67 @@ impl Encode for PartitionData {
         n
     }
 }
-
-impl<'de> Decode<'de> for PartitionData {
+impl Decode<'_> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.partition = get_i32(buf)?; }
-        if version >= 0 { out.state_epoch = get_i32(buf)?; }
-        if version >= 0 { out.leader_epoch = get_i32(buf)?; }
-        if version >= 0 { out.start_offset = get_i64(buf)?; }
-        if version >= 1 { out.delivery_complete_count = get_i32(buf)?; }
-        if version >= 0 { out.state_batches = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(StateBatch::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.partition = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.state_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.leader_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.start_offset = get_i64(buf)?;
+        }
+        if version >= 1 {
+            out.delivery_complete_count = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.state_batches = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(StateBatch::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl PartitionData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.partition = 1i32; }
-        if version >= 0 { m.state_epoch = 1i32; }
-        if version >= 0 { m.leader_epoch = 1i32; }
-        if version >= 0 { m.start_offset = 1i64; }
-        if version >= 1 { m.delivery_complete_count = 1i32; }
-        if version >= 0 { m.state_batches = vec![StateBatch::populated(version)]; }
+        if version >= 0 {
+            m.partition = 1i32;
+        }
+        if version >= 0 {
+            m.state_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.leader_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.start_offset = 1i64;
+        }
+        if version >= 1 {
+            m.delivery_complete_count = 1i32;
+        }
+        if version >= 0 {
+            m.state_batches = vec![StateBatch::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StateBatch {
     pub first_offset: i64,
@@ -237,14 +379,21 @@ pub struct StateBatch {
     pub delivery_count: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for StateBatch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i64(buf, self.first_offset) }
-        if version >= 0 { put_i64(buf, self.last_offset) }
-        if version >= 0 { put_i8(buf, self.delivery_state) }
-        if version >= 0 { put_i16(buf, self.delivery_count) }
+        if version >= 0 {
+            put_i64(buf, self.first_offset);
+        }
+        if version >= 0 {
+            put_i64(buf, self.last_offset);
+        }
+        if version >= 0 {
+            put_i8(buf, self.delivery_state);
+        }
+        if version >= 0 {
+            put_i16(buf, self.delivery_count);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -254,10 +403,18 @@ impl Encode for StateBatch {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -265,33 +422,45 @@ impl Encode for StateBatch {
         n
     }
 }
-
-impl<'de> Decode<'de> for StateBatch {
+impl Decode<'_> for StateBatch {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.first_offset = get_i64(buf)?; }
-        if version >= 0 { out.last_offset = get_i64(buf)?; }
-        if version >= 0 { out.delivery_state = get_i8(buf)?; }
-        if version >= 0 { out.delivery_count = get_i16(buf)?; }
+        if version >= 0 {
+            out.first_offset = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.last_offset = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.delivery_state = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.delivery_count = get_i16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl StateBatch {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.first_offset = 1i64; }
-        if version >= 0 { m.last_offset = 1i64; }
-        if version >= 0 { m.delivery_state = 1i8; }
-        if version >= 0 { m.delivery_count = 1i16; }
+        if version >= 0 {
+            m.first_offset = 1i64;
+        }
+        if version >= 0 {
+            m.last_offset = 1i64;
+        }
+        if version >= 0 {
+            m.delivery_state = 1i8;
+        }
+        if version >= 0 {
+            m.delivery_count = 1i16;
+        }
         m
     }
 }
@@ -302,7 +471,10 @@ impl StateBatch {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "groupId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)
 }

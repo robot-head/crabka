@@ -4,10 +4,10 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i8, put_i8};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -20,8 +20,16 @@ pub struct Status {
 impl Encode for Status {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i8(buf, self.status_code) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.status_detail) } else { put_string(buf, &self.status_detail) } }
+        if version >= 0 {
+            put_i8(buf, self.status_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.status_detail);
+            } else {
+                put_string(buf, &self.status_detail);
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -31,8 +39,16 @@ impl Encode for Status {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += if flex { compact_string_len(&self.status_detail) } else { string_len(&self.status_detail) }; }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.status_detail)
+            } else {
+                string_len(&self.status_detail)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -41,16 +57,22 @@ impl Encode for Status {
     }
 }
 
-impl<'de> Decode<'de> for Status {
+impl Decode<'_> for Status {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.status_code = get_i8(buf)?; }
-        if version >= 0 { out.status_detail = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
+        if version >= 0 {
+            out.status_code = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.status_detail = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
@@ -61,8 +83,12 @@ impl Status {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.status_code = 1i8; }
-        if version >= 0 { m.status_detail = "x".to_string(); }
+        if version >= 0 {
+            m.status_code = 1i8;
+        }
+        if version >= 0 {
+            m.status_detail = "x".to_string();
+        }
         m
     }
 }

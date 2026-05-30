@@ -6,10 +6,9 @@ use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
     get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 79;
@@ -18,7 +17,9 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareAcknowledgeResponse {
@@ -30,19 +31,47 @@ pub struct ShareAcknowledgeResponse {
     pub node_endpoints: Vec<NodeEndpoint>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for ShareAcknowledgeResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message.as_deref()) } else { put_nullable_string(buf, self.error_message.as_deref()) } }
-        if version >= 2 { put_i32(buf, self.acquisition_lock_timeout_ms) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.responses).len(), flex); for it in &self.responses { it.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.node_endpoints).len(), flex); for it in &self.node_endpoints { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
+        if version >= 2 {
+            put_i32(buf, self.acquisition_lock_timeout_ms);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.responses).len(), flex);
+                for it in &self.responses {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.node_endpoints).len(), flex);
+                for it in &self.node_endpoints {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -52,12 +81,46 @@ impl Encode for ShareAcknowledgeResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message.as_deref()) } else { nullable_string_len(self.error_message.as_deref()) }; }
-        if version >= 2 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.responses).len(), flex); let body: usize = (self.responses).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.node_endpoints).len(), flex); let body: usize = (self.node_endpoints).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message.as_deref())
+            } else {
+                nullable_string_len(self.error_message.as_deref())
+            };
+        }
+        if version >= 2 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.responses).len(), flex);
+                let body: usize = (self.responses)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.node_endpoints).len(),
+                    flex,
+                );
+                let body: usize = (self.node_endpoints)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -65,56 +128,104 @@ impl Encode for ShareAcknowledgeResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for ShareAcknowledgeResponse {
+impl Decode<'_> for ShareAcknowledgeResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 2 { out.acquisition_lock_timeout_ms = get_i32(buf)?; }
-        if version >= 0 { out.responses = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(ShareAcknowledgeTopicResponse::decode(buf, version)?); } v }; }
-        if version >= 0 { out.node_endpoints = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(NodeEndpoint::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 2 {
+            out.acquisition_lock_timeout_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.responses = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(ShareAcknowledgeTopicResponse::decode(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.node_endpoints = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(NodeEndpoint::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ShareAcknowledgeResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x".to_string()); }
-        if version >= 2 { m.acquisition_lock_timeout_ms = 1i32; }
-        if version >= 0 { m.responses = vec![ShareAcknowledgeTopicResponse::populated(version)]; }
-        if version >= 0 { m.node_endpoints = vec![NodeEndpoint::populated(version)]; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x".to_string());
+        }
+        if version >= 2 {
+            m.acquisition_lock_timeout_ms = 1i32;
+        }
+        if version >= 0 {
+            m.responses = vec![ShareAcknowledgeTopicResponse::populated(version)];
+        }
+        if version >= 0 {
+            m.node_endpoints = vec![NodeEndpoint::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareAcknowledgeTopicResponse {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for ShareAcknowledgeTopicResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { crate::primitives::uuid::put_uuid(buf, self.topic_id) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -124,8 +235,20 @@ impl Encode for ShareAcknowledgeTopicResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 16; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -133,33 +256,43 @@ impl Encode for ShareAcknowledgeTopicResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for ShareAcknowledgeTopicResponse {
+impl Decode<'_> for ShareAcknowledgeTopicResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.topic_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(PartitionData::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.topic_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(PartitionData::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ShareAcknowledgeTopicResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        if version >= 0 {
+            m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.partitions = vec![PartitionData::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionData {
     pub partition_index: i32,
@@ -168,14 +301,25 @@ pub struct PartitionData {
     pub current_leader: LeaderIdAndEpoch,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.partition_index) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message.as_deref()) } else { put_nullable_string(buf, self.error_message.as_deref()) } }
-        if version >= 0 { self.current_leader.encode(buf, version)? }
+        if version >= 0 {
+            put_i32(buf, self.partition_index);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
+        if version >= 0 {
+            self.current_leader.encode(buf, version)?;
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -185,10 +329,22 @@ impl Encode for PartitionData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message.as_deref()) } else { nullable_string_len(self.error_message.as_deref()) }; }
-        if version >= 0 { n += self.current_leader.encoded_len(version); }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message.as_deref())
+            } else {
+                nullable_string_len(self.error_message.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += self.current_leader.encoded_len(version);
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -196,49 +352,67 @@ impl Encode for PartitionData {
         n
     }
 }
-
-impl<'de> Decode<'de> for PartitionData {
+impl Decode<'_> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.partition_index = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.current_leader = LeaderIdAndEpoch::decode(buf, version)?; }
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.current_leader = LeaderIdAndEpoch::decode(buf, version)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl PartitionData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.partition_index = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x".to_string()); }
-        if version >= 0 { m.current_leader = LeaderIdAndEpoch::populated(version); }
+        if version >= 0 {
+            m.partition_index = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.current_leader = LeaderIdAndEpoch::populated(version);
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderIdAndEpoch {
     pub leader_id: i32,
     pub leader_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for LeaderIdAndEpoch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.leader_id) }
-        if version >= 0 { put_i32(buf, self.leader_epoch) }
+        if version >= 0 {
+            put_i32(buf, self.leader_id);
+        }
+        if version >= 0 {
+            put_i32(buf, self.leader_epoch);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -248,8 +422,12 @@ impl Encode for LeaderIdAndEpoch {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -257,33 +435,36 @@ impl Encode for LeaderIdAndEpoch {
         n
     }
 }
-
-impl<'de> Decode<'de> for LeaderIdAndEpoch {
+impl Decode<'_> for LeaderIdAndEpoch {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.leader_id = get_i32(buf)?; }
-        if version >= 0 { out.leader_epoch = get_i32(buf)?; }
+        if version >= 0 {
+            out.leader_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.leader_epoch = get_i32(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl LeaderIdAndEpoch {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.leader_id = 1i32; }
-        if version >= 0 { m.leader_epoch = 1i32; }
+        if version >= 0 {
+            m.leader_id = 1i32;
+        }
+        if version >= 0 {
+            m.leader_epoch = 1i32;
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NodeEndpoint {
     pub node_id: i32,
@@ -292,14 +473,29 @@ pub struct NodeEndpoint {
     pub rack: Option<String>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for NodeEndpoint {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.node_id) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) } }
-        if version >= 0 { put_i32(buf, self.port) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.rack.as_deref()) } else { put_nullable_string(buf, self.rack.as_deref()) } }
+        if version >= 0 {
+            put_i32(buf, self.node_id);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.host);
+            } else {
+                put_string(buf, &self.host);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.port);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.rack.as_deref());
+            } else {
+                put_nullable_string(buf, self.rack.as_deref());
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -309,10 +505,26 @@ impl Encode for NodeEndpoint {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.rack.as_deref()) } else { nullable_string_len(self.rack.as_deref()) }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.rack.as_deref())
+            } else {
+                nullable_string_len(self.rack.as_deref())
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -320,33 +532,53 @@ impl Encode for NodeEndpoint {
         n
     }
 }
-
-impl<'de> Decode<'de> for NodeEndpoint {
+impl Decode<'_> for NodeEndpoint {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.node_id = get_i32(buf)?; }
-        if version >= 0 { out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.port = get_i32(buf)?; }
-        if version >= 0 { out.rack = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
+        if version >= 0 {
+            out.node_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.port = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.rack = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl NodeEndpoint {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.node_id = 1i32; }
-        if version >= 0 { m.host = "x".to_string(); }
-        if version >= 0 { m.port = 1i32; }
-        if version >= 0 { m.rack = Some("x".to_string()); }
+        if version >= 0 {
+            m.node_id = 1i32;
+        }
+        if version >= 0 {
+            m.host = "x".to_string();
+        }
+        if version >= 0 {
+            m.port = 1i32;
+        }
+        if version >= 0 {
+            m.rack = Some("x".to_string());
+        }
         m
     }
 }
@@ -361,9 +593,15 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
     if version >= 2 {
-        obj.insert("acquisitionLockTimeoutMs".to_string(), ::serde_json::json!(0));
+        obj.insert(
+            "acquisitionLockTimeoutMs".to_string(),
+            ::serde_json::json!(0),
+        );
     }
     obj.insert("responses".to_string(), ::serde_json::Value::Array(vec![]));
-    obj.insert("nodeEndpoints".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert(
+        "nodeEndpoints".to_string(),
+        ::serde_json::Value::Array(vec![]),
+    );
     ::serde_json::Value::Object(obj)
 }

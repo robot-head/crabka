@@ -3,7 +3,9 @@
 use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_bool, get_i32, get_i64, put_bool, put_i32, put_i64};
-use crate::tagged_fields::{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{
+    WriteTaggedFields, encode_to_bytes, read_tagged_fields, tagged_fields_len,
+};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 63;
@@ -12,7 +14,9 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrokerHeartbeatRequest {
@@ -25,7 +29,6 @@ pub struct BrokerHeartbeatRequest {
     pub cordoned_log_dirs: Option<Vec<crate::primitives::uuid::Uuid>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for BrokerHeartbeatRequest {
     fn default() -> Self {
         Self {
@@ -40,26 +43,82 @@ impl Default for BrokerHeartbeatRequest {
         }
     }
 }
-
 impl Encode for BrokerHeartbeatRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.broker_id) }
-        if version >= 0 { put_i64(buf, self.broker_epoch) }
-        if version >= 0 { put_i64(buf, self.current_metadata_offset) }
-        if version >= 0 { put_bool(buf, self.want_fence) }
-        if version >= 0 { put_bool(buf, self.want_shut_down) }
+        if version >= 0 {
+            put_i32(buf, self.broker_id);
+        }
+        if version >= 0 {
+            put_i64(buf, self.broker_epoch);
+        }
+        if version >= 0 {
+            put_i64(buf, self.current_metadata_offset);
+        }
+        if version >= 0 {
+            put_bool(buf, self.want_fence);
+        }
+        if version >= 0 {
+            put_bool(buf, self.want_shut_down);
+        }
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.offline_log_dirs)) {
-                let payload = encode_to_bytes({ let prefix = crate::primitives::array::array_len_prefix_len((self.offline_log_dirs).len(), flex); let body: usize = (self.offline_log_dirs).iter().map(|_| 16).sum(); prefix + body }, |b| { { crate::primitives::array::put_array_len(b, (self.offline_log_dirs).len(), flex); for it in &self.offline_log_dirs { crate::primitives::uuid::put_uuid(b, *it); } }; Ok(()) });
+                let payload = encode_to_bytes(
+                    {
+                        let prefix = crate::primitives::array::array_len_prefix_len(
+                            (self.offline_log_dirs).len(),
+                            flex,
+                        );
+                        let body: usize = (self.offline_log_dirs).iter().map(|_| 16).sum();
+                        prefix + body
+                    },
+                    |b| {
+                        {
+                            crate::primitives::array::put_array_len(
+                                b,
+                                (self.offline_log_dirs).len(),
+                                flex,
+                            );
+                            for it in &self.offline_log_dirs {
+                                crate::primitives::uuid::put_uuid(b, *it);
+                            }
+                        };
+                        Ok(())
+                    },
+                );
                 tagged.add(0, payload);
             }
             if !(self.cordoned_log_dirs.is_none()) {
-                let payload = encode_to_bytes({ let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum()); prefix + body }, |b| { { let len = (self.cordoned_log_dirs).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(b, len, flex); if let Some(v) = &self.cordoned_log_dirs { for it in v { crate::primitives::uuid::put_uuid(b, *it); } } }; Ok(()) });
+                let payload = encode_to_bytes(
+                    {
+                        let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
+                        let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                            opt.map(std::vec::Vec::len),
+                            flex,
+                        );
+                        let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());
+                        prefix + body
+                    },
+                    |b| {
+                        {
+                            let len = (self.cordoned_log_dirs).as_ref().map(Vec::len);
+                            crate::primitives::array::put_nullable_array_len(b, len, flex);
+                            if let Some(v) = &self.cordoned_log_dirs {
+                                for it in v {
+                                    crate::primitives::uuid::put_uuid(b, *it);
+                                }
+                            }
+                        };
+                        Ok(())
+                    },
+                );
                 tagged.add(1, payload);
             }
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -69,67 +128,149 @@ impl Encode for BrokerHeartbeatRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
             if !(crate::codegen_helpers::is_default(&self.offline_log_dirs)) {
-                known_pairs.push((0, { let prefix = crate::primitives::array::array_len_prefix_len((self.offline_log_dirs).len(), flex); let body: usize = (self.offline_log_dirs).iter().map(|_| 16).sum(); prefix + body }));
+                known_pairs.push((0, {
+                    let prefix = crate::primitives::array::array_len_prefix_len(
+                        (self.offline_log_dirs).len(),
+                        flex,
+                    );
+                    let body: usize = (self.offline_log_dirs).iter().map(|_| 16).sum();
+                    prefix + body
+                }));
             }
             if !(self.cordoned_log_dirs.is_none()) {
-                known_pairs.push((1, { let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum()); prefix + body }));
+                known_pairs.push((1, {
+                    let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
+                    let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                        opt.map(std::vec::Vec::len),
+                        flex,
+                    );
+                    let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());
+                    prefix + body
+                }));
             }
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
         }
         n
     }
 }
-
-impl<'de> Decode<'de> for BrokerHeartbeatRequest {
+impl Decode<'_> for BrokerHeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.broker_id = get_i32(buf)?; }
-        if version >= 0 { out.broker_epoch = get_i64(buf)?; }
-        if version >= 0 { out.current_metadata_offset = get_i64(buf)?; }
-        if version >= 0 { out.want_fence = get_bool(buf)?; }
-        if version >= 0 { out.want_shut_down = get_bool(buf)?; }
+        if version >= 0 {
+            out.broker_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.broker_epoch = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.current_metadata_offset = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.want_fence = get_bool(buf)?;
+        }
+        if version >= 0 {
+            out.want_shut_down = get_bool(buf)?;
+        }
         if flex {
-            // Pre-declare typed slots for known tagged fields.
             let mut tag_offline_log_dirs = None;
             let mut tag_cordoned_log_dirs = None;
-            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| {
-                match tag {
-                0 => { tag_offline_log_dirs = Some({ let b: &mut &[u8] = payload; { let n = crate::primitives::array::get_array_len(b, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(crate::primitives::uuid::get_uuid(b)?); } v } }); Ok(true) }
-                1 => { tag_cordoned_log_dirs = Some({ let b: &mut &[u8] = payload; { let opt = crate::primitives::array::get_nullable_array_len(b, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(crate::primitives::uuid::get_uuid(b)?); } Some(v) } } } }); Ok(true) }
-                    _ => Ok(false),
+            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
+                0 => {
+                    tag_offline_log_dirs = Some({
+                        let b: &mut &[u8] = payload;
+                        {
+                            let n = crate::primitives::array::get_array_len(b, flex)?;
+                            let mut v = Vec::with_capacity(n);
+                            for _ in 0..n {
+                                v.push(crate::primitives::uuid::get_uuid(b)?);
+                            }
+                            v
+                        }
+                    });
+                    Ok(true)
                 }
+                1 => {
+                    tag_cordoned_log_dirs = Some({
+                        let b: &mut &[u8] = payload;
+                        {
+                            let opt = crate::primitives::array::get_nullable_array_len(b, flex)?;
+                            match opt {
+                                None => None,
+                                Some(n) => {
+                                    let mut v = Vec::with_capacity(n);
+                                    for _ in 0..n {
+                                        v.push(crate::primitives::uuid::get_uuid(b)?);
+                                    }
+                                    Some(v)
+                                }
+                            }
+                        }
+                    });
+                    Ok(true)
+                }
+                _ => Ok(false),
             })?;
-            if let Some(v) = tag_offline_log_dirs { out.offline_log_dirs = v; }
-            if let Some(v) = tag_cordoned_log_dirs { out.cordoned_log_dirs = v; }
+            if let Some(v) = tag_offline_log_dirs {
+                out.offline_log_dirs = v;
+            }
+            if let Some(v) = tag_cordoned_log_dirs {
+                out.cordoned_log_dirs = v;
+            }
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl BrokerHeartbeatRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.broker_id = 1i32; }
-        if version >= 0 { m.broker_epoch = 1i64; }
-        if version >= 0 { m.current_metadata_offset = 1i64; }
-        if version >= 0 { m.want_fence = true; }
-        if version >= 0 { m.want_shut_down = true; }
-        if version >= 1 { m.offline_log_dirs = vec![crate::primitives::uuid::Uuid([1u8; 16])]; }
-        if version >= 2 { m.cordoned_log_dirs = Some(vec![crate::primitives::uuid::Uuid([1u8; 16])]); }
+        if version >= 0 {
+            m.broker_id = 1i32;
+        }
+        if version >= 0 {
+            m.broker_epoch = 1i64;
+        }
+        if version >= 0 {
+            m.current_metadata_offset = 1i64;
+        }
+        if version >= 0 {
+            m.want_fence = true;
+        }
+        if version >= 0 {
+            m.want_shut_down = true;
+        }
+        if version >= 1 {
+            m.offline_log_dirs = vec![crate::primitives::uuid::Uuid([1u8; 16])];
+        }
+        if version >= 2 {
+            m.cordoned_log_dirs = Some(vec![crate::primitives::uuid::Uuid([1u8; 16])]);
+        }
         m
     }
 }
@@ -146,7 +287,10 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("wantFence".to_string(), ::serde_json::Value::Bool(false));
     obj.insert("wantShutDown".to_string(), ::serde_json::Value::Bool(false));
     if version >= 1 {
-        obj.insert("offlineLogDirs".to_string(), ::serde_json::Value::Array(vec![]));
+        obj.insert(
+            "offlineLogDirs".to_string(),
+            ::serde_json::Value::Array(vec![]),
+        );
     }
     if version >= 2 {
         obj.insert("cordonedLogDirs".to_string(), ::serde_json::Value::Null);

@@ -6,38 +6,26 @@ use crate::primitives::fixed::{get_bool, put_bool};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DefaultPrincipalData<'a> {
     pub type_: &'a str,
     pub name: &'a str,
     pub token_authenticated: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for DefaultPrincipalData<'a> {
-    fn default() -> Self {
-        Self {
-            type_: "",
-            name: "",
-            token_authenticated: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> DefaultPrincipalData<'a> {
+impl DefaultPrincipalData<'_> {
     pub fn to_owned(&self) -> crate::owned::default_principal_data::DefaultPrincipalData {
         crate::owned::default_principal_data::DefaultPrincipalData {
             type_: (self.type_).to_string(),
@@ -47,16 +35,31 @@ impl<'a> DefaultPrincipalData<'a> {
         }
     }
 }
-
-impl<'a> Encode for DefaultPrincipalData<'a> {
+impl Encode for DefaultPrincipalData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("DefaultPrincipalData version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "DefaultPrincipalData version out of range",
+            ));
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_string(buf, self.type_) } else { put_string(buf, self.type_) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 0 { put_bool(buf, self.token_authenticated) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.type_);
+            } else {
+                put_string(buf, self.type_);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.name);
+            } else {
+                put_string(buf, self.name);
+            }
+        }
+        if version >= 0 {
+            put_bool(buf, self.token_authenticated);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -66,9 +69,23 @@ impl<'a> Encode for DefaultPrincipalData<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.type_) } else { string_len(self.type_) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.type_)
+            } else {
+                string_len(self.type_)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -76,34 +93,52 @@ impl<'a> Encode for DefaultPrincipalData<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DefaultPrincipalData<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("DefaultPrincipalData version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "DefaultPrincipalData version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.type_ = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.token_authenticated = get_bool(buf)?; }
+        if version >= 0 {
+            out.type_ = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.token_authenticated = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> DefaultPrincipalData<'a> {
+impl DefaultPrincipalData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.type_ = "x"; }
-        if version >= 0 { m.name = "x"; }
-        if version >= 0 { m.token_authenticated = true; }
+        if version >= 0 {
+            m.type_ = "x";
+        }
+        if version >= 0 {
+            m.name = "x";
+        }
+        if version >= 0 {
+            m.token_authenticated = true;
+        }
         m
     }
 }

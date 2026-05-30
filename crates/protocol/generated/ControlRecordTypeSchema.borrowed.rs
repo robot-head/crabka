@@ -9,23 +9,15 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 32767;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ControlRecordTypeSchema {
     pub type_: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for ControlRecordTypeSchema {
-    fn default() -> Self {
-        Self {
-            type_: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl ControlRecordTypeSchema {
     pub fn to_owned(&self) -> crate::owned::control_record_type_schema::ControlRecordTypeSchema {
         crate::owned::control_record_type_schema::ControlRecordTypeSchema {
@@ -34,42 +26,51 @@ impl ControlRecordTypeSchema {
         }
     }
 }
-
 impl Encode for ControlRecordTypeSchema {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("ControlRecordTypeSchema version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "ControlRecordTypeSchema version out of range",
+            ));
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i16(buf, self.type_) }
+        if version >= 0 {
+            put_i16(buf, self.type_);
+        }
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += 2;
+        }
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ControlRecordTypeSchema {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("ControlRecordTypeSchema version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "ControlRecordTypeSchema version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.type_ = get_i16(buf)?; }
+        if version >= 0 {
+            out.type_ = get_i16(buf)?;
+        }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ControlRecordTypeSchema {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.type_ = 1i16; }
+        if version >= 0 {
+            m.type_ = 1i16;
+        }
         m
     }
 }

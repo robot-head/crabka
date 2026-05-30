@@ -5,14 +5,13 @@ use bytes::BufMut;
 use crate::primitives::fixed::{get_bool, get_i32, get_i64, put_bool, put_i32, put_i64};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 52;
@@ -21,7 +20,9 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoteRequest<'a> {
@@ -30,8 +31,7 @@ pub struct VoteRequest<'a> {
     pub topics: Vec<TopicData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for VoteRequest<'a> {
+impl Default for VoteRequest<'_> {
     fn default() -> Self {
         Self {
             cluster_id: None,
@@ -41,27 +41,43 @@ impl<'a> Default for VoteRequest<'a> {
         }
     }
 }
-
-impl<'a> VoteRequest<'a> {
+impl VoteRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::vote_request::VoteRequest {
         crate::owned::vote_request::VoteRequest {
-            cluster_id: (self.cluster_id).map(|s| s.to_string()),
+            cluster_id: (self.cluster_id).map(std::string::ToString::to_string),
             voter_id: (self.voter_id),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for VoteRequest<'a> {
+impl Encode for VoteRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.cluster_id) } else { put_nullable_string(buf, self.cluster_id) } }
-        if version >= 1 { put_i32(buf, self.voter_id) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topics).len(), flex); for it in &self.topics { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.cluster_id);
+            } else {
+                put_nullable_string(buf, self.cluster_id);
+            }
+        }
+        if version >= 1 {
+            put_i32(buf, self.voter_id);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
+                for it in &self.topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -71,9 +87,24 @@ impl<'a> Encode for VoteRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.cluster_id) } else { nullable_string_len(self.cluster_id) }; }
-        if version >= 1 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex); let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.cluster_id)
+            } else {
+                nullable_string_len(self.cluster_id)
+            };
+        }
+        if version >= 1 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -81,70 +112,95 @@ impl<'a> Encode for VoteRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for VoteRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.cluster_id = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 1 { out.voter_id = get_i32(buf)?; }
-        if version >= 0 { out.topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(TopicData::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.cluster_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 1 {
+            out.voter_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(TopicData::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> VoteRequest<'a> {
+impl VoteRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.cluster_id = Some("x"); }
-        if version >= 1 { m.voter_id = 1i32; }
-        if version >= 0 { m.topics = vec![TopicData::populated(version)]; }
+        if version >= 0 {
+            m.cluster_id = Some("x");
+        }
+        if version >= 1 {
+            m.voter_id = 1i32;
+        }
+        if version >= 0 {
+            m.topics = vec![TopicData::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for TopicData<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     pub fn to_owned(&self) -> crate::owned::vote_request::TopicData {
         crate::owned::vote_request::TopicData {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for TopicData<'a> {
+impl Encode for TopicData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, self.topic_name) } else { put_string(buf, self.topic_name) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.topic_name);
+            } else {
+                put_string(buf, self.topic_name);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -154,8 +210,24 @@ impl<'a> Encode for TopicData<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.topic_name) } else { string_len(self.topic_name) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.topic_name)
+            } else {
+                string_len(self.topic_name)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -163,34 +235,48 @@ impl<'a> Encode for TopicData<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for TopicData<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.topic_name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(PartitionData::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.topic_name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(PartitionData::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.topic_name = "x"; }
-        if version >= 0 { m.partitions = vec![PartitionData::populated(version)]; }
+        if version >= 0 {
+            m.topic_name = "x";
+        }
+        if version >= 0 {
+            m.partitions = vec![PartitionData::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionData {
     pub partition_index: i32,
     pub replica_epoch: i32,
@@ -202,23 +288,6 @@ pub struct PartitionData {
     pub pre_vote: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for PartitionData {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            replica_epoch: 0i32,
-            replica_id: 0i32,
-            replica_directory_id: Default::default(),
-            voter_directory_id: Default::default(),
-            last_offset_epoch: 0i32,
-            last_offset: 0i64,
-            pre_vote: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl PartitionData {
     pub fn to_owned(&self) -> crate::owned::vote_request::PartitionData {
         crate::owned::vote_request::PartitionData {
@@ -234,18 +303,33 @@ impl PartitionData {
         }
     }
 }
-
 impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.partition_index) }
-        if version >= 0 { put_i32(buf, self.replica_epoch) }
-        if version >= 0 { put_i32(buf, self.replica_id) }
-        if version >= 1 { crate::primitives::uuid::put_uuid(buf, self.replica_directory_id) }
-        if version >= 1 { crate::primitives::uuid::put_uuid(buf, self.voter_directory_id) }
-        if version >= 0 { put_i32(buf, self.last_offset_epoch) }
-        if version >= 0 { put_i64(buf, self.last_offset) }
-        if version >= 2 { put_bool(buf, self.pre_vote) }
+        if version >= 0 {
+            put_i32(buf, self.partition_index);
+        }
+        if version >= 0 {
+            put_i32(buf, self.replica_epoch);
+        }
+        if version >= 0 {
+            put_i32(buf, self.replica_id);
+        }
+        if version >= 1 {
+            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id);
+        }
+        if version >= 1 {
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+        }
+        if version >= 0 {
+            put_i32(buf, self.last_offset_epoch);
+        }
+        if version >= 0 {
+            put_i64(buf, self.last_offset);
+        }
+        if version >= 2 {
+            put_bool(buf, self.pre_vote);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -255,14 +339,30 @@ impl Encode for PartitionData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 1 { n += 16; }
-        if version >= 1 { n += 16; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 8; }
-        if version >= 2 { n += 1; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 1 {
+            n += 16;
+        }
+        if version >= 1 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 2 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -270,41 +370,69 @@ impl Encode for PartitionData {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for PartitionData {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.partition_index = get_i32(buf)?; }
-        if version >= 0 { out.replica_epoch = get_i32(buf)?; }
-        if version >= 0 { out.replica_id = get_i32(buf)?; }
-        if version >= 1 { out.replica_directory_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 1 { out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.last_offset_epoch = get_i32(buf)?; }
-        if version >= 0 { out.last_offset = get_i64(buf)?; }
-        if version >= 2 { out.pre_vote = get_bool(buf)?; }
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.replica_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.replica_id = get_i32(buf)?;
+        }
+        if version >= 1 {
+            out.replica_directory_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 1 {
+            out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.last_offset_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.last_offset = get_i64(buf)?;
+        }
+        if version >= 2 {
+            out.pre_vote = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl PartitionData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.partition_index = 1i32; }
-        if version >= 0 { m.replica_epoch = 1i32; }
-        if version >= 0 { m.replica_id = 1i32; }
-        if version >= 1 { m.replica_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 1 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.last_offset_epoch = 1i32; }
-        if version >= 0 { m.last_offset = 1i64; }
-        if version >= 2 { m.pre_vote = true; }
+        if version >= 0 {
+            m.partition_index = 1i32;
+        }
+        if version >= 0 {
+            m.replica_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.replica_id = 1i32;
+        }
+        if version >= 1 {
+            m.replica_directory_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 1 {
+            m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.last_offset_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.last_offset = 1i64;
+        }
+        if version >= 2 {
+            m.pre_vote = true;
+        }
         m
     }
 }

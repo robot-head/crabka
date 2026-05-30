@@ -3,28 +3,18 @@
 use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnPartitionResult {
     pub partition_index: i32,
     pub partition_error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl Default for AddPartitionsToTxnPartitionResult {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            partition_error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl AddPartitionsToTxnPartitionResult {
-    pub fn to_owned(&self) -> crate::owned::common::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult {
+    pub fn to_owned(&self) -> crate::owned::common::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult{
         crate::owned::common::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult {
             partition_index: (self.partition_index),
             partition_error_code: (self.partition_error_code),
@@ -36,8 +26,12 @@ impl AddPartitionsToTxnPartitionResult {
 impl Encode for AddPartitionsToTxnPartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
-        if version >= 0 { put_i32(buf, self.partition_index) }
-        if version >= 0 { put_i16(buf, self.partition_error_code) }
+        if version >= 0 {
+            put_i32(buf, self.partition_index);
+        }
+        if version >= 0 {
+            put_i16(buf, self.partition_error_code);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -47,8 +41,12 @@ impl Encode for AddPartitionsToTxnPartitionResult {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 3;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -61,12 +59,14 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnPartitionResult {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
-        if version >= 0 { out.partition_index = get_i32(buf)?; }
-        if version >= 0 { out.partition_error_code = get_i16(buf)?; }
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.partition_error_code = get_i16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
@@ -77,8 +77,12 @@ impl AddPartitionsToTxnPartitionResult {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.partition_index = 1i32; }
-        if version >= 0 { m.partition_error_code = 1i16; }
+        if version >= 0 {
+            m.partition_index = 1i32;
+        }
+        if version >= 0 {
+            m.partition_error_code = 1i16;
+        }
         m
     }
 }

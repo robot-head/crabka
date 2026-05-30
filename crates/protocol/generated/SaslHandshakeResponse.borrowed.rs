@@ -6,9 +6,7 @@ use crate::primitives::fixed::{get_i16, put_i16};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 17;
@@ -17,74 +15,121 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 32767;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SaslHandshakeResponse<'a> {
     pub error_code: i16,
     pub mechanisms: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for SaslHandshakeResponse<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            mechanisms: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> SaslHandshakeResponse<'a> {
+impl SaslHandshakeResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::sasl_handshake_response::SaslHandshakeResponse {
         crate::owned::sasl_handshake_response::SaslHandshakeResponse {
             error_code: (self.error_code),
-            mechanisms: (self.mechanisms).iter().map(|s| s.to_string()).collect(),
+            mechanisms: (self.mechanisms)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for SaslHandshakeResponse<'a> {
+impl Encode for SaslHandshakeResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.mechanisms).len(), flex); for it in &self.mechanisms { if flex { put_compact_string(buf, *it) } else { put_string(buf, *it) }; } } }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.mechanisms).len(), flex);
+                for it in &self.mechanisms {
+                    if flex {
+                        put_compact_string(buf, it);
+                    } else {
+                        put_string(buf, it);
+                    }
+                }
+            }
+        }
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.mechanisms).len(), flex); let body: usize = (self.mechanisms).iter().map(|it| if flex { compact_string_len(*it) } else { string_len(*it) }).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.mechanisms).len(), flex);
+                let body: usize = (self.mechanisms)
+                    .iter()
+                    .map(|it| {
+                        if flex {
+                            compact_string_len(it)
+                        } else {
+                            string_len(it)
+                        }
+                    })
+                    .sum();
+                prefix + body
+            };
+        }
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for SaslHandshakeResponse<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.mechanisms = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }); } v }; }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.mechanisms = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(if flex {
+                        get_compact_string_borrowed(buf)?
+                    } else {
+                        get_string_borrowed(buf)?
+                    });
+                }
+                v
+            };
+        }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> SaslHandshakeResponse<'a> {
+impl SaslHandshakeResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.mechanisms = vec!["x"]; }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.mechanisms = vec!["x"];
+        }
         m
     }
 }

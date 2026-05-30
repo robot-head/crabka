@@ -5,14 +5,13 @@ use bytes::BufMut;
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 76;
@@ -21,9 +20,11 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareGroupHeartbeatRequest<'a> {
     pub group_id: &'a str,
     pub member_id: &'a str,
@@ -32,44 +33,70 @@ pub struct ShareGroupHeartbeatRequest<'a> {
     pub subscribed_topic_names: Option<Vec<&'a str>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for ShareGroupHeartbeatRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            member_id: "",
-            member_epoch: 0i32,
-            rack_id: None,
-            subscribed_topic_names: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> ShareGroupHeartbeatRequest<'a> {
-    pub fn to_owned(&self) -> crate::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest {
+impl ShareGroupHeartbeatRequest<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest {
         crate::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest {
             group_id: (self.group_id).to_string(),
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
-            rack_id: (self.rack_id).map(|s| s.to_string()),
-            subscribed_topic_names: (self.subscribed_topic_names).as_ref().map(|v| v.iter().map(|s| s.to_string()).collect()),
+            rack_id: (self.rack_id).map(std::string::ToString::to_string),
+            subscribed_topic_names: (self.subscribed_topic_names)
+                .as_ref()
+                .map(|v| v.iter().map(std::string::ToString::to_string).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for ShareGroupHeartbeatRequest<'a> {
+impl Encode for ShareGroupHeartbeatRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_string(buf, self.group_id) } else { put_string(buf, self.group_id) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.member_id) } else { put_string(buf, self.member_id) } }
-        if version >= 0 { put_i32(buf, self.member_epoch) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.rack_id) } else { put_nullable_string(buf, self.rack_id) } }
-        if version >= 0 { { let len = (self.subscribed_topic_names).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.subscribed_topic_names { for it in v { if flex { put_compact_string(buf, *it) } else { put_string(buf, *it) }; } } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.group_id);
+            } else {
+                put_string(buf, self.group_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.member_id);
+            } else {
+                put_string(buf, self.member_id);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.member_epoch);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.rack_id);
+            } else {
+                put_nullable_string(buf, self.rack_id);
+            }
+        }
+        if version >= 0 {
+            {
+                let len = (self.subscribed_topic_names).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.subscribed_topic_names {
+                    for it in v {
+                        if flex {
+                            put_compact_string(buf, it);
+                        } else {
+                            put_string(buf, it);
+                        }
+                    }
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -79,11 +106,51 @@ impl<'a> Encode for ShareGroupHeartbeatRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.group_id) } else { string_len(self.group_id) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.member_id) } else { string_len(self.member_id) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.rack_id) } else { nullable_string_len(self.rack_id) }; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| if flex { compact_string_len(*it) } else { string_len(*it) }).sum()); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.group_id)
+            } else {
+                string_len(self.group_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.member_id)
+            } else {
+                string_len(self.member_id)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.rack_id)
+            } else {
+                nullable_string_len(self.rack_id)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize = opt.map_or(0, |v| {
+                    v.iter()
+                        .map(|it| {
+                            if flex {
+                                compact_string_len(it)
+                            } else {
+                                string_len(it)
+                            }
+                        })
+                        .sum()
+                });
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -91,38 +158,85 @@ impl<'a> Encode for ShareGroupHeartbeatRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ShareGroupHeartbeatRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.group_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.member_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.member_epoch = get_i32(buf)?; }
-        if version >= 0 { out.rack_id = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.subscribed_topic_names = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }); } Some(v) } } }; }
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.member_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.rack_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.subscribed_topic_names = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(if flex {
+                                get_compact_string_borrowed(buf)?
+                            } else {
+                                get_string_borrowed(buf)?
+                            });
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> ShareGroupHeartbeatRequest<'a> {
+impl ShareGroupHeartbeatRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.group_id = "x"; }
-        if version >= 0 { m.member_id = "x"; }
-        if version >= 0 { m.member_epoch = 1i32; }
-        if version >= 0 { m.rack_id = Some("x"); }
-        if version >= 0 { m.subscribed_topic_names = Some(vec!["x"]); }
+        if version >= 0 {
+            m.group_id = "x";
+        }
+        if version >= 0 {
+            m.member_id = "x";
+        }
+        if version >= 0 {
+            m.member_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.rack_id = Some("x");
+        }
+        if version >= 0 {
+            m.subscribed_topic_names = Some(vec!["x"]);
+        }
         m
     }
 }

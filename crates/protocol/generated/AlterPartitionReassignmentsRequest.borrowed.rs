@@ -6,10 +6,8 @@ use crate::primitives::fixed::{get_bool, get_i32, put_bool, put_i32};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 45;
@@ -18,7 +16,9 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterPartitionReassignmentsRequest<'a> {
@@ -27,8 +27,7 @@ pub struct AlterPartitionReassignmentsRequest<'a> {
     pub topics: Vec<ReassignableTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for AlterPartitionReassignmentsRequest<'a> {
+impl Default for AlterPartitionReassignmentsRequest<'_> {
     fn default() -> Self {
         Self {
             timeout_ms: 60_000i32,
@@ -38,27 +37,45 @@ impl<'a> Default for AlterPartitionReassignmentsRequest<'a> {
         }
     }
 }
-
-impl<'a> AlterPartitionReassignmentsRequest<'a> {
-    pub fn to_owned(&self) -> crate::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest {
+impl AlterPartitionReassignmentsRequest<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest
+    {
         crate::owned::alter_partition_reassignments_request::AlterPartitionReassignmentsRequest {
             timeout_ms: (self.timeout_ms),
             allow_replication_factor_change: (self.allow_replication_factor_change),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(ReassignableTopic::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for AlterPartitionReassignmentsRequest<'a> {
+impl Encode for AlterPartitionReassignmentsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.timeout_ms) }
-        if version >= 1 { put_bool(buf, self.allow_replication_factor_change) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topics).len(), flex); for it in &self.topics { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.timeout_ms);
+        }
+        if version >= 1 {
+            put_bool(buf, self.allow_replication_factor_change);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
+                for it in &self.topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -68,9 +85,20 @@ impl<'a> Encode for AlterPartitionReassignmentsRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 1 { n += 1; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex); let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 1 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -78,70 +106,93 @@ impl<'a> Encode for AlterPartitionReassignmentsRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for AlterPartitionReassignmentsRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.timeout_ms = get_i32(buf)?; }
-        if version >= 1 { out.allow_replication_factor_change = get_bool(buf)?; }
-        if version >= 0 { out.topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(ReassignableTopic::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.timeout_ms = get_i32(buf)?;
+        }
+        if version >= 1 {
+            out.allow_replication_factor_change = get_bool(buf)?;
+        }
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(ReassignableTopic::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> AlterPartitionReassignmentsRequest<'a> {
+impl AlterPartitionReassignmentsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.timeout_ms = 1i32; }
-        if version >= 1 { m.allow_replication_factor_change = true; }
-        if version >= 0 { m.topics = vec![ReassignableTopic::populated(version)]; }
+        if version >= 0 {
+            m.timeout_ms = 1i32;
+        }
+        if version >= 1 {
+            m.allow_replication_factor_change = true;
+        }
+        if version >= 0 {
+            m.topics = vec![ReassignableTopic::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReassignableTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<ReassignablePartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for ReassignableTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> ReassignableTopic<'a> {
-    pub fn to_owned(&self) -> crate::owned::alter_partition_reassignments_request::ReassignableTopic {
+impl ReassignableTopic<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::alter_partition_reassignments_request::ReassignableTopic {
         crate::owned::alter_partition_reassignments_request::ReassignableTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(ReassignablePartition::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for ReassignableTopic<'a> {
+impl Encode for ReassignableTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.name);
+            } else {
+                put_string(buf, self.name);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -151,8 +202,24 @@ impl<'a> Encode for ReassignableTopic<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -160,52 +227,57 @@ impl<'a> Encode for ReassignableTopic<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ReassignableTopic<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(ReassignablePartition::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(ReassignablePartition::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> ReassignableTopic<'a> {
+impl ReassignableTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x"; }
-        if version >= 0 { m.partitions = vec![ReassignablePartition::populated(version)]; }
+        if version >= 0 {
+            m.name = "x";
+        }
+        if version >= 0 {
+            m.partitions = vec![ReassignablePartition::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReassignablePartition {
     pub partition_index: i32,
     pub replicas: Option<Vec<i32>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for ReassignablePartition {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            replicas: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl ReassignablePartition {
-    pub fn to_owned(&self) -> crate::owned::alter_partition_reassignments_request::ReassignablePartition {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::alter_partition_reassignments_request::ReassignablePartition {
         crate::owned::alter_partition_reassignments_request::ReassignablePartition {
             partition_index: (self.partition_index),
             replicas: (self.replicas).clone(),
@@ -213,12 +285,23 @@ impl ReassignablePartition {
         }
     }
 }
-
 impl Encode for ReassignablePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.partition_index) }
-        if version >= 0 { { let len = (self.replicas).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.replicas { for it in v { put_i32(buf, *it); } } } }
+        if version >= 0 {
+            put_i32(buf, self.partition_index);
+        }
+        if version >= 0 {
+            {
+                let len = (self.replicas).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.replicas {
+                    for it in v {
+                        put_i32(buf, *it);
+                    }
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -228,8 +311,20 @@ impl Encode for ReassignablePartition {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.replicas).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum()); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.replicas).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -237,29 +332,45 @@ impl Encode for ReassignablePartition {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ReassignablePartition {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.partition_index = get_i32(buf)?; }
-        if version >= 0 { out.replicas = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i32(buf)?); } Some(v) } } }; }
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.replicas = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(get_i32(buf)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ReassignablePartition {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.partition_index = 1i32; }
-        if version >= 0 { m.replicas = Some(vec![1i32]); }
+        if version >= 0 {
+            m.partition_index = 1i32;
+        }
+        if version >= 0 {
+            m.replicas = Some(vec![1i32]);
+        }
         m
     }
 }

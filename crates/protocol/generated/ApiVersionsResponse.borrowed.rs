@@ -2,14 +2,16 @@
 
 use bytes::BufMut;
 
-use crate::primitives::fixed::{get_bool, get_i16, get_i32, get_i64, put_bool, put_i16, put_i32, put_i64};
+use crate::primitives::fixed::{
+    get_bool, get_i16, get_i32, get_i64, put_bool, put_i16, put_i32, put_i64,
+};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{
+    WriteTaggedFields, encode_to_bytes, read_tagged_fields, tagged_fields_len,
 };
-use crate::tagged_fields::{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields};
 use crate::{Decode, DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 18;
@@ -18,7 +20,9 @@ pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 3;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiVersionsResponse {
@@ -31,7 +35,6 @@ pub struct ApiVersionsResponse {
     pub zk_migration_ready: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for ApiVersionsResponse {
     fn default() -> Self {
         Self {
@@ -46,12 +49,11 @@ impl Default for ApiVersionsResponse {
         }
     }
 }
-
 impl ApiVersionsResponse {
     pub fn to_owned(&self) -> crate::owned::api_versions_response::ApiVersionsResponse {
         crate::owned::api_versions_response::ApiVersionsResponse {
             error_code: (self.error_code),
-            api_keys: (self.api_keys).iter().map(|it| it.to_owned()).collect(),
+            api_keys: (self.api_keys).iter().map(ApiVersion::to_owned).collect(),
             throttle_time_ms: (self.throttle_time_ms),
             supported_features: self.supported_features.clone(),
             finalized_features_epoch: (self.finalized_features_epoch),
@@ -61,32 +63,101 @@ impl ApiVersionsResponse {
         }
     }
 }
-
 impl Encode for ApiVersionsResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.api_keys).len(), flex); for it in &self.api_keys { it.encode(buf, version)?; } } }
-        if version >= 1 { put_i32(buf, self.throttle_time_ms) }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.api_keys).len(), flex);
+                for it in &self.api_keys {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 1 {
+            put_i32(buf, self.throttle_time_ms);
+        }
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.supported_features)) {
-                let payload = encode_to_bytes({ let prefix = crate::primitives::array::array_len_prefix_len((self.supported_features).len(), flex); let body: usize = (self.supported_features).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }, |b| { { crate::primitives::array::put_array_len(b, (self.supported_features).len(), flex); for it in &self.supported_features { it.encode(b, version)?; } }; Ok(()) });
+                let payload = encode_to_bytes(
+                    {
+                        let prefix = crate::primitives::array::array_len_prefix_len(
+                            (self.supported_features).len(),
+                            flex,
+                        );
+                        let body: usize = (self.supported_features)
+                            .iter()
+                            .map(|it| it.encoded_len(version))
+                            .sum();
+                        prefix + body
+                    },
+                    |b| {
+                        {
+                            crate::primitives::array::put_array_len(
+                                b,
+                                (self.supported_features).len(),
+                                flex,
+                            );
+                            for it in &self.supported_features {
+                                it.encode(b, version)?;
+                            }
+                        };
+                        Ok(())
+                    },
+                );
                 tagged.add(0, payload);
             }
             if !(self.finalized_features_epoch == -1i64) {
-                let payload = encode_to_bytes(8, |b| { put_i64(b, self.finalized_features_epoch); Ok(()) });
+                let payload = encode_to_bytes(8, |b| {
+                    put_i64(b, self.finalized_features_epoch);
+                    Ok(())
+                });
                 tagged.add(1, payload);
             }
             if !(crate::codegen_helpers::is_default(&self.finalized_features)) {
-                let payload = encode_to_bytes({ let prefix = crate::primitives::array::array_len_prefix_len((self.finalized_features).len(), flex); let body: usize = (self.finalized_features).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }, |b| { { crate::primitives::array::put_array_len(b, (self.finalized_features).len(), flex); for it in &self.finalized_features { it.encode(b, version)?; } }; Ok(()) });
+                let payload = encode_to_bytes(
+                    {
+                        let prefix = crate::primitives::array::array_len_prefix_len(
+                            (self.finalized_features).len(),
+                            flex,
+                        );
+                        let body: usize = (self.finalized_features)
+                            .iter()
+                            .map(|it| it.encoded_len(version))
+                            .sum();
+                        prefix + body
+                    },
+                    |b| {
+                        {
+                            crate::primitives::array::put_array_len(
+                                b,
+                                (self.finalized_features).len(),
+                                flex,
+                            );
+                            for it in &self.finalized_features {
+                                it.encode(b, version)?;
+                            }
+                        };
+                        Ok(())
+                    },
+                );
                 tagged.add(2, payload);
             }
-            if !(self.zk_migration_ready == false) {
-                let payload = encode_to_bytes(1, |b| { put_bool(b, self.zk_migration_ready); Ok(()) });
+            if !(!self.zk_migration_ready) {
+                let payload = encode_to_bytes(1, |b| {
+                    put_bool(b, self.zk_migration_ready);
+                    Ok(())
+                });
                 tagged.add(3, payload);
             }
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -96,21 +167,55 @@ impl Encode for ApiVersionsResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.api_keys).len(), flex); let body: usize = (self.api_keys).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 1 { n += 4; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.api_keys).len(), flex);
+                let body: usize = (self.api_keys)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 1 {
+            n += 4;
+        }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
             if !(crate::codegen_helpers::is_default(&self.supported_features)) {
-                known_pairs.push((0, { let prefix = crate::primitives::array::array_len_prefix_len((self.supported_features).len(), flex); let body: usize = (self.supported_features).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }));
+                known_pairs.push((0, {
+                    let prefix = crate::primitives::array::array_len_prefix_len(
+                        (self.supported_features).len(),
+                        flex,
+                    );
+                    let body: usize = (self.supported_features)
+                        .iter()
+                        .map(|it| it.encoded_len(version))
+                        .sum();
+                    prefix + body
+                }));
             }
             if !(self.finalized_features_epoch == -1i64) {
                 known_pairs.push((1, 8));
             }
             if !(crate::codegen_helpers::is_default(&self.finalized_features)) {
-                known_pairs.push((2, { let prefix = crate::primitives::array::array_len_prefix_len((self.finalized_features).len(), flex); let body: usize = (self.finalized_features).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }));
+                known_pairs.push((2, {
+                    let prefix = crate::primitives::array::array_len_prefix_len(
+                        (self.finalized_features).len(),
+                        flex,
+                    );
+                    let body: usize = (self.finalized_features)
+                        .iter()
+                        .map(|it| it.encoded_len(version))
+                        .sum();
+                    prefix + body
+                }));
             }
-            if !(self.zk_migration_ready == false) {
+            if !(!self.zk_migration_ready) {
                 known_pairs.push((3, 1));
             }
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -118,76 +223,136 @@ impl Encode for ApiVersionsResponse {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ApiVersionsResponse {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.api_keys = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(ApiVersion::decode_borrow(buf, version)?); } v }; }
-        if version >= 1 { out.throttle_time_ms = get_i32(buf)?; }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.api_keys = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(ApiVersion::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 1 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
         if flex {
-            // Pre-declare typed slots for known tagged fields.
             let mut tag_supported_features = None;
             let mut tag_finalized_features_epoch = None;
             let mut tag_finalized_features = None;
             let mut tag_zk_migration_ready = None;
-            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| {
-                match tag {
-                0 => { tag_supported_features = Some({ let b: &mut &[u8] = payload; { let n = crate::primitives::array::get_array_len(b, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(crate::owned::api_versions_response::SupportedFeatureKey::decode(b, version)?); } v } }); Ok(true) }
-                1 => { tag_finalized_features_epoch = Some({ let b: &mut &[u8] = payload; get_i64(b)? }); Ok(true) }
-                2 => { tag_finalized_features = Some({ let b: &mut &[u8] = payload; { let n = crate::primitives::array::get_array_len(b, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(crate::owned::api_versions_response::FinalizedFeatureKey::decode(b, version)?); } v } }); Ok(true) }
-                3 => { tag_zk_migration_ready = Some({ let b: &mut &[u8] = payload; get_bool(b)? }); Ok(true) }
-                    _ => Ok(false),
+            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
+                0 => {
+                    tag_supported_features = Some({
+                        let b: &mut &[u8] = payload;
+                        {
+                            let n = crate::primitives::array::get_array_len(b, flex)?;
+                            let mut v = Vec::with_capacity(n);
+                            for _ in 0..n {
+                                v . push (crate :: owned :: api_versions_response :: SupportedFeatureKey :: decode (b , version) ?) ;
+                            }
+                            v
+                        }
+                    });
+                    Ok(true)
                 }
+                1 => {
+                    tag_finalized_features_epoch = Some({
+                        let b: &mut &[u8] = payload;
+                        get_i64(b)?
+                    });
+                    Ok(true)
+                }
+                2 => {
+                    tag_finalized_features = Some({
+                        let b: &mut &[u8] = payload;
+                        {
+                            let n = crate::primitives::array::get_array_len(b, flex)?;
+                            let mut v = Vec::with_capacity(n);
+                            for _ in 0..n {
+                                v . push (crate :: owned :: api_versions_response :: FinalizedFeatureKey :: decode (b , version) ?) ;
+                            }
+                            v
+                        }
+                    });
+                    Ok(true)
+                }
+                3 => {
+                    tag_zk_migration_ready = Some({
+                        let b: &mut &[u8] = payload;
+                        get_bool(b)?
+                    });
+                    Ok(true)
+                }
+                _ => Ok(false),
             })?;
-            if let Some(v) = tag_supported_features { out.supported_features = v; }
-            if let Some(v) = tag_finalized_features_epoch { out.finalized_features_epoch = v; }
-            if let Some(v) = tag_finalized_features { out.finalized_features = v; }
-            if let Some(v) = tag_zk_migration_ready { out.zk_migration_ready = v; }
+            if let Some(v) = tag_supported_features {
+                out.supported_features = v;
+            }
+            if let Some(v) = tag_finalized_features_epoch {
+                out.finalized_features_epoch = v;
+            }
+            if let Some(v) = tag_finalized_features {
+                out.finalized_features = v;
+            }
+            if let Some(v) = tag_zk_migration_ready {
+                out.zk_migration_ready = v;
+            }
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ApiVersionsResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.api_keys = vec![ApiVersion::populated(version)]; }
-        if version >= 1 { m.throttle_time_ms = 1i32; }
-        if version >= 3 { m.supported_features = vec![crate::owned::api_versions_response::SupportedFeatureKey::populated(version)]; }
-        if version >= 3 { m.finalized_features_epoch = 1i64; }
-        if version >= 3 { m.finalized_features = vec![crate::owned::api_versions_response::FinalizedFeatureKey::populated(version)]; }
-        if version >= 3 { m.zk_migration_ready = true; }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.api_keys = vec![ApiVersion::populated(version)];
+        }
+        if version >= 1 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 3 {
+            m.supported_features =
+                vec![crate::owned::api_versions_response::SupportedFeatureKey::populated(version)];
+        }
+        if version >= 3 {
+            m.finalized_features_epoch = 1i64;
+        }
+        if version >= 3 {
+            m.finalized_features =
+                vec![crate::owned::api_versions_response::FinalizedFeatureKey::populated(version)];
+        }
+        if version >= 3 {
+            m.zk_migration_ready = true;
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ApiVersion {
     pub api_key: i16,
     pub min_version: i16,
     pub max_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for ApiVersion {
-    fn default() -> Self {
-        Self {
-            api_key: 0i16,
-            min_version: 0i16,
-            max_version: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl ApiVersion {
     pub fn to_owned(&self) -> crate::owned::api_versions_response::ApiVersion {
         crate::owned::api_versions_response::ApiVersion {
@@ -198,13 +363,18 @@ impl ApiVersion {
         }
     }
 }
-
 impl Encode for ApiVersion {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
-        if version >= 0 { put_i16(buf, self.api_key) }
-        if version >= 0 { put_i16(buf, self.min_version) }
-        if version >= 0 { put_i16(buf, self.max_version) }
+        if version >= 0 {
+            put_i16(buf, self.api_key);
+        }
+        if version >= 0 {
+            put_i16(buf, self.min_version);
+        }
+        if version >= 0 {
+            put_i16(buf, self.max_version);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -214,9 +384,15 @@ impl Encode for ApiVersion {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 3;
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -224,55 +400,50 @@ impl Encode for ApiVersion {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ApiVersion {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
-        if version >= 0 { out.api_key = get_i16(buf)?; }
-        if version >= 0 { out.min_version = get_i16(buf)?; }
-        if version >= 0 { out.max_version = get_i16(buf)?; }
+        if version >= 0 {
+            out.api_key = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.min_version = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.max_version = get_i16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ApiVersion {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.api_key = 1i16; }
-        if version >= 0 { m.min_version = 1i16; }
-        if version >= 0 { m.max_version = 1i16; }
+        if version >= 0 {
+            m.api_key = 1i16;
+        }
+        if version >= 0 {
+            m.min_version = 1i16;
+        }
+        if version >= 0 {
+            m.max_version = 1i16;
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SupportedFeatureKey<'a> {
     pub name: &'a str,
     pub min_version: i16,
     pub max_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for SupportedFeatureKey<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            min_version: 0i16,
-            max_version: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> SupportedFeatureKey<'a> {
+impl SupportedFeatureKey<'_> {
     pub fn to_owned(&self) -> crate::owned::api_versions_response::SupportedFeatureKey {
         crate::owned::api_versions_response::SupportedFeatureKey {
             name: (self.name).to_string(),
@@ -282,13 +453,22 @@ impl<'a> SupportedFeatureKey<'a> {
         }
     }
 }
-
-impl<'a> Encode for SupportedFeatureKey<'a> {
+impl Encode for SupportedFeatureKey<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
-        if version >= 3 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 3 { put_i16(buf, self.min_version) }
-        if version >= 3 { put_i16(buf, self.max_version) }
+        if version >= 3 {
+            if flex {
+                put_compact_string(buf, self.name);
+            } else {
+                put_string(buf, self.name);
+            }
+        }
+        if version >= 3 {
+            put_i16(buf, self.min_version);
+        }
+        if version >= 3 {
+            put_i16(buf, self.max_version);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -298,9 +478,19 @@ impl<'a> Encode for SupportedFeatureKey<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 3;
         let mut n: usize = 0;
-        if version >= 3 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 3 { n += 2; }
-        if version >= 3 { n += 2; }
+        if version >= 3 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 3 {
+            n += 2;
+        }
+        if version >= 3 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -308,55 +498,54 @@ impl<'a> Encode for SupportedFeatureKey<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for SupportedFeatureKey<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
-        if version >= 3 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 3 { out.min_version = get_i16(buf)?; }
-        if version >= 3 { out.max_version = get_i16(buf)?; }
+        if version >= 3 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 3 {
+            out.min_version = get_i16(buf)?;
+        }
+        if version >= 3 {
+            out.max_version = get_i16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> SupportedFeatureKey<'a> {
+impl SupportedFeatureKey<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 3 { m.name = "x"; }
-        if version >= 3 { m.min_version = 1i16; }
-        if version >= 3 { m.max_version = 1i16; }
+        if version >= 3 {
+            m.name = "x";
+        }
+        if version >= 3 {
+            m.min_version = 1i16;
+        }
+        if version >= 3 {
+            m.max_version = 1i16;
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FinalizedFeatureKey<'a> {
     pub name: &'a str,
     pub max_version_level: i16,
     pub min_version_level: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for FinalizedFeatureKey<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            max_version_level: 0i16,
-            min_version_level: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> FinalizedFeatureKey<'a> {
+impl FinalizedFeatureKey<'_> {
     pub fn to_owned(&self) -> crate::owned::api_versions_response::FinalizedFeatureKey {
         crate::owned::api_versions_response::FinalizedFeatureKey {
             name: (self.name).to_string(),
@@ -366,13 +555,22 @@ impl<'a> FinalizedFeatureKey<'a> {
         }
     }
 }
-
-impl<'a> Encode for FinalizedFeatureKey<'a> {
+impl Encode for FinalizedFeatureKey<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
-        if version >= 3 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 3 { put_i16(buf, self.max_version_level) }
-        if version >= 3 { put_i16(buf, self.min_version_level) }
+        if version >= 3 {
+            if flex {
+                put_compact_string(buf, self.name);
+            } else {
+                put_string(buf, self.name);
+            }
+        }
+        if version >= 3 {
+            put_i16(buf, self.max_version_level);
+        }
+        if version >= 3 {
+            put_i16(buf, self.min_version_level);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -382,9 +580,19 @@ impl<'a> Encode for FinalizedFeatureKey<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 3;
         let mut n: usize = 0;
-        if version >= 3 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 3 { n += 2; }
-        if version >= 3 { n += 2; }
+        if version >= 3 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 3 {
+            n += 2;
+        }
+        if version >= 3 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -392,31 +600,43 @@ impl<'a> Encode for FinalizedFeatureKey<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for FinalizedFeatureKey<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
-        if version >= 3 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 3 { out.max_version_level = get_i16(buf)?; }
-        if version >= 3 { out.min_version_level = get_i16(buf)?; }
+        if version >= 3 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 3 {
+            out.max_version_level = get_i16(buf)?;
+        }
+        if version >= 3 {
+            out.min_version_level = get_i16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> FinalizedFeatureKey<'a> {
+impl FinalizedFeatureKey<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 3 { m.name = "x"; }
-        if version >= 3 { m.max_version_level = 1i16; }
-        if version >= 3 { m.min_version_level = 1i16; }
+        if version >= 3 {
+            m.name = "x";
+        }
+        if version >= 3 {
+            m.max_version_level = 1i16;
+        }
+        if version >= 3 {
+            m.min_version_level = 1i16;
+        }
         m
     }
 }

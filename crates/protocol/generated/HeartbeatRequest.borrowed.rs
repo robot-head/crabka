@@ -5,14 +5,13 @@ use bytes::BufMut;
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 12;
@@ -21,9 +20,11 @@ pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 4;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HeartbeatRequest<'a> {
     pub group_id: &'a str,
     pub generation_id: i32,
@@ -31,41 +32,50 @@ pub struct HeartbeatRequest<'a> {
     pub group_instance_id: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for HeartbeatRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            generation_id: 0i32,
-            member_id: "",
-            group_instance_id: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> HeartbeatRequest<'a> {
+impl HeartbeatRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::heartbeat_request::HeartbeatRequest {
         crate::owned::heartbeat_request::HeartbeatRequest {
             group_id: (self.group_id).to_string(),
             generation_id: (self.generation_id),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
+            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for HeartbeatRequest<'a> {
+impl Encode for HeartbeatRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_string(buf, self.group_id) } else { put_string(buf, self.group_id) } }
-        if version >= 0 { put_i32(buf, self.generation_id) }
-        if version >= 0 { if flex { put_compact_string(buf, self.member_id) } else { put_string(buf, self.member_id) } }
-        if version >= 3 { if flex { put_compact_nullable_string(buf, self.group_instance_id) } else { put_nullable_string(buf, self.group_instance_id) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.group_id);
+            } else {
+                put_string(buf, self.group_id);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.generation_id);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.member_id);
+            } else {
+                put_string(buf, self.member_id);
+            }
+        }
+        if version >= 3 {
+            if flex {
+                put_compact_nullable_string(buf, self.group_instance_id);
+            } else {
+                put_nullable_string(buf, self.group_instance_id);
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -75,10 +85,30 @@ impl<'a> Encode for HeartbeatRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.group_id) } else { string_len(self.group_id) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_string_len(self.member_id) } else { string_len(self.member_id) }; }
-        if version >= 3 { n += if flex { compact_nullable_string_len(self.group_instance_id) } else { nullable_string_len(self.group_instance_id) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.group_id)
+            } else {
+                string_len(self.group_id)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.member_id)
+            } else {
+                string_len(self.member_id)
+            };
+        }
+        if version >= 3 {
+            n += if flex {
+                compact_nullable_string_len(self.group_instance_id)
+            } else {
+                nullable_string_len(self.group_instance_id)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -86,36 +116,63 @@ impl<'a> Encode for HeartbeatRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for HeartbeatRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.group_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.generation_id = get_i32(buf)?; }
-        if version >= 0 { out.member_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 3 { out.group_instance_id = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.generation_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 3 {
+            out.group_instance_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> HeartbeatRequest<'a> {
+impl HeartbeatRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.group_id = "x"; }
-        if version >= 0 { m.generation_id = 1i32; }
-        if version >= 0 { m.member_id = "x"; }
-        if version >= 3 { m.group_instance_id = Some("x"); }
+        if version >= 0 {
+            m.group_id = "x";
+        }
+        if version >= 0 {
+            m.generation_id = 1i32;
+        }
+        if version >= 0 {
+            m.member_id = "x";
+        }
+        if version >= 3 {
+            m.group_instance_id = Some("x");
+        }
         m
     }
 }

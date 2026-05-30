@@ -6,10 +6,9 @@ use crate::primitives::fixed::{get_bool, get_i32, get_u16, put_bool, put_i32, pu
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
     get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 80;
@@ -18,7 +17,9 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddRaftVoterRequest {
@@ -30,7 +31,6 @@ pub struct AddRaftVoterRequest {
     pub ack_when_committed: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for AddRaftVoterRequest {
     fn default() -> Self {
         Self {
@@ -44,19 +44,42 @@ impl Default for AddRaftVoterRequest {
         }
     }
 }
-
 impl Encode for AddRaftVoterRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.cluster_id.as_deref()) } else { put_nullable_string(buf, self.cluster_id.as_deref()) } }
-        if version >= 0 { put_i32(buf, self.timeout_ms) }
-        if version >= 0 { put_i32(buf, self.voter_id) }
-        if version >= 0 { crate::primitives::uuid::put_uuid(buf, self.voter_directory_id) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.listeners).len(), flex); for it in &self.listeners { it.encode(buf, version)?; } } }
-        if version >= 1 { put_bool(buf, self.ack_when_committed) }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.cluster_id.as_deref());
+            } else {
+                put_nullable_string(buf, self.cluster_id.as_deref());
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.timeout_ms);
+        }
+        if version >= 0 {
+            put_i32(buf, self.voter_id);
+        }
+        if version >= 0 {
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.listeners).len(), flex);
+                for it in &self.listeners {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 1 {
+            put_bool(buf, self.ack_when_committed);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -66,12 +89,36 @@ impl Encode for AddRaftVoterRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.cluster_id.as_deref()) } else { nullable_string_len(self.cluster_id.as_deref()) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 16; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.listeners).len(), flex); let body: usize = (self.listeners).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 1 { n += 1; }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.cluster_id.as_deref())
+            } else {
+                nullable_string_len(self.cluster_id.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.listeners).len(), flex);
+                let body: usize = (self.listeners)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 1 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -79,44 +126,77 @@ impl Encode for AddRaftVoterRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for AddRaftVoterRequest {
+impl Decode<'_> for AddRaftVoterRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.cluster_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.timeout_ms = get_i32(buf)?; }
-        if version >= 0 { out.voter_id = get_i32(buf)?; }
-        if version >= 0 { out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.listeners = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(Listener::decode(buf, version)?); } v }; }
-        if version >= 1 { out.ack_when_committed = get_bool(buf)?; }
+        if version >= 0 {
+            out.cluster_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.timeout_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.voter_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.listeners = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(Listener::decode(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 1 {
+            out.ack_when_committed = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl AddRaftVoterRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.cluster_id = Some("x".to_string()); }
-        if version >= 0 { m.timeout_ms = 1i32; }
-        if version >= 0 { m.voter_id = 1i32; }
-        if version >= 0 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.listeners = vec![Listener::populated(version)]; }
-        if version >= 1 { m.ack_when_committed = true; }
+        if version >= 0 {
+            m.cluster_id = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.timeout_ms = 1i32;
+        }
+        if version >= 0 {
+            m.voter_id = 1i32;
+        }
+        if version >= 0 {
+            m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.listeners = vec![Listener::populated(version)];
+        }
+        if version >= 1 {
+            m.ack_when_committed = true;
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listener {
     pub name: String,
@@ -124,13 +204,26 @@ pub struct Listener {
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for Listener {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) } }
-        if version >= 0 { if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) } }
-        if version >= 0 { put_u16(buf, self.port) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.name);
+            } else {
+                put_string(buf, &self.name);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.host);
+            } else {
+                put_string(buf, &self.host);
+            }
+        }
+        if version >= 0 {
+            put_u16(buf, self.port);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -140,9 +233,23 @@ impl Encode for Listener {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) }; }
-        if version >= 0 { n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) }; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.name)
+            } else {
+                string_len(&self.name)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -150,31 +257,47 @@ impl Encode for Listener {
         n
     }
 }
-
-impl<'de> Decode<'de> for Listener {
+impl Decode<'_> for Listener {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.port = get_u16(buf)?; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.port = get_u16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl Listener {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x".to_string(); }
-        if version >= 0 { m.host = "x".to_string(); }
-        if version >= 0 { m.port = 1u16; }
+        if version >= 0 {
+            m.name = "x".to_string();
+        }
+        if version >= 0 {
+            m.host = "x".to_string();
+        }
+        if version >= 0 {
+            m.port = 1u16;
+        }
         m
     }
 }
@@ -188,10 +311,16 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
     obj.insert("timeoutMs".to_string(), ::serde_json::json!(0));
     obj.insert("voterId".to_string(), ::serde_json::json!(0));
-    obj.insert("voterDirectoryId".to_string(), ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()));
+    obj.insert(
+        "voterDirectoryId".to_string(),
+        ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()),
+    );
     obj.insert("listeners".to_string(), ::serde_json::Value::Array(vec![]));
     if version >= 1 {
-        obj.insert("ackWhenCommitted".to_string(), ::serde_json::Value::Bool(true));
+        obj.insert(
+            "ackWhenCommitted".to_string(),
+            ::serde_json::Value::Bool(true),
+        );
     }
     ::serde_json::Value::Object(obj)
 }

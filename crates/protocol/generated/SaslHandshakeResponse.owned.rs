@@ -4,8 +4,8 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i16, put_i16};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
@@ -15,7 +15,9 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 32767;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SaslHandshakeResponse {
@@ -23,46 +25,99 @@ pub struct SaslHandshakeResponse {
     pub mechanisms: Vec<String>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for SaslHandshakeResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.mechanisms).len(), flex); for it in &self.mechanisms { if flex { put_compact_string(buf, &*it) } else { put_string(buf, &*it) }; } } }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.mechanisms).len(), flex);
+                for it in &self.mechanisms {
+                    if flex {
+                        put_compact_string(buf, it);
+                    } else {
+                        put_string(buf, it);
+                    }
+                }
+            }
+        }
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.mechanisms).len(), flex); let body: usize = (self.mechanisms).iter().map(|it| if flex { compact_string_len(&*it) } else { string_len(&*it) }).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.mechanisms).len(), flex);
+                let body: usize = (self.mechanisms)
+                    .iter()
+                    .map(|it| {
+                        if flex {
+                            compact_string_len(it)
+                        } else {
+                            string_len(it)
+                        }
+                    })
+                    .sum();
+                prefix + body
+            };
+        }
         n
     }
 }
-
-impl<'de> Decode<'de> for SaslHandshakeResponse {
+impl Decode<'_> for SaslHandshakeResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.mechanisms = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }); } v }; }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.mechanisms = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(if flex {
+                        get_compact_string_owned(buf)?
+                    } else {
+                        get_string_owned(buf)?
+                    });
+                }
+                v
+            };
+        }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl SaslHandshakeResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.mechanisms = vec!["x".to_string()]; }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.mechanisms = vec!["x".to_string()];
+        }
         m
     }
 }

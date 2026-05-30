@@ -4,13 +4,14 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    bytes_len, compact_bytes_len, get_bytes_owned, get_compact_bytes_owned, put_bytes,
+    put_compact_bytes,
 };
-use crate::primitives::string_bytes::{bytes_len, compact_bytes_len, get_bytes_owned, get_compact_bytes_owned, put_bytes, put_compact_bytes};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes::{
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
+};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 14;
@@ -19,7 +20,9 @@ pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 4;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncGroupResponse {
@@ -30,18 +33,42 @@ pub struct SyncGroupResponse {
     pub assignment: ::bytes::Bytes,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for SyncGroupResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 1 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 5 { if flex { put_compact_nullable_string(buf, self.protocol_type.as_deref()) } else { put_nullable_string(buf, self.protocol_type.as_deref()) } }
-        if version >= 5 { if flex { put_compact_nullable_string(buf, self.protocol_name.as_deref()) } else { put_nullable_string(buf, self.protocol_name.as_deref()) } }
-        if version >= 0 { if flex { put_compact_bytes(buf, &self.assignment) } else { put_bytes(buf, &self.assignment) } }
+        if version >= 1 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 5 {
+            if flex {
+                put_compact_nullable_string(buf, self.protocol_type.as_deref());
+            } else {
+                put_nullable_string(buf, self.protocol_type.as_deref());
+            }
+        }
+        if version >= 5 {
+            if flex {
+                put_compact_nullable_string(buf, self.protocol_name.as_deref());
+            } else {
+                put_nullable_string(buf, self.protocol_name.as_deref());
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_bytes(buf, &self.assignment);
+            } else {
+                put_bytes(buf, &self.assignment);
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -51,11 +78,33 @@ impl Encode for SyncGroupResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 1 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 5 { n += if flex { compact_nullable_string_len(self.protocol_type.as_deref()) } else { nullable_string_len(self.protocol_type.as_deref()) }; }
-        if version >= 5 { n += if flex { compact_nullable_string_len(self.protocol_name.as_deref()) } else { nullable_string_len(self.protocol_name.as_deref()) }; }
-        if version >= 0 { n += if flex { compact_bytes_len(&self.assignment) } else { bytes_len(&self.assignment) }; }
+        if version >= 1 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 5 {
+            n += if flex {
+                compact_nullable_string_len(self.protocol_type.as_deref())
+            } else {
+                nullable_string_len(self.protocol_type.as_deref())
+            };
+        }
+        if version >= 5 {
+            n += if flex {
+                compact_nullable_string_len(self.protocol_name.as_deref())
+            } else {
+                nullable_string_len(self.protocol_name.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_bytes_len(&self.assignment)
+            } else {
+                bytes_len(&self.assignment)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -63,38 +112,69 @@ impl Encode for SyncGroupResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for SyncGroupResponse {
+impl Decode<'_> for SyncGroupResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 1 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 5 { out.protocol_type = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 5 { out.protocol_name = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.assignment = if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }; }
+        if version >= 1 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 5 {
+            out.protocol_type = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 5 {
+            out.protocol_name = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.assignment = if flex {
+                get_compact_bytes_owned(buf)?
+            } else {
+                get_bytes_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl SyncGroupResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 1 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 5 { m.protocol_type = Some("x".to_string()); }
-        if version >= 5 { m.protocol_name = Some("x".to_string()); }
-        if version >= 0 { m.assignment = ::bytes::Bytes::from_static(b"x"); }
+        if version >= 1 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 5 {
+            m.protocol_type = Some("x".to_string());
+        }
+        if version >= 5 {
+            m.protocol_name = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.assignment = ::bytes::Bytes::from_static(b"x");
+        }
         m
     }
 }
@@ -115,6 +195,9 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version >= 5 {
         obj.insert("protocolName".to_string(), ::serde_json::Value::Null);
     }
-    obj.insert("assignment".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "assignment".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     ::serde_json::Value::Object(obj)
 }

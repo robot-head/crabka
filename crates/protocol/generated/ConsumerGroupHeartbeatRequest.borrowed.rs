@@ -5,14 +5,13 @@ use bytes::BufMut;
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 68;
@@ -21,7 +20,9 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConsumerGroupHeartbeatRequest<'a> {
@@ -37,8 +38,7 @@ pub struct ConsumerGroupHeartbeatRequest<'a> {
     pub topic_partitions: Option<Vec<TopicPartitions>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for ConsumerGroupHeartbeatRequest<'a> {
+impl Default for ConsumerGroupHeartbeatRequest<'_> {
     fn default() -> Self {
         Self {
             group_id: "",
@@ -55,41 +55,113 @@ impl<'a> Default for ConsumerGroupHeartbeatRequest<'a> {
         }
     }
 }
-
-impl<'a> ConsumerGroupHeartbeatRequest<'a> {
-    pub fn to_owned(&self) -> crate::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest {
+impl ConsumerGroupHeartbeatRequest<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest {
         crate::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest {
             group_id: (self.group_id).to_string(),
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
-            instance_id: (self.instance_id).map(|s| s.to_string()),
-            rack_id: (self.rack_id).map(|s| s.to_string()),
+            instance_id: (self.instance_id).map(std::string::ToString::to_string),
+            rack_id: (self.rack_id).map(std::string::ToString::to_string),
             rebalance_timeout_ms: (self.rebalance_timeout_ms),
-            subscribed_topic_names: (self.subscribed_topic_names).as_ref().map(|v| v.iter().map(|s| s.to_string()).collect()),
-            subscribed_topic_regex: (self.subscribed_topic_regex).map(|s| s.to_string()),
-            server_assignor: (self.server_assignor).map(|s| s.to_string()),
-            topic_partitions: (self.topic_partitions).as_ref().map(|v| v.iter().map(|it| it.to_owned()).collect()),
+            subscribed_topic_names: (self.subscribed_topic_names)
+                .as_ref()
+                .map(|v| v.iter().map(std::string::ToString::to_string).collect()),
+            subscribed_topic_regex: (self.subscribed_topic_regex)
+                .map(std::string::ToString::to_string),
+            server_assignor: (self.server_assignor).map(std::string::ToString::to_string),
+            topic_partitions: (self.topic_partitions)
+                .as_ref()
+                .map(|v| v.iter().map(TopicPartitions::to_owned).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for ConsumerGroupHeartbeatRequest<'a> {
+impl Encode for ConsumerGroupHeartbeatRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_string(buf, self.group_id) } else { put_string(buf, self.group_id) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.member_id) } else { put_string(buf, self.member_id) } }
-        if version >= 0 { put_i32(buf, self.member_epoch) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.instance_id) } else { put_nullable_string(buf, self.instance_id) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.rack_id) } else { put_nullable_string(buf, self.rack_id) } }
-        if version >= 0 { put_i32(buf, self.rebalance_timeout_ms) }
-        if version >= 0 { { let len = (self.subscribed_topic_names).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.subscribed_topic_names { for it in v { if flex { put_compact_string(buf, *it) } else { put_string(buf, *it) }; } } } }
-        if version >= 1 { if flex { put_compact_nullable_string(buf, self.subscribed_topic_regex) } else { put_nullable_string(buf, self.subscribed_topic_regex) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.server_assignor) } else { put_nullable_string(buf, self.server_assignor) } }
-        if version >= 0 { { let len = (self.topic_partitions).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.topic_partitions { for it in v { it.encode(buf, version)?; } } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.group_id);
+            } else {
+                put_string(buf, self.group_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.member_id);
+            } else {
+                put_string(buf, self.member_id);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.member_epoch);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.instance_id);
+            } else {
+                put_nullable_string(buf, self.instance_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.rack_id);
+            } else {
+                put_nullable_string(buf, self.rack_id);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.rebalance_timeout_ms);
+        }
+        if version >= 0 {
+            {
+                let len = (self.subscribed_topic_names).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.subscribed_topic_names {
+                    for it in v {
+                        if flex {
+                            put_compact_string(buf, it);
+                        } else {
+                            put_string(buf, it);
+                        }
+                    }
+                }
+            }
+        }
+        if version >= 1 {
+            if flex {
+                put_compact_nullable_string(buf, self.subscribed_topic_regex);
+            } else {
+                put_nullable_string(buf, self.subscribed_topic_regex);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.server_assignor);
+            } else {
+                put_nullable_string(buf, self.server_assignor);
+            }
+        }
+        if version >= 0 {
+            {
+                let len = (self.topic_partitions).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.topic_partitions {
+                    for it in v {
+                        it.encode(buf, version)?;
+                    }
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -99,16 +171,87 @@ impl<'a> Encode for ConsumerGroupHeartbeatRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.group_id) } else { string_len(self.group_id) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.member_id) } else { string_len(self.member_id) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.instance_id) } else { nullable_string_len(self.instance_id) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.rack_id) } else { nullable_string_len(self.rack_id) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| if flex { compact_string_len(*it) } else { string_len(*it) }).sum()); prefix + body }; }
-        if version >= 1 { n += if flex { compact_nullable_string_len(self.subscribed_topic_regex) } else { nullable_string_len(self.subscribed_topic_regex) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.server_assignor) } else { nullable_string_len(self.server_assignor) }; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.topic_partitions).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.group_id)
+            } else {
+                string_len(self.group_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.member_id)
+            } else {
+                string_len(self.member_id)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.instance_id)
+            } else {
+                nullable_string_len(self.instance_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.rack_id)
+            } else {
+                nullable_string_len(self.rack_id)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize = opt.map_or(0, |v| {
+                    v.iter()
+                        .map(|it| {
+                            if flex {
+                                compact_string_len(it)
+                            } else {
+                                string_len(it)
+                            }
+                        })
+                        .sum()
+                });
+                prefix + body
+            };
+        }
+        if version >= 1 {
+            n += if flex {
+                compact_nullable_string_len(self.subscribed_topic_regex)
+            } else {
+                nullable_string_len(self.subscribed_topic_regex)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.server_assignor)
+            } else {
+                nullable_string_len(self.server_assignor)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.topic_partitions).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize =
+                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -116,69 +259,148 @@ impl<'a> Encode for ConsumerGroupHeartbeatRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ConsumerGroupHeartbeatRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.group_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.member_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.member_epoch = get_i32(buf)?; }
-        if version >= 0 { out.instance_id = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.rack_id = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.rebalance_timeout_ms = get_i32(buf)?; }
-        if version >= 0 { out.subscribed_topic_names = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }); } Some(v) } } }; }
-        if version >= 1 { out.subscribed_topic_regex = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.server_assignor = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.topic_partitions = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(TopicPartitions::decode_borrow(buf, version)?); } Some(v) } } }; }
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.member_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.instance_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.rack_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.rebalance_timeout_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.subscribed_topic_names = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(if flex {
+                                get_compact_string_borrowed(buf)?
+                            } else {
+                                get_string_borrowed(buf)?
+                            });
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        if version >= 1 {
+            out.subscribed_topic_regex = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.server_assignor = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.topic_partitions = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(TopicPartitions::decode_borrow(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> ConsumerGroupHeartbeatRequest<'a> {
+impl ConsumerGroupHeartbeatRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.group_id = "x"; }
-        if version >= 0 { m.member_id = "x"; }
-        if version >= 0 { m.member_epoch = 1i32; }
-        if version >= 0 { m.instance_id = Some("x"); }
-        if version >= 0 { m.rack_id = Some("x"); }
-        if version >= 0 { m.rebalance_timeout_ms = 1i32; }
-        if version >= 0 { m.subscribed_topic_names = Some(vec!["x"]); }
-        if version >= 1 { m.subscribed_topic_regex = Some("x"); }
-        if version >= 0 { m.server_assignor = Some("x"); }
-        if version >= 0 { m.topic_partitions = Some(vec![TopicPartitions::populated(version)]); }
+        if version >= 0 {
+            m.group_id = "x";
+        }
+        if version >= 0 {
+            m.member_id = "x";
+        }
+        if version >= 0 {
+            m.member_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.instance_id = Some("x");
+        }
+        if version >= 0 {
+            m.rack_id = Some("x");
+        }
+        if version >= 0 {
+            m.rebalance_timeout_ms = 1i32;
+        }
+        if version >= 0 {
+            m.subscribed_topic_names = Some(vec!["x"]);
+        }
+        if version >= 1 {
+            m.subscribed_topic_regex = Some("x");
+        }
+        if version >= 0 {
+            m.server_assignor = Some("x");
+        }
+        if version >= 0 {
+            m.topic_partitions = Some(vec![TopicPartitions::populated(version)]);
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartitions {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for TopicPartitions {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl TopicPartitions {
     pub fn to_owned(&self) -> crate::owned::consumer_group_heartbeat_request::TopicPartitions {
         crate::owned::consumer_group_heartbeat_request::TopicPartitions {
@@ -188,12 +410,20 @@ impl TopicPartitions {
         }
     }
 }
-
 impl Encode for TopicPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { crate::primitives::uuid::put_uuid(buf, self.topic_id) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { put_i32(buf, *it); } } }
+        if version >= 0 {
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    put_i32(buf, *it);
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -203,8 +433,17 @@ impl Encode for TopicPartitions {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 16; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|_| 4).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions).iter().map(|_| 4).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -212,29 +451,40 @@ impl Encode for TopicPartitions {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for TopicPartitions {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.topic_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i32(buf)?); } v }; }
+        if version >= 0 {
+            out.topic_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i32(buf)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl TopicPartitions {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.partitions = vec![1i32]; }
+        if version >= 0 {
+            m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.partitions = vec![1i32];
+        }
         m
     }
 }

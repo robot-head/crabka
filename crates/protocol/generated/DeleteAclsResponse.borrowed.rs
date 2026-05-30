@@ -2,17 +2,16 @@
 
 use bytes::BufMut;
 
-use crate::primitives::fixed::{get_i16, get_i32, get_i8, put_i16, put_i32, put_i8};
+use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i8, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 31;
@@ -21,43 +20,48 @@ pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteAclsResponse<'a> {
     pub throttle_time_ms: i32,
     pub filter_results: Vec<DeleteAclsFilterResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for DeleteAclsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            filter_results: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> DeleteAclsResponse<'a> {
+impl DeleteAclsResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_acls_response::DeleteAclsResponse {
         crate::owned::delete_acls_response::DeleteAclsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            filter_results: (self.filter_results).iter().map(|it| it.to_owned()).collect(),
+            filter_results: (self.filter_results)
+                .iter()
+                .map(DeleteAclsFilterResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for DeleteAclsResponse<'a> {
+impl Encode for DeleteAclsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.filter_results).len(), flex); for it in &self.filter_results { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.filter_results).len(), flex);
+                for it in &self.filter_results {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -67,8 +71,22 @@ impl<'a> Encode for DeleteAclsResponse<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.filter_results).len(), flex); let body: usize = (self.filter_results).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.filter_results).len(),
+                    flex,
+                );
+                let body: usize = (self.filter_results)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -76,72 +94,90 @@ impl<'a> Encode for DeleteAclsResponse<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DeleteAclsResponse<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.filter_results = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DeleteAclsFilterResult::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.filter_results = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DeleteAclsFilterResult::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> DeleteAclsResponse<'a> {
+impl DeleteAclsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.filter_results = vec![DeleteAclsFilterResult::populated(version)]; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.filter_results = vec![DeleteAclsFilterResult::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteAclsFilterResult<'a> {
     pub error_code: i16,
     pub error_message: Option<&'a str>,
     pub matching_acls: Vec<DeleteAclsMatchingAcl<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for DeleteAclsFilterResult<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            error_message: None,
-            matching_acls: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> DeleteAclsFilterResult<'a> {
+impl DeleteAclsFilterResult<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_acls_response::DeleteAclsFilterResult {
         crate::owned::delete_acls_response::DeleteAclsFilterResult {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
-            matching_acls: (self.matching_acls).iter().map(|it| it.to_owned()).collect(),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            matching_acls: (self.matching_acls)
+                .iter()
+                .map(DeleteAclsMatchingAcl::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for DeleteAclsFilterResult<'a> {
+impl Encode for DeleteAclsFilterResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message) } else { put_nullable_string(buf, self.error_message) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.matching_acls).len(), flex); for it in &self.matching_acls { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message);
+            } else {
+                put_nullable_string(buf, self.error_message);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.matching_acls).len(), flex);
+                for it in &self.matching_acls {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -151,9 +187,29 @@ impl<'a> Encode for DeleteAclsFilterResult<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message) } else { nullable_string_len(self.error_message) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.matching_acls).len(), flex); let body: usize = (self.matching_acls).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message)
+            } else {
+                nullable_string_len(self.error_message)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.matching_acls).len(),
+                    flex,
+                );
+                let body: usize = (self.matching_acls)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -161,35 +217,53 @@ impl<'a> Encode for DeleteAclsFilterResult<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DeleteAclsFilterResult<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.matching_acls = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DeleteAclsMatchingAcl::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.matching_acls = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DeleteAclsMatchingAcl::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> DeleteAclsFilterResult<'a> {
+impl DeleteAclsFilterResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x"); }
-        if version >= 0 { m.matching_acls = vec![DeleteAclsMatchingAcl::populated(version)]; }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x");
+        }
+        if version >= 0 {
+            m.matching_acls = vec![DeleteAclsMatchingAcl::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteAclsMatchingAcl<'a> {
     pub error_code: i16,
@@ -203,8 +277,7 @@ pub struct DeleteAclsMatchingAcl<'a> {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for DeleteAclsMatchingAcl<'a> {
+impl Default for DeleteAclsMatchingAcl<'_> {
     fn default() -> Self {
         Self {
             error_code: 0i16,
@@ -220,12 +293,11 @@ impl<'a> Default for DeleteAclsMatchingAcl<'a> {
         }
     }
 }
-
-impl<'a> DeleteAclsMatchingAcl<'a> {
+impl DeleteAclsMatchingAcl<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_acls_response::DeleteAclsMatchingAcl {
         crate::owned::delete_acls_response::DeleteAclsMatchingAcl {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
             pattern_type: (self.pattern_type),
@@ -237,19 +309,52 @@ impl<'a> DeleteAclsMatchingAcl<'a> {
         }
     }
 }
-
-impl<'a> Encode for DeleteAclsMatchingAcl<'a> {
+impl Encode for DeleteAclsMatchingAcl<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message) } else { put_nullable_string(buf, self.error_message) } }
-        if version >= 0 { put_i8(buf, self.resource_type) }
-        if version >= 0 { if flex { put_compact_string(buf, self.resource_name) } else { put_string(buf, self.resource_name) } }
-        if version >= 1 { put_i8(buf, self.pattern_type) }
-        if version >= 0 { if flex { put_compact_string(buf, self.principal) } else { put_string(buf, self.principal) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.host) } else { put_string(buf, self.host) } }
-        if version >= 0 { put_i8(buf, self.operation) }
-        if version >= 0 { put_i8(buf, self.permission_type) }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message);
+            } else {
+                put_nullable_string(buf, self.error_message);
+            }
+        }
+        if version >= 0 {
+            put_i8(buf, self.resource_type);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.resource_name);
+            } else {
+                put_string(buf, self.resource_name);
+            }
+        }
+        if version >= 1 {
+            put_i8(buf, self.pattern_type);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.principal);
+            } else {
+                put_string(buf, self.principal);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.host);
+            } else {
+                put_string(buf, self.host);
+            }
+        }
+        if version >= 0 {
+            put_i8(buf, self.operation);
+        }
+        if version >= 0 {
+            put_i8(buf, self.permission_type);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -259,15 +364,49 @@ impl<'a> Encode for DeleteAclsMatchingAcl<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message) } else { nullable_string_len(self.error_message) }; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += if flex { compact_string_len(self.resource_name) } else { string_len(self.resource_name) }; }
-        if version >= 1 { n += 1; }
-        if version >= 0 { n += if flex { compact_string_len(self.principal) } else { string_len(self.principal) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.host) } else { string_len(self.host) }; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message)
+            } else {
+                nullable_string_len(self.error_message)
+            };
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.resource_name)
+            } else {
+                string_len(self.resource_name)
+            };
+        }
+        if version >= 1 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.principal)
+            } else {
+                string_len(self.principal)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.host)
+            } else {
+                string_len(self.host)
+            };
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -275,43 +414,91 @@ impl<'a> Encode for DeleteAclsMatchingAcl<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DeleteAclsMatchingAcl<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.resource_type = get_i8(buf)?; }
-        if version >= 0 { out.resource_name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 1 { out.pattern_type = get_i8(buf)?; }
-        if version >= 0 { out.principal = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.host = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.operation = get_i8(buf)?; }
-        if version >= 0 { out.permission_type = get_i8(buf)?; }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.resource_type = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.resource_name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 1 {
+            out.pattern_type = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.principal = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.operation = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.permission_type = get_i8(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> DeleteAclsMatchingAcl<'a> {
+impl DeleteAclsMatchingAcl<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x"); }
-        if version >= 0 { m.resource_type = 1i8; }
-        if version >= 0 { m.resource_name = "x"; }
-        if version >= 1 { m.pattern_type = 1i8; }
-        if version >= 0 { m.principal = "x"; }
-        if version >= 0 { m.host = "x"; }
-        if version >= 0 { m.operation = 1i8; }
-        if version >= 0 { m.permission_type = 1i8; }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x");
+        }
+        if version >= 0 {
+            m.resource_type = 1i8;
+        }
+        if version >= 0 {
+            m.resource_name = "x";
+        }
+        if version >= 1 {
+            m.pattern_type = 1i8;
+        }
+        if version >= 0 {
+            m.principal = "x";
+        }
+        if version >= 0 {
+            m.host = "x";
+        }
+        if version >= 0 {
+            m.operation = 1i8;
+        }
+        if version >= 0 {
+            m.permission_type = 1i8;
+        }
         m
     }
 }

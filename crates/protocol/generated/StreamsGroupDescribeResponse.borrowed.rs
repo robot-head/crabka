@@ -2,17 +2,16 @@
 
 use bytes::BufMut;
 
-use crate::primitives::fixed::{get_bool, get_i16, get_i32, get_i8, put_bool, put_i16, put_i32};
+use crate::primitives::fixed::{get_bool, get_i8, get_i16, get_i32, put_bool, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 89;
@@ -21,43 +20,47 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamsGroupDescribeResponse<'a> {
     pub throttle_time_ms: i32,
     pub groups: Vec<DescribedGroup<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for StreamsGroupDescribeResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            groups: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> StreamsGroupDescribeResponse<'a> {
-    pub fn to_owned(&self) -> crate::owned::streams_group_describe_response::StreamsGroupDescribeResponse {
+impl StreamsGroupDescribeResponse<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::streams_group_describe_response::StreamsGroupDescribeResponse {
         crate::owned::streams_group_describe_response::StreamsGroupDescribeResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            groups: (self.groups).iter().map(|it| it.to_owned()).collect(),
+            groups: (self.groups).iter().map(DescribedGroup::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for StreamsGroupDescribeResponse<'a> {
+impl Encode for StreamsGroupDescribeResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.groups).len(), flex); for it in &self.groups { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.groups).len(), flex);
+                for it in &self.groups {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -67,8 +70,17 @@ impl<'a> Encode for StreamsGroupDescribeResponse<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.groups).len(), flex); let body: usize = (self.groups).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.groups).len(), flex);
+                let body: usize = (self.groups).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -76,36 +88,49 @@ impl<'a> Encode for StreamsGroupDescribeResponse<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for StreamsGroupDescribeResponse<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.groups = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DescribedGroup::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.groups = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribedGroup::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> StreamsGroupDescribeResponse<'a> {
+impl StreamsGroupDescribeResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.groups = vec![DescribedGroup::populated(version)]; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.groups = vec![DescribedGroup::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedGroup<'a> {
     pub error_code: i16,
@@ -119,8 +144,7 @@ pub struct DescribedGroup<'a> {
     pub authorized_operations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for DescribedGroup<'a> {
+impl Default for DescribedGroup<'_> {
     fn default() -> Self {
         Self {
             error_code: 0i16,
@@ -136,36 +160,77 @@ impl<'a> Default for DescribedGroup<'a> {
         }
     }
 }
-
-impl<'a> DescribedGroup<'a> {
+impl DescribedGroup<'_> {
     pub fn to_owned(&self) -> crate::owned::streams_group_describe_response::DescribedGroup {
         crate::owned::streams_group_describe_response::DescribedGroup {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             group_id: (self.group_id).to_string(),
             group_state: (self.group_state).to_string(),
             group_epoch: (self.group_epoch),
             assignment_epoch: (self.assignment_epoch),
-            topology: (self.topology).as_ref().map(|v| v.to_owned()),
-            members: (self.members).iter().map(|it| it.to_owned()).collect(),
+            topology: (self.topology).as_ref().map(Topology::to_owned),
+            members: (self.members).iter().map(Member::to_owned).collect(),
             authorized_operations: (self.authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for DescribedGroup<'a> {
+impl Encode for DescribedGroup<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message) } else { put_nullable_string(buf, self.error_message) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.group_id) } else { put_string(buf, self.group_id) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.group_state) } else { put_string(buf, self.group_state) } }
-        if version >= 0 { put_i32(buf, self.group_epoch) }
-        if version >= 0 { put_i32(buf, self.assignment_epoch) }
-        if version >= 0 { match &self.topology { None => { buf.put_i8(-1); }, Some(v) => { buf.put_i8(1); v.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.members).len(), flex); for it in &self.members { it.encode(buf, version)?; } } }
-        if version >= 0 { put_i32(buf, self.authorized_operations) }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message);
+            } else {
+                put_nullable_string(buf, self.error_message);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.group_id);
+            } else {
+                put_string(buf, self.group_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.group_state);
+            } else {
+                put_string(buf, self.group_state);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.group_epoch);
+        }
+        if version >= 0 {
+            put_i32(buf, self.assignment_epoch);
+        }
+        if version >= 0 {
+            match &self.topology {
+                None => {
+                    buf.put_i8(-1);
+                }
+                Some(v) => {
+                    buf.put_i8(1);
+                    v.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.members).len(), flex);
+                for it in &self.members {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.authorized_operations);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -175,15 +240,53 @@ impl<'a> Encode for DescribedGroup<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message) } else { nullable_string_len(self.error_message) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.group_id) } else { string_len(self.group_id) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.group_state) } else { string_len(self.group_state) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 1 + self.topology.as_ref().map_or(0, |v| v.encoded_len(version)); }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.members).len(), flex); let body: usize = (self.members).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += 4; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message)
+            } else {
+                nullable_string_len(self.error_message)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.group_id)
+            } else {
+                string_len(self.group_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.group_state)
+            } else {
+                string_len(self.group_state)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 1 + self.topology.as_ref().map_or(0, |v| v.encoded_len(version));
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.members).len(), flex);
+                let body: usize = (self.members)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -191,79 +294,135 @@ impl<'a> Encode for DescribedGroup<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DescribedGroup<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.group_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.group_state = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.group_epoch = get_i32(buf)?; }
-        if version >= 0 { out.assignment_epoch = get_i32(buf)?; }
-        if version >= 0 { out.topology = if get_i8(buf)? < 0 { None } else { Some(Topology::decode_borrow(buf, version)?) }; }
-        if version >= 0 { out.members = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(Member::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.authorized_operations = get_i32(buf)?; }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.group_state = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.group_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.assignment_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.topology = if get_i8(buf)? < 0 {
+                None
+            } else {
+                Some(Topology::decode_borrow(buf, version)?)
+            };
+        }
+        if version >= 0 {
+            out.members = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(Member::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.authorized_operations = get_i32(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> DescribedGroup<'a> {
+impl DescribedGroup<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x"); }
-        if version >= 0 { m.group_id = "x"; }
-        if version >= 0 { m.group_state = "x"; }
-        if version >= 0 { m.group_epoch = 1i32; }
-        if version >= 0 { m.assignment_epoch = 1i32; }
-        if version >= 0 { m.topology = Some(Topology::populated(version)); }
-        if version >= 0 { m.members = vec![Member::populated(version)]; }
-        if version >= 0 { m.authorized_operations = 1i32; }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x");
+        }
+        if version >= 0 {
+            m.group_id = "x";
+        }
+        if version >= 0 {
+            m.group_state = "x";
+        }
+        if version >= 0 {
+            m.group_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.assignment_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.topology = Some(Topology::populated(version));
+        }
+        if version >= 0 {
+            m.members = vec![Member::populated(version)];
+        }
+        if version >= 0 {
+            m.authorized_operations = 1i32;
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Topology<'a> {
     pub epoch: i32,
     pub subtopologies: Option<Vec<Subtopology<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for Topology<'a> {
-    fn default() -> Self {
-        Self {
-            epoch: 0i32,
-            subtopologies: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> Topology<'a> {
+impl Topology<'_> {
     pub fn to_owned(&self) -> crate::owned::streams_group_describe_response::Topology {
         crate::owned::streams_group_describe_response::Topology {
             epoch: (self.epoch),
-            subtopologies: (self.subtopologies).as_ref().map(|v| v.iter().map(|it| it.to_owned()).collect()),
+            subtopologies: (self.subtopologies)
+                .as_ref()
+                .map(|v| v.iter().map(Subtopology::to_owned).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for Topology<'a> {
+impl Encode for Topology<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.epoch) }
-        if version >= 0 { { let len = (self.subtopologies).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.subtopologies { for it in v { it.encode(buf, version)?; } } } }
+        if version >= 0 {
+            put_i32(buf, self.epoch);
+        }
+        if version >= 0 {
+            {
+                let len = (self.subtopologies).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.subtopologies {
+                    for it in v {
+                        it.encode(buf, version)?;
+                    }
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -273,8 +432,21 @@ impl<'a> Encode for Topology<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.subtopologies).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.subtopologies).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize =
+                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -282,34 +454,49 @@ impl<'a> Encode for Topology<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for Topology<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.epoch = get_i32(buf)?; }
-        if version >= 0 { out.subtopologies = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(Subtopology::decode_borrow(buf, version)?); } Some(v) } } }; }
+        if version >= 0 {
+            out.epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.subtopologies = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(Subtopology::decode_borrow(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> Topology<'a> {
+impl Topology<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.epoch = 1i32; }
-        if version >= 0 { m.subtopologies = Some(vec![Subtopology::populated(version)]); }
+        if version >= 0 {
+            m.epoch = 1i32;
+        }
+        if version >= 0 {
+            m.subtopologies = Some(vec![Subtopology::populated(version)]);
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Subtopology<'a> {
     pub subtopology_id: &'a str,
     pub source_topics: Vec<&'a str>,
@@ -318,41 +505,92 @@ pub struct Subtopology<'a> {
     pub repartition_source_topics: Vec<super::common::topic_info::TopicInfo<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for Subtopology<'a> {
-    fn default() -> Self {
-        Self {
-            subtopology_id: "",
-            source_topics: Vec::new(),
-            repartition_sink_topics: Vec::new(),
-            state_changelog_topics: Vec::new(),
-            repartition_source_topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> Subtopology<'a> {
+impl Subtopology<'_> {
     pub fn to_owned(&self) -> crate::owned::streams_group_describe_response::Subtopology {
         crate::owned::streams_group_describe_response::Subtopology {
             subtopology_id: (self.subtopology_id).to_string(),
-            source_topics: (self.source_topics).iter().map(|s| s.to_string()).collect(),
-            repartition_sink_topics: (self.repartition_sink_topics).iter().map(|s| s.to_string()).collect(),
-            state_changelog_topics: (self.state_changelog_topics).iter().map(|it| it.to_owned()).collect(),
-            repartition_source_topics: (self.repartition_source_topics).iter().map(|it| it.to_owned()).collect(),
+            source_topics: (self.source_topics)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            repartition_sink_topics: (self.repartition_sink_topics)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            state_changelog_topics: (self.state_changelog_topics)
+                .iter()
+                .map(super::common::topic_info::TopicInfo::to_owned)
+                .collect(),
+            repartition_source_topics: (self.repartition_source_topics)
+                .iter()
+                .map(super::common::topic_info::TopicInfo::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for Subtopology<'a> {
+impl Encode for Subtopology<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, self.subtopology_id) } else { put_string(buf, self.subtopology_id) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.source_topics).len(), flex); for it in &self.source_topics { if flex { put_compact_string(buf, *it) } else { put_string(buf, *it) }; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.repartition_sink_topics).len(), flex); for it in &self.repartition_sink_topics { if flex { put_compact_string(buf, *it) } else { put_string(buf, *it) }; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.state_changelog_topics).len(), flex); for it in &self.state_changelog_topics { it.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.repartition_source_topics).len(), flex); for it in &self.repartition_source_topics { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.subtopology_id);
+            } else {
+                put_string(buf, self.subtopology_id);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.source_topics).len(), flex);
+                for it in &self.source_topics {
+                    if flex {
+                        put_compact_string(buf, it);
+                    } else {
+                        put_string(buf, it);
+                    }
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(
+                    buf,
+                    (self.repartition_sink_topics).len(),
+                    flex,
+                );
+                for it in &self.repartition_sink_topics {
+                    if flex {
+                        put_compact_string(buf, it);
+                    } else {
+                        put_string(buf, it);
+                    }
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(
+                    buf,
+                    (self.state_changelog_topics).len(),
+                    flex,
+                );
+                for it in &self.state_changelog_topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(
+                    buf,
+                    (self.repartition_source_topics).len(),
+                    flex,
+                );
+                for it in &self.repartition_source_topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -362,11 +600,77 @@ impl<'a> Encode for Subtopology<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.subtopology_id) } else { string_len(self.subtopology_id) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.source_topics).len(), flex); let body: usize = (self.source_topics).iter().map(|it| if flex { compact_string_len(*it) } else { string_len(*it) }).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.repartition_sink_topics).len(), flex); let body: usize = (self.repartition_sink_topics).iter().map(|it| if flex { compact_string_len(*it) } else { string_len(*it) }).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.state_changelog_topics).len(), flex); let body: usize = (self.state_changelog_topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.repartition_source_topics).len(), flex); let body: usize = (self.repartition_source_topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.subtopology_id)
+            } else {
+                string_len(self.subtopology_id)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.source_topics).len(),
+                    flex,
+                );
+                let body: usize = (self.source_topics)
+                    .iter()
+                    .map(|it| {
+                        if flex {
+                            compact_string_len(it)
+                        } else {
+                            string_len(it)
+                        }
+                    })
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.repartition_sink_topics).len(),
+                    flex,
+                );
+                let body: usize = (self.repartition_sink_topics)
+                    .iter()
+                    .map(|it| {
+                        if flex {
+                            compact_string_len(it)
+                        } else {
+                            string_len(it)
+                        }
+                    })
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.state_changelog_topics).len(),
+                    flex,
+                );
+                let body: usize = (self.state_changelog_topics)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.repartition_source_topics).len(),
+                    flex,
+                );
+                let body: usize = (self.repartition_source_topics)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -374,40 +678,101 @@ impl<'a> Encode for Subtopology<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.subtopology_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.source_topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }); } v }; }
-        if version >= 0 { out.repartition_sink_topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }); } v }; }
-        if version >= 0 { out.state_changelog_topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::topic_info::TopicInfo::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.repartition_source_topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::topic_info::TopicInfo::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.subtopology_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.source_topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(if flex {
+                        get_compact_string_borrowed(buf)?
+                    } else {
+                        get_string_borrowed(buf)?
+                    });
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.repartition_sink_topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(if flex {
+                        get_compact_string_borrowed(buf)?
+                    } else {
+                        get_string_borrowed(buf)?
+                    });
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.state_changelog_topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(super::common::topic_info::TopicInfo::decode_borrow(
+                        buf, version,
+                    )?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.repartition_source_topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(super::common::topic_info::TopicInfo::decode_borrow(
+                        buf, version,
+                    )?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> Subtopology<'a> {
+impl Subtopology<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.subtopology_id = "x"; }
-        if version >= 0 { m.source_topics = vec!["x"]; }
-        if version >= 0 { m.repartition_sink_topics = vec!["x"]; }
-        if version >= 0 { m.state_changelog_topics = vec![super::common::topic_info::TopicInfo::populated(version)]; }
-        if version >= 0 { m.repartition_source_topics = vec![super::common::topic_info::TopicInfo::populated(version)]; }
+        if version >= 0 {
+            m.subtopology_id = "x";
+        }
+        if version >= 0 {
+            m.source_topics = vec!["x"];
+        }
+        if version >= 0 {
+            m.repartition_sink_topics = vec!["x"];
+        }
+        if version >= 0 {
+            m.state_changelog_topics =
+                vec![super::common::topic_info::TopicInfo::populated(version)];
+        }
+        if version >= 0 {
+            m.repartition_source_topics =
+                vec![super::common::topic_info::TopicInfo::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Member<'a> {
     pub member_id: &'a str,
     pub member_epoch: i32,
@@ -426,45 +791,32 @@ pub struct Member<'a> {
     pub is_classic: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for Member<'a> {
-    fn default() -> Self {
-        Self {
-            member_id: "",
-            member_epoch: 0i32,
-            instance_id: None,
-            rack_id: None,
-            client_id: "",
-            client_host: "",
-            topology_epoch: 0i32,
-            process_id: "",
-            user_endpoint: None,
-            client_tags: Vec::new(),
-            task_offsets: Vec::new(),
-            task_end_offsets: Vec::new(),
-            assignment: Default::default(),
-            target_assignment: Default::default(),
-            is_classic: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> Member<'a> {
+impl Member<'_> {
     pub fn to_owned(&self) -> crate::owned::streams_group_describe_response::Member {
         crate::owned::streams_group_describe_response::Member {
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
-            instance_id: (self.instance_id).map(|s| s.to_string()),
-            rack_id: (self.rack_id).map(|s| s.to_string()),
+            instance_id: (self.instance_id).map(std::string::ToString::to_string),
+            rack_id: (self.rack_id).map(std::string::ToString::to_string),
             client_id: (self.client_id).to_string(),
             client_host: (self.client_host).to_string(),
             topology_epoch: (self.topology_epoch),
             process_id: (self.process_id).to_string(),
-            user_endpoint: (self.user_endpoint).as_ref().map(|v| v.to_owned()),
-            client_tags: (self.client_tags).iter().map(|it| it.to_owned()).collect(),
-            task_offsets: (self.task_offsets).iter().map(|it| it.to_owned()).collect(),
-            task_end_offsets: (self.task_end_offsets).iter().map(|it| it.to_owned()).collect(),
+            user_endpoint: (self.user_endpoint)
+                .as_ref()
+                .map(super::common::endpoint::Endpoint::to_owned),
+            client_tags: (self.client_tags)
+                .iter()
+                .map(super::common::key_value::KeyValue::to_owned)
+                .collect(),
+            task_offsets: (self.task_offsets)
+                .iter()
+                .map(super::common::task_offset::TaskOffset::to_owned)
+                .collect(),
+            task_end_offsets: (self.task_end_offsets)
+                .iter()
+                .map(super::common::task_offset::TaskOffset::to_owned)
+                .collect(),
             assignment: (self.assignment).to_owned(),
             target_assignment: (self.target_assignment).to_owned(),
             is_classic: (self.is_classic),
@@ -472,25 +824,101 @@ impl<'a> Member<'a> {
         }
     }
 }
-
-impl<'a> Encode for Member<'a> {
+impl Encode for Member<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, self.member_id) } else { put_string(buf, self.member_id) } }
-        if version >= 0 { put_i32(buf, self.member_epoch) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.instance_id) } else { put_nullable_string(buf, self.instance_id) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.rack_id) } else { put_nullable_string(buf, self.rack_id) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.client_id) } else { put_string(buf, self.client_id) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.client_host) } else { put_string(buf, self.client_host) } }
-        if version >= 0 { put_i32(buf, self.topology_epoch) }
-        if version >= 0 { if flex { put_compact_string(buf, self.process_id) } else { put_string(buf, self.process_id) } }
-        if version >= 0 { match &self.user_endpoint { None => { buf.put_i8(-1); }, Some(v) => { buf.put_i8(1); v.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.client_tags).len(), flex); for it in &self.client_tags { it.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.task_offsets).len(), flex); for it in &self.task_offsets { it.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.task_end_offsets).len(), flex); for it in &self.task_end_offsets { it.encode(buf, version)?; } } }
-        if version >= 0 { self.assignment.encode(buf, version)? }
-        if version >= 0 { self.target_assignment.encode(buf, version)? }
-        if version >= 0 { put_bool(buf, self.is_classic) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.member_id);
+            } else {
+                put_string(buf, self.member_id);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.member_epoch);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.instance_id);
+            } else {
+                put_nullable_string(buf, self.instance_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.rack_id);
+            } else {
+                put_nullable_string(buf, self.rack_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.client_id);
+            } else {
+                put_string(buf, self.client_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.client_host);
+            } else {
+                put_string(buf, self.client_host);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.topology_epoch);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.process_id);
+            } else {
+                put_string(buf, self.process_id);
+            }
+        }
+        if version >= 0 {
+            match &self.user_endpoint {
+                None => {
+                    buf.put_i8(-1);
+                }
+                Some(v) => {
+                    buf.put_i8(1);
+                    v.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.client_tags).len(), flex);
+                for it in &self.client_tags {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.task_offsets).len(), flex);
+                for it in &self.task_offsets {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.task_end_offsets).len(), flex);
+                for it in &self.task_end_offsets {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            self.assignment.encode(buf, version)?;
+        }
+        if version >= 0 {
+            self.target_assignment.encode(buf, version)?;
+        }
+        if version >= 0 {
+            put_bool(buf, self.is_classic);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -500,21 +928,104 @@ impl<'a> Encode for Member<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.member_id) } else { string_len(self.member_id) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.instance_id) } else { nullable_string_len(self.instance_id) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.rack_id) } else { nullable_string_len(self.rack_id) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.client_id) } else { string_len(self.client_id) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.client_host) } else { string_len(self.client_host) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_string_len(self.process_id) } else { string_len(self.process_id) }; }
-        if version >= 0 { n += 1 + self.user_endpoint.as_ref().map_or(0, |v| v.encoded_len(version)); }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.client_tags).len(), flex); let body: usize = (self.client_tags).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.task_offsets).len(), flex); let body: usize = (self.task_offsets).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.task_end_offsets).len(), flex); let body: usize = (self.task_end_offsets).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += self.assignment.encoded_len(version); }
-        if version >= 0 { n += self.target_assignment.encoded_len(version); }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.member_id)
+            } else {
+                string_len(self.member_id)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.instance_id)
+            } else {
+                nullable_string_len(self.instance_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.rack_id)
+            } else {
+                nullable_string_len(self.rack_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.client_id)
+            } else {
+                string_len(self.client_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.client_host)
+            } else {
+                string_len(self.client_host)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.process_id)
+            } else {
+                string_len(self.process_id)
+            };
+        }
+        if version >= 0 {
+            n += 1 + self
+                .user_endpoint
+                .as_ref()
+                .map_or(0, |v| v.encoded_len(version));
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.client_tags).len(), flex);
+                let body: usize = (self.client_tags)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.task_offsets).len(), flex);
+                let body: usize = (self.task_offsets)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.task_end_offsets).len(),
+                    flex,
+                );
+                let body: usize = (self.task_end_offsets)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += self.assignment.encoded_len(version);
+        }
+        if version >= 0 {
+            n += self.target_assignment.encoded_len(version);
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -522,55 +1033,169 @@ impl<'a> Encode for Member<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for Member<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.member_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.member_epoch = get_i32(buf)?; }
-        if version >= 0 { out.instance_id = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.rack_id = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.client_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.client_host = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.topology_epoch = get_i32(buf)?; }
-        if version >= 0 { out.process_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.user_endpoint = if get_i8(buf)? < 0 { None } else { Some(super::common::endpoint::Endpoint::decode_borrow(buf, version)?) }; }
-        if version >= 0 { out.client_tags = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::key_value::KeyValue::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.task_offsets = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::task_offset::TaskOffset::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.task_end_offsets = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::task_offset::TaskOffset::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.assignment = super::common::assignment::Assignment::decode_borrow(buf, version)?; }
-        if version >= 0 { out.target_assignment = super::common::assignment::Assignment::decode_borrow(buf, version)?; }
-        if version >= 0 { out.is_classic = get_bool(buf)?; }
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.member_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.instance_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.rack_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.client_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.client_host = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.topology_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.process_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.user_endpoint = if get_i8(buf)? < 0 {
+                None
+            } else {
+                Some(super::common::endpoint::Endpoint::decode_borrow(
+                    buf, version,
+                )?)
+            };
+        }
+        if version >= 0 {
+            out.client_tags = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(super::common::key_value::KeyValue::decode_borrow(
+                        buf, version,
+                    )?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.task_offsets = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(super::common::task_offset::TaskOffset::decode_borrow(
+                        buf, version,
+                    )?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.task_end_offsets = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(super::common::task_offset::TaskOffset::decode_borrow(
+                        buf, version,
+                    )?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.assignment = super::common::assignment::Assignment::decode_borrow(buf, version)?;
+        }
+        if version >= 0 {
+            out.target_assignment =
+                super::common::assignment::Assignment::decode_borrow(buf, version)?;
+        }
+        if version >= 0 {
+            out.is_classic = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> Member<'a> {
+impl Member<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.member_id = "x"; }
-        if version >= 0 { m.member_epoch = 1i32; }
-        if version >= 0 { m.instance_id = Some("x"); }
-        if version >= 0 { m.rack_id = Some("x"); }
-        if version >= 0 { m.client_id = "x"; }
-        if version >= 0 { m.client_host = "x"; }
-        if version >= 0 { m.topology_epoch = 1i32; }
-        if version >= 0 { m.process_id = "x"; }
-        if version >= 0 { m.user_endpoint = Some(super::common::endpoint::Endpoint::populated(version)); }
-        if version >= 0 { m.client_tags = vec![super::common::key_value::KeyValue::populated(version)]; }
-        if version >= 0 { m.task_offsets = vec![super::common::task_offset::TaskOffset::populated(version)]; }
-        if version >= 0 { m.task_end_offsets = vec![super::common::task_offset::TaskOffset::populated(version)]; }
-        if version >= 0 { m.assignment = super::common::assignment::Assignment::populated(version); }
-        if version >= 0 { m.target_assignment = super::common::assignment::Assignment::populated(version); }
-        if version >= 0 { m.is_classic = true; }
+        if version >= 0 {
+            m.member_id = "x";
+        }
+        if version >= 0 {
+            m.member_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.instance_id = Some("x");
+        }
+        if version >= 0 {
+            m.rack_id = Some("x");
+        }
+        if version >= 0 {
+            m.client_id = "x";
+        }
+        if version >= 0 {
+            m.client_host = "x";
+        }
+        if version >= 0 {
+            m.topology_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.process_id = "x";
+        }
+        if version >= 0 {
+            m.user_endpoint = Some(super::common::endpoint::Endpoint::populated(version));
+        }
+        if version >= 0 {
+            m.client_tags = vec![super::common::key_value::KeyValue::populated(version)];
+        }
+        if version >= 0 {
+            m.task_offsets = vec![super::common::task_offset::TaskOffset::populated(version)];
+        }
+        if version >= 0 {
+            m.task_end_offsets = vec![super::common::task_offset::TaskOffset::populated(version)];
+        }
+        if version >= 0 {
+            m.assignment = super::common::assignment::Assignment::populated(version);
+        }
+        if version >= 0 {
+            m.target_assignment = super::common::assignment::Assignment::populated(version);
+        }
+        if version >= 0 {
+            m.is_classic = true;
+        }
         m
     }
 }

@@ -6,10 +6,9 @@ use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
     get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 88;
@@ -18,7 +17,9 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamsGroupHeartbeatResponse {
@@ -38,27 +39,105 @@ pub struct StreamsGroupHeartbeatResponse {
     pub partitions_by_user_endpoint: Option<Vec<EndpointToPartitions>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for StreamsGroupHeartbeatResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message.as_deref()) } else { put_nullable_string(buf, self.error_message.as_deref()) } }
-        if version >= 0 { if flex { put_compact_string(buf, &self.member_id) } else { put_string(buf, &self.member_id) } }
-        if version >= 0 { put_i32(buf, self.member_epoch) }
-        if version >= 0 { put_i32(buf, self.heartbeat_interval_ms) }
-        if version >= 0 { put_i32(buf, self.acceptable_recovery_lag) }
-        if version >= 0 { put_i32(buf, self.task_offset_interval_ms) }
-        if version >= 0 { { let len = (self.status).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.status { for it in v { it.encode(buf, version)?; } } } }
-        if version >= 0 { { let len = (self.active_tasks).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.active_tasks { for it in v { it.encode(buf, version)?; } } } }
-        if version >= 0 { { let len = (self.standby_tasks).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.standby_tasks { for it in v { it.encode(buf, version)?; } } } }
-        if version >= 0 { { let len = (self.warmup_tasks).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.warmup_tasks { for it in v { it.encode(buf, version)?; } } } }
-        if version >= 0 { put_i32(buf, self.endpoint_information_epoch) }
-        if version >= 0 { { let len = (self.partitions_by_user_endpoint).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.partitions_by_user_endpoint { for it in v { it.encode(buf, version)?; } } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.member_id);
+            } else {
+                put_string(buf, &self.member_id);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.member_epoch);
+        }
+        if version >= 0 {
+            put_i32(buf, self.heartbeat_interval_ms);
+        }
+        if version >= 0 {
+            put_i32(buf, self.acceptable_recovery_lag);
+        }
+        if version >= 0 {
+            put_i32(buf, self.task_offset_interval_ms);
+        }
+        if version >= 0 {
+            {
+                let len = (self.status).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.status {
+                    for it in v {
+                        it.encode(buf, version)?;
+                    }
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                let len = (self.active_tasks).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.active_tasks {
+                    for it in v {
+                        it.encode(buf, version)?;
+                    }
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                let len = (self.standby_tasks).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.standby_tasks {
+                    for it in v {
+                        it.encode(buf, version)?;
+                    }
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                let len = (self.warmup_tasks).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.warmup_tasks {
+                    for it in v {
+                        it.encode(buf, version)?;
+                    }
+                }
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.endpoint_information_epoch);
+        }
+        if version >= 0 {
+            {
+                let len = (self.partitions_by_user_endpoint).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.partitions_by_user_endpoint {
+                    for it in v {
+                        it.encode(buf, version)?;
+                    }
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -68,20 +147,101 @@ impl Encode for StreamsGroupHeartbeatResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message.as_deref()) } else { nullable_string_len(self.error_message.as_deref()) }; }
-        if version >= 0 { n += if flex { compact_string_len(&self.member_id) } else { string_len(&self.member_id) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.status).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); prefix + body }; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.active_tasks).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); prefix + body }; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.standby_tasks).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); prefix + body }; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.warmup_tasks).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); prefix + body }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.partitions_by_user_endpoint).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message.as_deref())
+            } else {
+                nullable_string_len(self.error_message.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.member_id)
+            } else {
+                string_len(&self.member_id)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.status).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize =
+                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.active_tasks).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize =
+                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.standby_tasks).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize =
+                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.warmup_tasks).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize =
+                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.partitions_by_user_endpoint).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize =
+                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -89,60 +249,182 @@ impl Encode for StreamsGroupHeartbeatResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for StreamsGroupHeartbeatResponse {
+impl Decode<'_> for StreamsGroupHeartbeatResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.member_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.member_epoch = get_i32(buf)?; }
-        if version >= 0 { out.heartbeat_interval_ms = get_i32(buf)?; }
-        if version >= 0 { out.acceptable_recovery_lag = get_i32(buf)?; }
-        if version >= 0 { out.task_offset_interval_ms = get_i32(buf)?; }
-        if version >= 0 { out.status = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::status::Status::decode(buf, version)?); } Some(v) } } }; }
-        if version >= 0 { out.active_tasks = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::task_ids::TaskIds::decode(buf, version)?); } Some(v) } } }; }
-        if version >= 0 { out.standby_tasks = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::task_ids::TaskIds::decode(buf, version)?); } Some(v) } } }; }
-        if version >= 0 { out.warmup_tasks = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::task_ids::TaskIds::decode(buf, version)?); } Some(v) } } }; }
-        if version >= 0 { out.endpoint_information_epoch = get_i32(buf)?; }
-        if version >= 0 { out.partitions_by_user_endpoint = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(EndpointToPartitions::decode(buf, version)?); } Some(v) } } }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.member_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.heartbeat_interval_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.acceptable_recovery_lag = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.task_offset_interval_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.status = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::status::Status::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        if version >= 0 {
+            out.active_tasks = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::task_ids::TaskIds::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        if version >= 0 {
+            out.standby_tasks = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::task_ids::TaskIds::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        if version >= 0 {
+            out.warmup_tasks = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::task_ids::TaskIds::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        if version >= 0 {
+            out.endpoint_information_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.partitions_by_user_endpoint = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(EndpointToPartitions::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl StreamsGroupHeartbeatResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x".to_string()); }
-        if version >= 0 { m.member_id = "x".to_string(); }
-        if version >= 0 { m.member_epoch = 1i32; }
-        if version >= 0 { m.heartbeat_interval_ms = 1i32; }
-        if version >= 0 { m.acceptable_recovery_lag = 1i32; }
-        if version >= 0 { m.task_offset_interval_ms = 1i32; }
-        if version >= 0 { m.status = Some(vec![super::common::status::Status::populated(version)]); }
-        if version >= 0 { m.active_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]); }
-        if version >= 0 { m.standby_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]); }
-        if version >= 0 { m.warmup_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]); }
-        if version >= 0 { m.endpoint_information_epoch = 1i32; }
-        if version >= 0 { m.partitions_by_user_endpoint = Some(vec![EndpointToPartitions::populated(version)]); }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.member_id = "x".to_string();
+        }
+        if version >= 0 {
+            m.member_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.heartbeat_interval_ms = 1i32;
+        }
+        if version >= 0 {
+            m.acceptable_recovery_lag = 1i32;
+        }
+        if version >= 0 {
+            m.task_offset_interval_ms = 1i32;
+        }
+        if version >= 0 {
+            m.status = Some(vec![super::common::status::Status::populated(version)]);
+        }
+        if version >= 0 {
+            m.active_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+        }
+        if version >= 0 {
+            m.standby_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+        }
+        if version >= 0 {
+            m.warmup_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+        }
+        if version >= 0 {
+            m.endpoint_information_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.partitions_by_user_endpoint = Some(vec![EndpointToPartitions::populated(version)]);
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndpointToPartitions {
     pub user_endpoint: super::common::endpoint::Endpoint,
@@ -150,13 +432,28 @@ pub struct EndpointToPartitions {
     pub standby_partitions: Vec<super::common::topic_partition::TopicPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for EndpointToPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { self.user_endpoint.encode(buf, version)? }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.active_partitions).len(), flex); for it in &self.active_partitions { it.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.standby_partitions).len(), flex); for it in &self.standby_partitions { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            self.user_endpoint.encode(buf, version)?;
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.active_partitions).len(), flex);
+                for it in &self.active_partitions {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.standby_partitions).len(), flex);
+                for it in &self.standby_partitions {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -166,9 +463,35 @@ impl Encode for EndpointToPartitions {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += self.user_endpoint.encoded_len(version); }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.active_partitions).len(), flex); let body: usize = (self.active_partitions).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.standby_partitions).len(), flex); let body: usize = (self.standby_partitions).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += self.user_endpoint.encoded_len(version);
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.active_partitions).len(),
+                    flex,
+                );
+                let body: usize = (self.active_partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.standby_partitions).len(),
+                    flex,
+                );
+                let body: usize = (self.standby_partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -176,31 +499,61 @@ impl Encode for EndpointToPartitions {
         n
     }
 }
-
-impl<'de> Decode<'de> for EndpointToPartitions {
+impl Decode<'_> for EndpointToPartitions {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.user_endpoint = super::common::endpoint::Endpoint::decode(buf, version)?; }
-        if version >= 0 { out.active_partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::topic_partition::TopicPartition::decode(buf, version)?); } v }; }
-        if version >= 0 { out.standby_partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(super::common::topic_partition::TopicPartition::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.user_endpoint = super::common::endpoint::Endpoint::decode(buf, version)?;
+        }
+        if version >= 0 {
+            out.active_partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(super::common::topic_partition::TopicPartition::decode(
+                        buf, version,
+                    )?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.standby_partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(super::common::topic_partition::TopicPartition::decode(
+                        buf, version,
+                    )?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl EndpointToPartitions {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.user_endpoint = super::common::endpoint::Endpoint::populated(version); }
-        if version >= 0 { m.active_partitions = vec![super::common::topic_partition::TopicPartition::populated(version)]; }
-        if version >= 0 { m.standby_partitions = vec![super::common::topic_partition::TopicPartition::populated(version)]; }
+        if version >= 0 {
+            m.user_endpoint = super::common::endpoint::Endpoint::populated(version);
+        }
+        if version >= 0 {
+            m.active_partitions = vec![super::common::topic_partition::TopicPartition::populated(
+                version,
+            )];
+        }
+        if version >= 0 {
+            m.standby_partitions = vec![super::common::topic_partition::TopicPartition::populated(
+                version,
+            )];
+        }
         m
     }
 }
@@ -214,7 +567,10 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
-    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "memberId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     obj.insert("memberEpoch".to_string(), ::serde_json::json!(0));
     obj.insert("heartbeatIntervalMs".to_string(), ::serde_json::json!(0));
     obj.insert("acceptableRecoveryLag".to_string(), ::serde_json::json!(0));
@@ -223,7 +579,13 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("activeTasks".to_string(), ::serde_json::Value::Null);
     obj.insert("standbyTasks".to_string(), ::serde_json::Value::Null);
     obj.insert("warmupTasks".to_string(), ::serde_json::Value::Null);
-    obj.insert("endpointInformationEpoch".to_string(), ::serde_json::json!(0));
-    obj.insert("partitionsByUserEndpoint".to_string(), ::serde_json::Value::Null);
+    obj.insert(
+        "endpointInformationEpoch".to_string(),
+        ::serde_json::json!(0),
+    );
+    obj.insert(
+        "partitionsByUserEndpoint".to_string(),
+        ::serde_json::Value::Null,
+    );
     ::serde_json::Value::Object(obj)
 }

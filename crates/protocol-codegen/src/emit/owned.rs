@@ -245,14 +245,14 @@ fn emit_nested_structs_for_fields(
     }
 }
 
-fn flex_min(spec: &MessageSpec) -> i16 {
+pub(crate) fn flex_min(spec: &MessageSpec) -> i16 {
     match spec.flexible_versions {
         FlexibleVersions::Range(r) => r.min,
         FlexibleVersions::None => i16::MAX,
     }
 }
 
-fn base_type(t: &str) -> &str {
+pub(crate) fn base_type(t: &str) -> &str {
     t.strip_prefix("[]").unwrap_or(t)
 }
 
@@ -284,7 +284,7 @@ fn has_tagged_fields_recursive(fields: &[FieldSpec]) -> bool {
 
 /// Returns true if any field (recursively) is `float64`.
 /// `f64` does not implement `Eq`, so structs with `float64` fields must not derive `Eq`.
-fn has_float64_recursive(fields: &[FieldSpec]) -> bool {
+pub(crate) fn has_float64_recursive(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let base = base_type(&f.field_type);
         base == "float64" || has_float64_recursive(&f.fields)
@@ -362,7 +362,7 @@ fn uses_nullable_struct_recursive(fields: &[FieldSpec]) -> bool {
     })
 }
 
-fn has_any_flex(spec: &MessageSpec) -> bool {
+pub(crate) fn has_any_flex(spec: &MessageSpec) -> bool {
     matches!(spec.flexible_versions, FlexibleVersions::Range(_))
 }
 
@@ -371,7 +371,7 @@ fn has_any_tagged_in_spec(spec: &MessageSpec) -> bool {
 }
 
 #[allow(clippy::too_many_lines)]
-fn emit_imports(out: &mut String, spec: &MessageSpec) {
+pub(crate) fn emit_imports(out: &mut String, spec: &MessageSpec) {
     let types = used_field_types_recursive(&spec.fields);
     let tagged = has_any_tagged_in_spec(spec);
     let flex = has_any_flex(spec);
@@ -543,7 +543,7 @@ fn emit_imports(out: &mut String, spec: &MessageSpec) {
     .unwrap();
 }
 
-fn emit_constants(out: &mut String, spec: &MessageSpec) {
+pub(crate) fn emit_constants(out: &mut String, spec: &MessageSpec) {
     let min_version = spec.valid_versions.min;
     let max_version = spec.valid_versions.max;
     let flex = flex_min(spec);
@@ -573,7 +573,7 @@ fn is_flexible(version: i16) -> bool {{ version >= FLEXIBLE_MIN }}"
 
 /// Returns a Rust expression for the default value of an owned field, respecting the
 /// schema-level `default` attribute (e.g. `"-1"` for `ControllerId`).
-fn owned_default_expr(f: &FieldSpec) -> String {
+pub(crate) fn owned_default_expr(f: &FieldSpec) -> String {
     let base = base_type(&f.field_type);
     let is_array = f.field_type.starts_with("[]");
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
@@ -643,7 +643,7 @@ fn parse_string_default_as_i64(s: &str) -> Option<i64> {
 
 /// Returns true if any field in `fields` has a non-trivial schema default
 /// (one that differs from the Rust type's natural Default).
-fn needs_manual_default(fields: &[FieldSpec]) -> bool {
+pub(crate) fn needs_manual_default(fields: &[FieldSpec]) -> bool {
     fields.iter().any(|f| {
         let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
         match &f.default {
@@ -726,7 +726,10 @@ impl Default for {type_name} {{
 }
 
 /// Returns the resolved Rust path for a struct-typed field, or `None` for primitives.
-fn struct_path_for(f: &FieldSpec, res_map: &HashMap<String, Resolution>) -> Option<String> {
+pub(crate) fn struct_path_for(
+    f: &FieldSpec,
+    res_map: &HashMap<String, Resolution>,
+) -> Option<String> {
     let base = base_type(&f.field_type);
     if is_struct_type(base) {
         res_map.get(base).map(|r| r.rust_path.clone())
@@ -735,7 +738,7 @@ fn struct_path_for(f: &FieldSpec, res_map: &HashMap<String, Resolution>) -> Opti
     }
 }
 
-fn is_struct_type(t: &str) -> bool {
+pub(crate) fn is_struct_type(t: &str) -> bool {
     t.chars().next().is_some_and(char::is_uppercase)
 }
 
@@ -1144,7 +1147,7 @@ fn emit_owned_populated_field(
 
 /// Build the populated-value expression for one owned field. `option` mirrors
 /// the field's Rust-type `Option<...>` wrapping as computed by `emit_struct`.
-fn owned_populated_value(
+pub(crate) fn owned_populated_value(
     f: &FieldSpec,
     res_map: &HashMap<String, Resolution>,
     option: bool,
@@ -1197,7 +1200,7 @@ fn owned_populated_scalar(
 
 /// Returns `true` if this field has `"flexibleVersions": "none"` (per-field override),
 /// meaning it must always use the legacy (non-compact) codec even in flex message versions.
-fn field_forces_non_flex(f: &FieldSpec) -> bool {
+pub(crate) fn field_forces_non_flex(f: &FieldSpec) -> bool {
     matches!(f.flexible_versions, Some(FlexibleVersions::None))
 }
 
@@ -1326,7 +1329,7 @@ fn emit_decode_one(
 
 /// When a non-nullable decode is used but the field type is `Option<T>`, wrap the
 /// result in `Some`. For array-of-struct this wraps the whole block.
-fn wrap_non_nullable_for_option(
+pub(crate) fn wrap_non_nullable_for_option(
     _schema_type: &str,
     non_nullable_call: &str,
     _res_map: &HashMap<String, Resolution>,
@@ -1339,7 +1342,7 @@ fn wrap_non_nullable_for_option(
 /// Returns a Rust boolean expression that is `true` when the tagged field
 /// equals its schema-specified default. This is used to suppress tagged field
 /// serialization (JVM Kafka also omits tagged fields that equal their defaults).
-fn tagged_is_default_cond(f: &FieldSpec) -> String {
+pub(crate) fn tagged_is_default_cond(f: &FieldSpec) -> String {
     let field = name_conv::field_name(&f.name);
     let base = base_type(&f.field_type);
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
@@ -1440,7 +1443,7 @@ fn emit_decode_tagged_arm(
 /// Encode a field whose Rust type is `Option<T>` but the wire format is non-nullable
 /// (because `nullable_versions.min > field.versions.min`).
 /// Treats `None` as the empty/default value for the underlying type.
-fn encode_call_option_as_non_nullable(
+pub(crate) fn encode_call_option_as_non_nullable(
     schema_type: &str,
     expr: &str,
     res_map: &HashMap<String, Resolution>,
@@ -1488,7 +1491,7 @@ fn encode_call_option_as_non_nullable(
 }
 
 /// Compute the `encoded_len` of a field whose Rust type is `Option<T>` but wire is non-nullable.
-fn encoded_len_expr_option_as_non_nullable(
+pub(crate) fn encoded_len_expr_option_as_non_nullable(
     schema_type: &str,
     expr: &str,
     res_map: &HashMap<String, Resolution>,
@@ -1534,7 +1537,7 @@ fn encoded_len_expr_option_as_non_nullable(
 
 /// Generate an encode call expression using a specific buffer variable name.
 /// This is used for tagged-field closures where the buffer is `b` not `buf`.
-fn encode_call_with_buf(
+pub(crate) fn encode_call_with_buf(
     schema_type: &str,
     expr: &str,
     nullable: bool,
@@ -1548,7 +1551,7 @@ fn encode_call_with_buf(
 }
 
 /// Generate a decode call expression using a specific buffer variable name.
-fn decode_call_with_buf(
+pub(crate) fn decode_call_with_buf(
     schema_type: &str,
     nullable: bool,
     res_map: &HashMap<String, Resolution>,
@@ -1562,7 +1565,7 @@ fn decode_call_with_buf(
 // `res_map` is threaded through for array-element recursion even though the
 // primitives branch doesn't use it directly.
 #[allow(clippy::only_used_in_recursion)]
-fn encode_call(
+pub(crate) fn encode_call(
     schema_type: &str,
     expr: &str,
     nullable: bool,
@@ -1657,7 +1660,7 @@ fn encode_call(
 }
 
 #[allow(clippy::only_used_in_recursion)]
-fn encoded_len_expr(
+pub(crate) fn encoded_len_expr(
     schema_type: &str,
     expr: &str,
     nullable: bool,
@@ -1746,7 +1749,7 @@ fn encoded_len_expr(
 }
 
 #[allow(clippy::only_used_in_recursion)]
-fn decode_call(
+pub(crate) fn decode_call(
     schema_type: &str,
     nullable: bool,
     res_map: &HashMap<String, Resolution>,
@@ -1856,10 +1859,10 @@ fn decode_call(
 
 // --- helpers --------------------------------------------------------------
 
-fn is_tagged(f: &FieldSpec) -> bool {
+pub(crate) fn is_tagged(f: &FieldSpec) -> bool {
     f.tag.is_some()
 }
-fn is_nullable(f: &FieldSpec) -> bool {
+pub(crate) fn is_nullable(f: &FieldSpec) -> bool {
     f.nullable_versions.is_some()
 }
 
@@ -1870,7 +1873,7 @@ fn is_nullable(f: &FieldSpec) -> bool {
 /// codec must switch between nullable and non-nullable per version. Returns
 /// `Some(cond)` for that boundary expression, or `None` when nullability is
 /// constant across the whole field range (use `is_nullable(f)` directly).
-fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
+pub(crate) fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
     let r = f.nullable_versions?;
     let need_lower = r.min > f.versions.min;
     let need_upper = r.max < f.versions.max;
@@ -1887,7 +1890,7 @@ fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
     Some(parts.join(" && "))
 }
 
-fn version_cond(r: VersionRange, version_var: &str) -> String {
+pub(crate) fn version_cond(r: VersionRange, version_var: &str) -> String {
     if r.max == i16::MAX {
         format!("{version_var} >= {}", r.min)
     } else {

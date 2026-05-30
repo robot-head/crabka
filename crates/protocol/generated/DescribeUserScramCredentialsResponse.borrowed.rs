@@ -2,17 +2,16 @@
 
 use bytes::BufMut;
 
-use crate::primitives::fixed::{get_i16, get_i32, get_i8, put_i16, put_i32, put_i8};
+use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i8, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 50;
@@ -21,9 +20,11 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeUserScramCredentialsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -31,41 +32,44 @@ pub struct DescribeUserScramCredentialsResponse<'a> {
     pub results: Vec<DescribeUserScramCredentialsResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for DescribeUserScramCredentialsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            results: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
+impl DescribeUserScramCredentialsResponse<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse
+    {
+        crate :: owned :: describe_user_scram_credentials_response :: DescribeUserScramCredentialsResponse { throttle_time_ms : (self . throttle_time_ms) , error_code : (self . error_code) , error_message : (self . error_message) . map (std::string::ToString::to_string) , results : (self . results) . iter () . map (DescribeUserScramCredentialsResult::to_owned) . collect () , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
     }
 }
-
-impl<'a> DescribeUserScramCredentialsResponse<'a> {
-    pub fn to_owned(&self) -> crate::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
-        crate::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse {
-            throttle_time_ms: (self.throttle_time_ms),
-            error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
-            results: (self.results).iter().map(|it| it.to_owned()).collect(),
-            unknown_tagged_fields: self.unknown_tagged_fields.clone(),
-        }
-    }
-}
-
-impl<'a> Encode for DescribeUserScramCredentialsResponse<'a> {
+impl Encode for DescribeUserScramCredentialsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message) } else { put_nullable_string(buf, self.error_message) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.results).len(), flex); for it in &self.results { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message);
+            } else {
+                put_nullable_string(buf, self.error_message);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.results).len(), flex);
+                for it in &self.results {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -75,10 +79,30 @@ impl<'a> Encode for DescribeUserScramCredentialsResponse<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message) } else { nullable_string_len(self.error_message) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.results).len(), flex); let body: usize = (self.results).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message)
+            } else {
+                nullable_string_len(self.error_message)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.results).len(), flex);
+                let body: usize = (self.results)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -86,41 +110,68 @@ impl<'a> Encode for DescribeUserScramCredentialsResponse<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DescribeUserScramCredentialsResponse<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.results = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DescribeUserScramCredentialsResult::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.results = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribeUserScramCredentialsResult::decode_borrow(
+                        buf, version,
+                    )?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> DescribeUserScramCredentialsResponse<'a> {
+impl DescribeUserScramCredentialsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x"); }
-        if version >= 0 { m.results = vec![DescribeUserScramCredentialsResult::populated(version)]; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x");
+        }
+        if version >= 0 {
+            m.results = vec![DescribeUserScramCredentialsResult::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeUserScramCredentialsResult<'a> {
     pub user: &'a str,
     pub error_code: i16,
@@ -128,38 +179,51 @@ pub struct DescribeUserScramCredentialsResult<'a> {
     pub credential_infos: Vec<CredentialInfo>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for DescribeUserScramCredentialsResult<'a> {
-    fn default() -> Self {
-        Self {
-            user: "",
-            error_code: 0i16,
-            error_message: None,
-            credential_infos: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> DescribeUserScramCredentialsResult<'a> {
-    pub fn to_owned(&self) -> crate::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResult {
+impl DescribeUserScramCredentialsResult<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResult
+    {
         crate::owned::describe_user_scram_credentials_response::DescribeUserScramCredentialsResult {
             user: (self.user).to_string(),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
-            credential_infos: (self.credential_infos).iter().map(|it| it.to_owned()).collect(),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            credential_infos: (self.credential_infos)
+                .iter()
+                .map(CredentialInfo::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for DescribeUserScramCredentialsResult<'a> {
+impl Encode for DescribeUserScramCredentialsResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, self.user) } else { put_string(buf, self.user) } }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message) } else { put_nullable_string(buf, self.error_message) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.credential_infos).len(), flex); for it in &self.credential_infos { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.user);
+            } else {
+                put_string(buf, self.user);
+            }
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message);
+            } else {
+                put_nullable_string(buf, self.error_message);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.credential_infos).len(), flex);
+                for it in &self.credential_infos {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -169,10 +233,36 @@ impl<'a> Encode for DescribeUserScramCredentialsResult<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.user) } else { string_len(self.user) }; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message) } else { nullable_string_len(self.error_message) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.credential_infos).len(), flex); let body: usize = (self.credential_infos).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.user)
+            } else {
+                string_len(self.user)
+            };
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message)
+            } else {
+                nullable_string_len(self.error_message)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.credential_infos).len(),
+                    flex,
+                );
+                let body: usize = (self.credential_infos)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -180,56 +270,73 @@ impl<'a> Encode for DescribeUserScramCredentialsResult<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DescribeUserScramCredentialsResult<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.user = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.credential_infos = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(CredentialInfo::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.user = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.credential_infos = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(CredentialInfo::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> DescribeUserScramCredentialsResult<'a> {
+impl DescribeUserScramCredentialsResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.user = "x"; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x"); }
-        if version >= 0 { m.credential_infos = vec![CredentialInfo::populated(version)]; }
+        if version >= 0 {
+            m.user = "x";
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x");
+        }
+        if version >= 0 {
+            m.credential_infos = vec![CredentialInfo::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CredentialInfo {
     pub mechanism: i8,
     pub iterations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for CredentialInfo {
-    fn default() -> Self {
-        Self {
-            mechanism: 0i8,
-            iterations: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl CredentialInfo {
-    pub fn to_owned(&self) -> crate::owned::describe_user_scram_credentials_response::CredentialInfo {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::describe_user_scram_credentials_response::CredentialInfo {
         crate::owned::describe_user_scram_credentials_response::CredentialInfo {
             mechanism: (self.mechanism),
             iterations: (self.iterations),
@@ -237,12 +344,15 @@ impl CredentialInfo {
         }
     }
 }
-
 impl Encode for CredentialInfo {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i8(buf, self.mechanism) }
-        if version >= 0 { put_i32(buf, self.iterations) }
+        if version >= 0 {
+            put_i8(buf, self.mechanism);
+        }
+        if version >= 0 {
+            put_i32(buf, self.iterations);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -252,8 +362,12 @@ impl Encode for CredentialInfo {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += 4; }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += 4;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -261,29 +375,33 @@ impl Encode for CredentialInfo {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for CredentialInfo {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.mechanism = get_i8(buf)?; }
-        if version >= 0 { out.iterations = get_i32(buf)?; }
+        if version >= 0 {
+            out.mechanism = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.iterations = get_i32(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl CredentialInfo {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.mechanism = 1i8; }
-        if version >= 0 { m.iterations = 1i32; }
+        if version >= 0 {
+            m.mechanism = 1i8;
+        }
+        if version >= 0 {
+            m.iterations = 1i32;
+        }
         m
     }
 }
