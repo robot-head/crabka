@@ -10,6 +10,11 @@ description = "Metadata Raft quorum (openraft adapters + Controller) for Crabka"
 [lints]
 workspace = true
 
+[features]
+# Throwaway KIP-595 slice-0 spike: serves real KRaft ApiVersions+Fetch on the
+# controller listener so a JVM broker observer can fetch the metadata log.
+kraft-spike = []
+
 [dependencies]
 crabka-metadata = { version = "0.1", path = "../metadata" }
 crabka-log = { version = "0.1", path = "../log" }

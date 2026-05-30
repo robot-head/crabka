@@ -16,6 +16,9 @@ default = []
 # `test_advance_log_start` for the replication integration tests.
 # Pulls in `crabka-log/test-helpers` to reach `Log::test_set_log_start_offset`.
 test-helpers = ["crabka-log/test-helpers"]
+# Throwaway KIP-595 slice-0 spike: forwards to crabka-raft's kraft-spike,
+# which serves real KRaft ApiVersions+Fetch on the controller listener.
+kraft-spike = ["crabka-raft/kraft-spike"]
 
 [[bin]]
 name = "crabka-broker"

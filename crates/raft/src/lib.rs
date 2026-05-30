@@ -49,6 +49,8 @@ mod config;
 mod controller;
 mod error;
 pub mod handshake;
+#[cfg(feature = "kraft-spike")]
+mod kraft_spike;
 mod log_store;
 mod metadata_fetch;
 mod network;
