@@ -41,7 +41,7 @@ impl Encode for DescribeGroupsResponse {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -78,7 +78,7 @@ impl Encode for DescribeGroupsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeGroupsResponse {
+impl Decode<'_> for DescribeGroupsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -152,41 +152,41 @@ impl Encode for DescribedGroup {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 6 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_state)
+                put_compact_string(buf, &self.group_state);
             } else {
-                put_string(buf, &self.group_state)
+                put_string(buf, &self.group_state);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.protocol_type)
+                put_compact_string(buf, &self.protocol_type);
             } else {
-                put_string(buf, &self.protocol_type)
+                put_string(buf, &self.protocol_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.protocol_data)
+                put_compact_string(buf, &self.protocol_data);
             } else {
-                put_string(buf, &self.protocol_data)
+                put_string(buf, &self.protocol_data);
             }
         }
         if version >= 0 {
@@ -198,7 +198,7 @@ impl Encode for DescribedGroup {
             }
         }
         if version >= 3 {
-            put_i32(buf, self.authorized_operations)
+            put_i32(buf, self.authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -268,7 +268,7 @@ impl Encode for DescribedGroup {
         n
     }
 }
-impl<'de> Decode<'de> for DescribedGroup {
+impl Decode<'_> for DescribedGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
@@ -376,44 +376,44 @@ impl Encode for DescribedGroupMember {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 4 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref())
+                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref())
+                put_nullable_string(buf, self.group_instance_id.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.client_id)
+                put_compact_string(buf, &self.client_id);
             } else {
-                put_string(buf, &self.client_id)
+                put_string(buf, &self.client_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.client_host)
+                put_compact_string(buf, &self.client_host);
             } else {
-                put_string(buf, &self.client_host)
+                put_string(buf, &self.client_host);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.member_metadata)
+                put_compact_bytes(buf, &self.member_metadata);
             } else {
-                put_bytes(buf, &self.member_metadata)
+                put_bytes(buf, &self.member_metadata);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.member_assignment)
+                put_compact_bytes(buf, &self.member_assignment);
             } else {
-                put_bytes(buf, &self.member_assignment)
+                put_bytes(buf, &self.member_assignment);
             }
         }
         if flex {
@@ -474,7 +474,7 @@ impl Encode for DescribedGroupMember {
         n
     }
 }
-impl<'de> Decode<'de> for DescribedGroupMember {
+impl Decode<'_> for DescribedGroupMember {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();

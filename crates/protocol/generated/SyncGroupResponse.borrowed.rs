@@ -4,14 +4,13 @@ use bytes::{BufMut, Bytes};
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes::{put_bytes, put_compact_bytes};
 use crate::primitives::string_bytes_borrowed::{get_bytes_borrowed, get_compact_bytes_borrowed};
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -26,7 +25,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncGroupResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -35,31 +34,19 @@ pub struct SyncGroupResponse<'a> {
     pub assignment: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for SyncGroupResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            protocol_type: None,
-            protocol_name: None,
-            assignment: &[],
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> SyncGroupResponse<'a> {
+impl SyncGroupResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::sync_group_response::SyncGroupResponse {
         crate::owned::sync_group_response::SyncGroupResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            protocol_type: (self.protocol_type).map(|s| s.to_string()),
-            protocol_name: (self.protocol_name).map(|s| s.to_string()),
+            protocol_type: (self.protocol_type).map(std::string::ToString::to_string),
+            protocol_name: (self.protocol_name).map(std::string::ToString::to_string),
             assignment: Bytes::copy_from_slice(self.assignment),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for SyncGroupResponse<'a> {
+impl Encode for SyncGroupResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -69,30 +56,30 @@ impl<'a> Encode for SyncGroupResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.protocol_type)
+                put_compact_nullable_string(buf, self.protocol_type);
             } else {
-                put_nullable_string(buf, self.protocol_type)
+                put_nullable_string(buf, self.protocol_type);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.protocol_name)
+                put_compact_nullable_string(buf, self.protocol_name);
             } else {
-                put_nullable_string(buf, self.protocol_name)
+                put_nullable_string(buf, self.protocol_name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.assignment)
+                put_compact_bytes(buf, self.assignment);
             } else {
-                put_bytes(buf, self.assignment)
+                put_bytes(buf, self.assignment);
             }
         }
         if flex {
@@ -184,7 +171,7 @@ impl<'de> DecodeBorrow<'de> for SyncGroupResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> SyncGroupResponse<'a> {
+impl SyncGroupResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -93,7 +93,7 @@ impl Encode for AlterUserScramCredentialsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for AlterUserScramCredentialsRequest {
+impl Decode<'_> for AlterUserScramCredentialsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -154,13 +154,13 @@ impl Encode for ScramCredentialDeletion {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.mechanism)
+            put_i8(buf, self.mechanism);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -188,7 +188,7 @@ impl Encode for ScramCredentialDeletion {
         n
     }
 }
-impl<'de> Decode<'de> for ScramCredentialDeletion {
+impl Decode<'_> for ScramCredentialDeletion {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -236,29 +236,29 @@ impl Encode for ScramCredentialUpsertion {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.mechanism)
+            put_i8(buf, self.mechanism);
         }
         if version >= 0 {
-            put_i32(buf, self.iterations)
+            put_i32(buf, self.iterations);
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.salt)
+                put_compact_bytes(buf, &self.salt);
             } else {
-                put_bytes(buf, &self.salt)
+                put_bytes(buf, &self.salt);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.salted_password)
+                put_compact_bytes(buf, &self.salted_password);
             } else {
-                put_bytes(buf, &self.salted_password)
+                put_bytes(buf, &self.salted_password);
             }
         }
         if flex {
@@ -304,7 +304,7 @@ impl Encode for ScramCredentialUpsertion {
         n
     }
 }
-impl<'de> Decode<'de> for ScramCredentialUpsertion {
+impl Decode<'_> for ScramCredentialUpsertion {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

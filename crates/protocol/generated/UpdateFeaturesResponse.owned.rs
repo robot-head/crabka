@@ -39,19 +39,19 @@ impl Encode for UpdateFeaturesResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
-        if version >= 0 && version <= 1 {
+        if (0..=1).contains(&version) {
             {
                 crate::primitives::array::put_array_len(buf, (self.results).len(), flex);
                 for it in &self.results {
@@ -81,7 +81,7 @@ impl Encode for UpdateFeaturesResponse {
                 nullable_string_len(self.error_message.as_deref())
             };
         }
-        if version >= 0 && version <= 1 {
+        if (0..=1).contains(&version) {
             n += {
                 let prefix =
                     crate::primitives::array::array_len_prefix_len((self.results).len(), flex);
@@ -99,7 +99,7 @@ impl Encode for UpdateFeaturesResponse {
         n
     }
 }
-impl<'de> Decode<'de> for UpdateFeaturesResponse {
+impl Decode<'_> for UpdateFeaturesResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -122,7 +122,7 @@ impl<'de> Decode<'de> for UpdateFeaturesResponse {
                 get_nullable_string_owned(buf)?
             };
         }
-        if version >= 0 && version <= 1 {
+        if (0..=1).contains(&version) {
             out.results = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -152,7 +152,7 @@ impl UpdateFeaturesResponse {
         if version >= 0 {
             m.error_message = Some("x".to_string());
         }
-        if version >= 0 && version <= 1 {
+        if (0..=1).contains(&version) {
             m.results = vec![UpdatableFeatureResult::populated(version)];
         }
         m
@@ -170,19 +170,19 @@ impl Encode for UpdatableFeatureResult {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.feature)
+                put_compact_string(buf, &self.feature);
             } else {
-                put_string(buf, &self.feature)
+                put_string(buf, &self.feature);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {
@@ -218,7 +218,7 @@ impl Encode for UpdatableFeatureResult {
         n
     }
 }
-impl<'de> Decode<'de> for UpdatableFeatureResult {
+impl Decode<'_> for UpdatableFeatureResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

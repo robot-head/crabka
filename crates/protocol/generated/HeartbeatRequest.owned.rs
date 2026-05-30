@@ -40,26 +40,26 @@ impl Encode for HeartbeatRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.generation_id)
+            put_i32(buf, self.generation_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref())
+                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref())
+                put_nullable_string(buf, self.group_instance_id.as_deref());
             }
         }
         if flex {
@@ -102,7 +102,7 @@ impl Encode for HeartbeatRequest {
         n
     }
 }
-impl<'de> Decode<'de> for HeartbeatRequest {
+impl Decode<'_> for HeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

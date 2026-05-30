@@ -34,16 +34,16 @@ impl Encode for AllocateProducerIdsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i64(buf, self.producer_id_start)
+            put_i64(buf, self.producer_id_start);
         }
         if version >= 0 {
-            put_i32(buf, self.producer_id_len)
+            put_i32(buf, self.producer_id_len);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -73,7 +73,7 @@ impl Encode for AllocateProducerIdsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for AllocateProducerIdsResponse {
+impl Decode<'_> for AllocateProducerIdsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

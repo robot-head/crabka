@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct HeartbeatRequest<'a> {
     pub group_id: &'a str,
     pub generation_id: i32,
@@ -32,29 +32,18 @@ pub struct HeartbeatRequest<'a> {
     pub group_instance_id: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for HeartbeatRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            generation_id: 0i32,
-            member_id: "",
-            group_instance_id: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> HeartbeatRequest<'a> {
+impl HeartbeatRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::heartbeat_request::HeartbeatRequest {
         crate::owned::heartbeat_request::HeartbeatRequest {
             group_id: (self.group_id).to_string(),
             generation_id: (self.generation_id),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
+            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for HeartbeatRequest<'a> {
+impl Encode for HeartbeatRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -65,26 +54,26 @@ impl<'a> Encode for HeartbeatRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.generation_id)
+            put_i32(buf, self.generation_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id)
+                put_compact_nullable_string(buf, self.group_instance_id);
             } else {
-                put_nullable_string(buf, self.group_instance_id)
+                put_nullable_string(buf, self.group_instance_id);
             }
         }
         if flex {
@@ -168,7 +157,7 @@ impl<'de> DecodeBorrow<'de> for HeartbeatRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> HeartbeatRequest<'a> {
+impl HeartbeatRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

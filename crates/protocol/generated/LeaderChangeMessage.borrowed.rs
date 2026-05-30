@@ -14,7 +14,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderChangeMessage {
     pub version: i16,
     pub leader_id: i32,
@@ -22,26 +22,18 @@ pub struct LeaderChangeMessage {
     pub granting_voters: Vec<super::common::voter::Voter>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for LeaderChangeMessage {
-    fn default() -> Self {
-        Self {
-            version: 0i16,
-            leader_id: 0i32,
-            voters: Vec::new(),
-            granting_voters: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
 impl LeaderChangeMessage {
     pub fn to_owned(&self) -> crate::owned::leader_change_message::LeaderChangeMessage {
         crate::owned::leader_change_message::LeaderChangeMessage {
             version: (self.version),
             leader_id: (self.leader_id),
-            voters: (self.voters).iter().map(|it| it.to_owned()).collect(),
+            voters: (self.voters)
+                .iter()
+                .map(super::common::voter::Voter::to_owned)
+                .collect(),
             granting_voters: (self.granting_voters)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::common::voter::Voter::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -56,10 +48,10 @@ impl Encode for LeaderChangeMessage {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version)
+            put_i16(buf, self.version);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
             {

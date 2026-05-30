@@ -4,12 +4,11 @@ use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -24,22 +23,13 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GetReplicaLogInfoResponse<'a> {
     pub broker_epoch: i64,
     pub topic_partition_log_info_list: Vec<TopicPartitionLogInfo<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for GetReplicaLogInfoResponse<'a> {
-    fn default() -> Self {
-        Self {
-            broker_epoch: 0i64,
-            topic_partition_log_info_list: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> GetReplicaLogInfoResponse<'a> {
+impl GetReplicaLogInfoResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::get_replica_log_info_response::GetReplicaLogInfoResponse {
@@ -47,13 +37,13 @@ impl<'a> GetReplicaLogInfoResponse<'a> {
             broker_epoch: (self.broker_epoch),
             topic_partition_log_info_list: (self.topic_partition_log_info_list)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(TopicPartitionLogInfo::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for GetReplicaLogInfoResponse<'a> {
+impl Encode for GetReplicaLogInfoResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -63,7 +53,7 @@ impl<'a> Encode for GetReplicaLogInfoResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i64(buf, self.broker_epoch)
+            put_i64(buf, self.broker_epoch);
         }
         if version >= 0 {
             {
@@ -139,7 +129,7 @@ impl<'de> DecodeBorrow<'de> for GetReplicaLogInfoResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> GetReplicaLogInfoResponse<'a> {
+impl GetReplicaLogInfoResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -152,38 +142,29 @@ impl<'a> GetReplicaLogInfoResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartitionLogInfo<'a> {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partition_log_info: Vec<PartitionLogInfo<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicPartitionLogInfo<'a> {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partition_log_info: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicPartitionLogInfo<'a> {
+impl TopicPartitionLogInfo<'_> {
     pub fn to_owned(&self) -> crate::owned::get_replica_log_info_response::TopicPartitionLogInfo {
         crate::owned::get_replica_log_info_response::TopicPartitionLogInfo {
             topic_id: (self.topic_id),
             partition_log_info: (self.partition_log_info)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(PartitionLogInfo::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for TopicPartitionLogInfo<'a> {
+impl Encode for TopicPartitionLogInfo<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -249,7 +230,7 @@ impl<'de> DecodeBorrow<'de> for TopicPartitionLogInfo<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicPartitionLogInfo<'a> {
+impl TopicPartitionLogInfo<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -262,7 +243,7 @@ impl<'a> TopicPartitionLogInfo<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionLogInfo<'a> {
     pub partition: i32,
     pub last_written_leader_epoch: i32,
@@ -272,20 +253,7 @@ pub struct PartitionLogInfo<'a> {
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for PartitionLogInfo<'a> {
-    fn default() -> Self {
-        Self {
-            partition: 0i32,
-            last_written_leader_epoch: 0i32,
-            current_leader_epoch: 0i32,
-            log_end_offset: 0i64,
-            error_code: 0i16,
-            error_message: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> PartitionLogInfo<'a> {
+impl PartitionLogInfo<'_> {
     pub fn to_owned(&self) -> crate::owned::get_replica_log_info_response::PartitionLogInfo {
         crate::owned::get_replica_log_info_response::PartitionLogInfo {
             partition: (self.partition),
@@ -293,34 +261,34 @@ impl<'a> PartitionLogInfo<'a> {
             current_leader_epoch: (self.current_leader_epoch),
             log_end_offset: (self.log_end_offset),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for PartitionLogInfo<'a> {
+impl Encode for PartitionLogInfo<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 0 {
-            put_i32(buf, self.last_written_leader_epoch)
+            put_i32(buf, self.last_written_leader_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.current_leader_epoch)
+            put_i32(buf, self.current_leader_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.log_end_offset)
+            put_i64(buf, self.log_end_offset);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if flex {
@@ -394,7 +362,7 @@ impl<'de> DecodeBorrow<'de> for PartitionLogInfo<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> PartitionLogInfo<'a> {
+impl PartitionLogInfo<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

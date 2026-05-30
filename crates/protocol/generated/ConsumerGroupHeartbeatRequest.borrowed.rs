@@ -38,7 +38,7 @@ pub struct ConsumerGroupHeartbeatRequest<'a> {
     pub topic_partitions: Option<Vec<TopicPartitions>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ConsumerGroupHeartbeatRequest<'a> {
+impl Default for ConsumerGroupHeartbeatRequest<'_> {
     fn default() -> Self {
         Self {
             group_id: "",
@@ -55,7 +55,7 @@ impl<'a> Default for ConsumerGroupHeartbeatRequest<'a> {
         }
     }
 }
-impl<'a> ConsumerGroupHeartbeatRequest<'a> {
+impl ConsumerGroupHeartbeatRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest {
@@ -63,22 +63,23 @@ impl<'a> ConsumerGroupHeartbeatRequest<'a> {
             group_id: (self.group_id).to_string(),
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
-            instance_id: (self.instance_id).map(|s| s.to_string()),
-            rack_id: (self.rack_id).map(|s| s.to_string()),
+            instance_id: (self.instance_id).map(std::string::ToString::to_string),
+            rack_id: (self.rack_id).map(std::string::ToString::to_string),
             rebalance_timeout_ms: (self.rebalance_timeout_ms),
             subscribed_topic_names: (self.subscribed_topic_names)
                 .as_ref()
-                .map(|v| v.iter().map(|s| s.to_string()).collect()),
-            subscribed_topic_regex: (self.subscribed_topic_regex).map(|s| s.to_string()),
-            server_assignor: (self.server_assignor).map(|s| s.to_string()),
+                .map(|v| v.iter().map(std::string::ToString::to_string).collect()),
+            subscribed_topic_regex: (self.subscribed_topic_regex)
+                .map(std::string::ToString::to_string),
+            server_assignor: (self.server_assignor).map(std::string::ToString::to_string),
             topic_partitions: (self.topic_partitions)
                 .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+                .map(|v| v.iter().map(TopicPartitions::to_owned).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ConsumerGroupHeartbeatRequest<'a> {
+impl Encode for ConsumerGroupHeartbeatRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -89,37 +90,37 @@ impl<'a> Encode for ConsumerGroupHeartbeatRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.instance_id)
+                put_compact_nullable_string(buf, self.instance_id);
             } else {
-                put_nullable_string(buf, self.instance_id)
+                put_nullable_string(buf, self.instance_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id)
+                put_compact_nullable_string(buf, self.rack_id);
             } else {
-                put_nullable_string(buf, self.rack_id)
+                put_nullable_string(buf, self.rack_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.rebalance_timeout_ms)
+            put_i32(buf, self.rebalance_timeout_ms);
         }
         if version >= 0 {
             {
@@ -128,26 +129,26 @@ impl<'a> Encode for ConsumerGroupHeartbeatRequest<'a> {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, *it)
+                            put_compact_string(buf, it);
                         } else {
-                            put_string(buf, *it)
-                        };
+                            put_string(buf, it);
+                        }
                     }
                 }
             }
         }
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.subscribed_topic_regex)
+                put_compact_nullable_string(buf, self.subscribed_topic_regex);
             } else {
-                put_nullable_string(buf, self.subscribed_topic_regex)
+                put_nullable_string(buf, self.subscribed_topic_regex);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.server_assignor)
+                put_compact_nullable_string(buf, self.server_assignor);
             } else {
-                put_nullable_string(buf, self.server_assignor)
+                put_nullable_string(buf, self.server_assignor);
             }
         }
         if version >= 0 {
@@ -208,16 +209,16 @@ impl<'a> Encode for ConsumerGroupHeartbeatRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(*it)
+                                compact_string_len(it)
                             } else {
-                                string_len(*it)
+                                string_len(it)
                             }
                         })
                         .sum()
@@ -243,7 +244,7 @@ impl<'a> Encode for ConsumerGroupHeartbeatRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.topic_partitions).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -357,7 +358,7 @@ impl<'de> DecodeBorrow<'de> for ConsumerGroupHeartbeatRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ConsumerGroupHeartbeatRequest<'a> {
+impl ConsumerGroupHeartbeatRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -394,20 +395,11 @@ impl<'a> ConsumerGroupHeartbeatRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartitions {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for TopicPartitions {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl TopicPartitions {
     pub fn to_owned(&self) -> crate::owned::consumer_group_heartbeat_request::TopicPartitions {
@@ -422,7 +414,7 @@ impl Encode for TopicPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {

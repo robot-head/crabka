@@ -22,9 +22,9 @@ impl Encode for TopicPartition {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic)
+                put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic)
+                put_string(buf, &self.topic);
             }
         }
         if version >= 0 {
@@ -67,7 +67,7 @@ impl Encode for TopicPartition {
     }
 }
 
-impl<'de> Decode<'de> for TopicPartition {
+impl Decode<'_> for TopicPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

@@ -35,17 +35,17 @@ impl Encode for SaslHandshakeResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.mechanisms).len(), flex);
                 for it in &self.mechanisms {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -65,9 +65,9 @@ impl Encode for SaslHandshakeResponse {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -77,7 +77,7 @@ impl Encode for SaslHandshakeResponse {
         n
     }
 }
-impl<'de> Decode<'de> for SaslHandshakeResponse {
+impl Decode<'_> for SaslHandshakeResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

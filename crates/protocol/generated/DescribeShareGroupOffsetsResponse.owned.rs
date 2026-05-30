@@ -37,7 +37,7 @@ impl Encode for DescribeShareGroupOffsetsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -74,7 +74,7 @@ impl Encode for DescribeShareGroupOffsetsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeShareGroupOffsetsResponse {
+impl Decode<'_> for DescribeShareGroupOffsetsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -132,9 +132,9 @@ impl Encode for DescribeShareGroupOffsetsResponseGroup {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
@@ -146,13 +146,13 @@ impl Encode for DescribeShareGroupOffsetsResponseGroup {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {
@@ -196,7 +196,7 @@ impl Encode for DescribeShareGroupOffsetsResponseGroup {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeShareGroupOffsetsResponseGroup {
+impl Decode<'_> for DescribeShareGroupOffsetsResponseGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -267,13 +267,13 @@ impl Encode for DescribeShareGroupOffsetsResponseTopic {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic_name)
+                put_compact_string(buf, &self.topic_name);
             } else {
-                put_string(buf, &self.topic_name)
+                put_string(buf, &self.topic_name);
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -320,7 +320,7 @@ impl Encode for DescribeShareGroupOffsetsResponseTopic {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeShareGroupOffsetsResponseTopic {
+impl Decode<'_> for DescribeShareGroupOffsetsResponseTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -398,25 +398,25 @@ impl Encode for DescribeShareGroupOffsetsResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.start_offset)
+            put_i64(buf, self.start_offset);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 1 {
-            put_i64(buf, self.lag)
+            put_i64(buf, self.lag);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {
@@ -457,7 +457,7 @@ impl Encode for DescribeShareGroupOffsetsResponsePartition {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeShareGroupOffsetsResponsePartition {
+impl Decode<'_> for DescribeShareGroupOffsetsResponsePartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

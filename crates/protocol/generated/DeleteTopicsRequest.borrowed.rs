@@ -24,34 +24,30 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteTopicsRequest<'a> {
     pub topics: Vec<DeleteTopicState<'a>>,
     pub topic_names: Vec<&'a str>,
     pub timeout_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteTopicsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            topics: Vec::new(),
-            topic_names: Vec::new(),
-            timeout_ms: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteTopicsRequest<'a> {
+impl DeleteTopicsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_topics_request::DeleteTopicsRequest {
         crate::owned::delete_topics_request::DeleteTopicsRequest {
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
-            topic_names: (self.topic_names).iter().map(|s| s.to_string()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(DeleteTopicState::to_owned)
+                .collect(),
+            topic_names: (self.topic_names)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             timeout_ms: (self.timeout_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteTopicsRequest<'a> {
+impl Encode for DeleteTopicsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -68,20 +64,20 @@ impl<'a> Encode for DeleteTopicsRequest<'a> {
                 }
             }
         }
-        if version >= 0 && version <= 5 {
+        if (0..=5).contains(&version) {
             {
                 crate::primitives::array::put_array_len(buf, (self.topic_names).len(), flex);
                 for it in &self.topic_names {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -100,7 +96,7 @@ impl<'a> Encode for DeleteTopicsRequest<'a> {
                 prefix + body
             };
         }
-        if version >= 0 && version <= 5 {
+        if (0..=5).contains(&version) {
             n += {
                 let prefix =
                     crate::primitives::array::array_len_prefix_len((self.topic_names).len(), flex);
@@ -108,9 +104,9 @@ impl<'a> Encode for DeleteTopicsRequest<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -147,7 +143,7 @@ impl<'de> DecodeBorrow<'de> for DeleteTopicsRequest<'de> {
                 v
             };
         }
-        if version >= 0 && version <= 5 {
+        if (0..=5).contains(&version) {
             out.topic_names = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -171,14 +167,14 @@ impl<'de> DecodeBorrow<'de> for DeleteTopicsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteTopicsRequest<'a> {
+impl DeleteTopicsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
         if version >= 6 {
             m.topics = vec![DeleteTopicState::populated(version)];
         }
-        if version >= 0 && version <= 5 {
+        if (0..=5).contains(&version) {
             m.topic_names = vec!["x"];
         }
         if version >= 0 {
@@ -187,42 +183,33 @@ impl<'a> DeleteTopicsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteTopicState<'a> {
     pub name: Option<&'a str>,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteTopicState<'a> {
-    fn default() -> Self {
-        Self {
-            name: None,
-            topic_id: Default::default(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteTopicState<'a> {
+impl DeleteTopicState<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_topics_request::DeleteTopicState {
         crate::owned::delete_topics_request::DeleteTopicState {
-            name: (self.name).map(|s| s.to_string()),
+            name: (self.name).map(std::string::ToString::to_string),
             topic_id: (self.topic_id),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteTopicState<'a> {
+impl Encode for DeleteTopicState<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 6 {
             if flex {
-                put_compact_nullable_string(buf, self.name)
+                put_compact_nullable_string(buf, self.name);
             } else {
-                put_nullable_string(buf, self.name)
+                put_nullable_string(buf, self.name);
             }
         }
         if version >= 6 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -271,7 +258,7 @@ impl<'de> DecodeBorrow<'de> for DeleteTopicState<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteTopicState<'a> {
+impl DeleteTopicState<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

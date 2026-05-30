@@ -20,28 +20,20 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreateAclsRequest<'a> {
     pub creations: Vec<AclCreation<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for CreateAclsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            creations: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> CreateAclsRequest<'a> {
+impl CreateAclsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::create_acls_request::CreateAclsRequest {
         crate::owned::create_acls_request::CreateAclsRequest {
-            creations: (self.creations).iter().map(|it| it.to_owned()).collect(),
+            creations: (self.creations).iter().map(AclCreation::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for CreateAclsRequest<'a> {
+impl Encode for CreateAclsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -112,7 +104,7 @@ impl<'de> DecodeBorrow<'de> for CreateAclsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> CreateAclsRequest<'a> {
+impl CreateAclsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -133,7 +125,7 @@ pub struct AclCreation<'a> {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AclCreation<'a> {
+impl Default for AclCreation<'_> {
     fn default() -> Self {
         Self {
             resource_type: 0i8,
@@ -147,7 +139,7 @@ impl<'a> Default for AclCreation<'a> {
         }
     }
 }
-impl<'a> AclCreation<'a> {
+impl AclCreation<'_> {
     pub fn to_owned(&self) -> crate::owned::create_acls_request::AclCreation {
         crate::owned::create_acls_request::AclCreation {
             resource_type: (self.resource_type),
@@ -161,41 +153,41 @@ impl<'a> AclCreation<'a> {
         }
     }
 }
-impl<'a> Encode for AclCreation<'a> {
+impl Encode for AclCreation<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name)
+                put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name)
+                put_string(buf, self.resource_name);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.resource_pattern_type)
+            put_i8(buf, self.resource_pattern_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal)
+                put_compact_string(buf, self.principal);
             } else {
-                put_string(buf, self.principal)
+                put_string(buf, self.principal);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.operation)
+            put_i8(buf, self.operation);
         }
         if version >= 0 {
-            put_i8(buf, self.permission_type)
+            put_i8(buf, self.permission_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -290,7 +282,7 @@ impl<'de> DecodeBorrow<'de> for AclCreation<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AclCreation<'a> {
+impl AclCreation<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

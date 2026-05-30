@@ -37,9 +37,9 @@ impl Encode for InitializeShareGroupStateRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
@@ -81,7 +81,7 @@ impl Encode for InitializeShareGroupStateRequest {
         n
     }
 }
-impl<'de> Decode<'de> for InitializeShareGroupStateRequest {
+impl Decode<'_> for InitializeShareGroupStateRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -138,7 +138,7 @@ impl Encode for InitializeStateData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -178,7 +178,7 @@ impl Encode for InitializeStateData {
         n
     }
 }
-impl<'de> Decode<'de> for InitializeStateData {
+impl Decode<'_> for InitializeStateData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -226,13 +226,13 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 0 {
-            put_i32(buf, self.state_epoch)
+            put_i32(buf, self.state_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.start_offset)
+            put_i64(buf, self.start_offset);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -259,7 +259,7 @@ impl Encode for PartitionData {
         n
     }
 }
-impl<'de> Decode<'de> for PartitionData {
+impl Decode<'_> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

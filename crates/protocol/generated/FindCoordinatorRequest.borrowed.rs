@@ -20,37 +20,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FindCoordinatorRequest<'a> {
     pub key: &'a str,
     pub key_type: i8,
     pub coordinator_keys: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for FindCoordinatorRequest<'a> {
-    fn default() -> Self {
-        Self {
-            key: "",
-            key_type: 0i8,
-            coordinator_keys: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> FindCoordinatorRequest<'a> {
+impl FindCoordinatorRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::find_coordinator_request::FindCoordinatorRequest {
         crate::owned::find_coordinator_request::FindCoordinatorRequest {
             key: (self.key).to_string(),
             key_type: (self.key_type),
             coordinator_keys: (self.coordinator_keys)
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for FindCoordinatorRequest<'a> {
+impl Encode for FindCoordinatorRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -59,25 +49,25 @@ impl<'a> Encode for FindCoordinatorRequest<'a> {
             });
         }
         let flex = is_flexible(version);
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, self.key)
+                put_compact_string(buf, self.key);
             } else {
-                put_string(buf, self.key)
+                put_string(buf, self.key);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.key_type)
+            put_i8(buf, self.key_type);
         }
         if version >= 4 {
             {
                 crate::primitives::array::put_array_len(buf, (self.coordinator_keys).len(), flex);
                 for it in &self.coordinator_keys {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -90,7 +80,7 @@ impl<'a> Encode for FindCoordinatorRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += if flex {
                 compact_string_len(self.key)
             } else {
@@ -110,9 +100,9 @@ impl<'a> Encode for FindCoordinatorRequest<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -136,7 +126,7 @@ impl<'de> DecodeBorrow<'de> for FindCoordinatorRequest<'de> {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.key = if flex {
                 get_compact_string_borrowed(buf)?
             } else {
@@ -167,11 +157,11 @@ impl<'de> DecodeBorrow<'de> for FindCoordinatorRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> FindCoordinatorRequest<'a> {
+impl FindCoordinatorRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.key = "x";
         }
         if version >= 1 {

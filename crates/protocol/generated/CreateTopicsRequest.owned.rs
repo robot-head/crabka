@@ -56,10 +56,10 @@ impl Encode for CreateTopicsRequest {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 1 {
-            put_bool(buf, self.validate_only)
+            put_bool(buf, self.validate_only);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -91,7 +91,7 @@ impl Encode for CreateTopicsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for CreateTopicsRequest {
+impl Decode<'_> for CreateTopicsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -154,16 +154,16 @@ impl Encode for CreatableTopic {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.num_partitions)
+            put_i32(buf, self.num_partitions);
         }
         if version >= 0 {
-            put_i16(buf, self.replication_factor)
+            put_i16(buf, self.replication_factor);
         }
         if version >= 0 {
             {
@@ -232,7 +232,7 @@ impl Encode for CreatableTopic {
         n
     }
 }
-impl<'de> Decode<'de> for CreatableTopic {
+impl Decode<'_> for CreatableTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
@@ -308,7 +308,7 @@ impl Encode for CreatableReplicaAssignment {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
             {
@@ -345,7 +345,7 @@ impl Encode for CreatableReplicaAssignment {
         n
     }
 }
-impl<'de> Decode<'de> for CreatableReplicaAssignment {
+impl Decode<'_> for CreatableReplicaAssignment {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
@@ -393,16 +393,16 @@ impl Encode for CreatableTopicConfig {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value.as_deref())
+                put_compact_nullable_string(buf, self.value.as_deref());
             } else {
-                put_nullable_string(buf, self.value.as_deref())
+                put_nullable_string(buf, self.value.as_deref());
             }
         }
         if flex {
@@ -435,7 +435,7 @@ impl Encode for CreatableTopicConfig {
         n
     }
 }
-impl<'de> Decode<'de> for CreatableTopicConfig {
+impl Decode<'_> for CreatableTopicConfig {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();

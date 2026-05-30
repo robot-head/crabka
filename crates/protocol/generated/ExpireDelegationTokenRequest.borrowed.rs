@@ -18,22 +18,13 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExpireDelegationTokenRequest<'a> {
     pub hmac: &'a [u8],
     pub expiry_time_period_ms: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ExpireDelegationTokenRequest<'a> {
-    fn default() -> Self {
-        Self {
-            hmac: &[],
-            expiry_time_period_ms: 0i64,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ExpireDelegationTokenRequest<'a> {
+impl ExpireDelegationTokenRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::expire_delegation_token_request::ExpireDelegationTokenRequest {
@@ -44,7 +35,7 @@ impl<'a> ExpireDelegationTokenRequest<'a> {
         }
     }
 }
-impl<'a> Encode for ExpireDelegationTokenRequest<'a> {
+impl Encode for ExpireDelegationTokenRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -55,13 +46,13 @@ impl<'a> Encode for ExpireDelegationTokenRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.hmac)
+                put_compact_bytes(buf, self.hmac);
             } else {
-                put_bytes(buf, self.hmac)
+                put_bytes(buf, self.hmac);
             }
         }
         if version >= 0 {
-            put_i64(buf, self.expiry_time_period_ms)
+            put_i64(buf, self.expiry_time_period_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -118,7 +109,7 @@ impl<'de> DecodeBorrow<'de> for ExpireDelegationTokenRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ExpireDelegationTokenRequest<'a> {
+impl ExpireDelegationTokenRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

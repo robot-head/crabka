@@ -37,7 +37,7 @@ impl Encode for CreatePartitionsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -77,7 +77,7 @@ impl Encode for CreatePartitionsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for CreatePartitionsResponse {
+impl Decode<'_> for CreatePartitionsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -132,19 +132,19 @@ impl Encode for CreatePartitionsTopicResult {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {
@@ -180,7 +180,7 @@ impl Encode for CreatePartitionsTopicResult {
         n
     }
 }
-impl<'de> Decode<'de> for CreatePartitionsTopicResult {
+impl Decode<'_> for CreatePartitionsTopicResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

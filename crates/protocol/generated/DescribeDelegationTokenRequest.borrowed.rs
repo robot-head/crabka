@@ -18,32 +18,26 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeDelegationTokenRequest<'a> {
     pub owners: Option<Vec<DescribeDelegationTokenOwner<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeDelegationTokenRequest<'a> {
-    fn default() -> Self {
-        Self {
-            owners: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeDelegationTokenRequest<'a> {
+impl DescribeDelegationTokenRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_request::DescribeDelegationTokenRequest {
         crate::owned::describe_delegation_token_request::DescribeDelegationTokenRequest {
-            owners: (self.owners)
-                .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+            owners: (self.owners).as_ref().map(|v| {
+                v.iter()
+                    .map(DescribeDelegationTokenOwner::to_owned)
+                    .collect()
+            }),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeDelegationTokenRequest<'a> {
+impl Encode for DescribeDelegationTokenRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -76,7 +70,7 @@ impl<'a> Encode for DescribeDelegationTokenRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.owners).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -123,7 +117,7 @@ impl<'de> DecodeBorrow<'de> for DescribeDelegationTokenRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeDelegationTokenRequest<'a> {
+impl DescribeDelegationTokenRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -133,22 +127,13 @@ impl<'a> DescribeDelegationTokenRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeDelegationTokenOwner<'a> {
     pub principal_type: &'a str,
     pub principal_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeDelegationTokenOwner<'a> {
-    fn default() -> Self {
-        Self {
-            principal_type: "",
-            principal_name: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeDelegationTokenOwner<'a> {
+impl DescribeDelegationTokenOwner<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_request::DescribeDelegationTokenOwner {
@@ -159,21 +144,21 @@ impl<'a> DescribeDelegationTokenOwner<'a> {
         }
     }
 }
-impl<'a> Encode for DescribeDelegationTokenOwner<'a> {
+impl Encode for DescribeDelegationTokenOwner<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_type)
+                put_compact_string(buf, self.principal_type);
             } else {
-                put_string(buf, self.principal_type)
+                put_string(buf, self.principal_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_name)
+                put_compact_string(buf, self.principal_name);
             } else {
-                put_string(buf, self.principal_name)
+                put_string(buf, self.principal_name);
             }
         }
         if flex {
@@ -231,7 +216,7 @@ impl<'de> DecodeBorrow<'de> for DescribeDelegationTokenOwner<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeDelegationTokenOwner<'a> {
+impl DescribeDelegationTokenOwner<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

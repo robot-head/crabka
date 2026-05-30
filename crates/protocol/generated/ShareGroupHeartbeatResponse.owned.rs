@@ -4,9 +4,8 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -42,30 +41,30 @@ impl Encode for ShareGroupHeartbeatResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.member_id.as_deref())
+                put_compact_nullable_string(buf, self.member_id.as_deref());
             } else {
-                put_nullable_string(buf, self.member_id.as_deref())
+                put_nullable_string(buf, self.member_id.as_deref());
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.heartbeat_interval_ms)
+            put_i32(buf, self.heartbeat_interval_ms);
         }
         if version >= 0 {
             match &self.assignment {
@@ -126,7 +125,7 @@ impl Encode for ShareGroupHeartbeatResponse {
         n
     }
 }
-impl<'de> Decode<'de> for ShareGroupHeartbeatResponse {
+impl Decode<'_> for ShareGroupHeartbeatResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -249,7 +248,7 @@ impl Encode for Assignment {
         n
     }
 }
-impl<'de> Decode<'de> for Assignment {
+impl Decode<'_> for Assignment {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

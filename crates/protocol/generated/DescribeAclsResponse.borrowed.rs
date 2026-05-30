@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeAclsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -32,29 +32,21 @@ pub struct DescribeAclsResponse<'a> {
     pub resources: Vec<DescribeAclsResource<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeAclsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            resources: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeAclsResponse<'a> {
+impl DescribeAclsResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_acls_response::DescribeAclsResponse {
         crate::owned::describe_acls_response::DescribeAclsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
-            resources: (self.resources).iter().map(|it| it.to_owned()).collect(),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            resources: (self.resources)
+                .iter()
+                .map(DescribeAclsResource::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeAclsResponse<'a> {
+impl Encode for DescribeAclsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -64,16 +56,16 @@ impl<'a> Encode for DescribeAclsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
@@ -164,7 +156,7 @@ impl<'de> DecodeBorrow<'de> for DescribeAclsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeAclsResponse<'a> {
+impl DescribeAclsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -191,7 +183,7 @@ pub struct DescribeAclsResource<'a> {
     pub acls: Vec<AclDescription<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeAclsResource<'a> {
+impl Default for DescribeAclsResource<'_> {
     fn default() -> Self {
         Self {
             resource_type: 0i8,
@@ -202,32 +194,32 @@ impl<'a> Default for DescribeAclsResource<'a> {
         }
     }
 }
-impl<'a> DescribeAclsResource<'a> {
+impl DescribeAclsResource<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_acls_response::DescribeAclsResource {
         crate::owned::describe_acls_response::DescribeAclsResource {
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
             pattern_type: (self.pattern_type),
-            acls: (self.acls).iter().map(|it| it.to_owned()).collect(),
+            acls: (self.acls).iter().map(AclDescription::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeAclsResource<'a> {
+impl Encode for DescribeAclsResource<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name)
+                put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name)
+                put_string(buf, self.resource_name);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.pattern_type)
+            put_i8(buf, self.pattern_type);
         }
         if version >= 0 {
             {
@@ -308,7 +300,7 @@ impl<'de> DecodeBorrow<'de> for DescribeAclsResource<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeAclsResource<'a> {
+impl DescribeAclsResource<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -327,7 +319,7 @@ impl<'a> DescribeAclsResource<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AclDescription<'a> {
     pub principal: &'a str,
     pub host: &'a str,
@@ -335,18 +327,7 @@ pub struct AclDescription<'a> {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AclDescription<'a> {
-    fn default() -> Self {
-        Self {
-            principal: "",
-            host: "",
-            operation: 0i8,
-            permission_type: 0i8,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AclDescription<'a> {
+impl AclDescription<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_acls_response::AclDescription {
         crate::owned::describe_acls_response::AclDescription {
             principal: (self.principal).to_string(),
@@ -357,28 +338,28 @@ impl<'a> AclDescription<'a> {
         }
     }
 }
-impl<'a> Encode for AclDescription<'a> {
+impl Encode for AclDescription<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal)
+                put_compact_string(buf, self.principal);
             } else {
-                put_string(buf, self.principal)
+                put_string(buf, self.principal);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.operation)
+            put_i8(buf, self.operation);
         }
         if version >= 0 {
-            put_i8(buf, self.permission_type)
+            put_i8(buf, self.permission_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -447,7 +428,7 @@ impl<'de> DecodeBorrow<'de> for AclDescription<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AclDescription<'a> {
+impl AclDescription<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

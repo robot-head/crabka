@@ -6,12 +6,11 @@ use crate::primitives::fixed::{
     get_bool, get_i8, get_i32, get_i64, put_bool, put_i8, put_i32, put_i64,
 };
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -42,7 +41,7 @@ pub struct ShareFetchRequest<'a> {
     pub forgotten_topics_data: Vec<ForgottenTopic>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ShareFetchRequest<'a> {
+impl Default for ShareFetchRequest<'_> {
     fn default() -> Self {
         Self {
             group_id: None,
@@ -61,11 +60,11 @@ impl<'a> Default for ShareFetchRequest<'a> {
         }
     }
 }
-impl<'a> ShareFetchRequest<'a> {
+impl ShareFetchRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::ShareFetchRequest {
         crate::owned::share_fetch_request::ShareFetchRequest {
-            group_id: (self.group_id).map(|s| s.to_string()),
-            member_id: (self.member_id).map(|s| s.to_string()),
+            group_id: (self.group_id).map(std::string::ToString::to_string),
+            member_id: (self.member_id).map(std::string::ToString::to_string),
             share_session_epoch: (self.share_session_epoch),
             max_wait_ms: (self.max_wait_ms),
             min_bytes: (self.min_bytes),
@@ -74,16 +73,16 @@ impl<'a> ShareFetchRequest<'a> {
             batch_size: (self.batch_size),
             share_acquire_mode: (self.share_acquire_mode),
             is_renew_ack: (self.is_renew_ack),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics).iter().map(FetchTopic::to_owned).collect(),
             forgotten_topics_data: (self.forgotten_topics_data)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(ForgottenTopic::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ShareFetchRequest<'a> {
+impl Encode for ShareFetchRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -94,41 +93,41 @@ impl<'a> Encode for ShareFetchRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.group_id)
+                put_compact_nullable_string(buf, self.group_id);
             } else {
-                put_nullable_string(buf, self.group_id)
+                put_nullable_string(buf, self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.member_id)
+                put_compact_nullable_string(buf, self.member_id);
             } else {
-                put_nullable_string(buf, self.member_id)
+                put_nullable_string(buf, self.member_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.share_session_epoch)
+            put_i32(buf, self.share_session_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.max_wait_ms)
+            put_i32(buf, self.max_wait_ms);
         }
         if version >= 0 {
-            put_i32(buf, self.min_bytes)
+            put_i32(buf, self.min_bytes);
         }
         if version >= 0 {
-            put_i32(buf, self.max_bytes)
+            put_i32(buf, self.max_bytes);
         }
         if version >= 1 {
-            put_i32(buf, self.max_records)
+            put_i32(buf, self.max_records);
         }
         if version >= 1 {
-            put_i32(buf, self.batch_size)
+            put_i32(buf, self.batch_size);
         }
         if version >= 2 {
-            put_i8(buf, self.share_acquire_mode)
+            put_i8(buf, self.share_acquire_mode);
         }
         if version >= 2 {
-            put_bool(buf, self.is_renew_ack)
+            put_bool(buf, self.is_renew_ack);
         }
         if version >= 0 {
             {
@@ -300,7 +299,7 @@ impl<'de> DecodeBorrow<'de> for ShareFetchRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ShareFetchRequest<'a> {
+impl ShareFetchRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -343,26 +342,20 @@ impl<'a> ShareFetchRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FetchTopic {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<FetchPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for FetchTopic {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
 impl FetchTopic {
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::FetchTopic {
         crate::owned::share_fetch_request::FetchTopic {
             topic_id: (self.topic_id),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(FetchPartition::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -371,7 +364,7 @@ impl Encode for FetchTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -448,22 +441,12 @@ impl FetchTopic {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FetchPartition {
     pub partition_index: i32,
     pub partition_max_bytes: i32,
     pub acknowledgement_batches: Vec<AcknowledgementBatch>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for FetchPartition {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            partition_max_bytes: 0i32,
-            acknowledgement_batches: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl FetchPartition {
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::FetchPartition {
@@ -472,7 +455,7 @@ impl FetchPartition {
             partition_max_bytes: (self.partition_max_bytes),
             acknowledgement_batches: (self.acknowledgement_batches)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(AcknowledgementBatch::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -482,10 +465,10 @@ impl Encode for FetchPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
-        if version >= 0 && version <= 0 {
-            put_i32(buf, self.partition_max_bytes)
+        if version == 0 {
+            put_i32(buf, self.partition_max_bytes);
         }
         if version >= 0 {
             {
@@ -511,7 +494,7 @@ impl Encode for FetchPartition {
         if version >= 0 {
             n += 4;
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             n += 4;
         }
         if version >= 0 {
@@ -541,7 +524,7 @@ impl<'de> DecodeBorrow<'de> for FetchPartition {
         if version >= 0 {
             out.partition_index = get_i32(buf)?;
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             out.partition_max_bytes = get_i32(buf)?;
         }
         if version >= 0 {
@@ -568,7 +551,7 @@ impl FetchPartition {
         if version >= 0 {
             m.partition_index = 1i32;
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             m.partition_max_bytes = 1i32;
         }
         if version >= 0 {
@@ -577,22 +560,12 @@ impl FetchPartition {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AcknowledgementBatch {
     pub first_offset: i64,
     pub last_offset: i64,
     pub acknowledge_types: Vec<i8>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for AcknowledgementBatch {
-    fn default() -> Self {
-        Self {
-            first_offset: 0i64,
-            last_offset: 0i64,
-            acknowledge_types: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl AcknowledgementBatch {
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::AcknowledgementBatch {
@@ -608,10 +581,10 @@ impl Encode for AcknowledgementBatch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.first_offset)
+            put_i64(buf, self.first_offset);
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset)
+            put_i64(buf, self.last_offset);
         }
         if version >= 0 {
             {
@@ -696,20 +669,11 @@ impl AcknowledgementBatch {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ForgottenTopic {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for ForgottenTopic {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl ForgottenTopic {
     pub fn to_owned(&self) -> crate::owned::share_fetch_request::ForgottenTopic {
@@ -724,7 +688,7 @@ impl Encode for ForgottenTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {

@@ -20,31 +20,25 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListOffsetsResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<ListOffsetsTopicResponse<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ListOffsetsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ListOffsetsResponse<'a> {
+impl ListOffsetsResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::list_offsets_response::ListOffsetsResponse {
         crate::owned::list_offsets_response::ListOffsetsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(ListOffsetsTopicResponse::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ListOffsetsResponse<'a> {
+impl Encode for ListOffsetsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -54,7 +48,7 @@ impl<'a> Encode for ListOffsetsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -121,7 +115,7 @@ impl<'de> DecodeBorrow<'de> for ListOffsetsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ListOffsetsResponse<'a> {
+impl ListOffsetsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -134,38 +128,32 @@ impl<'a> ListOffsetsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListOffsetsTopicResponse<'a> {
     pub name: &'a str,
     pub partitions: Vec<ListOffsetsPartitionResponse>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ListOffsetsTopicResponse<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ListOffsetsTopicResponse<'a> {
+impl ListOffsetsTopicResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::list_offsets_response::ListOffsetsTopicResponse {
         crate::owned::list_offsets_response::ListOffsetsTopicResponse {
             name: (self.name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(ListOffsetsPartitionResponse::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ListOffsetsTopicResponse<'a> {
+impl Encode for ListOffsetsTopicResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -238,7 +226,7 @@ impl<'de> DecodeBorrow<'de> for ListOffsetsTopicResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ListOffsetsTopicResponse<'a> {
+impl ListOffsetsTopicResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -288,19 +276,19 @@ impl Encode for ListOffsetsPartitionResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 1 {
-            put_i64(buf, self.timestamp)
+            put_i64(buf, self.timestamp);
         }
         if version >= 1 {
-            put_i64(buf, self.offset)
+            put_i64(buf, self.offset);
         }
         if version >= 4 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

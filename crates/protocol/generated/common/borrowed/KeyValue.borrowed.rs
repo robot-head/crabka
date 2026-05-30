@@ -8,24 +8,14 @@ use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KeyValue<'a> {
     pub key: &'a str,
     pub value: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl<'a> Default for KeyValue<'a> {
-    fn default() -> Self {
-        Self {
-            key: "",
-            value: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> KeyValue<'a> {
+impl KeyValue<'_> {
     pub fn to_owned(&self) -> crate::owned::common::key_value::KeyValue {
         crate::owned::common::key_value::KeyValue {
             key: (self.key).to_string(),
@@ -35,21 +25,21 @@ impl<'a> KeyValue<'a> {
     }
 }
 
-impl<'a> Encode for KeyValue<'a> {
+impl Encode for KeyValue<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.key)
+                put_compact_string(buf, self.key);
             } else {
-                put_string(buf, self.key)
+                put_string(buf, self.key);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.value)
+                put_compact_string(buf, self.value);
             } else {
-                put_string(buf, self.value)
+                put_string(buf, self.value);
             }
         }
         if flex {
@@ -109,7 +99,7 @@ impl<'de> DecodeBorrow<'de> for KeyValue<'de> {
 }
 
 #[cfg(test)]
-impl<'a> KeyValue<'a> {
+impl KeyValue<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

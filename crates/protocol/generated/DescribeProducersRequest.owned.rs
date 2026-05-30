@@ -66,7 +66,7 @@ impl Encode for DescribeProducersRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeProducersRequest {
+impl Decode<'_> for DescribeProducersRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -114,9 +114,9 @@ impl Encode for TopicRequest {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -160,7 +160,7 @@ impl Encode for TopicRequest {
         n
     }
 }
-impl<'de> Decode<'de> for TopicRequest {
+impl Decode<'_> for TopicRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

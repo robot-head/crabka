@@ -26,7 +26,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncGroupRequest<'a> {
     pub group_id: &'a str,
     pub generation_id: i32,
@@ -37,35 +37,24 @@ pub struct SyncGroupRequest<'a> {
     pub assignments: Vec<SyncGroupRequestAssignment<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for SyncGroupRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            generation_id: 0i32,
-            member_id: "",
-            group_instance_id: None,
-            protocol_type: None,
-            protocol_name: None,
-            assignments: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> SyncGroupRequest<'a> {
+impl SyncGroupRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::sync_group_request::SyncGroupRequest {
         crate::owned::sync_group_request::SyncGroupRequest {
             group_id: (self.group_id).to_string(),
             generation_id: (self.generation_id),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
-            protocol_type: (self.protocol_type).map(|s| s.to_string()),
-            protocol_name: (self.protocol_name).map(|s| s.to_string()),
-            assignments: (self.assignments).iter().map(|it| it.to_owned()).collect(),
+            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
+            protocol_type: (self.protocol_type).map(std::string::ToString::to_string),
+            protocol_name: (self.protocol_name).map(std::string::ToString::to_string),
+            assignments: (self.assignments)
+                .iter()
+                .map(SyncGroupRequestAssignment::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for SyncGroupRequest<'a> {
+impl Encode for SyncGroupRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -76,40 +65,40 @@ impl<'a> Encode for SyncGroupRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.generation_id)
+            put_i32(buf, self.generation_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id)
+                put_compact_nullable_string(buf, self.group_instance_id);
             } else {
-                put_nullable_string(buf, self.group_instance_id)
+                put_nullable_string(buf, self.group_instance_id);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.protocol_type)
+                put_compact_nullable_string(buf, self.protocol_type);
             } else {
-                put_nullable_string(buf, self.protocol_type)
+                put_nullable_string(buf, self.protocol_type);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.protocol_name)
+                put_compact_nullable_string(buf, self.protocol_name);
             } else {
-                put_nullable_string(buf, self.protocol_name)
+                put_nullable_string(buf, self.protocol_name);
             }
         }
         if version >= 0 {
@@ -250,7 +239,7 @@ impl<'de> DecodeBorrow<'de> for SyncGroupRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> SyncGroupRequest<'a> {
+impl SyncGroupRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -278,22 +267,13 @@ impl<'a> SyncGroupRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SyncGroupRequestAssignment<'a> {
     pub member_id: &'a str,
     pub assignment: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for SyncGroupRequestAssignment<'a> {
-    fn default() -> Self {
-        Self {
-            member_id: "",
-            assignment: &[],
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> SyncGroupRequestAssignment<'a> {
+impl SyncGroupRequestAssignment<'_> {
     pub fn to_owned(&self) -> crate::owned::sync_group_request::SyncGroupRequestAssignment {
         crate::owned::sync_group_request::SyncGroupRequestAssignment {
             member_id: (self.member_id).to_string(),
@@ -302,21 +282,21 @@ impl<'a> SyncGroupRequestAssignment<'a> {
         }
     }
 }
-impl<'a> Encode for SyncGroupRequestAssignment<'a> {
+impl Encode for SyncGroupRequestAssignment<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.assignment)
+                put_compact_bytes(buf, self.assignment);
             } else {
-                put_bytes(buf, self.assignment)
+                put_bytes(buf, self.assignment);
             }
         }
         if flex {
@@ -376,7 +356,7 @@ impl<'de> DecodeBorrow<'de> for SyncGroupRequestAssignment<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> SyncGroupRequestAssignment<'a> {
+impl SyncGroupRequestAssignment<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

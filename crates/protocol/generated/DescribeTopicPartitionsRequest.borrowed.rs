@@ -27,7 +27,7 @@ pub struct DescribeTopicPartitionsRequest<'a> {
     pub cursor: Option<Cursor<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeTopicPartitionsRequest<'a> {
+impl Default for DescribeTopicPartitionsRequest<'_> {
     fn default() -> Self {
         Self {
             topics: Vec::new(),
@@ -37,19 +37,19 @@ impl<'a> Default for DescribeTopicPartitionsRequest<'a> {
         }
     }
 }
-impl<'a> DescribeTopicPartitionsRequest<'a> {
+impl DescribeTopicPartitionsRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_topic_partitions_request::DescribeTopicPartitionsRequest {
         crate::owned::describe_topic_partitions_request::DescribeTopicPartitionsRequest {
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics).iter().map(TopicRequest::to_owned).collect(),
             response_partition_limit: (self.response_partition_limit),
-            cursor: (self.cursor).as_ref().map(|v| v.to_owned()),
+            cursor: (self.cursor).as_ref().map(Cursor::to_owned),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeTopicPartitionsRequest<'a> {
+impl Encode for DescribeTopicPartitionsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -67,7 +67,7 @@ impl<'a> Encode for DescribeTopicPartitionsRequest<'a> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.response_partition_limit)
+            put_i32(buf, self.response_partition_limit);
         }
         if version >= 0 {
             match &self.cursor {
@@ -147,7 +147,7 @@ impl<'de> DecodeBorrow<'de> for DescribeTopicPartitionsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeTopicPartitionsRequest<'a> {
+impl DescribeTopicPartitionsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -163,20 +163,12 @@ impl<'a> DescribeTopicPartitionsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicRequest<'a> {
     pub name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicRequest<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicRequest<'a> {
+impl TopicRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_topic_partitions_request::TopicRequest {
         crate::owned::describe_topic_partitions_request::TopicRequest {
             name: (self.name).to_string(),
@@ -184,14 +176,14 @@ impl<'a> TopicRequest<'a> {
         }
     }
 }
-impl<'a> Encode for TopicRequest<'a> {
+impl Encode for TopicRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if flex {
@@ -235,7 +227,7 @@ impl<'de> DecodeBorrow<'de> for TopicRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicRequest<'a> {
+impl TopicRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -245,22 +237,13 @@ impl<'a> TopicRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Cursor<'a> {
     pub topic_name: &'a str,
     pub partition_index: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Cursor<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            partition_index: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Cursor<'a> {
+impl Cursor<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_topic_partitions_request::Cursor {
         crate::owned::describe_topic_partitions_request::Cursor {
             topic_name: (self.topic_name).to_string(),
@@ -269,18 +252,18 @@ impl<'a> Cursor<'a> {
         }
     }
 }
-impl<'a> Encode for Cursor<'a> {
+impl Encode for Cursor<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name)
+                put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name)
+                put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -329,7 +312,7 @@ impl<'de> DecodeBorrow<'de> for Cursor<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Cursor<'a> {
+impl Cursor<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

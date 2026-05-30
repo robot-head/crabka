@@ -39,9 +39,9 @@ impl Encode for EndQuorumEpochRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id.as_deref())
+                put_compact_nullable_string(buf, self.cluster_id.as_deref());
             } else {
-                put_nullable_string(buf, self.cluster_id.as_deref())
+                put_nullable_string(buf, self.cluster_id.as_deref());
             }
         }
         if version >= 0 {
@@ -104,7 +104,7 @@ impl Encode for EndQuorumEpochRequest {
         n
     }
 }
-impl<'de> Decode<'de> for EndQuorumEpochRequest {
+impl Decode<'_> for EndQuorumEpochRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -175,9 +175,9 @@ impl Encode for TopicData {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic_name)
+                put_compact_string(buf, &self.topic_name);
             } else {
-                put_string(buf, &self.topic_name)
+                put_string(buf, &self.topic_name);
             }
         }
         if version >= 0 {
@@ -222,7 +222,7 @@ impl Encode for TopicData {
         n
     }
 }
-impl<'de> Decode<'de> for TopicData {
+impl Decode<'_> for TopicData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -276,15 +276,15 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             {
                 crate::primitives::array::put_array_len(
                     buf,
@@ -326,7 +326,7 @@ impl Encode for PartitionData {
         if version >= 0 {
             n += 4;
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             n += {
                 let prefix = crate::primitives::array::array_len_prefix_len(
                     (self.preferred_successors).len(),
@@ -356,7 +356,7 @@ impl Encode for PartitionData {
         n
     }
 }
-impl<'de> Decode<'de> for PartitionData {
+impl Decode<'_> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -369,7 +369,7 @@ impl<'de> Decode<'de> for PartitionData {
         if version >= 0 {
             out.leader_epoch = get_i32(buf)?;
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             out.preferred_successors = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -409,7 +409,7 @@ impl PartitionData {
         if version >= 0 {
             m.leader_epoch = 1i32;
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             m.preferred_successors = vec![1i32];
         }
         if version >= 1 {
@@ -428,10 +428,10 @@ impl Encode for ReplicaInfo {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 1 {
-            put_i32(buf, self.candidate_id)
+            put_i32(buf, self.candidate_id);
         }
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.candidate_directory_id)
+            crate::primitives::uuid::put_uuid(buf, self.candidate_directory_id);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -455,7 +455,7 @@ impl Encode for ReplicaInfo {
         n
     }
 }
-impl<'de> Decode<'de> for ReplicaInfo {
+impl Decode<'_> for ReplicaInfo {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -497,20 +497,20 @@ impl Encode for LeaderEndpoint {
         let flex = version >= 1;
         if version >= 1 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 1 {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
         if version >= 1 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -545,7 +545,7 @@ impl Encode for LeaderEndpoint {
         n
     }
 }
-impl<'de> Decode<'de> for LeaderEndpoint {
+impl Decode<'_> for LeaderEndpoint {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();

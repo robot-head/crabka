@@ -20,33 +20,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteShareGroupStateRequest<'a> {
     pub group_id: &'a str,
     pub topics: Vec<DeleteStateData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteShareGroupStateRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteShareGroupStateRequest<'a> {
+impl DeleteShareGroupStateRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_state_request::DeleteShareGroupStateRequest {
         crate::owned::delete_share_group_state_request::DeleteShareGroupStateRequest {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(DeleteStateData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteShareGroupStateRequest<'a> {
+impl Encode for DeleteShareGroupStateRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -57,9 +51,9 @@ impl<'a> Encode for DeleteShareGroupStateRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
@@ -135,7 +129,7 @@ impl<'de> DecodeBorrow<'de> for DeleteShareGroupStateRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteShareGroupStateRequest<'a> {
+impl DeleteShareGroupStateRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -148,26 +142,20 @@ impl<'a> DeleteShareGroupStateRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteStateData {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Default for DeleteStateData {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
 impl DeleteStateData {
     pub fn to_owned(&self) -> crate::owned::delete_share_group_state_request::DeleteStateData {
         crate::owned::delete_share_group_state_request::DeleteStateData {
             topic_id: (self.topic_id),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -176,7 +164,7 @@ impl Encode for DeleteStateData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -253,18 +241,10 @@ impl DeleteStateData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionData {
     pub partition: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for PartitionData {
-    fn default() -> Self {
-        Self {
-            partition: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl PartitionData {
     pub fn to_owned(&self) -> crate::owned::delete_share_group_state_request::PartitionData {
@@ -278,7 +258,7 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

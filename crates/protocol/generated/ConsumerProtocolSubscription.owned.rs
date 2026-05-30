@@ -56,18 +56,18 @@ impl Encode for ConsumerProtocolSubscription {
                 crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
                 for it in &self.topics {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.user_data.as_deref())
+                put_compact_nullable_bytes(buf, self.user_data.as_deref());
             } else {
-                put_nullable_bytes(buf, self.user_data.as_deref())
+                put_nullable_bytes(buf, self.user_data.as_deref());
             }
         }
         if version >= 1 {
@@ -79,13 +79,13 @@ impl Encode for ConsumerProtocolSubscription {
             }
         }
         if version >= 2 {
-            put_i32(buf, self.generation_id)
+            put_i32(buf, self.generation_id);
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id.as_deref())
+                put_compact_nullable_string(buf, self.rack_id.as_deref());
             } else {
-                put_nullable_string(buf, self.rack_id.as_deref())
+                put_nullable_string(buf, self.rack_id.as_deref());
             }
         }
         Ok(())
@@ -101,9 +101,9 @@ impl Encode for ConsumerProtocolSubscription {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -143,7 +143,7 @@ impl Encode for ConsumerProtocolSubscription {
         n
     }
 }
-impl<'de> Decode<'de> for ConsumerProtocolSubscription {
+impl Decode<'_> for ConsumerProtocolSubscription {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -230,9 +230,9 @@ impl Encode for TopicPartition {
         let flex = version >= 32767;
         if version >= 1 {
             if flex {
-                put_compact_string(buf, &self.topic)
+                put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic)
+                put_string(buf, &self.topic);
             }
         }
         if version >= 1 {
@@ -266,7 +266,7 @@ impl Encode for TopicPartition {
         n
     }
 }
-impl<'de> Decode<'de> for TopicPartition {
+impl Decode<'_> for TopicPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 32767;
         let mut out = Self::default();

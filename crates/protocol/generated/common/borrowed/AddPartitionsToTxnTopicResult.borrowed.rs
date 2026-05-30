@@ -8,7 +8,7 @@ use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnTopicResult<'a> {
     pub name: &'a str,
     pub results_by_partition:
@@ -16,17 +16,7 @@ pub struct AddPartitionsToTxnTopicResult<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl<'a> Default for AddPartitionsToTxnTopicResult<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            results_by_partition: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> AddPartitionsToTxnTopicResult<'a> {
+impl AddPartitionsToTxnTopicResult<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult
@@ -35,21 +25,21 @@ impl<'a> AddPartitionsToTxnTopicResult<'a> {
             name: (self.name).to_string(),
             results_by_partition: (self.results_by_partition)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
 
-impl<'a> Encode for AddPartitionsToTxnTopicResult<'a> {
+impl Encode for AddPartitionsToTxnTopicResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -130,7 +120,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnTopicResult<'de> {
 }
 
 #[cfg(test)]
-impl<'a> AddPartitionsToTxnTopicResult<'a> {
+impl AddPartitionsToTxnTopicResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

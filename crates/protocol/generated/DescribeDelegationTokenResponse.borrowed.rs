@@ -22,36 +22,29 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeDelegationTokenResponse<'a> {
     pub error_code: i16,
     pub tokens: Vec<DescribedDelegationToken<'a>>,
     pub throttle_time_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeDelegationTokenResponse<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            tokens: Vec::new(),
-            throttle_time_ms: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeDelegationTokenResponse<'a> {
+impl DescribeDelegationTokenResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_response::DescribeDelegationTokenResponse {
         crate::owned::describe_delegation_token_response::DescribeDelegationTokenResponse {
             error_code: (self.error_code),
-            tokens: (self.tokens).iter().map(|it| it.to_owned()).collect(),
+            tokens: (self.tokens)
+                .iter()
+                .map(DescribedDelegationToken::to_owned)
+                .collect(),
             throttle_time_ms: (self.throttle_time_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeDelegationTokenResponse<'a> {
+impl Encode for DescribeDelegationTokenResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -61,7 +54,7 @@ impl<'a> Encode for DescribeDelegationTokenResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
@@ -72,7 +65,7 @@ impl<'a> Encode for DescribeDelegationTokenResponse<'a> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -137,7 +130,7 @@ impl<'de> DecodeBorrow<'de> for DescribeDelegationTokenResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeDelegationTokenResponse<'a> {
+impl DescribeDelegationTokenResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -153,7 +146,7 @@ impl<'a> DescribeDelegationTokenResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribedDelegationToken<'a> {
     pub principal_type: &'a str,
     pub principal_name: &'a str,
@@ -167,24 +160,7 @@ pub struct DescribedDelegationToken<'a> {
     pub renewers: Vec<DescribedDelegationTokenRenewer<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribedDelegationToken<'a> {
-    fn default() -> Self {
-        Self {
-            principal_type: "",
-            principal_name: "",
-            token_requester_principal_type: "",
-            token_requester_principal_name: "",
-            issue_timestamp: 0i64,
-            expiry_timestamp: 0i64,
-            max_timestamp: 0i64,
-            token_id: "",
-            hmac: &[],
-            renewers: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribedDelegationToken<'a> {
+impl DescribedDelegationToken<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_response::DescribedDelegationToken {
@@ -198,63 +174,66 @@ impl<'a> DescribedDelegationToken<'a> {
             max_timestamp: (self.max_timestamp),
             token_id: (self.token_id).to_string(),
             hmac: Bytes::copy_from_slice(self.hmac),
-            renewers: (self.renewers).iter().map(|it| it.to_owned()).collect(),
+            renewers: (self.renewers)
+                .iter()
+                .map(DescribedDelegationTokenRenewer::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribedDelegationToken<'a> {
+impl Encode for DescribedDelegationToken<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_type)
+                put_compact_string(buf, self.principal_type);
             } else {
-                put_string(buf, self.principal_type)
+                put_string(buf, self.principal_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_name)
+                put_compact_string(buf, self.principal_name);
             } else {
-                put_string(buf, self.principal_name)
-            }
-        }
-        if version >= 3 {
-            if flex {
-                put_compact_string(buf, self.token_requester_principal_type)
-            } else {
-                put_string(buf, self.token_requester_principal_type)
+                put_string(buf, self.principal_name);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_string(buf, self.token_requester_principal_name)
+                put_compact_string(buf, self.token_requester_principal_type);
             } else {
-                put_string(buf, self.token_requester_principal_name)
+                put_string(buf, self.token_requester_principal_type);
+            }
+        }
+        if version >= 3 {
+            if flex {
+                put_compact_string(buf, self.token_requester_principal_name);
+            } else {
+                put_string(buf, self.token_requester_principal_name);
             }
         }
         if version >= 0 {
-            put_i64(buf, self.issue_timestamp)
+            put_i64(buf, self.issue_timestamp);
         }
         if version >= 0 {
-            put_i64(buf, self.expiry_timestamp)
+            put_i64(buf, self.expiry_timestamp);
         }
         if version >= 0 {
-            put_i64(buf, self.max_timestamp)
+            put_i64(buf, self.max_timestamp);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.token_id)
+                put_compact_string(buf, self.token_id);
             } else {
-                put_string(buf, self.token_id)
+                put_string(buf, self.token_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.hmac)
+                put_compact_bytes(buf, self.hmac);
             } else {
-                put_bytes(buf, self.hmac)
+                put_bytes(buf, self.hmac);
             }
         }
         if version >= 0 {
@@ -419,7 +398,7 @@ impl<'de> DecodeBorrow<'de> for DescribedDelegationToken<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribedDelegationToken<'a> {
+impl DescribedDelegationToken<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -456,22 +435,13 @@ impl<'a> DescribedDelegationToken<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribedDelegationTokenRenewer<'a> {
     pub principal_type: &'a str,
     pub principal_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribedDelegationTokenRenewer<'a> {
-    fn default() -> Self {
-        Self {
-            principal_type: "",
-            principal_name: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribedDelegationTokenRenewer<'a> {
+impl DescribedDelegationTokenRenewer<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_delegation_token_response::DescribedDelegationTokenRenewer {
@@ -482,21 +452,21 @@ impl<'a> DescribedDelegationTokenRenewer<'a> {
         }
     }
 }
-impl<'a> Encode for DescribedDelegationTokenRenewer<'a> {
+impl Encode for DescribedDelegationTokenRenewer<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_type)
+                put_compact_string(buf, self.principal_type);
             } else {
-                put_string(buf, self.principal_type)
+                put_string(buf, self.principal_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_name)
+                put_compact_string(buf, self.principal_name);
             } else {
-                put_string(buf, self.principal_name)
+                put_string(buf, self.principal_name);
             }
         }
         if flex {
@@ -554,7 +524,7 @@ impl<'de> DecodeBorrow<'de> for DescribedDelegationTokenRenewer<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribedDelegationTokenRenewer<'a> {
+impl DescribedDelegationTokenRenewer<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

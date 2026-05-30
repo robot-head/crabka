@@ -10,7 +10,7 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicInfo<'a> {
     pub name: &'a str,
     pub partitions: i32,
@@ -19,19 +19,7 @@ pub struct TopicInfo<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl<'a> Default for TopicInfo<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: 0i32,
-            replication_factor: 0i16,
-            topic_configs: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> TopicInfo<'a> {
+impl TopicInfo<'_> {
     pub fn to_owned(&self) -> crate::owned::common::topic_info::TopicInfo {
         crate::owned::common::topic_info::TopicInfo {
             name: (self.name).to_string(),
@@ -39,28 +27,28 @@ impl<'a> TopicInfo<'a> {
             replication_factor: (self.replication_factor),
             topic_configs: (self.topic_configs)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::key_value::KeyValue::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
 
-impl<'a> Encode for TopicInfo<'a> {
+impl Encode for TopicInfo<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partitions)
+            put_i32(buf, self.partitions);
         }
         if version >= 0 {
-            put_i16(buf, self.replication_factor)
+            put_i16(buf, self.replication_factor);
         }
         if version >= 0 {
             {
@@ -148,7 +136,7 @@ impl<'de> DecodeBorrow<'de> for TopicInfo<'de> {
 }
 
 #[cfg(test)]
-impl<'a> TopicInfo<'a> {
+impl TopicInfo<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

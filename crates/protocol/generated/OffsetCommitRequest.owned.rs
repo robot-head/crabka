@@ -55,30 +55,30 @@ impl Encode for OffsetCommitRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 1 {
-            put_i32(buf, self.generation_id_or_member_epoch)
+            put_i32(buf, self.generation_id_or_member_epoch);
         }
         if version >= 1 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 7 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref())
+                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref())
+                put_nullable_string(buf, self.group_instance_id.as_deref());
             }
         }
-        if version >= 2 && version <= 4 {
-            put_i64(buf, self.retention_time_ms)
+        if (2..=4).contains(&version) {
+            put_i64(buf, self.retention_time_ms);
         }
         if version >= 0 {
             {
@@ -121,7 +121,7 @@ impl Encode for OffsetCommitRequest {
                 nullable_string_len(self.group_instance_id.as_deref())
             };
         }
-        if version >= 2 && version <= 4 {
+        if (2..=4).contains(&version) {
             n += 8;
         }
         if version >= 0 {
@@ -139,7 +139,7 @@ impl Encode for OffsetCommitRequest {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetCommitRequest {
+impl Decode<'_> for OffsetCommitRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -173,7 +173,7 @@ impl<'de> Decode<'de> for OffsetCommitRequest {
                 get_nullable_string_owned(buf)?
             };
         }
-        if version >= 2 && version <= 4 {
+        if (2..=4).contains(&version) {
             out.retention_time_ms = get_i64(buf)?;
         }
         if version >= 0 {
@@ -209,7 +209,7 @@ impl OffsetCommitRequest {
         if version >= 7 {
             m.group_instance_id = Some("x".to_string());
         }
-        if version >= 2 && version <= 4 {
+        if (2..=4).contains(&version) {
             m.retention_time_ms = 1i64;
         }
         if version >= 0 {
@@ -228,15 +228,15 @@ pub struct OffsetCommitRequestTopic {
 impl Encode for OffsetCommitRequestTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -255,7 +255,7 @@ impl Encode for OffsetCommitRequestTopic {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 8;
         let mut n: usize = 0;
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             n += if flex {
                 compact_string_len(&self.name)
             } else {
@@ -283,11 +283,11 @@ impl Encode for OffsetCommitRequestTopic {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetCommitRequestTopic {
+impl Decode<'_> for OffsetCommitRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             out.name = if flex {
                 get_compact_string_owned(buf)?
             } else {
@@ -318,7 +318,7 @@ impl OffsetCommitRequestTopic {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             m.name = "x".to_string();
         }
         if version >= 10 {
@@ -353,19 +353,19 @@ impl Encode for OffsetCommitRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.committed_offset)
+            put_i64(buf, self.committed_offset);
         }
         if version >= 6 {
-            put_i32(buf, self.committed_leader_epoch)
+            put_i32(buf, self.committed_leader_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.committed_metadata.as_deref())
+                put_compact_nullable_string(buf, self.committed_metadata.as_deref());
             } else {
-                put_nullable_string(buf, self.committed_metadata.as_deref())
+                put_nullable_string(buf, self.committed_metadata.as_deref());
             }
         }
         if flex {
@@ -400,7 +400,7 @@ impl Encode for OffsetCommitRequestPartition {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetCommitRequestPartition {
+impl Decode<'_> for OffsetCommitRequestPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();
@@ -472,7 +472,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version >= 7 {
         obj.insert("groupInstanceId".to_string(), ::serde_json::Value::Null);
     }
-    if version >= 2 && version <= 4 {
+    if (2..=4).contains(&version) {
         obj.insert("retentionTimeMs".to_string(), ::serde_json::json!(-1));
     }
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));

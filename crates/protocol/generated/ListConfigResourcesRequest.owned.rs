@@ -64,7 +64,7 @@ impl Encode for ListConfigResourcesRequest {
         n
     }
 }
-impl<'de> Decode<'de> for ListConfigResourcesRequest {
+impl Decode<'_> for ListConfigResourcesRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

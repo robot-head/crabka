@@ -45,20 +45,20 @@ impl Encode for DeleteTopicsRequest {
                 }
             }
         }
-        if version >= 0 && version <= 5 {
+        if (0..=5).contains(&version) {
             {
                 crate::primitives::array::put_array_len(buf, (self.topic_names).len(), flex);
                 for it in &self.topic_names {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -77,7 +77,7 @@ impl Encode for DeleteTopicsRequest {
                 prefix + body
             };
         }
-        if version >= 0 && version <= 5 {
+        if (0..=5).contains(&version) {
             n += {
                 let prefix =
                     crate::primitives::array::array_len_prefix_len((self.topic_names).len(), flex);
@@ -85,9 +85,9 @@ impl Encode for DeleteTopicsRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -104,7 +104,7 @@ impl Encode for DeleteTopicsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteTopicsRequest {
+impl Decode<'_> for DeleteTopicsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -124,7 +124,7 @@ impl<'de> Decode<'de> for DeleteTopicsRequest {
                 v
             };
         }
-        if version >= 0 && version <= 5 {
+        if (0..=5).contains(&version) {
             out.topic_names = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -155,7 +155,7 @@ impl DeleteTopicsRequest {
         if version >= 6 {
             m.topics = vec![DeleteTopicState::populated(version)];
         }
-        if version >= 0 && version <= 5 {
+        if (0..=5).contains(&version) {
             m.topic_names = vec!["x".to_string()];
         }
         if version >= 0 {
@@ -175,13 +175,13 @@ impl Encode for DeleteTopicState {
         let flex = version >= 4;
         if version >= 6 {
             if flex {
-                put_compact_nullable_string(buf, self.name.as_deref())
+                put_compact_nullable_string(buf, self.name.as_deref());
             } else {
-                put_nullable_string(buf, self.name.as_deref())
+                put_nullable_string(buf, self.name.as_deref());
             }
         }
         if version >= 6 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -209,7 +209,7 @@ impl Encode for DeleteTopicState {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteTopicState {
+impl Decode<'_> for DeleteTopicState {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

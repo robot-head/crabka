@@ -63,37 +63,37 @@ impl Encode for ConsumerGroupHeartbeatRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.instance_id.as_deref())
+                put_compact_nullable_string(buf, self.instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.instance_id.as_deref())
+                put_nullable_string(buf, self.instance_id.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id.as_deref())
+                put_compact_nullable_string(buf, self.rack_id.as_deref());
             } else {
-                put_nullable_string(buf, self.rack_id.as_deref())
+                put_nullable_string(buf, self.rack_id.as_deref());
             }
         }
         if version >= 0 {
-            put_i32(buf, self.rebalance_timeout_ms)
+            put_i32(buf, self.rebalance_timeout_ms);
         }
         if version >= 0 {
             {
@@ -102,26 +102,26 @@ impl Encode for ConsumerGroupHeartbeatRequest {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, &*it)
+                            put_compact_string(buf, it);
                         } else {
-                            put_string(buf, &*it)
-                        };
+                            put_string(buf, it);
+                        }
                     }
                 }
             }
         }
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.subscribed_topic_regex.as_deref())
+                put_compact_nullable_string(buf, self.subscribed_topic_regex.as_deref());
             } else {
-                put_nullable_string(buf, self.subscribed_topic_regex.as_deref())
+                put_nullable_string(buf, self.subscribed_topic_regex.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.server_assignor.as_deref())
+                put_compact_nullable_string(buf, self.server_assignor.as_deref());
             } else {
-                put_nullable_string(buf, self.server_assignor.as_deref())
+                put_nullable_string(buf, self.server_assignor.as_deref());
             }
         }
         if version >= 0 {
@@ -182,16 +182,16 @@ impl Encode for ConsumerGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(&*it)
+                                compact_string_len(it)
                             } else {
-                                string_len(&*it)
+                                string_len(it)
                             }
                         })
                         .sum()
@@ -217,7 +217,7 @@ impl Encode for ConsumerGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.topic_partitions).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -232,7 +232,7 @@ impl Encode for ConsumerGroupHeartbeatRequest {
         n
     }
 }
-impl<'de> Decode<'de> for ConsumerGroupHeartbeatRequest {
+impl Decode<'_> for ConsumerGroupHeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -378,7 +378,7 @@ impl Encode for TopicPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -415,7 +415,7 @@ impl Encode for TopicPartitions {
         n
     }
 }
-impl<'de> Decode<'de> for TopicPartitions {
+impl Decode<'_> for TopicPartitions {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

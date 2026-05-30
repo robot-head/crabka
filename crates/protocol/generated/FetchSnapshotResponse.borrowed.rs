@@ -26,7 +26,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FetchSnapshotResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -34,29 +34,18 @@ pub struct FetchSnapshotResponse<'a> {
     pub node_endpoints: Vec<crate::owned::fetch_snapshot_response::NodeEndpoint>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for FetchSnapshotResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            topics: Vec::new(),
-            node_endpoints: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> FetchSnapshotResponse<'a> {
+impl FetchSnapshotResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_response::FetchSnapshotResponse {
         crate::owned::fetch_snapshot_response::FetchSnapshotResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics).iter().map(TopicSnapshot::to_owned).collect(),
             node_endpoints: self.node_endpoints.clone(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for FetchSnapshotResponse<'a> {
+impl Encode for FetchSnapshotResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -66,10 +55,10 @@ impl<'a> Encode for FetchSnapshotResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
@@ -208,7 +197,7 @@ impl<'de> DecodeBorrow<'de> for FetchSnapshotResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> FetchSnapshotResponse<'a> {
+impl FetchSnapshotResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -228,38 +217,32 @@ impl<'a> FetchSnapshotResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicSnapshot<'a> {
     pub name: &'a str,
     pub partitions: Vec<PartitionSnapshot<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicSnapshot<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicSnapshot<'a> {
+impl TopicSnapshot<'_> {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_response::TopicSnapshot {
         crate::owned::fetch_snapshot_response::TopicSnapshot {
             name: (self.name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionSnapshot::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for TopicSnapshot<'a> {
+impl Encode for TopicSnapshot<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -332,7 +315,7 @@ impl<'de> DecodeBorrow<'de> for TopicSnapshot<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicSnapshot<'a> {
+impl TopicSnapshot<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -345,7 +328,7 @@ impl<'a> TopicSnapshot<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionSnapshot<'a> {
     pub index: i32,
     pub error_code: i16,
@@ -356,21 +339,7 @@ pub struct PartitionSnapshot<'a> {
     pub current_leader: LeaderIdAndEpoch,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for PartitionSnapshot<'a> {
-    fn default() -> Self {
-        Self {
-            index: 0i32,
-            error_code: 0i16,
-            snapshot_id: Default::default(),
-            size: 0i64,
-            position: 0i64,
-            unaligned_records: Default::default(),
-            current_leader: Default::default(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> PartitionSnapshot<'a> {
+impl PartitionSnapshot<'_> {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_response::PartitionSnapshot {
         crate::owned::fetch_snapshot_response::PartitionSnapshot {
             index: (self.index),
@@ -386,23 +355,23 @@ impl<'a> PartitionSnapshot<'a> {
         }
     }
 }
-impl<'a> Encode for PartitionSnapshot<'a> {
+impl Encode for PartitionSnapshot<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.index)
+            put_i32(buf, self.index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            self.snapshot_id.encode(buf, version)?
+            self.snapshot_id.encode(buf, version)?;
         }
         if version >= 0 {
-            put_i64(buf, self.size)
+            put_i64(buf, self.size);
         }
         if version >= 0 {
-            put_i64(buf, self.position)
+            put_i64(buf, self.position);
         }
         if version >= 0 {
             {
@@ -413,9 +382,9 @@ impl<'a> Encode for PartitionSnapshot<'a> {
                     version,
                 )?;
                 if flex {
-                    put_compact_bytes(buf, &__rb_buf)
+                    put_compact_bytes(buf, &__rb_buf);
                 } else {
-                    put_bytes(buf, &__rb_buf)
+                    put_bytes(buf, &__rb_buf);
                 }
             }
         }
@@ -527,7 +496,7 @@ impl<'de> DecodeBorrow<'de> for PartitionSnapshot<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> PartitionSnapshot<'a> {
+impl PartitionSnapshot<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -552,20 +521,11 @@ impl<'a> PartitionSnapshot<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotId {
     pub end_offset: i64,
     pub epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for SnapshotId {
-    fn default() -> Self {
-        Self {
-            end_offset: 0i64,
-            epoch: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl SnapshotId {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_response::SnapshotId {
@@ -580,10 +540,10 @@ impl Encode for SnapshotId {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.end_offset)
+            put_i64(buf, self.end_offset);
         }
         if version >= 0 {
-            put_i32(buf, self.epoch)
+            put_i32(buf, self.epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -637,20 +597,11 @@ impl SnapshotId {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderIdAndEpoch {
     pub leader_id: i32,
     pub leader_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for LeaderIdAndEpoch {
-    fn default() -> Self {
-        Self {
-            leader_id: 0i32,
-            leader_epoch: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl LeaderIdAndEpoch {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_response::LeaderIdAndEpoch {
@@ -665,10 +616,10 @@ impl Encode for LeaderIdAndEpoch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -722,24 +673,14 @@ impl LeaderIdAndEpoch {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NodeEndpoint<'a> {
     pub node_id: i32,
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for NodeEndpoint<'a> {
-    fn default() -> Self {
-        Self {
-            node_id: 0i32,
-            host: "",
-            port: 0u16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> NodeEndpoint<'a> {
+impl NodeEndpoint<'_> {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_response::NodeEndpoint {
         crate::owned::fetch_snapshot_response::NodeEndpoint {
             node_id: (self.node_id),
@@ -749,21 +690,21 @@ impl<'a> NodeEndpoint<'a> {
         }
     }
 }
-impl<'a> Encode for NodeEndpoint<'a> {
+impl Encode for NodeEndpoint<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 1 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 1 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -818,7 +759,7 @@ impl<'de> DecodeBorrow<'de> for NodeEndpoint<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> NodeEndpoint<'a> {
+impl NodeEndpoint<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

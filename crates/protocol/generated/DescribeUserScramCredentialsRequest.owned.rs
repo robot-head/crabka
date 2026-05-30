@@ -56,7 +56,7 @@ impl Encode for DescribeUserScramCredentialsRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.users).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -71,7 +71,7 @@ impl Encode for DescribeUserScramCredentialsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeUserScramCredentialsRequest {
+impl Decode<'_> for DescribeUserScramCredentialsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -123,9 +123,9 @@ impl Encode for UserName {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if flex {
@@ -151,7 +151,7 @@ impl Encode for UserName {
         n
     }
 }
-impl<'de> Decode<'de> for UserName {
+impl Decode<'_> for UserName {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

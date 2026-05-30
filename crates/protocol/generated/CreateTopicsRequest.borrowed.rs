@@ -31,7 +31,7 @@ pub struct CreateTopicsRequest<'a> {
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for CreateTopicsRequest<'a> {
+impl Default for CreateTopicsRequest<'_> {
     fn default() -> Self {
         Self {
             topics: Vec::new(),
@@ -41,17 +41,17 @@ impl<'a> Default for CreateTopicsRequest<'a> {
         }
     }
 }
-impl<'a> CreateTopicsRequest<'a> {
+impl CreateTopicsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreateTopicsRequest {
         crate::owned::create_topics_request::CreateTopicsRequest {
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics).iter().map(CreatableTopic::to_owned).collect(),
             timeout_ms: (self.timeout_ms),
             validate_only: (self.validate_only),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for CreateTopicsRequest<'a> {
+impl Encode for CreateTopicsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -69,10 +69,10 @@ impl<'a> Encode for CreateTopicsRequest<'a> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 1 {
-            put_bool(buf, self.validate_only)
+            put_bool(buf, self.validate_only);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -137,7 +137,7 @@ impl<'de> DecodeBorrow<'de> for CreateTopicsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> CreateTopicsRequest<'a> {
+impl CreateTopicsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -153,7 +153,7 @@ impl<'a> CreateTopicsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatableTopic<'a> {
     pub name: &'a str,
     pub num_partitions: i32,
@@ -162,45 +162,39 @@ pub struct CreatableTopic<'a> {
     pub configs: Vec<CreatableTopicConfig<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for CreatableTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            num_partitions: 0i32,
-            replication_factor: 0i16,
-            assignments: Vec::new(),
-            configs: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> CreatableTopic<'a> {
+impl CreatableTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreatableTopic {
         crate::owned::create_topics_request::CreatableTopic {
             name: (self.name).to_string(),
             num_partitions: (self.num_partitions),
             replication_factor: (self.replication_factor),
-            assignments: (self.assignments).iter().map(|it| it.to_owned()).collect(),
-            configs: (self.configs).iter().map(|it| it.to_owned()).collect(),
+            assignments: (self.assignments)
+                .iter()
+                .map(CreatableReplicaAssignment::to_owned)
+                .collect(),
+            configs: (self.configs)
+                .iter()
+                .map(CreatableTopicConfig::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for CreatableTopic<'a> {
+impl Encode for CreatableTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.num_partitions)
+            put_i32(buf, self.num_partitions);
         }
         if version >= 0 {
-            put_i16(buf, self.replication_factor)
+            put_i16(buf, self.replication_factor);
         }
         if version >= 0 {
             {
@@ -313,7 +307,7 @@ impl<'de> DecodeBorrow<'de> for CreatableTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> CreatableTopic<'a> {
+impl CreatableTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -335,20 +329,11 @@ impl<'a> CreatableTopic<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatableReplicaAssignment {
     pub partition_index: i32,
     pub broker_ids: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for CreatableReplicaAssignment {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            broker_ids: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl CreatableReplicaAssignment {
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreatableReplicaAssignment {
@@ -363,7 +348,7 @@ impl Encode for CreatableReplicaAssignment {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
             {
@@ -437,45 +422,36 @@ impl CreatableReplicaAssignment {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatableTopicConfig<'a> {
     pub name: &'a str,
     pub value: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for CreatableTopicConfig<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            value: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> CreatableTopicConfig<'a> {
+impl CreatableTopicConfig<'_> {
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreatableTopicConfig {
         crate::owned::create_topics_request::CreatableTopicConfig {
             name: (self.name).to_string(),
-            value: (self.value).map(|s| s.to_string()),
+            value: (self.value).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for CreatableTopicConfig<'a> {
+impl Encode for CreatableTopicConfig<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value)
+                put_compact_nullable_string(buf, self.value);
             } else {
-                put_nullable_string(buf, self.value)
+                put_nullable_string(buf, self.value);
             }
         }
         if flex {
@@ -533,7 +509,7 @@ impl<'de> DecodeBorrow<'de> for CreatableTopicConfig<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> CreatableTopicConfig<'a> {
+impl CreatableTopicConfig<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

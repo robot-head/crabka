@@ -36,7 +36,7 @@ impl Encode for OffsetForLeaderEpochResponse {
         }
         let flex = is_flexible(version);
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -73,7 +73,7 @@ impl Encode for OffsetForLeaderEpochResponse {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetForLeaderEpochResponse {
+impl Decode<'_> for OffsetForLeaderEpochResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -127,9 +127,9 @@ impl Encode for OffsetForLeaderTopicResult {
         let flex = version >= 4;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic)
+                put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic)
+                put_string(buf, &self.topic);
             }
         }
         if version >= 0 {
@@ -174,7 +174,7 @@ impl Encode for OffsetForLeaderTopicResult {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetForLeaderTopicResult {
+impl Decode<'_> for OffsetForLeaderTopicResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
@@ -238,16 +238,16 @@ impl Encode for EpochEndOffset {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 1 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.end_offset)
+            put_i64(buf, self.end_offset);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -277,7 +277,7 @@ impl Encode for EpochEndOffset {
         n
     }
 }
-impl<'de> Decode<'de> for EpochEndOffset {
+impl Decode<'_> for EpochEndOffset {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

@@ -37,10 +37,10 @@ impl Encode for DescribeTransactionsRequest {
                 crate::primitives::array::put_array_len(buf, (self.transactional_ids).len(), flex);
                 for it in &self.transactional_ids {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -63,9 +63,9 @@ impl Encode for DescribeTransactionsRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -79,7 +79,7 @@ impl Encode for DescribeTransactionsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeTransactionsRequest {
+impl Decode<'_> for DescribeTransactionsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

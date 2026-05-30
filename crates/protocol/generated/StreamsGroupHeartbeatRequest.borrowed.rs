@@ -45,7 +45,7 @@ pub struct StreamsGroupHeartbeatRequest<'a> {
     pub shutdown_application: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for StreamsGroupHeartbeatRequest<'a> {
+impl Default for StreamsGroupHeartbeatRequest<'_> {
     fn default() -> Self {
         Self {
             group_id: "",
@@ -69,7 +69,7 @@ impl<'a> Default for StreamsGroupHeartbeatRequest<'a> {
         }
     }
 }
-impl<'a> StreamsGroupHeartbeatRequest<'a> {
+impl StreamsGroupHeartbeatRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest {
@@ -78,36 +78,50 @@ impl<'a> StreamsGroupHeartbeatRequest<'a> {
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
             endpoint_information_epoch: (self.endpoint_information_epoch),
-            instance_id: (self.instance_id).map(|s| s.to_string()),
-            rack_id: (self.rack_id).map(|s| s.to_string()),
+            instance_id: (self.instance_id).map(std::string::ToString::to_string),
+            rack_id: (self.rack_id).map(std::string::ToString::to_string),
             rebalance_timeout_ms: (self.rebalance_timeout_ms),
-            topology: (self.topology).as_ref().map(|v| v.to_owned()),
-            active_tasks: (self.active_tasks)
+            topology: (self.topology).as_ref().map(Topology::to_owned),
+            active_tasks: (self.active_tasks).as_ref().map(|v| {
+                v.iter()
+                    .map(super::common::task_ids::TaskIds::to_owned)
+                    .collect()
+            }),
+            standby_tasks: (self.standby_tasks).as_ref().map(|v| {
+                v.iter()
+                    .map(super::common::task_ids::TaskIds::to_owned)
+                    .collect()
+            }),
+            warmup_tasks: (self.warmup_tasks).as_ref().map(|v| {
+                v.iter()
+                    .map(super::common::task_ids::TaskIds::to_owned)
+                    .collect()
+            }),
+            process_id: (self.process_id).map(std::string::ToString::to_string),
+            user_endpoint: (self.user_endpoint)
                 .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
-            standby_tasks: (self.standby_tasks)
-                .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
-            warmup_tasks: (self.warmup_tasks)
-                .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
-            process_id: (self.process_id).map(|s| s.to_string()),
-            user_endpoint: (self.user_endpoint).as_ref().map(|v| v.to_owned()),
-            client_tags: (self.client_tags)
-                .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
-            task_offsets: (self.task_offsets)
-                .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
-            task_end_offsets: (self.task_end_offsets)
-                .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+                .map(super::common::endpoint::Endpoint::to_owned),
+            client_tags: (self.client_tags).as_ref().map(|v| {
+                v.iter()
+                    .map(super::common::key_value::KeyValue::to_owned)
+                    .collect()
+            }),
+            task_offsets: (self.task_offsets).as_ref().map(|v| {
+                v.iter()
+                    .map(super::common::task_offset::TaskOffset::to_owned)
+                    .collect()
+            }),
+            task_end_offsets: (self.task_end_offsets).as_ref().map(|v| {
+                v.iter()
+                    .map(super::common::task_offset::TaskOffset::to_owned)
+                    .collect()
+            }),
             shutdown_application: (self.shutdown_application),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
+impl Encode for StreamsGroupHeartbeatRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -118,40 +132,40 @@ impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.endpoint_information_epoch)
+            put_i32(buf, self.endpoint_information_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.instance_id)
+                put_compact_nullable_string(buf, self.instance_id);
             } else {
-                put_nullable_string(buf, self.instance_id)
+                put_nullable_string(buf, self.instance_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id)
+                put_compact_nullable_string(buf, self.rack_id);
             } else {
-                put_nullable_string(buf, self.rack_id)
+                put_nullable_string(buf, self.rack_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.rebalance_timeout_ms)
+            put_i32(buf, self.rebalance_timeout_ms);
         }
         if version >= 0 {
             match &self.topology {
@@ -199,9 +213,9 @@ impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.process_id)
+                put_compact_nullable_string(buf, self.process_id);
             } else {
-                put_nullable_string(buf, self.process_id)
+                put_nullable_string(buf, self.process_id);
             }
         }
         if version >= 0 {
@@ -249,7 +263,7 @@ impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.shutdown_application)
+            put_bool(buf, self.shutdown_application);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -304,7 +318,7 @@ impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.active_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -316,7 +330,7 @@ impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.standby_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -328,7 +342,7 @@ impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.warmup_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -353,7 +367,7 @@ impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.client_tags).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -365,7 +379,7 @@ impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.task_offsets).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -377,7 +391,7 @@ impl<'a> Encode for StreamsGroupHeartbeatRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.task_end_offsets).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -577,7 +591,7 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> StreamsGroupHeartbeatRequest<'a> {
+impl StreamsGroupHeartbeatRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -639,38 +653,29 @@ impl<'a> StreamsGroupHeartbeatRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Topology<'a> {
     pub epoch: i32,
     pub subtopologies: Vec<Subtopology<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Topology<'a> {
-    fn default() -> Self {
-        Self {
-            epoch: 0i32,
-            subtopologies: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Topology<'a> {
+impl Topology<'_> {
     pub fn to_owned(&self) -> crate::owned::streams_group_heartbeat_request::Topology {
         crate::owned::streams_group_heartbeat_request::Topology {
             epoch: (self.epoch),
             subtopologies: (self.subtopologies)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(Subtopology::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for Topology<'a> {
+impl Encode for Topology<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.epoch)
+            put_i32(buf, self.epoch);
         }
         if version >= 0 {
             {
@@ -736,7 +741,7 @@ impl<'de> DecodeBorrow<'de> for Topology<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Topology<'a> {
+impl Topology<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -749,7 +754,7 @@ impl<'a> Topology<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Subtopology<'a> {
     pub subtopology_id: &'a str,
     pub source_topics: Vec<&'a str>,
@@ -760,57 +765,46 @@ pub struct Subtopology<'a> {
     pub copartition_groups: Vec<CopartitionGroup>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Subtopology<'a> {
-    fn default() -> Self {
-        Self {
-            subtopology_id: "",
-            source_topics: Vec::new(),
-            source_topic_regex: Vec::new(),
-            state_changelog_topics: Vec::new(),
-            repartition_sink_topics: Vec::new(),
-            repartition_source_topics: Vec::new(),
-            copartition_groups: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Subtopology<'a> {
+impl Subtopology<'_> {
     pub fn to_owned(&self) -> crate::owned::streams_group_heartbeat_request::Subtopology {
         crate::owned::streams_group_heartbeat_request::Subtopology {
             subtopology_id: (self.subtopology_id).to_string(),
-            source_topics: (self.source_topics).iter().map(|s| s.to_string()).collect(),
+            source_topics: (self.source_topics)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             source_topic_regex: (self.source_topic_regex)
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect(),
             state_changelog_topics: (self.state_changelog_topics)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::common::topic_info::TopicInfo::to_owned)
                 .collect(),
             repartition_sink_topics: (self.repartition_sink_topics)
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect(),
             repartition_source_topics: (self.repartition_source_topics)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::common::topic_info::TopicInfo::to_owned)
                 .collect(),
             copartition_groups: (self.copartition_groups)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(CopartitionGroup::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for Subtopology<'a> {
+impl Encode for Subtopology<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.subtopology_id)
+                put_compact_string(buf, self.subtopology_id);
             } else {
-                put_string(buf, self.subtopology_id)
+                put_string(buf, self.subtopology_id);
             }
         }
         if version >= 0 {
@@ -818,10 +812,10 @@ impl<'a> Encode for Subtopology<'a> {
                 crate::primitives::array::put_array_len(buf, (self.source_topics).len(), flex);
                 for it in &self.source_topics {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -830,10 +824,10 @@ impl<'a> Encode for Subtopology<'a> {
                 crate::primitives::array::put_array_len(buf, (self.source_topic_regex).len(), flex);
                 for it in &self.source_topic_regex {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -858,10 +852,10 @@ impl<'a> Encode for Subtopology<'a> {
                 );
                 for it in &self.repartition_sink_topics {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -911,9 +905,9 @@ impl<'a> Encode for Subtopology<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -930,9 +924,9 @@ impl<'a> Encode for Subtopology<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -962,9 +956,9 @@ impl<'a> Encode for Subtopology<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -1098,7 +1092,7 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Subtopology<'a> {
+impl Subtopology<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -1128,22 +1122,12 @@ impl<'a> Subtopology<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CopartitionGroup {
     pub source_topics: Vec<i16>,
     pub source_topic_regex: Vec<i16>,
     pub repartition_source_topics: Vec<i16>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for CopartitionGroup {
-    fn default() -> Self {
-        Self {
-            source_topics: Vec::new(),
-            source_topic_regex: Vec::new(),
-            repartition_source_topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl CopartitionGroup {
     pub fn to_owned(&self) -> crate::owned::streams_group_heartbeat_request::CopartitionGroup {

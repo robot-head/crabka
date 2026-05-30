@@ -22,34 +22,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeLogDirsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub results: Vec<DescribeLogDirsResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeLogDirsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            results: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeLogDirsResponse<'a> {
+impl DescribeLogDirsResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_response::DescribeLogDirsResponse {
         crate::owned::describe_log_dirs_response::DescribeLogDirsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            results: (self.results).iter().map(|it| it.to_owned()).collect(),
+            results: (self.results)
+                .iter()
+                .map(DescribeLogDirsResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeLogDirsResponse<'a> {
+impl Encode for DescribeLogDirsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -59,10 +52,10 @@ impl<'a> Encode for DescribeLogDirsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 3 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
@@ -138,7 +131,7 @@ impl<'de> DecodeBorrow<'de> for DescribeLogDirsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeLogDirsResponse<'a> {
+impl DescribeLogDirsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -164,7 +157,7 @@ pub struct DescribeLogDirsResult<'a> {
     pub is_cordoned: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeLogDirsResult<'a> {
+impl Default for DescribeLogDirsResult<'_> {
     fn default() -> Self {
         Self {
             error_code: 0i16,
@@ -177,12 +170,15 @@ impl<'a> Default for DescribeLogDirsResult<'a> {
         }
     }
 }
-impl<'a> DescribeLogDirsResult<'a> {
+impl DescribeLogDirsResult<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_response::DescribeLogDirsResult {
         crate::owned::describe_log_dirs_response::DescribeLogDirsResult {
             error_code: (self.error_code),
             log_dir: (self.log_dir).to_string(),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(DescribeLogDirsTopic::to_owned)
+                .collect(),
             total_bytes: (self.total_bytes),
             usable_bytes: (self.usable_bytes),
             is_cordoned: (self.is_cordoned),
@@ -190,17 +186,17 @@ impl<'a> DescribeLogDirsResult<'a> {
         }
     }
 }
-impl<'a> Encode for DescribeLogDirsResult<'a> {
+impl Encode for DescribeLogDirsResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.log_dir)
+                put_compact_string(buf, self.log_dir);
             } else {
-                put_string(buf, self.log_dir)
+                put_string(buf, self.log_dir);
             }
         }
         if version >= 0 {
@@ -212,13 +208,13 @@ impl<'a> Encode for DescribeLogDirsResult<'a> {
             }
         }
         if version >= 4 {
-            put_i64(buf, self.total_bytes)
+            put_i64(buf, self.total_bytes);
         }
         if version >= 4 {
-            put_i64(buf, self.usable_bytes)
+            put_i64(buf, self.usable_bytes);
         }
         if version >= 5 {
-            put_bool(buf, self.is_cordoned)
+            put_bool(buf, self.is_cordoned);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -303,7 +299,7 @@ impl<'de> DecodeBorrow<'de> for DescribeLogDirsResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeLogDirsResult<'a> {
+impl DescribeLogDirsResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -328,38 +324,32 @@ impl<'a> DescribeLogDirsResult<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeLogDirsTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<DescribeLogDirsPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeLogDirsTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeLogDirsTopic<'a> {
+impl DescribeLogDirsTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_response::DescribeLogDirsTopic {
         crate::owned::describe_log_dirs_response::DescribeLogDirsTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(DescribeLogDirsPartition::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeLogDirsTopic<'a> {
+impl Encode for DescribeLogDirsTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -432,7 +422,7 @@ impl<'de> DecodeBorrow<'de> for DescribeLogDirsTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeLogDirsTopic<'a> {
+impl DescribeLogDirsTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -445,24 +435,13 @@ impl<'a> DescribeLogDirsTopic<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeLogDirsPartition {
     pub partition_index: i32,
     pub partition_size: i64,
     pub offset_lag: i64,
     pub is_future_key: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for DescribeLogDirsPartition {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            partition_size: 0i64,
-            offset_lag: 0i64,
-            is_future_key: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl DescribeLogDirsPartition {
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_response::DescribeLogDirsPartition {
@@ -479,16 +458,16 @@ impl Encode for DescribeLogDirsPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.partition_size)
+            put_i64(buf, self.partition_size);
         }
         if version >= 0 {
-            put_i64(buf, self.offset_lag)
+            put_i64(buf, self.offset_lag);
         }
         if version >= 0 {
-            put_bool(buf, self.is_future_key)
+            put_bool(buf, self.is_future_key);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

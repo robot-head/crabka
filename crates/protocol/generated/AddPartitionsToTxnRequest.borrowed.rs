@@ -20,7 +20,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnRequest<'a> {
     pub transactions: Vec<AddPartitionsToTxnTransaction<'a>>,
     pub v3_and_below_transactional_id: &'a str,
@@ -30,36 +30,27 @@ pub struct AddPartitionsToTxnRequest<'a> {
         Vec<super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AddPartitionsToTxnRequest<'a> {
-    fn default() -> Self {
-        Self {
-            transactions: Vec::new(),
-            v3_and_below_transactional_id: "",
-            v3_and_below_producer_id: 0i64,
-            v3_and_below_producer_epoch: 0i16,
-            v3_and_below_topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AddPartitionsToTxnRequest<'a> {
+impl AddPartitionsToTxnRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest {
         crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest {
-            transactions: (self.transactions).iter().map(|it| it.to_owned()).collect(),
+            transactions: (self.transactions)
+                .iter()
+                .map(AddPartitionsToTxnTransaction::to_owned)
+                .collect(),
             v3_and_below_transactional_id: (self.v3_and_below_transactional_id).to_string(),
             v3_and_below_producer_id: (self.v3_and_below_producer_id),
             v3_and_below_producer_epoch: (self.v3_and_below_producer_epoch),
             v3_and_below_topics: (self.v3_and_below_topics)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AddPartitionsToTxnRequest<'a> {
+impl Encode for AddPartitionsToTxnRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -76,20 +67,20 @@ impl<'a> Encode for AddPartitionsToTxnRequest<'a> {
                 }
             }
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, self.v3_and_below_transactional_id)
+                put_compact_string(buf, self.v3_and_below_transactional_id);
             } else {
-                put_string(buf, self.v3_and_below_transactional_id)
+                put_string(buf, self.v3_and_below_transactional_id);
             }
         }
-        if version >= 0 && version <= 3 {
-            put_i64(buf, self.v3_and_below_producer_id)
+        if (0..=3).contains(&version) {
+            put_i64(buf, self.v3_and_below_producer_id);
         }
-        if version >= 0 && version <= 3 {
-            put_i16(buf, self.v3_and_below_producer_epoch)
+        if (0..=3).contains(&version) {
+            put_i16(buf, self.v3_and_below_producer_epoch);
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             {
                 crate::primitives::array::put_array_len(
                     buf,
@@ -121,20 +112,20 @@ impl<'a> Encode for AddPartitionsToTxnRequest<'a> {
                 prefix + body
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += if flex {
                 compact_string_len(self.v3_and_below_transactional_id)
             } else {
                 string_len(self.v3_and_below_transactional_id)
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 8;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 2;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += {
                 let prefix = crate::primitives::array::array_len_prefix_len(
                     (self.v3_and_below_topics).len(),
@@ -174,20 +165,20 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnRequest<'de> {
                 v
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.v3_and_below_transactional_id = if flex {
                 get_compact_string_borrowed(buf)?
             } else {
                 get_string_borrowed(buf)?
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.v3_and_below_producer_id = get_i64(buf)?;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.v3_and_below_producer_epoch = get_i16(buf)?;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.v3_and_below_topics = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -204,23 +195,23 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AddPartitionsToTxnRequest<'a> {
+impl AddPartitionsToTxnRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
         if version >= 4 {
             m.transactions = vec![AddPartitionsToTxnTransaction::populated(version)];
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.v3_and_below_transactional_id = "x";
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.v3_and_below_producer_id = 1i64;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.v3_and_below_producer_epoch = 1i16;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.v3_and_below_topics = vec![
                 super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(
                     version,
@@ -230,7 +221,7 @@ impl<'a> AddPartitionsToTxnRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnTransaction<'a> {
     pub transactional_id: &'a str,
     pub producer_id: i64,
@@ -239,19 +230,7 @@ pub struct AddPartitionsToTxnTransaction<'a> {
     pub topics: Vec<super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AddPartitionsToTxnTransaction<'a> {
-    fn default() -> Self {
-        Self {
-            transactional_id: "",
-            producer_id: 0i64,
-            producer_epoch: 0i16,
-            verify_only: false,
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AddPartitionsToTxnTransaction<'a> {
+impl AddPartitionsToTxnTransaction<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnTransaction {
@@ -260,29 +239,32 @@ impl<'a> AddPartitionsToTxnTransaction<'a> {
             producer_id: (self.producer_id),
             producer_epoch: (self.producer_epoch),
             verify_only: (self.verify_only),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AddPartitionsToTxnTransaction<'a> {
+impl Encode for AddPartitionsToTxnTransaction<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, self.transactional_id)
+                put_compact_string(buf, self.transactional_id);
             } else {
-                put_string(buf, self.transactional_id)
+                put_string(buf, self.transactional_id);
             }
         }
         if version >= 4 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 4 {
-            put_i16(buf, self.producer_epoch)
+            put_i16(buf, self.producer_epoch);
         }
         if version >= 4 {
-            put_bool(buf, self.verify_only)
+            put_bool(buf, self.verify_only);
         }
         if version >= 4 {
             {
@@ -369,7 +351,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnTransaction<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AddPartitionsToTxnTransaction<'a> {
+impl AddPartitionsToTxnTransaction<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

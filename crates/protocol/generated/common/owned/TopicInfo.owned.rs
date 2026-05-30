@@ -24,16 +24,16 @@ impl Encode for TopicInfo {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partitions)
+            put_i32(buf, self.partitions);
         }
         if version >= 0 {
-            put_i16(buf, self.replication_factor)
+            put_i16(buf, self.replication_factor);
         }
         if version >= 0 {
             {
@@ -86,7 +86,7 @@ impl Encode for TopicInfo {
     }
 }
 
-impl<'de> Decode<'de> for TopicInfo {
+impl Decode<'_> for TopicInfo {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

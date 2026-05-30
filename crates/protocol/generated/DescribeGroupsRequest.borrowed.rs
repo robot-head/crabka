@@ -20,31 +20,25 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeGroupsRequest<'a> {
     pub groups: Vec<&'a str>,
     pub include_authorized_operations: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeGroupsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            groups: Vec::new(),
-            include_authorized_operations: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeGroupsRequest<'a> {
+impl DescribeGroupsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_groups_request::DescribeGroupsRequest {
         crate::owned::describe_groups_request::DescribeGroupsRequest {
-            groups: (self.groups).iter().map(|s| s.to_string()).collect(),
+            groups: (self.groups)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             include_authorized_operations: (self.include_authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeGroupsRequest<'a> {
+impl Encode for DescribeGroupsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -58,15 +52,15 @@ impl<'a> Encode for DescribeGroupsRequest<'a> {
                 crate::primitives::array::put_array_len(buf, (self.groups).len(), flex);
                 for it in &self.groups {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
         if version >= 3 {
-            put_bool(buf, self.include_authorized_operations)
+            put_bool(buf, self.include_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -85,9 +79,9 @@ impl<'a> Encode for DescribeGroupsRequest<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -138,7 +132,7 @@ impl<'de> DecodeBorrow<'de> for DescribeGroupsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeGroupsRequest<'a> {
+impl DescribeGroupsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

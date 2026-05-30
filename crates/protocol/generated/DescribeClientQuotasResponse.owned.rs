@@ -39,16 +39,16 @@ impl Encode for DescribeClientQuotasResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
@@ -88,7 +88,7 @@ impl Encode for DescribeClientQuotasResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.entries).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -103,7 +103,7 @@ impl Encode for DescribeClientQuotasResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeClientQuotasResponse {
+impl Decode<'_> for DescribeClientQuotasResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -224,7 +224,7 @@ impl Encode for EntryData {
         n
     }
 }
-impl<'de> Decode<'de> for EntryData {
+impl Decode<'_> for EntryData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -279,16 +279,16 @@ impl Encode for EntityData {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.entity_type)
+                put_compact_string(buf, &self.entity_type);
             } else {
-                put_string(buf, &self.entity_type)
+                put_string(buf, &self.entity_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.entity_name.as_deref())
+                put_compact_nullable_string(buf, self.entity_name.as_deref());
             } else {
-                put_nullable_string(buf, self.entity_name.as_deref())
+                put_nullable_string(buf, self.entity_name.as_deref());
             }
         }
         if flex {
@@ -321,7 +321,7 @@ impl Encode for EntityData {
         n
     }
 }
-impl<'de> Decode<'de> for EntityData {
+impl Decode<'_> for EntityData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -370,13 +370,13 @@ impl Encode for ValueData {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.key)
+                put_compact_string(buf, &self.key);
             } else {
-                put_string(buf, &self.key)
+                put_string(buf, &self.key);
             }
         }
         if version >= 0 {
-            put_f64(buf, self.value)
+            put_f64(buf, self.value);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -404,7 +404,7 @@ impl Encode for ValueData {
         n
     }
 }
-impl<'de> Decode<'de> for ValueData {
+impl Decode<'_> for ValueData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();

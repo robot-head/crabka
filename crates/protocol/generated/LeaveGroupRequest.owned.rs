@@ -37,16 +37,16 @@ impl Encode for LeaveGroupRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
-        if version >= 0 && version <= 2 {
+        if (0..=2).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 3 {
@@ -73,7 +73,7 @@ impl Encode for LeaveGroupRequest {
                 string_len(&self.group_id)
             };
         }
-        if version >= 0 && version <= 2 {
+        if (0..=2).contains(&version) {
             n += if flex {
                 compact_string_len(&self.member_id)
             } else {
@@ -98,7 +98,7 @@ impl Encode for LeaveGroupRequest {
         n
     }
 }
-impl<'de> Decode<'de> for LeaveGroupRequest {
+impl Decode<'_> for LeaveGroupRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -115,7 +115,7 @@ impl<'de> Decode<'de> for LeaveGroupRequest {
                 get_string_owned(buf)?
             };
         }
-        if version >= 0 && version <= 2 {
+        if (0..=2).contains(&version) {
             out.member_id = if flex {
                 get_compact_string_owned(buf)?
             } else {
@@ -146,7 +146,7 @@ impl LeaveGroupRequest {
         if version >= 0 {
             m.group_id = "x".to_string();
         }
-        if version >= 0 && version <= 2 {
+        if (0..=2).contains(&version) {
             m.member_id = "x".to_string();
         }
         if version >= 3 {
@@ -167,23 +167,23 @@ impl Encode for MemberIdentity {
         let flex = version >= 4;
         if version >= 3 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref())
+                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref())
+                put_nullable_string(buf, self.group_instance_id.as_deref());
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.reason.as_deref())
+                put_compact_nullable_string(buf, self.reason.as_deref());
             } else {
-                put_nullable_string(buf, self.reason.as_deref())
+                put_nullable_string(buf, self.reason.as_deref());
             }
         }
         if flex {
@@ -223,7 +223,7 @@ impl Encode for MemberIdentity {
         n
     }
 }
-impl<'de> Decode<'de> for MemberIdentity {
+impl Decode<'_> for MemberIdentity {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

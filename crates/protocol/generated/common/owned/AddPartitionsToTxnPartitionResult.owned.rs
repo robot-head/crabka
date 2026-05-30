@@ -17,10 +17,10 @@ impl Encode for AddPartitionsToTxnPartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.partition_error_code)
+            put_i16(buf, self.partition_error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -45,7 +45,7 @@ impl Encode for AddPartitionsToTxnPartitionResult {
     }
 }
 
-impl<'de> Decode<'de> for AddPartitionsToTxnPartitionResult {
+impl Decode<'_> for AddPartitionsToTxnPartitionResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

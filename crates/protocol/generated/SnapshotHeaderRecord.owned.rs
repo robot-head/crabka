@@ -29,10 +29,10 @@ impl Encode for SnapshotHeaderRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version)
+            put_i16(buf, self.version);
         }
         if version >= 0 {
-            put_i64(buf, self.last_contained_log_timestamp)
+            put_i64(buf, self.last_contained_log_timestamp);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -56,7 +56,7 @@ impl Encode for SnapshotHeaderRecord {
         n
     }
 }
-impl<'de> Decode<'de> for SnapshotHeaderRecord {
+impl Decode<'_> for SnapshotHeaderRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

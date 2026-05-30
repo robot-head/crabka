@@ -63,36 +63,36 @@ impl Encode for JoinGroupRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.session_timeout_ms)
+            put_i32(buf, self.session_timeout_ms);
         }
         if version >= 1 {
-            put_i32(buf, self.rebalance_timeout_ms)
+            put_i32(buf, self.rebalance_timeout_ms);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref())
+                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref())
+                put_nullable_string(buf, self.group_instance_id.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.protocol_type)
+                put_compact_string(buf, &self.protocol_type);
             } else {
-                put_string(buf, &self.protocol_type)
+                put_string(buf, &self.protocol_type);
             }
         }
         if version >= 0 {
@@ -105,9 +105,9 @@ impl Encode for JoinGroupRequest {
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.reason.as_deref())
+                put_compact_nullable_string(buf, self.reason.as_deref());
             } else {
-                put_nullable_string(buf, self.reason.as_deref())
+                put_nullable_string(buf, self.reason.as_deref());
             }
         }
         if flex {
@@ -178,7 +178,7 @@ impl Encode for JoinGroupRequest {
         n
     }
 }
-impl<'de> Decode<'de> for JoinGroupRequest {
+impl Decode<'_> for JoinGroupRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -288,16 +288,16 @@ impl Encode for JoinGroupRequestProtocol {
         let flex = version >= 6;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.metadata)
+                put_compact_bytes(buf, &self.metadata);
             } else {
-                put_bytes(buf, &self.metadata)
+                put_bytes(buf, &self.metadata);
             }
         }
         if flex {
@@ -330,7 +330,7 @@ impl Encode for JoinGroupRequestProtocol {
         n
     }
 }
-impl<'de> Decode<'de> for JoinGroupRequestProtocol {
+impl Decode<'_> for JoinGroupRequestProtocol {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();

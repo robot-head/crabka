@@ -45,7 +45,7 @@ impl Encode for AlterClientQuotasRequest {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only)
+            put_bool(buf, self.validate_only);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -77,7 +77,7 @@ impl Encode for AlterClientQuotasRequest {
         n
     }
 }
-impl<'de> Decode<'de> for AlterClientQuotasRequest {
+impl Decode<'_> for AlterClientQuotasRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -176,7 +176,7 @@ impl Encode for EntryData {
         n
     }
 }
-impl<'de> Decode<'de> for EntryData {
+impl Decode<'_> for EntryData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -231,16 +231,16 @@ impl Encode for EntityData {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.entity_type)
+                put_compact_string(buf, &self.entity_type);
             } else {
-                put_string(buf, &self.entity_type)
+                put_string(buf, &self.entity_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.entity_name.as_deref())
+                put_compact_nullable_string(buf, self.entity_name.as_deref());
             } else {
-                put_nullable_string(buf, self.entity_name.as_deref())
+                put_nullable_string(buf, self.entity_name.as_deref());
             }
         }
         if flex {
@@ -273,7 +273,7 @@ impl Encode for EntityData {
         n
     }
 }
-impl<'de> Decode<'de> for EntityData {
+impl Decode<'_> for EntityData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -323,16 +323,16 @@ impl Encode for OpData {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.key)
+                put_compact_string(buf, &self.key);
             } else {
-                put_string(buf, &self.key)
+                put_string(buf, &self.key);
             }
         }
         if version >= 0 {
-            put_f64(buf, self.value)
+            put_f64(buf, self.value);
         }
         if version >= 0 {
-            put_bool(buf, self.remove)
+            put_bool(buf, self.remove);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -363,7 +363,7 @@ impl Encode for OpData {
         n
     }
 }
-impl<'de> Decode<'de> for OpData {
+impl Decode<'_> for OpData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();

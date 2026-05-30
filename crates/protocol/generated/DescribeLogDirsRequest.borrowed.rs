@@ -20,30 +20,22 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeLogDirsRequest<'a> {
     pub topics: Option<Vec<DescribableLogDirTopic<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeLogDirsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            topics: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeLogDirsRequest<'a> {
+impl DescribeLogDirsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_request::DescribeLogDirsRequest {
         crate::owned::describe_log_dirs_request::DescribeLogDirsRequest {
             topics: (self.topics)
                 .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+                .map(|v| v.iter().map(DescribableLogDirTopic::to_owned).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeLogDirsRequest<'a> {
+impl Encode for DescribeLogDirsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -76,7 +68,7 @@ impl<'a> Encode for DescribeLogDirsRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.topics).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -123,7 +115,7 @@ impl<'de> DecodeBorrow<'de> for DescribeLogDirsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeLogDirsRequest<'a> {
+impl DescribeLogDirsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -133,22 +125,13 @@ impl<'a> DescribeLogDirsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribableLogDirTopic<'a> {
     pub topic: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribableLogDirTopic<'a> {
-    fn default() -> Self {
-        Self {
-            topic: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribableLogDirTopic<'a> {
+impl DescribableLogDirTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_log_dirs_request::DescribableLogDirTopic {
         crate::owned::describe_log_dirs_request::DescribableLogDirTopic {
             topic: (self.topic).to_string(),
@@ -157,14 +140,14 @@ impl<'a> DescribableLogDirTopic<'a> {
         }
     }
 }
-impl<'a> Encode for DescribableLogDirTopic<'a> {
+impl Encode for DescribableLogDirTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic)
+                put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic)
+                put_string(buf, self.topic);
             }
         }
         if version >= 0 {
@@ -234,7 +217,7 @@ impl<'de> DecodeBorrow<'de> for DescribableLogDirTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribableLogDirTopic<'a> {
+impl DescribableLogDirTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

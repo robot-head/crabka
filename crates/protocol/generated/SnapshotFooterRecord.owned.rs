@@ -28,7 +28,7 @@ impl Encode for SnapshotFooterRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version)
+            put_i16(buf, self.version);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -49,7 +49,7 @@ impl Encode for SnapshotFooterRecord {
         n
     }
 }
-impl<'de> Decode<'de> for SnapshotFooterRecord {
+impl Decode<'_> for SnapshotFooterRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

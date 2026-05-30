@@ -14,20 +14,11 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotHeaderRecord {
     pub version: i16,
     pub last_contained_log_timestamp: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for SnapshotHeaderRecord {
-    fn default() -> Self {
-        Self {
-            version: 0i16,
-            last_contained_log_timestamp: 0i64,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl SnapshotHeaderRecord {
     pub fn to_owned(&self) -> crate::owned::snapshot_header_record::SnapshotHeaderRecord {
@@ -47,10 +38,10 @@ impl Encode for SnapshotHeaderRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version)
+            put_i16(buf, self.version);
         }
         if version >= 0 {
-            put_i64(buf, self.last_contained_log_timestamp)
+            put_i64(buf, self.last_contained_log_timestamp);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

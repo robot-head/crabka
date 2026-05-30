@@ -36,7 +36,7 @@ impl Encode for DeleteGroupsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -76,7 +76,7 @@ impl Encode for DeleteGroupsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteGroupsResponse {
+impl Decode<'_> for DeleteGroupsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -130,13 +130,13 @@ impl Encode for DeletableGroupResult {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -164,7 +164,7 @@ impl Encode for DeletableGroupResult {
         n
     }
 }
-impl<'de> Decode<'de> for DeletableGroupResult {
+impl Decode<'_> for DeletableGroupResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

@@ -20,34 +20,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatePartitionsRequest<'a> {
     pub topics: Vec<CreatePartitionsTopic<'a>>,
     pub timeout_ms: i32,
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for CreatePartitionsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            topics: Vec::new(),
-            timeout_ms: 0i32,
-            validate_only: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> CreatePartitionsRequest<'a> {
+impl CreatePartitionsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::create_partitions_request::CreatePartitionsRequest {
         crate::owned::create_partitions_request::CreatePartitionsRequest {
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(CreatePartitionsTopic::to_owned)
+                .collect(),
             timeout_ms: (self.timeout_ms),
             validate_only: (self.validate_only),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for CreatePartitionsRequest<'a> {
+impl Encode for CreatePartitionsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -65,10 +58,10 @@ impl<'a> Encode for CreatePartitionsRequest<'a> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only)
+            put_bool(buf, self.validate_only);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -133,7 +126,7 @@ impl<'de> DecodeBorrow<'de> for CreatePartitionsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> CreatePartitionsRequest<'a> {
+impl CreatePartitionsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -149,47 +142,37 @@ impl<'a> CreatePartitionsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatePartitionsTopic<'a> {
     pub name: &'a str,
     pub count: i32,
     pub assignments: Option<Vec<CreatePartitionsAssignment>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for CreatePartitionsTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            count: 0i32,
-            assignments: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> CreatePartitionsTopic<'a> {
+impl CreatePartitionsTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::create_partitions_request::CreatePartitionsTopic {
         crate::owned::create_partitions_request::CreatePartitionsTopic {
             name: (self.name).to_string(),
             count: (self.count),
             assignments: (self.assignments)
                 .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+                .map(|v| v.iter().map(CreatePartitionsAssignment::to_owned).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for CreatePartitionsTopic<'a> {
+impl Encode for CreatePartitionsTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.count)
+            put_i32(buf, self.count);
         }
         if version >= 0 {
             {
@@ -225,7 +208,7 @@ impl<'a> Encode for CreatePartitionsTopic<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.assignments).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -276,7 +259,7 @@ impl<'de> DecodeBorrow<'de> for CreatePartitionsTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> CreatePartitionsTopic<'a> {
+impl CreatePartitionsTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -292,18 +275,10 @@ impl<'a> CreatePartitionsTopic<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatePartitionsAssignment {
     pub broker_ids: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for CreatePartitionsAssignment {
-    fn default() -> Self {
-        Self {
-            broker_ids: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl CreatePartitionsAssignment {
     pub fn to_owned(&self) -> crate::owned::create_partitions_request::CreatePartitionsAssignment {

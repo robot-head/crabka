@@ -20,22 +20,13 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeTransactionsResponse<'a> {
     pub throttle_time_ms: i32,
     pub transaction_states: Vec<TransactionState<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeTransactionsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            transaction_states: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeTransactionsResponse<'a> {
+impl DescribeTransactionsResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_transactions_response::DescribeTransactionsResponse {
@@ -43,13 +34,13 @@ impl<'a> DescribeTransactionsResponse<'a> {
             throttle_time_ms: (self.throttle_time_ms),
             transaction_states: (self.transaction_states)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(TransactionState::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeTransactionsResponse<'a> {
+impl Encode for DescribeTransactionsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -59,7 +50,7 @@ impl<'a> Encode for DescribeTransactionsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -131,7 +122,7 @@ impl<'de> DecodeBorrow<'de> for DescribeTransactionsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeTransactionsResponse<'a> {
+impl DescribeTransactionsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -144,7 +135,7 @@ impl<'a> DescribeTransactionsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransactionState<'a> {
     pub error_code: i16,
     pub transactional_id: &'a str,
@@ -156,22 +147,7 @@ pub struct TransactionState<'a> {
     pub topics: Vec<TopicData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TransactionState<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            transactional_id: "",
-            transaction_state: "",
-            transaction_timeout_ms: 0i32,
-            transaction_start_time_ms: 0i64,
-            producer_id: 0i64,
-            producer_epoch: 0i16,
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TransactionState<'a> {
+impl TransactionState<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_transactions_response::TransactionState {
         crate::owned::describe_transactions_response::TransactionState {
             error_code: (self.error_code),
@@ -181,42 +157,42 @@ impl<'a> TransactionState<'a> {
             transaction_start_time_ms: (self.transaction_start_time_ms),
             producer_id: (self.producer_id),
             producer_epoch: (self.producer_epoch),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for TransactionState<'a> {
+impl Encode for TransactionState<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.transactional_id)
+                put_compact_string(buf, self.transactional_id);
             } else {
-                put_string(buf, self.transactional_id)
+                put_string(buf, self.transactional_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.transaction_state)
+                put_compact_string(buf, self.transaction_state);
             } else {
-                put_string(buf, self.transaction_state)
+                put_string(buf, self.transaction_state);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.transaction_timeout_ms)
+            put_i32(buf, self.transaction_timeout_ms);
         }
         if version >= 0 {
-            put_i64(buf, self.transaction_start_time_ms)
+            put_i64(buf, self.transaction_start_time_ms);
         }
         if version >= 0 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 0 {
-            put_i16(buf, self.producer_epoch)
+            put_i16(buf, self.producer_epoch);
         }
         if version >= 0 {
             {
@@ -329,7 +305,7 @@ impl<'de> DecodeBorrow<'de> for TransactionState<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TransactionState<'a> {
+impl TransactionState<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -360,22 +336,13 @@ impl<'a> TransactionState<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicData<'a> {
     pub topic: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicData<'a> {
-    fn default() -> Self {
-        Self {
-            topic: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_transactions_response::TopicData {
         crate::owned::describe_transactions_response::TopicData {
             topic: (self.topic).to_string(),
@@ -384,14 +351,14 @@ impl<'a> TopicData<'a> {
         }
     }
 }
-impl<'a> Encode for TopicData<'a> {
+impl Encode for TopicData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic)
+                put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic)
+                put_string(buf, self.topic);
             }
         }
         if version >= 0 {
@@ -461,7 +428,7 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

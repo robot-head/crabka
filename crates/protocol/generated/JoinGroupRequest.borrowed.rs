@@ -38,7 +38,7 @@ pub struct JoinGroupRequest<'a> {
     pub reason: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for JoinGroupRequest<'a> {
+impl Default for JoinGroupRequest<'_> {
     fn default() -> Self {
         Self {
             group_id: "",
@@ -53,22 +53,25 @@ impl<'a> Default for JoinGroupRequest<'a> {
         }
     }
 }
-impl<'a> JoinGroupRequest<'a> {
+impl JoinGroupRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::join_group_request::JoinGroupRequest {
         crate::owned::join_group_request::JoinGroupRequest {
             group_id: (self.group_id).to_string(),
             session_timeout_ms: (self.session_timeout_ms),
             rebalance_timeout_ms: (self.rebalance_timeout_ms),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
+            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
             protocol_type: (self.protocol_type).to_string(),
-            protocols: (self.protocols).iter().map(|it| it.to_owned()).collect(),
-            reason: (self.reason).map(|s| s.to_string()),
+            protocols: (self.protocols)
+                .iter()
+                .map(JoinGroupRequestProtocol::to_owned)
+                .collect(),
+            reason: (self.reason).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for JoinGroupRequest<'a> {
+impl Encode for JoinGroupRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -79,36 +82,36 @@ impl<'a> Encode for JoinGroupRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.session_timeout_ms)
+            put_i32(buf, self.session_timeout_ms);
         }
         if version >= 1 {
-            put_i32(buf, self.rebalance_timeout_ms)
+            put_i32(buf, self.rebalance_timeout_ms);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id)
+                put_compact_nullable_string(buf, self.group_instance_id);
             } else {
-                put_nullable_string(buf, self.group_instance_id)
+                put_nullable_string(buf, self.group_instance_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.protocol_type)
+                put_compact_string(buf, self.protocol_type);
             } else {
-                put_string(buf, self.protocol_type)
+                put_string(buf, self.protocol_type);
             }
         }
         if version >= 0 {
@@ -121,9 +124,9 @@ impl<'a> Encode for JoinGroupRequest<'a> {
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.reason)
+                put_compact_nullable_string(buf, self.reason);
             } else {
-                put_nullable_string(buf, self.reason)
+                put_nullable_string(buf, self.reason);
             }
         }
         if flex {
@@ -262,7 +265,7 @@ impl<'de> DecodeBorrow<'de> for JoinGroupRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> JoinGroupRequest<'a> {
+impl JoinGroupRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -293,22 +296,13 @@ impl<'a> JoinGroupRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct JoinGroupRequestProtocol<'a> {
     pub name: &'a str,
     pub metadata: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for JoinGroupRequestProtocol<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            metadata: &[],
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> JoinGroupRequestProtocol<'a> {
+impl JoinGroupRequestProtocol<'_> {
     pub fn to_owned(&self) -> crate::owned::join_group_request::JoinGroupRequestProtocol {
         crate::owned::join_group_request::JoinGroupRequestProtocol {
             name: (self.name).to_string(),
@@ -317,21 +311,21 @@ impl<'a> JoinGroupRequestProtocol<'a> {
         }
     }
 }
-impl<'a> Encode for JoinGroupRequestProtocol<'a> {
+impl Encode for JoinGroupRequestProtocol<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.metadata)
+                put_compact_bytes(buf, self.metadata);
             } else {
-                put_bytes(buf, self.metadata)
+                put_bytes(buf, self.metadata);
             }
         }
         if flex {
@@ -391,7 +385,7 @@ impl<'de> DecodeBorrow<'de> for JoinGroupRequestProtocol<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> JoinGroupRequestProtocol<'a> {
+impl JoinGroupRequestProtocol<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

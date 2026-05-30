@@ -4,12 +4,11 @@ use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -22,7 +21,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RequestHeader<'a> {
     pub request_api_key: i16,
     pub request_api_version: i16,
@@ -30,29 +29,18 @@ pub struct RequestHeader<'a> {
     pub client_id: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for RequestHeader<'a> {
-    fn default() -> Self {
-        Self {
-            request_api_key: 0i16,
-            request_api_version: 0i16,
-            correlation_id: 0i32,
-            client_id: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> RequestHeader<'a> {
+impl RequestHeader<'_> {
     pub fn to_owned(&self) -> crate::owned::request_header::RequestHeader {
         crate::owned::request_header::RequestHeader {
             request_api_key: (self.request_api_key),
             request_api_version: (self.request_api_version),
             correlation_id: (self.correlation_id),
-            client_id: (self.client_id).map(|s| s.to_string()),
+            client_id: (self.client_id).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for RequestHeader<'a> {
+impl Encode for RequestHeader<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -61,21 +49,21 @@ impl<'a> Encode for RequestHeader<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.request_api_key)
+            put_i16(buf, self.request_api_key);
         }
         if version >= 0 {
-            put_i16(buf, self.request_api_version)
+            put_i16(buf, self.request_api_version);
         }
         if version >= 0 {
-            put_i32(buf, self.correlation_id)
+            put_i32(buf, self.correlation_id);
         }
         if version >= 1 {
             {
                 let flex = false;
                 if flex {
-                    put_compact_nullable_string(buf, self.client_id)
+                    put_compact_nullable_string(buf, self.client_id);
                 } else {
-                    put_nullable_string(buf, self.client_id)
+                    put_nullable_string(buf, self.client_id);
                 }
             }
         }
@@ -149,7 +137,7 @@ impl<'de> DecodeBorrow<'de> for RequestHeader<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> RequestHeader<'a> {
+impl RequestHeader<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

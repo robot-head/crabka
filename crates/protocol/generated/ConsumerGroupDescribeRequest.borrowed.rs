@@ -20,33 +20,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConsumerGroupDescribeRequest<'a> {
     pub group_ids: Vec<&'a str>,
     pub include_authorized_operations: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ConsumerGroupDescribeRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_ids: Vec::new(),
-            include_authorized_operations: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ConsumerGroupDescribeRequest<'a> {
+impl ConsumerGroupDescribeRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_group_describe_request::ConsumerGroupDescribeRequest {
         crate::owned::consumer_group_describe_request::ConsumerGroupDescribeRequest {
-            group_ids: (self.group_ids).iter().map(|s| s.to_string()).collect(),
+            group_ids: (self.group_ids)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             include_authorized_operations: (self.include_authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ConsumerGroupDescribeRequest<'a> {
+impl Encode for ConsumerGroupDescribeRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -60,15 +54,15 @@ impl<'a> Encode for ConsumerGroupDescribeRequest<'a> {
                 crate::primitives::array::put_array_len(buf, (self.group_ids).len(), flex);
                 for it in &self.group_ids {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
         if version >= 0 {
-            put_bool(buf, self.include_authorized_operations)
+            put_bool(buf, self.include_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -87,9 +81,9 @@ impl<'a> Encode for ConsumerGroupDescribeRequest<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -140,7 +134,7 @@ impl<'de> DecodeBorrow<'de> for ConsumerGroupDescribeRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ConsumerGroupDescribeRequest<'a> {
+impl ConsumerGroupDescribeRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

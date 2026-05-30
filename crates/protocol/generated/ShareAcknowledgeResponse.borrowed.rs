@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareAcknowledgeResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -34,36 +34,26 @@ pub struct ShareAcknowledgeResponse<'a> {
     pub node_endpoints: Vec<NodeEndpoint<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ShareAcknowledgeResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            acquisition_lock_timeout_ms: 0i32,
-            responses: Vec::new(),
-            node_endpoints: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ShareAcknowledgeResponse<'a> {
+impl ShareAcknowledgeResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_response::ShareAcknowledgeResponse {
         crate::owned::share_acknowledge_response::ShareAcknowledgeResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             acquisition_lock_timeout_ms: (self.acquisition_lock_timeout_ms),
-            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
+            responses: (self.responses)
+                .iter()
+                .map(ShareAcknowledgeTopicResponse::to_owned)
+                .collect(),
             node_endpoints: (self.node_endpoints)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(NodeEndpoint::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ShareAcknowledgeResponse<'a> {
+impl Encode for ShareAcknowledgeResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -73,20 +63,20 @@ impl<'a> Encode for ShareAcknowledgeResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 2 {
-            put_i32(buf, self.acquisition_lock_timeout_ms)
+            put_i32(buf, self.acquisition_lock_timeout_ms);
         }
         if version >= 0 {
             {
@@ -213,7 +203,7 @@ impl<'de> DecodeBorrow<'de> for ShareAcknowledgeResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ShareAcknowledgeResponse<'a> {
+impl ShareAcknowledgeResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -238,37 +228,31 @@ impl<'a> ShareAcknowledgeResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareAcknowledgeTopicResponse<'a> {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ShareAcknowledgeTopicResponse<'a> {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ShareAcknowledgeTopicResponse<'a> {
+impl ShareAcknowledgeTopicResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::share_acknowledge_response::ShareAcknowledgeTopicResponse {
         crate::owned::share_acknowledge_response::ShareAcknowledgeTopicResponse {
             topic_id: (self.topic_id),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ShareAcknowledgeTopicResponse<'a> {
+impl Encode for ShareAcknowledgeTopicResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -332,7 +316,7 @@ impl<'de> DecodeBorrow<'de> for ShareAcknowledgeTopicResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ShareAcknowledgeTopicResponse<'a> {
+impl ShareAcknowledgeTopicResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -345,7 +329,7 @@ impl<'a> ShareAcknowledgeTopicResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionData<'a> {
     pub partition_index: i32,
     pub error_code: i16,
@@ -353,46 +337,35 @@ pub struct PartitionData<'a> {
     pub current_leader: LeaderIdAndEpoch,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for PartitionData<'a> {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            current_leader: Default::default(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> PartitionData<'a> {
+impl PartitionData<'_> {
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_response::PartitionData {
         crate::owned::share_acknowledge_response::PartitionData {
             partition_index: (self.partition_index),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             current_leader: (self.current_leader).to_owned(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for PartitionData<'a> {
+impl Encode for PartitionData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
-            self.current_leader.encode(buf, version)?
+            self.current_leader.encode(buf, version)?;
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -453,7 +426,7 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> PartitionData<'a> {
+impl PartitionData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -472,20 +445,11 @@ impl<'a> PartitionData<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderIdAndEpoch {
     pub leader_id: i32,
     pub leader_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for LeaderIdAndEpoch {
-    fn default() -> Self {
-        Self {
-            leader_id: 0i32,
-            leader_epoch: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl LeaderIdAndEpoch {
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_response::LeaderIdAndEpoch {
@@ -500,10 +464,10 @@ impl Encode for LeaderIdAndEpoch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -557,7 +521,7 @@ impl LeaderIdAndEpoch {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NodeEndpoint<'a> {
     pub node_id: i32,
     pub host: &'a str,
@@ -565,49 +529,38 @@ pub struct NodeEndpoint<'a> {
     pub rack: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for NodeEndpoint<'a> {
-    fn default() -> Self {
-        Self {
-            node_id: 0i32,
-            host: "",
-            port: 0i32,
-            rack: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> NodeEndpoint<'a> {
+impl NodeEndpoint<'_> {
     pub fn to_owned(&self) -> crate::owned::share_acknowledge_response::NodeEndpoint {
         crate::owned::share_acknowledge_response::NodeEndpoint {
             node_id: (self.node_id),
             host: (self.host).to_string(),
             port: (self.port),
-            rack: (self.rack).map(|s| s.to_string()),
+            rack: (self.rack).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for NodeEndpoint<'a> {
+impl Encode for NodeEndpoint<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack)
+                put_compact_nullable_string(buf, self.rack);
             } else {
-                put_nullable_string(buf, self.rack)
+                put_nullable_string(buf, self.rack);
             }
         }
         if flex {
@@ -677,7 +630,7 @@ impl<'de> DecodeBorrow<'de> for NodeEndpoint<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> NodeEndpoint<'a> {
+impl NodeEndpoint<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

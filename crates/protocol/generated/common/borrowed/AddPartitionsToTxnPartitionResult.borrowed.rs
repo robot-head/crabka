@@ -6,21 +6,11 @@ use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnPartitionResult {
     pub partition_index: i32,
     pub partition_error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-
-impl Default for AddPartitionsToTxnPartitionResult {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            partition_error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 
 impl AddPartitionsToTxnPartitionResult {
@@ -37,10 +27,10 @@ impl Encode for AddPartitionsToTxnPartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.partition_error_code)
+            put_i16(buf, self.partition_error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

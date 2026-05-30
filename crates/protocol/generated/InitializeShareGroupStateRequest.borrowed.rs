@@ -20,33 +20,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InitializeShareGroupStateRequest<'a> {
     pub group_id: &'a str,
     pub topics: Vec<InitializeStateData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for InitializeShareGroupStateRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> InitializeShareGroupStateRequest<'a> {
+impl InitializeShareGroupStateRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::initialize_share_group_state_request::InitializeShareGroupStateRequest {
         crate::owned::initialize_share_group_state_request::InitializeShareGroupStateRequest {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(InitializeStateData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for InitializeShareGroupStateRequest<'a> {
+impl Encode for InitializeShareGroupStateRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -57,9 +51,9 @@ impl<'a> Encode for InitializeShareGroupStateRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
@@ -135,7 +129,7 @@ impl<'de> DecodeBorrow<'de> for InitializeShareGroupStateRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> InitializeShareGroupStateRequest<'a> {
+impl InitializeShareGroupStateRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -148,20 +142,11 @@ impl<'a> InitializeShareGroupStateRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InitializeStateData {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for InitializeStateData {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl InitializeStateData {
     pub fn to_owned(
@@ -169,7 +154,10 @@ impl InitializeStateData {
     ) -> crate::owned::initialize_share_group_state_request::InitializeStateData {
         crate::owned::initialize_share_group_state_request::InitializeStateData {
             topic_id: (self.topic_id),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -178,7 +166,7 @@ impl Encode for InitializeStateData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -255,22 +243,12 @@ impl InitializeStateData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionData {
     pub partition: i32,
     pub state_epoch: i32,
     pub start_offset: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for PartitionData {
-    fn default() -> Self {
-        Self {
-            partition: 0i32,
-            state_epoch: 0i32,
-            start_offset: 0i64,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl PartitionData {
     pub fn to_owned(&self) -> crate::owned::initialize_share_group_state_request::PartitionData {
@@ -286,13 +264,13 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 0 {
-            put_i32(buf, self.state_epoch)
+            put_i32(buf, self.state_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.start_offset)
+            put_i64(buf, self.start_offset);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

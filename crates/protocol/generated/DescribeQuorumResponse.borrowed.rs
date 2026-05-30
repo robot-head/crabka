@@ -26,7 +26,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeQuorumResponse<'a> {
     pub error_code: i16,
     pub error_message: Option<&'a str>,
@@ -34,29 +34,18 @@ pub struct DescribeQuorumResponse<'a> {
     pub nodes: Vec<Node<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeQuorumResponse<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            error_message: None,
-            topics: Vec::new(),
-            nodes: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeQuorumResponse<'a> {
+impl DescribeQuorumResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::DescribeQuorumResponse {
         crate::owned::describe_quorum_response::DescribeQuorumResponse {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
-            nodes: (self.nodes).iter().map(|it| it.to_owned()).collect(),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
+            nodes: (self.nodes).iter().map(Node::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeQuorumResponse<'a> {
+impl Encode for DescribeQuorumResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -66,13 +55,13 @@ impl<'a> Encode for DescribeQuorumResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 2 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
@@ -180,7 +169,7 @@ impl<'de> DecodeBorrow<'de> for DescribeQuorumResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeQuorumResponse<'a> {
+impl DescribeQuorumResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -199,38 +188,32 @@ impl<'a> DescribeQuorumResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<PartitionData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicData<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::TopicData {
         crate::owned::describe_quorum_response::TopicData {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for TopicData<'a> {
+impl Encode for TopicData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name)
+                put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name)
+                put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -303,7 +286,7 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -316,7 +299,7 @@ impl<'a> TopicData<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionData<'a> {
     pub partition_index: i32,
     pub error_code: i16,
@@ -328,63 +311,51 @@ pub struct PartitionData<'a> {
     pub observers: Vec<super::common::replica_state::ReplicaState>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for PartitionData<'a> {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            leader_id: 0i32,
-            leader_epoch: 0i32,
-            high_watermark: 0i64,
-            current_voters: Vec::new(),
-            observers: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> PartitionData<'a> {
+impl PartitionData<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::PartitionData {
         crate::owned::describe_quorum_response::PartitionData {
             partition_index: (self.partition_index),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             leader_id: (self.leader_id),
             leader_epoch: (self.leader_epoch),
             high_watermark: (self.high_watermark),
             current_voters: (self.current_voters)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::common::replica_state::ReplicaState::to_owned)
                 .collect(),
-            observers: (self.observers).iter().map(|it| it.to_owned()).collect(),
+            observers: (self.observers)
+                .iter()
+                .map(super::common::replica_state::ReplicaState::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for PartitionData<'a> {
+impl Encode for PartitionData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 2 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.high_watermark)
+            put_i64(buf, self.high_watermark);
         }
         if version >= 0 {
             {
@@ -521,7 +492,7 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> PartitionData<'a> {
+impl PartitionData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -556,35 +527,26 @@ impl<'a> PartitionData<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Node<'a> {
     pub node_id: i32,
     pub listeners: Vec<Listener<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Node<'a> {
-    fn default() -> Self {
-        Self {
-            node_id: 0i32,
-            listeners: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Node<'a> {
+impl Node<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::Node {
         crate::owned::describe_quorum_response::Node {
             node_id: (self.node_id),
-            listeners: (self.listeners).iter().map(|it| it.to_owned()).collect(),
+            listeners: (self.listeners).iter().map(Listener::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for Node<'a> {
+impl Encode for Node<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 2 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 2 {
             {
@@ -648,7 +610,7 @@ impl<'de> DecodeBorrow<'de> for Node<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Node<'a> {
+impl Node<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -661,24 +623,14 @@ impl<'a> Node<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listener<'a> {
     pub name: &'a str,
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Listener<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            host: "",
-            port: 0u16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Listener<'a> {
+impl Listener<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_quorum_response::Listener {
         crate::owned::describe_quorum_response::Listener {
             name: (self.name).to_string(),
@@ -688,25 +640,25 @@ impl<'a> Listener<'a> {
         }
     }
 }
-impl<'a> Encode for Listener<'a> {
+impl Encode for Listener<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 2 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 2 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 2 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -769,7 +721,7 @@ impl<'de> DecodeBorrow<'de> for Listener<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Listener<'a> {
+impl Listener<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

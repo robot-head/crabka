@@ -35,16 +35,16 @@ impl Encode for ApiVersionsRequest {
         let flex = is_flexible(version);
         if version >= 3 {
             if flex {
-                put_compact_string(buf, &self.client_software_name)
+                put_compact_string(buf, &self.client_software_name);
             } else {
-                put_string(buf, &self.client_software_name)
+                put_string(buf, &self.client_software_name);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_string(buf, &self.client_software_version)
+                put_compact_string(buf, &self.client_software_version);
             } else {
-                put_string(buf, &self.client_software_version)
+                put_string(buf, &self.client_software_version);
             }
         }
         if flex {
@@ -77,7 +77,7 @@ impl Encode for ApiVersionsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for ApiVersionsRequest {
+impl Decode<'_> for ApiVersionsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

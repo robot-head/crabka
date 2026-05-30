@@ -38,23 +38,23 @@ impl Encode for EnvelopeRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.request_data)
+                put_compact_bytes(buf, &self.request_data);
             } else {
-                put_bytes(buf, &self.request_data)
+                put_bytes(buf, &self.request_data);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.request_principal.as_deref())
+                put_compact_nullable_bytes(buf, self.request_principal.as_deref());
             } else {
-                put_nullable_bytes(buf, self.request_principal.as_deref())
+                put_nullable_bytes(buf, self.request_principal.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.client_host_address)
+                put_compact_bytes(buf, &self.client_host_address);
             } else {
-                put_bytes(buf, &self.client_host_address)
+                put_bytes(buf, &self.client_host_address);
             }
         }
         if flex {
@@ -94,7 +94,7 @@ impl Encode for EnvelopeRequest {
         n
     }
 }
-impl<'de> Decode<'de> for EnvelopeRequest {
+impl Decode<'_> for EnvelopeRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

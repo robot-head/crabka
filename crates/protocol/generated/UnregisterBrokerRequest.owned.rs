@@ -31,7 +31,7 @@ impl Encode for UnregisterBrokerRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -52,7 +52,7 @@ impl Encode for UnregisterBrokerRequest {
         n
     }
 }
-impl<'de> Decode<'de> for UnregisterBrokerRequest {
+impl Decode<'_> for UnregisterBrokerRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

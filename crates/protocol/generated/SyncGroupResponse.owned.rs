@@ -8,9 +8,8 @@ use crate::primitives::string_bytes::{
     put_compact_bytes,
 };
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -44,30 +43,30 @@ impl Encode for SyncGroupResponse {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.protocol_type.as_deref())
+                put_compact_nullable_string(buf, self.protocol_type.as_deref());
             } else {
-                put_nullable_string(buf, self.protocol_type.as_deref())
+                put_nullable_string(buf, self.protocol_type.as_deref());
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.protocol_name.as_deref())
+                put_compact_nullable_string(buf, self.protocol_name.as_deref());
             } else {
-                put_nullable_string(buf, self.protocol_name.as_deref())
+                put_nullable_string(buf, self.protocol_name.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.assignment)
+                put_compact_bytes(buf, &self.assignment);
             } else {
-                put_bytes(buf, &self.assignment)
+                put_bytes(buf, &self.assignment);
             }
         }
         if flex {
@@ -113,7 +112,7 @@ impl Encode for SyncGroupResponse {
         n
     }
 }
-impl<'de> Decode<'de> for SyncGroupResponse {
+impl Decode<'_> for SyncGroupResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

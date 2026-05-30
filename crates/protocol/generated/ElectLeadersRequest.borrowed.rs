@@ -27,7 +27,7 @@ pub struct ElectLeadersRequest<'a> {
     pub timeout_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ElectLeadersRequest<'a> {
+impl Default for ElectLeadersRequest<'_> {
     fn default() -> Self {
         Self {
             election_type: 0i8,
@@ -37,19 +37,19 @@ impl<'a> Default for ElectLeadersRequest<'a> {
         }
     }
 }
-impl<'a> ElectLeadersRequest<'a> {
+impl ElectLeadersRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::elect_leaders_request::ElectLeadersRequest {
         crate::owned::elect_leaders_request::ElectLeadersRequest {
             election_type: (self.election_type),
             topic_partitions: (self.topic_partitions)
                 .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+                .map(|v| v.iter().map(TopicPartitions::to_owned).collect()),
             timeout_ms: (self.timeout_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ElectLeadersRequest<'a> {
+impl Encode for ElectLeadersRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -59,7 +59,7 @@ impl<'a> Encode for ElectLeadersRequest<'a> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i8(buf, self.election_type)
+            put_i8(buf, self.election_type);
         }
         if version >= 0 {
             {
@@ -73,7 +73,7 @@ impl<'a> Encode for ElectLeadersRequest<'a> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -91,7 +91,7 @@ impl<'a> Encode for ElectLeadersRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.topic_partitions).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -147,7 +147,7 @@ impl<'de> DecodeBorrow<'de> for ElectLeadersRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ElectLeadersRequest<'a> {
+impl ElectLeadersRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -163,22 +163,13 @@ impl<'a> ElectLeadersRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartitions<'a> {
     pub topic: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicPartitions<'a> {
-    fn default() -> Self {
-        Self {
-            topic: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicPartitions<'a> {
+impl TopicPartitions<'_> {
     pub fn to_owned(&self) -> crate::owned::elect_leaders_request::TopicPartitions {
         crate::owned::elect_leaders_request::TopicPartitions {
             topic: (self.topic).to_string(),
@@ -187,14 +178,14 @@ impl<'a> TopicPartitions<'a> {
         }
     }
 }
-impl<'a> Encode for TopicPartitions<'a> {
+impl Encode for TopicPartitions<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic)
+                put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic)
+                put_string(buf, self.topic);
             }
         }
         if version >= 0 {
@@ -264,7 +255,7 @@ impl<'de> DecodeBorrow<'de> for TopicPartitions<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicPartitions<'a> {
+impl TopicPartitions<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

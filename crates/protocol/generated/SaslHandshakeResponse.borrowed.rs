@@ -19,31 +19,25 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SaslHandshakeResponse<'a> {
     pub error_code: i16,
     pub mechanisms: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for SaslHandshakeResponse<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            mechanisms: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> SaslHandshakeResponse<'a> {
+impl SaslHandshakeResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::sasl_handshake_response::SaslHandshakeResponse {
         crate::owned::sasl_handshake_response::SaslHandshakeResponse {
             error_code: (self.error_code),
-            mechanisms: (self.mechanisms).iter().map(|s| s.to_string()).collect(),
+            mechanisms: (self.mechanisms)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for SaslHandshakeResponse<'a> {
+impl Encode for SaslHandshakeResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -53,17 +47,17 @@ impl<'a> Encode for SaslHandshakeResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.mechanisms).len(), flex);
                 for it in &self.mechanisms {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -83,9 +77,9 @@ impl<'a> Encode for SaslHandshakeResponse<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -126,7 +120,7 @@ impl<'de> DecodeBorrow<'de> for SaslHandshakeResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> SaslHandshakeResponse<'a> {
+impl SaslHandshakeResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

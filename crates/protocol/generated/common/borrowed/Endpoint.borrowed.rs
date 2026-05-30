@@ -10,24 +10,14 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Endpoint<'a> {
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl<'a> Default for Endpoint<'a> {
-    fn default() -> Self {
-        Self {
-            host: "",
-            port: 0u16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> Endpoint<'a> {
+impl Endpoint<'_> {
     pub fn to_owned(&self) -> crate::owned::common::endpoint::Endpoint {
         crate::owned::common::endpoint::Endpoint {
             host: (self.host).to_string(),
@@ -37,18 +27,18 @@ impl<'a> Endpoint<'a> {
     }
 }
 
-impl<'a> Encode for Endpoint<'a> {
+impl Encode for Endpoint<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -99,7 +89,7 @@ impl<'de> DecodeBorrow<'de> for Endpoint<'de> {
 }
 
 #[cfg(test)]
-impl<'a> Endpoint<'a> {
+impl Endpoint<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

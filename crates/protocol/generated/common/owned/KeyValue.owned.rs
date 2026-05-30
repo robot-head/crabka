@@ -20,16 +20,16 @@ impl Encode for KeyValue {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.key)
+                put_compact_string(buf, &self.key);
             } else {
-                put_string(buf, &self.key)
+                put_string(buf, &self.key);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.value)
+                put_compact_string(buf, &self.value);
             } else {
-                put_string(buf, &self.value)
+                put_string(buf, &self.value);
             }
         }
         if flex {
@@ -63,7 +63,7 @@ impl Encode for KeyValue {
     }
 }
 
-impl<'de> Decode<'de> for KeyValue {
+impl Decode<'_> for KeyValue {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

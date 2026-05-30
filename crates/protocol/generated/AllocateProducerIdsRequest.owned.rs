@@ -41,10 +41,10 @@ impl Encode for AllocateProducerIdsRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if version >= 0 {
-            put_i64(buf, self.broker_epoch)
+            put_i64(buf, self.broker_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -68,7 +68,7 @@ impl Encode for AllocateProducerIdsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for AllocateProducerIdsRequest {
+impl Decode<'_> for AllocateProducerIdsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

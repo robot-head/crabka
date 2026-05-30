@@ -18,7 +18,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PushTelemetryRequest<'a> {
     pub client_instance_id: crate::primitives::uuid::Uuid,
     pub subscription_id: i32,
@@ -27,19 +27,7 @@ pub struct PushTelemetryRequest<'a> {
     pub metrics: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for PushTelemetryRequest<'a> {
-    fn default() -> Self {
-        Self {
-            client_instance_id: Default::default(),
-            subscription_id: 0i32,
-            terminating: false,
-            compression_type: 0i8,
-            metrics: &[],
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> PushTelemetryRequest<'a> {
+impl PushTelemetryRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::push_telemetry_request::PushTelemetryRequest {
         crate::owned::push_telemetry_request::PushTelemetryRequest {
             client_instance_id: (self.client_instance_id),
@@ -51,7 +39,7 @@ impl<'a> PushTelemetryRequest<'a> {
         }
     }
 }
-impl<'a> Encode for PushTelemetryRequest<'a> {
+impl Encode for PushTelemetryRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -61,22 +49,22 @@ impl<'a> Encode for PushTelemetryRequest<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.client_instance_id)
+            crate::primitives::uuid::put_uuid(buf, self.client_instance_id);
         }
         if version >= 0 {
-            put_i32(buf, self.subscription_id)
+            put_i32(buf, self.subscription_id);
         }
         if version >= 0 {
-            put_bool(buf, self.terminating)
+            put_bool(buf, self.terminating);
         }
         if version >= 0 {
-            put_i8(buf, self.compression_type)
+            put_i8(buf, self.compression_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.metrics)
+                put_compact_bytes(buf, self.metrics);
             } else {
-                put_bytes(buf, self.metrics)
+                put_bytes(buf, self.metrics);
             }
         }
         if flex {
@@ -152,7 +140,7 @@ impl<'de> DecodeBorrow<'de> for PushTelemetryRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> PushTelemetryRequest<'a> {
+impl PushTelemetryRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

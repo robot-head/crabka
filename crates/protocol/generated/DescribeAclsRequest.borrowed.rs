@@ -4,12 +4,11 @@ use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i8, put_i8};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -35,7 +34,7 @@ pub struct DescribeAclsRequest<'a> {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeAclsRequest<'a> {
+impl Default for DescribeAclsRequest<'_> {
     fn default() -> Self {
         Self {
             resource_type_filter: 0i8,
@@ -49,21 +48,21 @@ impl<'a> Default for DescribeAclsRequest<'a> {
         }
     }
 }
-impl<'a> DescribeAclsRequest<'a> {
+impl DescribeAclsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_acls_request::DescribeAclsRequest {
         crate::owned::describe_acls_request::DescribeAclsRequest {
             resource_type_filter: (self.resource_type_filter),
-            resource_name_filter: (self.resource_name_filter).map(|s| s.to_string()),
+            resource_name_filter: (self.resource_name_filter).map(std::string::ToString::to_string),
             pattern_type_filter: (self.pattern_type_filter),
-            principal_filter: (self.principal_filter).map(|s| s.to_string()),
-            host_filter: (self.host_filter).map(|s| s.to_string()),
+            principal_filter: (self.principal_filter).map(std::string::ToString::to_string),
+            host_filter: (self.host_filter).map(std::string::ToString::to_string),
             operation: (self.operation),
             permission_type: (self.permission_type),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeAclsRequest<'a> {
+impl Encode for DescribeAclsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -73,37 +72,37 @@ impl<'a> Encode for DescribeAclsRequest<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i8(buf, self.resource_type_filter)
+            put_i8(buf, self.resource_type_filter);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.resource_name_filter)
+                put_compact_nullable_string(buf, self.resource_name_filter);
             } else {
-                put_nullable_string(buf, self.resource_name_filter)
+                put_nullable_string(buf, self.resource_name_filter);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.pattern_type_filter)
+            put_i8(buf, self.pattern_type_filter);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.principal_filter)
+                put_compact_nullable_string(buf, self.principal_filter);
             } else {
-                put_nullable_string(buf, self.principal_filter)
+                put_nullable_string(buf, self.principal_filter);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.host_filter)
+                put_compact_nullable_string(buf, self.host_filter);
             } else {
-                put_nullable_string(buf, self.host_filter)
+                put_nullable_string(buf, self.host_filter);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.operation)
+            put_i8(buf, self.operation);
         }
         if version >= 0 {
-            put_i8(buf, self.permission_type)
+            put_i8(buf, self.permission_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -204,7 +203,7 @@ impl<'de> DecodeBorrow<'de> for DescribeAclsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeAclsRequest<'a> {
+impl DescribeAclsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

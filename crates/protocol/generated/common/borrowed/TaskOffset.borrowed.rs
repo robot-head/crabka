@@ -10,7 +10,7 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskOffset<'a> {
     pub subtopology_id: &'a str,
     pub partition: i32,
@@ -18,18 +18,7 @@ pub struct TaskOffset<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl<'a> Default for TaskOffset<'a> {
-    fn default() -> Self {
-        Self {
-            subtopology_id: "",
-            partition: 0i32,
-            offset: 0i64,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> TaskOffset<'a> {
+impl TaskOffset<'_> {
     pub fn to_owned(&self) -> crate::owned::common::task_offset::TaskOffset {
         crate::owned::common::task_offset::TaskOffset {
             subtopology_id: (self.subtopology_id).to_string(),
@@ -40,21 +29,21 @@ impl<'a> TaskOffset<'a> {
     }
 }
 
-impl<'a> Encode for TaskOffset<'a> {
+impl Encode for TaskOffset<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.subtopology_id)
+                put_compact_string(buf, self.subtopology_id);
             } else {
-                put_string(buf, self.subtopology_id)
+                put_string(buf, self.subtopology_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 0 {
-            put_i64(buf, self.offset)
+            put_i64(buf, self.offset);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -111,7 +100,7 @@ impl<'de> DecodeBorrow<'de> for TaskOffset<'de> {
 }
 
 #[cfg(test)]
-impl<'a> TaskOffset<'a> {
+impl TaskOffset<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

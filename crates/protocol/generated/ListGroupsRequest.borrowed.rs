@@ -18,31 +18,28 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListGroupsRequest<'a> {
     pub states_filter: Vec<&'a str>,
     pub types_filter: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ListGroupsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            states_filter: Vec::new(),
-            types_filter: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ListGroupsRequest<'a> {
+impl ListGroupsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::list_groups_request::ListGroupsRequest {
         crate::owned::list_groups_request::ListGroupsRequest {
-            states_filter: (self.states_filter).iter().map(|s| s.to_string()).collect(),
-            types_filter: (self.types_filter).iter().map(|s| s.to_string()).collect(),
+            states_filter: (self.states_filter)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            types_filter: (self.types_filter)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ListGroupsRequest<'a> {
+impl Encode for ListGroupsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -56,10 +53,10 @@ impl<'a> Encode for ListGroupsRequest<'a> {
                 crate::primitives::array::put_array_len(buf, (self.states_filter).len(), flex);
                 for it in &self.states_filter {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -68,10 +65,10 @@ impl<'a> Encode for ListGroupsRequest<'a> {
                 crate::primitives::array::put_array_len(buf, (self.types_filter).len(), flex);
                 for it in &self.types_filter {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -94,9 +91,9 @@ impl<'a> Encode for ListGroupsRequest<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -111,9 +108,9 @@ impl<'a> Encode for ListGroupsRequest<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -172,7 +169,7 @@ impl<'de> DecodeBorrow<'de> for ListGroupsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ListGroupsRequest<'a> {
+impl ListGroupsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

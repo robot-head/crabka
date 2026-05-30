@@ -4,9 +4,8 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_bool, get_i8, put_bool, put_i8};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -46,10 +45,10 @@ impl Encode for DescribeConfigsRequest {
             }
         }
         if version >= 1 {
-            put_bool(buf, self.include_synonyms)
+            put_bool(buf, self.include_synonyms);
         }
         if version >= 3 {
-            put_bool(buf, self.include_documentation)
+            put_bool(buf, self.include_documentation);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -84,7 +83,7 @@ impl Encode for DescribeConfigsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeConfigsRequest {
+impl Decode<'_> for DescribeConfigsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -144,13 +143,13 @@ impl Encode for DescribeConfigsResource {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.resource_name)
+                put_compact_string(buf, &self.resource_name);
             } else {
-                put_string(buf, &self.resource_name)
+                put_string(buf, &self.resource_name);
             }
         }
         if version >= 0 {
@@ -160,10 +159,10 @@ impl Encode for DescribeConfigsResource {
                 if let Some(v) = &self.configuration_keys {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, &*it)
+                            put_compact_string(buf, it);
                         } else {
-                            put_string(buf, &*it)
-                        };
+                            put_string(buf, it);
+                        }
                     }
                 }
             }
@@ -191,16 +190,16 @@ impl Encode for DescribeConfigsResource {
             n += {
                 let opt: Option<&Vec<_>> = (self.configuration_keys).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(&*it)
+                                compact_string_len(it)
                             } else {
-                                string_len(&*it)
+                                string_len(it)
                             }
                         })
                         .sum()
@@ -215,7 +214,7 @@ impl Encode for DescribeConfigsResource {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeConfigsResource {
+impl Decode<'_> for DescribeConfigsResource {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

@@ -34,9 +34,9 @@ impl Encode for SaslAuthenticateRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.auth_bytes)
+                put_compact_bytes(buf, &self.auth_bytes);
             } else {
-                put_bytes(buf, &self.auth_bytes)
+                put_bytes(buf, &self.auth_bytes);
             }
         }
         if flex {
@@ -62,7 +62,7 @@ impl Encode for SaslAuthenticateRequest {
         n
     }
 }
-impl<'de> Decode<'de> for SaslAuthenticateRequest {
+impl Decode<'_> for SaslAuthenticateRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

@@ -20,7 +20,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndTxnRequest<'a> {
     pub transactional_id: &'a str,
     pub producer_id: i64,
@@ -28,18 +28,7 @@ pub struct EndTxnRequest<'a> {
     pub committed: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for EndTxnRequest<'a> {
-    fn default() -> Self {
-        Self {
-            transactional_id: "",
-            producer_id: 0i64,
-            producer_epoch: 0i16,
-            committed: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> EndTxnRequest<'a> {
+impl EndTxnRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::end_txn_request::EndTxnRequest {
         crate::owned::end_txn_request::EndTxnRequest {
             transactional_id: (self.transactional_id).to_string(),
@@ -50,7 +39,7 @@ impl<'a> EndTxnRequest<'a> {
         }
     }
 }
-impl<'a> Encode for EndTxnRequest<'a> {
+impl Encode for EndTxnRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -61,19 +50,19 @@ impl<'a> Encode for EndTxnRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.transactional_id)
+                put_compact_string(buf, self.transactional_id);
             } else {
-                put_string(buf, self.transactional_id)
+                put_string(buf, self.transactional_id);
             }
         }
         if version >= 0 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 0 {
-            put_i16(buf, self.producer_epoch)
+            put_i16(buf, self.producer_epoch);
         }
         if version >= 0 {
-            put_bool(buf, self.committed)
+            put_bool(buf, self.committed);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -140,7 +129,7 @@ impl<'de> DecodeBorrow<'de> for EndTxnRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> EndTxnRequest<'a> {
+impl EndTxnRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

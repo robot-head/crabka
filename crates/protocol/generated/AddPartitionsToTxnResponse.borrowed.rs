@@ -20,7 +20,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -29,18 +29,7 @@ pub struct AddPartitionsToTxnResponse<'a> {
         Vec<super::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AddPartitionsToTxnResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            results_by_transaction: Vec::new(),
-            results_by_topic_v3_and_below: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AddPartitionsToTxnResponse<'a> {
+impl AddPartitionsToTxnResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_response::AddPartitionsToTxnResponse {
@@ -49,17 +38,17 @@ impl<'a> AddPartitionsToTxnResponse<'a> {
             error_code: (self.error_code),
             results_by_transaction: (self.results_by_transaction)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(AddPartitionsToTxnResult::to_owned)
                 .collect(),
             results_by_topic_v3_and_below: (self.results_by_topic_v3_and_below)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AddPartitionsToTxnResponse<'a> {
+impl Encode for AddPartitionsToTxnResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -69,10 +58,10 @@ impl<'a> Encode for AddPartitionsToTxnResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 4 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 4 {
             {
@@ -86,7 +75,7 @@ impl<'a> Encode for AddPartitionsToTxnResponse<'a> {
                 }
             }
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             {
                 crate::primitives::array::put_array_len(
                     buf,
@@ -126,7 +115,7 @@ impl<'a> Encode for AddPartitionsToTxnResponse<'a> {
                 prefix + body
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += {
                 let prefix = crate::primitives::array::array_len_prefix_len(
                     (self.results_by_topic_v3_and_below).len(),
@@ -172,7 +161,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnResponse<'de> {
                 v
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.results_by_topic_v3_and_below = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -189,7 +178,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AddPartitionsToTxnResponse<'a> {
+impl AddPartitionsToTxnResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -202,29 +191,20 @@ impl<'a> AddPartitionsToTxnResponse<'a> {
         if version >= 4 {
             m.results_by_transaction = vec![AddPartitionsToTxnResult::populated(version)];
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m . results_by_topic_v3_and_below = vec ! [super :: common :: add_partitions_to_txn_topic_result :: AddPartitionsToTxnTopicResult :: populated (version)] ;
         }
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnResult<'a> {
     pub transactional_id: &'a str,
     pub topic_results:
         Vec<super::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AddPartitionsToTxnResult<'a> {
-    fn default() -> Self {
-        Self {
-            transactional_id: "",
-            topic_results: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AddPartitionsToTxnResult<'a> {
+impl AddPartitionsToTxnResult<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_response::AddPartitionsToTxnResult {
@@ -232,20 +212,20 @@ impl<'a> AddPartitionsToTxnResult<'a> {
             transactional_id: (self.transactional_id).to_string(),
             topic_results: (self.topic_results)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AddPartitionsToTxnResult<'a> {
+impl Encode for AddPartitionsToTxnResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, self.transactional_id)
+                put_compact_string(buf, self.transactional_id);
             } else {
-                put_string(buf, self.transactional_id)
+                put_string(buf, self.transactional_id);
             }
         }
         if version >= 4 {
@@ -320,7 +300,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AddPartitionsToTxnResult<'a> {
+impl AddPartitionsToTxnResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

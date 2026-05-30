@@ -39,10 +39,10 @@ impl Encode for AddPartitionsToTxnResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 4 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 4 {
             {
@@ -56,7 +56,7 @@ impl Encode for AddPartitionsToTxnResponse {
                 }
             }
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             {
                 crate::primitives::array::put_array_len(
                     buf,
@@ -96,7 +96,7 @@ impl Encode for AddPartitionsToTxnResponse {
                 prefix + body
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += {
                 let prefix = crate::primitives::array::array_len_prefix_len(
                     (self.results_by_topic_v3_and_below).len(),
@@ -116,7 +116,7 @@ impl Encode for AddPartitionsToTxnResponse {
         n
     }
 }
-impl<'de> Decode<'de> for AddPartitionsToTxnResponse {
+impl Decode<'_> for AddPartitionsToTxnResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -142,7 +142,7 @@ impl<'de> Decode<'de> for AddPartitionsToTxnResponse {
                 v
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.results_by_topic_v3_and_below = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -172,7 +172,7 @@ impl AddPartitionsToTxnResponse {
         if version >= 4 {
             m.results_by_transaction = vec![AddPartitionsToTxnResult::populated(version)];
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m . results_by_topic_v3_and_below = vec ! [super :: common :: add_partitions_to_txn_topic_result :: AddPartitionsToTxnTopicResult :: populated (version)] ;
         }
         m
@@ -190,9 +190,9 @@ impl Encode for AddPartitionsToTxnResult {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, &self.transactional_id)
+                put_compact_string(buf, &self.transactional_id);
             } else {
-                put_string(buf, &self.transactional_id)
+                put_string(buf, &self.transactional_id);
             }
         }
         if version >= 4 {
@@ -239,7 +239,7 @@ impl Encode for AddPartitionsToTxnResult {
         n
     }
 }
-impl<'de> Decode<'de> for AddPartitionsToTxnResult {
+impl Decode<'_> for AddPartitionsToTxnResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

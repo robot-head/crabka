@@ -20,34 +20,24 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListGroupsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub groups: Vec<ListedGroup<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ListGroupsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            groups: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ListGroupsResponse<'a> {
+impl ListGroupsResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::list_groups_response::ListGroupsResponse {
         crate::owned::list_groups_response::ListGroupsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            groups: (self.groups).iter().map(|it| it.to_owned()).collect(),
+            groups: (self.groups).iter().map(ListedGroup::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ListGroupsResponse<'a> {
+impl Encode for ListGroupsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -57,10 +47,10 @@ impl<'a> Encode for ListGroupsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
@@ -133,7 +123,7 @@ impl<'de> DecodeBorrow<'de> for ListGroupsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ListGroupsResponse<'a> {
+impl ListGroupsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -149,7 +139,7 @@ impl<'a> ListGroupsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListedGroup<'a> {
     pub group_id: &'a str,
     pub protocol_type: &'a str,
@@ -157,18 +147,7 @@ pub struct ListedGroup<'a> {
     pub group_type: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ListedGroup<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            protocol_type: "",
-            group_state: "",
-            group_type: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ListedGroup<'a> {
+impl ListedGroup<'_> {
     pub fn to_owned(&self) -> crate::owned::list_groups_response::ListedGroup {
         crate::owned::list_groups_response::ListedGroup {
             group_id: (self.group_id).to_string(),
@@ -179,35 +158,35 @@ impl<'a> ListedGroup<'a> {
         }
     }
 }
-impl<'a> Encode for ListedGroup<'a> {
+impl Encode for ListedGroup<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.protocol_type)
+                put_compact_string(buf, self.protocol_type);
             } else {
-                put_string(buf, self.protocol_type)
+                put_string(buf, self.protocol_type);
             }
         }
         if version >= 4 {
             if flex {
-                put_compact_string(buf, self.group_state)
+                put_compact_string(buf, self.group_state);
             } else {
-                put_string(buf, self.group_state)
+                put_string(buf, self.group_state);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_string(buf, self.group_type)
+                put_compact_string(buf, self.group_type);
             } else {
-                put_string(buf, self.group_type)
+                put_string(buf, self.group_type);
             }
         }
         if flex {
@@ -293,7 +272,7 @@ impl<'de> DecodeBorrow<'de> for ListedGroup<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ListedGroup<'a> {
+impl ListedGroup<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -4,13 +4,9 @@ use bytes::BufMut;
 
 use crate::primitives::fixed::{get_bool, get_i8, put_bool, put_i8};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
-};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
@@ -24,34 +20,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeConfigsRequest<'a> {
     pub resources: Vec<DescribeConfigsResource<'a>>,
     pub include_synonyms: bool,
     pub include_documentation: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeConfigsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            resources: Vec::new(),
-            include_synonyms: false,
-            include_documentation: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeConfigsRequest<'a> {
+impl DescribeConfigsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_configs_request::DescribeConfigsRequest {
         crate::owned::describe_configs_request::DescribeConfigsRequest {
-            resources: (self.resources).iter().map(|it| it.to_owned()).collect(),
+            resources: (self.resources)
+                .iter()
+                .map(DescribeConfigsResource::to_owned)
+                .collect(),
             include_synonyms: (self.include_synonyms),
             include_documentation: (self.include_documentation),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeConfigsRequest<'a> {
+impl Encode for DescribeConfigsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -69,10 +58,10 @@ impl<'a> Encode for DescribeConfigsRequest<'a> {
             }
         }
         if version >= 1 {
-            put_bool(buf, self.include_synonyms)
+            put_bool(buf, self.include_synonyms);
         }
         if version >= 3 {
-            put_bool(buf, self.include_documentation)
+            put_bool(buf, self.include_documentation);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -140,7 +129,7 @@ impl<'de> DecodeBorrow<'de> for DescribeConfigsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeConfigsRequest<'a> {
+impl DescribeConfigsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -156,46 +145,36 @@ impl<'a> DescribeConfigsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeConfigsResource<'a> {
     pub resource_type: i8,
     pub resource_name: &'a str,
     pub configuration_keys: Option<Vec<&'a str>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeConfigsResource<'a> {
-    fn default() -> Self {
-        Self {
-            resource_type: 0i8,
-            resource_name: "",
-            configuration_keys: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeConfigsResource<'a> {
+impl DescribeConfigsResource<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_configs_request::DescribeConfigsResource {
         crate::owned::describe_configs_request::DescribeConfigsResource {
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
             configuration_keys: (self.configuration_keys)
                 .as_ref()
-                .map(|v| v.iter().map(|s| s.to_string()).collect()),
+                .map(|v| v.iter().map(std::string::ToString::to_string).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeConfigsResource<'a> {
+impl Encode for DescribeConfigsResource<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name)
+                put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name)
+                put_string(buf, self.resource_name);
             }
         }
         if version >= 0 {
@@ -205,10 +184,10 @@ impl<'a> Encode for DescribeConfigsResource<'a> {
                 if let Some(v) = &self.configuration_keys {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, *it)
+                            put_compact_string(buf, it);
                         } else {
-                            put_string(buf, *it)
-                        };
+                            put_string(buf, it);
+                        }
                     }
                 }
             }
@@ -236,16 +215,16 @@ impl<'a> Encode for DescribeConfigsResource<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.configuration_keys).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(*it)
+                                compact_string_len(it)
                             } else {
-                                string_len(*it)
+                                string_len(it)
                             }
                         })
                         .sum()
@@ -300,7 +279,7 @@ impl<'de> DecodeBorrow<'de> for DescribeConfigsResource<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeConfigsResource<'a> {
+impl DescribeConfigsResource<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

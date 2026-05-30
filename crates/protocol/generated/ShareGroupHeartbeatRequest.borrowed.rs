@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareGroupHeartbeatRequest<'a> {
     pub group_id: &'a str,
     pub member_id: &'a str,
@@ -33,19 +33,7 @@ pub struct ShareGroupHeartbeatRequest<'a> {
     pub subscribed_topic_names: Option<Vec<&'a str>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ShareGroupHeartbeatRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            member_id: "",
-            member_epoch: 0i32,
-            rack_id: None,
-            subscribed_topic_names: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ShareGroupHeartbeatRequest<'a> {
+impl ShareGroupHeartbeatRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest {
@@ -53,15 +41,15 @@ impl<'a> ShareGroupHeartbeatRequest<'a> {
             group_id: (self.group_id).to_string(),
             member_id: (self.member_id).to_string(),
             member_epoch: (self.member_epoch),
-            rack_id: (self.rack_id).map(|s| s.to_string()),
+            rack_id: (self.rack_id).map(std::string::ToString::to_string),
             subscribed_topic_names: (self.subscribed_topic_names)
                 .as_ref()
-                .map(|v| v.iter().map(|s| s.to_string()).collect()),
+                .map(|v| v.iter().map(std::string::ToString::to_string).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ShareGroupHeartbeatRequest<'a> {
+impl Encode for ShareGroupHeartbeatRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -72,26 +60,26 @@ impl<'a> Encode for ShareGroupHeartbeatRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id)
+                put_compact_nullable_string(buf, self.rack_id);
             } else {
-                put_nullable_string(buf, self.rack_id)
+                put_nullable_string(buf, self.rack_id);
             }
         }
         if version >= 0 {
@@ -101,10 +89,10 @@ impl<'a> Encode for ShareGroupHeartbeatRequest<'a> {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, *it)
+                            put_compact_string(buf, it);
                         } else {
-                            put_string(buf, *it)
-                        };
+                            put_string(buf, it);
+                        }
                     }
                 }
             }
@@ -146,16 +134,16 @@ impl<'a> Encode for ShareGroupHeartbeatRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(*it)
+                                compact_string_len(it)
                             } else {
-                                string_len(*it)
+                                string_len(it)
                             }
                         })
                         .sum()
@@ -230,7 +218,7 @@ impl<'de> DecodeBorrow<'de> for ShareGroupHeartbeatRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ShareGroupHeartbeatRequest<'a> {
+impl ShareGroupHeartbeatRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

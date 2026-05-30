@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetFetchResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<OffsetFetchResponseTopic<'a>>,
@@ -32,29 +32,24 @@ pub struct OffsetFetchResponse<'a> {
     pub groups: Vec<OffsetFetchResponseGroup<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetFetchResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            topics: Vec::new(),
-            error_code: 0i16,
-            groups: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OffsetFetchResponse<'a> {
+impl OffsetFetchResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponse {
         crate::owned::offset_fetch_response::OffsetFetchResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(OffsetFetchResponseTopic::to_owned)
+                .collect(),
             error_code: (self.error_code),
-            groups: (self.groups).iter().map(|it| it.to_owned()).collect(),
+            groups: (self.groups)
+                .iter()
+                .map(OffsetFetchResponseGroup::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetFetchResponse<'a> {
+impl Encode for OffsetFetchResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -64,9 +59,9 @@ impl<'a> Encode for OffsetFetchResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             {
                 crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
                 for it in &self.topics {
@@ -74,8 +69,8 @@ impl<'a> Encode for OffsetFetchResponse<'a> {
                 }
             }
         }
-        if version >= 2 && version <= 7 {
-            put_i16(buf, self.error_code)
+        if (2..=7).contains(&version) {
+            put_i16(buf, self.error_code);
         }
         if version >= 8 {
             {
@@ -97,7 +92,7 @@ impl<'a> Encode for OffsetFetchResponse<'a> {
         if version >= 3 {
             n += 4;
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             n += {
                 let prefix =
                     crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
@@ -105,7 +100,7 @@ impl<'a> Encode for OffsetFetchResponse<'a> {
                 prefix + body
             };
         }
-        if version >= 2 && version <= 7 {
+        if (2..=7).contains(&version) {
             n += 2;
         }
         if version >= 8 {
@@ -136,7 +131,7 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponse<'de> {
         if version >= 3 {
             out.throttle_time_ms = get_i32(buf)?;
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             out.topics = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -146,7 +141,7 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponse<'de> {
                 v
             };
         }
-        if version >= 2 && version <= 7 {
+        if (2..=7).contains(&version) {
             out.error_code = get_i16(buf)?;
         }
         if version >= 8 {
@@ -166,17 +161,17 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetFetchResponse<'a> {
+impl OffsetFetchResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
         if version >= 3 {
             m.throttle_time_ms = 1i32;
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             m.topics = vec![OffsetFetchResponseTopic::populated(version)];
         }
-        if version >= 2 && version <= 7 {
+        if (2..=7).contains(&version) {
             m.error_code = 1i16;
         }
         if version >= 8 {
@@ -185,41 +180,35 @@ impl<'a> OffsetFetchResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetFetchResponseTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<OffsetFetchResponsePartition<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetFetchResponseTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OffsetFetchResponseTopic<'a> {
+impl OffsetFetchResponseTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponseTopic {
         crate::owned::offset_fetch_response::OffsetFetchResponseTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(OffsetFetchResponsePartition::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetFetchResponseTopic<'a> {
+impl Encode for OffsetFetchResponseTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             {
                 crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
                 for it in &self.partitions {
@@ -236,14 +225,14 @@ impl<'a> Encode for OffsetFetchResponseTopic<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 6;
         let mut n: usize = 0;
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             n += if flex {
                 compact_string_len(self.name)
             } else {
                 string_len(self.name)
             };
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             n += {
                 let prefix =
                     crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
@@ -265,14 +254,14 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponseTopic<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             out.name = if flex {
                 get_compact_string_borrowed(buf)?
             } else {
                 get_string_borrowed(buf)?
             };
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             out.partitions = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -289,14 +278,14 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponseTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetFetchResponseTopic<'a> {
+impl OffsetFetchResponseTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             m.name = "x";
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             m.partitions = vec![OffsetFetchResponsePartition::populated(version)];
         }
         m
@@ -311,7 +300,7 @@ pub struct OffsetFetchResponsePartition<'a> {
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetFetchResponsePartition<'a> {
+impl Default for OffsetFetchResponsePartition<'_> {
     fn default() -> Self {
         Self {
             partition_index: 0i32,
@@ -323,39 +312,39 @@ impl<'a> Default for OffsetFetchResponsePartition<'a> {
         }
     }
 }
-impl<'a> OffsetFetchResponsePartition<'a> {
+impl OffsetFetchResponsePartition<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponsePartition {
         crate::owned::offset_fetch_response::OffsetFetchResponsePartition {
             partition_index: (self.partition_index),
             committed_offset: (self.committed_offset),
             committed_leader_epoch: (self.committed_leader_epoch),
-            metadata: (self.metadata).map(|s| s.to_string()),
+            metadata: (self.metadata).map(std::string::ToString::to_string),
             error_code: (self.error_code),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetFetchResponsePartition<'a> {
+impl Encode for OffsetFetchResponsePartition<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
-        if version >= 0 && version <= 7 {
-            put_i32(buf, self.partition_index)
+        if (0..=7).contains(&version) {
+            put_i32(buf, self.partition_index);
         }
-        if version >= 0 && version <= 7 {
-            put_i64(buf, self.committed_offset)
+        if (0..=7).contains(&version) {
+            put_i64(buf, self.committed_offset);
         }
-        if version >= 5 && version <= 7 {
-            put_i32(buf, self.committed_leader_epoch)
+        if (5..=7).contains(&version) {
+            put_i32(buf, self.committed_leader_epoch);
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             if flex {
-                put_compact_nullable_string(buf, self.metadata)
+                put_compact_nullable_string(buf, self.metadata);
             } else {
-                put_nullable_string(buf, self.metadata)
+                put_nullable_string(buf, self.metadata);
             }
         }
-        if version >= 0 && version <= 7 {
-            put_i16(buf, self.error_code)
+        if (0..=7).contains(&version) {
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -366,23 +355,23 @@ impl<'a> Encode for OffsetFetchResponsePartition<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 6;
         let mut n: usize = 0;
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             n += 4;
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             n += 8;
         }
-        if version >= 5 && version <= 7 {
+        if (5..=7).contains(&version) {
             n += 4;
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             n += if flex {
                 compact_nullable_string_len(self.metadata)
             } else {
                 nullable_string_len(self.metadata)
             };
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             n += 2;
         }
         if flex {
@@ -396,23 +385,23 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponsePartition<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             out.partition_index = get_i32(buf)?;
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             out.committed_offset = get_i64(buf)?;
         }
-        if version >= 5 && version <= 7 {
+        if (5..=7).contains(&version) {
             out.committed_leader_epoch = get_i32(buf)?;
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             out.metadata = if flex {
                 get_compact_nullable_string_borrowed(buf)?
             } else {
                 get_nullable_string_borrowed(buf)?
             };
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             out.error_code = get_i16(buf)?;
         }
         if flex {
@@ -422,63 +411,56 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponsePartition<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetFetchResponsePartition<'a> {
+impl OffsetFetchResponsePartition<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             m.partition_index = 1i32;
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             m.committed_offset = 1i64;
         }
-        if version >= 5 && version <= 7 {
+        if (5..=7).contains(&version) {
             m.committed_leader_epoch = 1i32;
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             m.metadata = Some("x");
         }
-        if version >= 0 && version <= 7 {
+        if (0..=7).contains(&version) {
             m.error_code = 1i16;
         }
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetFetchResponseGroup<'a> {
     pub group_id: &'a str,
     pub topics: Vec<OffsetFetchResponseTopics<'a>>,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetFetchResponseGroup<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            topics: Vec::new(),
-            error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OffsetFetchResponseGroup<'a> {
+impl OffsetFetchResponseGroup<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponseGroup {
         crate::owned::offset_fetch_response::OffsetFetchResponseGroup {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(OffsetFetchResponseTopics::to_owned)
+                .collect(),
             error_code: (self.error_code),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetFetchResponseGroup<'a> {
+impl Encode for OffsetFetchResponseGroup<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 8 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 8 {
@@ -490,7 +472,7 @@ impl<'a> Encode for OffsetFetchResponseGroup<'a> {
             }
         }
         if version >= 8 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -557,7 +539,7 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponseGroup<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetFetchResponseGroup<'a> {
+impl OffsetFetchResponseGroup<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -573,45 +555,38 @@ impl<'a> OffsetFetchResponseGroup<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetFetchResponseTopics<'a> {
     pub name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<OffsetFetchResponsePartitions<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetFetchResponseTopics<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OffsetFetchResponseTopics<'a> {
+impl OffsetFetchResponseTopics<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponseTopics {
         crate::owned::offset_fetch_response::OffsetFetchResponseTopics {
             name: (self.name).to_string(),
             topic_id: (self.topic_id),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(OffsetFetchResponsePartitions::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetFetchResponseTopics<'a> {
+impl Encode for OffsetFetchResponseTopics<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
-        if version >= 8 && version <= 9 {
+        if (8..=9).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 8 {
             {
@@ -630,7 +605,7 @@ impl<'a> Encode for OffsetFetchResponseTopics<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 6;
         let mut n: usize = 0;
-        if version >= 8 && version <= 9 {
+        if (8..=9).contains(&version) {
             n += if flex {
                 compact_string_len(self.name)
             } else {
@@ -662,7 +637,7 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponseTopics<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
-        if version >= 8 && version <= 9 {
+        if (8..=9).contains(&version) {
             out.name = if flex {
                 get_compact_string_borrowed(buf)?
             } else {
@@ -689,11 +664,11 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponseTopics<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetFetchResponseTopics<'a> {
+impl OffsetFetchResponseTopics<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 8 && version <= 9 {
+        if (8..=9).contains(&version) {
             m.name = "x";
         }
         if version >= 10 {
@@ -714,7 +689,7 @@ pub struct OffsetFetchResponsePartitions<'a> {
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetFetchResponsePartitions<'a> {
+impl Default for OffsetFetchResponsePartitions<'_> {
     fn default() -> Self {
         Self {
             partition_index: 0i32,
@@ -726,39 +701,39 @@ impl<'a> Default for OffsetFetchResponsePartitions<'a> {
         }
     }
 }
-impl<'a> OffsetFetchResponsePartitions<'a> {
+impl OffsetFetchResponsePartitions<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_fetch_response::OffsetFetchResponsePartitions {
         crate::owned::offset_fetch_response::OffsetFetchResponsePartitions {
             partition_index: (self.partition_index),
             committed_offset: (self.committed_offset),
             committed_leader_epoch: (self.committed_leader_epoch),
-            metadata: (self.metadata).map(|s| s.to_string()),
+            metadata: (self.metadata).map(std::string::ToString::to_string),
             error_code: (self.error_code),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetFetchResponsePartitions<'a> {
+impl Encode for OffsetFetchResponsePartitions<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 8 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 8 {
-            put_i64(buf, self.committed_offset)
+            put_i64(buf, self.committed_offset);
         }
         if version >= 8 {
-            put_i32(buf, self.committed_leader_epoch)
+            put_i32(buf, self.committed_leader_epoch);
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.metadata)
+                put_compact_nullable_string(buf, self.metadata);
             } else {
-                put_nullable_string(buf, self.metadata)
+                put_nullable_string(buf, self.metadata);
             }
         }
         if version >= 8 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -825,7 +800,7 @@ impl<'de> DecodeBorrow<'de> for OffsetFetchResponsePartitions<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetFetchResponsePartitions<'a> {
+impl OffsetFetchResponsePartitions<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

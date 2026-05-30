@@ -35,20 +35,20 @@ impl Encode for DefaultPrincipalData {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.type_)
+                put_compact_string(buf, &self.type_);
             } else {
-                put_string(buf, &self.type_)
+                put_string(buf, &self.type_);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
-            put_bool(buf, self.token_authenticated)
+            put_bool(buf, self.token_authenticated);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -83,7 +83,7 @@ impl Encode for DefaultPrincipalData {
         n
     }
 }
-impl<'de> Decode<'de> for DefaultPrincipalData {
+impl Decode<'_> for DefaultPrincipalData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

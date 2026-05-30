@@ -37,10 +37,10 @@ impl Encode for DeleteGroupsRequest {
                 crate::primitives::array::put_array_len(buf, (self.groups_names).len(), flex);
                 for it in &self.groups_names {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -61,9 +61,9 @@ impl Encode for DeleteGroupsRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -77,7 +77,7 @@ impl Encode for DeleteGroupsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteGroupsRequest {
+impl Decode<'_> for DeleteGroupsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

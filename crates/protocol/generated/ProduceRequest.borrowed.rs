@@ -30,7 +30,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProduceRequest<'a> {
     pub transactional_id: Option<&'a str>,
     pub acks: i16,
@@ -38,29 +38,21 @@ pub struct ProduceRequest<'a> {
     pub topic_data: Vec<TopicProduceData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ProduceRequest<'a> {
-    fn default() -> Self {
-        Self {
-            transactional_id: None,
-            acks: 0i16,
-            timeout_ms: 0i32,
-            topic_data: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ProduceRequest<'a> {
+impl ProduceRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::produce_request::ProduceRequest {
         crate::owned::produce_request::ProduceRequest {
-            transactional_id: (self.transactional_id).map(|s| s.to_string()),
+            transactional_id: (self.transactional_id).map(std::string::ToString::to_string),
             acks: (self.acks),
             timeout_ms: (self.timeout_ms),
-            topic_data: (self.topic_data).iter().map(|it| it.to_owned()).collect(),
+            topic_data: (self.topic_data)
+                .iter()
+                .map(TopicProduceData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ProduceRequest<'a> {
+impl Encode for ProduceRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -71,16 +63,16 @@ impl<'a> Encode for ProduceRequest<'a> {
         let flex = is_flexible(version);
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.transactional_id)
+                put_compact_nullable_string(buf, self.transactional_id);
             } else {
-                put_nullable_string(buf, self.transactional_id)
+                put_nullable_string(buf, self.transactional_id);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.acks)
+            put_i16(buf, self.acks);
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
             {
@@ -170,7 +162,7 @@ impl<'de> DecodeBorrow<'de> for ProduceRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ProduceRequest<'a> {
+impl ProduceRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -189,48 +181,38 @@ impl<'a> ProduceRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicProduceData<'a> {
     pub name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partition_data: Vec<PartitionProduceData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicProduceData<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            topic_id: Default::default(),
-            partition_data: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicProduceData<'a> {
+impl TopicProduceData<'_> {
     pub fn to_owned(&self) -> crate::owned::produce_request::TopicProduceData {
         crate::owned::produce_request::TopicProduceData {
             name: (self.name).to_string(),
             topic_id: (self.topic_id),
             partition_data: (self.partition_data)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(PartitionProduceData::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for TopicProduceData<'a> {
+impl Encode for TopicProduceData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 13 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -249,7 +231,7 @@ impl<'a> Encode for TopicProduceData<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 9;
         let mut n: usize = 0;
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             n += if flex {
                 compact_string_len(self.name)
             } else {
@@ -283,7 +265,7 @@ impl<'de> DecodeBorrow<'de> for TopicProduceData<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             out.name = if flex {
                 get_compact_string_borrowed(buf)?
             } else {
@@ -310,11 +292,11 @@ impl<'de> DecodeBorrow<'de> for TopicProduceData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicProduceData<'a> {
+impl TopicProduceData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             m.name = "x";
         }
         if version >= 13 {
@@ -326,22 +308,13 @@ impl<'a> TopicProduceData<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionProduceData<'a> {
     pub index: i32,
     pub records: Option<crate::records::RecordsPayloadBorrowed<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for PartitionProduceData<'a> {
-    fn default() -> Self {
-        Self {
-            index: 0i32,
-            records: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> PartitionProduceData<'a> {
+impl PartitionProduceData<'_> {
     pub fn to_owned(&self) -> crate::owned::produce_request::PartitionProduceData {
         crate::owned::produce_request::PartitionProduceData {
             index: (self.index),
@@ -352,19 +325,19 @@ impl<'a> PartitionProduceData<'a> {
         }
     }
 }
-impl<'a> Encode for PartitionProduceData<'a> {
+impl Encode for PartitionProduceData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.index)
+            put_i32(buf, self.index);
         }
         if version >= 0 {
             match &self.records {
                 None => {
                     if flex {
-                        put_compact_nullable_bytes(buf, None)
+                        put_compact_nullable_bytes(buf, None);
                     } else {
-                        put_nullable_bytes(buf, None)
+                        put_nullable_bytes(buf, None);
                     }
                 }
                 Some(__rb) => {
@@ -375,9 +348,9 @@ impl<'a> Encode for PartitionProduceData<'a> {
                         version,
                     )?;
                     if flex {
-                        put_compact_bytes(buf, &__rb_buf)
+                        put_compact_bytes(buf, &__rb_buf);
                     } else {
-                        put_bytes(buf, &__rb_buf)
+                        put_bytes(buf, &__rb_buf);
                     }
                 }
             }
@@ -453,7 +426,7 @@ impl<'de> DecodeBorrow<'de> for PartitionProduceData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> PartitionProduceData<'a> {
+impl PartitionProduceData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -47,7 +47,7 @@ impl Encode for ElectLeadersRequest {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i8(buf, self.election_type)
+            put_i8(buf, self.election_type);
         }
         if version >= 0 {
             {
@@ -61,7 +61,7 @@ impl Encode for ElectLeadersRequest {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -79,7 +79,7 @@ impl Encode for ElectLeadersRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.topic_partitions).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -97,7 +97,7 @@ impl Encode for ElectLeadersRequest {
         n
     }
 }
-impl<'de> Decode<'de> for ElectLeadersRequest {
+impl Decode<'_> for ElectLeadersRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -162,9 +162,9 @@ impl Encode for TopicPartitions {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic)
+                put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic)
+                put_string(buf, &self.topic);
             }
         }
         if version >= 0 {
@@ -206,7 +206,7 @@ impl Encode for TopicPartitions {
         n
     }
 }
-impl<'de> Decode<'de> for TopicPartitions {
+impl Decode<'_> for TopicPartitions {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

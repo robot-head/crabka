@@ -26,31 +26,25 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeConfigsResponse<'a> {
     pub throttle_time_ms: i32,
     pub results: Vec<DescribeConfigsResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeConfigsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            results: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeConfigsResponse<'a> {
+impl DescribeConfigsResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_configs_response::DescribeConfigsResponse {
         crate::owned::describe_configs_response::DescribeConfigsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            results: (self.results).iter().map(|it| it.to_owned()).collect(),
+            results: (self.results)
+                .iter()
+                .map(DescribeConfigsResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeConfigsResponse<'a> {
+impl Encode for DescribeConfigsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -60,7 +54,7 @@ impl<'a> Encode for DescribeConfigsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -130,7 +124,7 @@ impl<'de> DecodeBorrow<'de> for DescribeConfigsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeConfigsResponse<'a> {
+impl DescribeConfigsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -143,7 +137,7 @@ impl<'a> DescribeConfigsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeConfigsResult<'a> {
     pub error_code: i16,
     pub error_message: Option<&'a str>,
@@ -152,51 +146,42 @@ pub struct DescribeConfigsResult<'a> {
     pub configs: Vec<DescribeConfigsResourceResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeConfigsResult<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            error_message: None,
-            resource_type: 0i8,
-            resource_name: "",
-            configs: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeConfigsResult<'a> {
+impl DescribeConfigsResult<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_configs_response::DescribeConfigsResult {
         crate::owned::describe_configs_response::DescribeConfigsResult {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
-            configs: (self.configs).iter().map(|it| it.to_owned()).collect(),
+            configs: (self.configs)
+                .iter()
+                .map(DescribeConfigsResourceResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeConfigsResult<'a> {
+impl Encode for DescribeConfigsResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name)
+                put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name)
+                put_string(buf, self.resource_name);
             }
         }
         if version >= 0 {
@@ -295,7 +280,7 @@ impl<'de> DecodeBorrow<'de> for DescribeConfigsResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeConfigsResult<'a> {
+impl DescribeConfigsResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -329,7 +314,7 @@ pub struct DescribeConfigsResourceResult<'a> {
     pub documentation: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeConfigsResourceResult<'a> {
+impl Default for DescribeConfigsResourceResult<'_> {
     fn default() -> Self {
         Self {
             name: "",
@@ -344,48 +329,51 @@ impl<'a> Default for DescribeConfigsResourceResult<'a> {
         }
     }
 }
-impl<'a> DescribeConfigsResourceResult<'a> {
+impl DescribeConfigsResourceResult<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_configs_response::DescribeConfigsResourceResult {
         crate::owned::describe_configs_response::DescribeConfigsResourceResult {
             name: (self.name).to_string(),
-            value: (self.value).map(|s| s.to_string()),
+            value: (self.value).map(std::string::ToString::to_string),
             read_only: (self.read_only),
             config_source: (self.config_source),
             is_sensitive: (self.is_sensitive),
-            synonyms: (self.synonyms).iter().map(|it| it.to_owned()).collect(),
+            synonyms: (self.synonyms)
+                .iter()
+                .map(DescribeConfigsSynonym::to_owned)
+                .collect(),
             config_type: (self.config_type),
-            documentation: (self.documentation).map(|s| s.to_string()),
+            documentation: (self.documentation).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeConfigsResourceResult<'a> {
+impl Encode for DescribeConfigsResourceResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value)
+                put_compact_nullable_string(buf, self.value);
             } else {
-                put_nullable_string(buf, self.value)
+                put_nullable_string(buf, self.value);
             }
         }
         if version >= 0 {
-            put_bool(buf, self.read_only)
+            put_bool(buf, self.read_only);
         }
         if version >= 1 {
-            put_i8(buf, self.config_source)
+            put_i8(buf, self.config_source);
         }
         if version >= 0 {
-            put_bool(buf, self.is_sensitive)
+            put_bool(buf, self.is_sensitive);
         }
         if version >= 1 {
             {
@@ -396,13 +384,13 @@ impl<'a> Encode for DescribeConfigsResourceResult<'a> {
             }
         }
         if version >= 3 {
-            put_i8(buf, self.config_type)
+            put_i8(buf, self.config_type);
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.documentation)
+                put_compact_nullable_string(buf, self.documentation);
             } else {
-                put_nullable_string(buf, self.documentation)
+                put_nullable_string(buf, self.documentation);
             }
         }
         if flex {
@@ -519,7 +507,7 @@ impl<'de> DecodeBorrow<'de> for DescribeConfigsResourceResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeConfigsResourceResult<'a> {
+impl DescribeConfigsResourceResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -550,52 +538,42 @@ impl<'a> DescribeConfigsResourceResult<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeConfigsSynonym<'a> {
     pub name: &'a str,
     pub value: Option<&'a str>,
     pub source: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeConfigsSynonym<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            value: None,
-            source: 0i8,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeConfigsSynonym<'a> {
+impl DescribeConfigsSynonym<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_configs_response::DescribeConfigsSynonym {
         crate::owned::describe_configs_response::DescribeConfigsSynonym {
             name: (self.name).to_string(),
-            value: (self.value).map(|s| s.to_string()),
+            value: (self.value).map(std::string::ToString::to_string),
             source: (self.source),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeConfigsSynonym<'a> {
+impl Encode for DescribeConfigsSynonym<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.value)
+                put_compact_nullable_string(buf, self.value);
             } else {
-                put_nullable_string(buf, self.value)
+                put_nullable_string(buf, self.value);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.source)
+            put_i8(buf, self.source);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -658,7 +636,7 @@ impl<'de> DecodeBorrow<'de> for DescribeConfigsSynonym<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeConfigsSynonym<'a> {
+impl DescribeConfigsSynonym<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

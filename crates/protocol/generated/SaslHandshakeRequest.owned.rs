@@ -33,9 +33,9 @@ impl Encode for SaslHandshakeRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.mechanism)
+                put_compact_string(buf, &self.mechanism);
             } else {
-                put_string(buf, &self.mechanism)
+                put_string(buf, &self.mechanism);
             }
         }
         Ok(())
@@ -53,7 +53,7 @@ impl Encode for SaslHandshakeRequest {
         n
     }
 }
-impl<'de> Decode<'de> for SaslHandshakeRequest {
+impl Decode<'_> for SaslHandshakeRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

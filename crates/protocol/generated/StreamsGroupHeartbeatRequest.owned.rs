@@ -77,40 +77,40 @@ impl Encode for StreamsGroupHeartbeatRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.endpoint_information_epoch)
+            put_i32(buf, self.endpoint_information_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.instance_id.as_deref())
+                put_compact_nullable_string(buf, self.instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.instance_id.as_deref())
+                put_nullable_string(buf, self.instance_id.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id.as_deref())
+                put_compact_nullable_string(buf, self.rack_id.as_deref());
             } else {
-                put_nullable_string(buf, self.rack_id.as_deref())
+                put_nullable_string(buf, self.rack_id.as_deref());
             }
         }
         if version >= 0 {
-            put_i32(buf, self.rebalance_timeout_ms)
+            put_i32(buf, self.rebalance_timeout_ms);
         }
         if version >= 0 {
             match &self.topology {
@@ -158,9 +158,9 @@ impl Encode for StreamsGroupHeartbeatRequest {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.process_id.as_deref())
+                put_compact_nullable_string(buf, self.process_id.as_deref());
             } else {
-                put_nullable_string(buf, self.process_id.as_deref())
+                put_nullable_string(buf, self.process_id.as_deref());
             }
         }
         if version >= 0 {
@@ -208,7 +208,7 @@ impl Encode for StreamsGroupHeartbeatRequest {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.shutdown_application)
+            put_bool(buf, self.shutdown_application);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -263,7 +263,7 @@ impl Encode for StreamsGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.active_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -275,7 +275,7 @@ impl Encode for StreamsGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.standby_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -287,7 +287,7 @@ impl Encode for StreamsGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.warmup_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -312,7 +312,7 @@ impl Encode for StreamsGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.client_tags).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -324,7 +324,7 @@ impl Encode for StreamsGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.task_offsets).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -336,7 +336,7 @@ impl Encode for StreamsGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.task_end_offsets).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -354,7 +354,7 @@ impl Encode for StreamsGroupHeartbeatRequest {
         n
     }
 }
-impl<'de> Decode<'de> for StreamsGroupHeartbeatRequest {
+impl Decode<'_> for StreamsGroupHeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -598,7 +598,7 @@ impl Encode for Topology {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.epoch)
+            put_i32(buf, self.epoch);
         }
         if version >= 0 {
             {
@@ -640,7 +640,7 @@ impl Encode for Topology {
         n
     }
 }
-impl<'de> Decode<'de> for Topology {
+impl Decode<'_> for Topology {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -693,9 +693,9 @@ impl Encode for Subtopology {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.subtopology_id)
+                put_compact_string(buf, &self.subtopology_id);
             } else {
-                put_string(buf, &self.subtopology_id)
+                put_string(buf, &self.subtopology_id);
             }
         }
         if version >= 0 {
@@ -703,10 +703,10 @@ impl Encode for Subtopology {
                 crate::primitives::array::put_array_len(buf, (self.source_topics).len(), flex);
                 for it in &self.source_topics {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -715,10 +715,10 @@ impl Encode for Subtopology {
                 crate::primitives::array::put_array_len(buf, (self.source_topic_regex).len(), flex);
                 for it in &self.source_topic_regex {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -743,10 +743,10 @@ impl Encode for Subtopology {
                 );
                 for it in &self.repartition_sink_topics {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -796,9 +796,9 @@ impl Encode for Subtopology {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -815,9 +815,9 @@ impl Encode for Subtopology {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -847,9 +847,9 @@ impl Encode for Subtopology {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -889,7 +889,7 @@ impl Encode for Subtopology {
         n
     }
 }
-impl<'de> Decode<'de> for Subtopology {
+impl Decode<'_> for Subtopology {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -1093,7 +1093,7 @@ impl Encode for CopartitionGroup {
         n
     }
 }
-impl<'de> Decode<'de> for CopartitionGroup {
+impl Decode<'_> for CopartitionGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

@@ -49,9 +49,9 @@ impl Encode for ConsumerProtocolAssignment {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.user_data.as_deref())
+                put_compact_nullable_bytes(buf, self.user_data.as_deref());
             } else {
-                put_nullable_bytes(buf, self.user_data.as_deref())
+                put_nullable_bytes(buf, self.user_data.as_deref());
             }
         }
         Ok(())
@@ -82,7 +82,7 @@ impl Encode for ConsumerProtocolAssignment {
         n
     }
 }
-impl<'de> Decode<'de> for ConsumerProtocolAssignment {
+impl Decode<'_> for ConsumerProtocolAssignment {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -136,9 +136,9 @@ impl Encode for TopicPartition {
         let flex = version >= 32767;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic)
+                put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic)
+                put_string(buf, &self.topic);
             }
         }
         if version >= 0 {
@@ -172,7 +172,7 @@ impl Encode for TopicPartition {
         n
     }
 }
-impl<'de> Decode<'de> for TopicPartition {
+impl Decode<'_> for TopicPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 32767;
         let mut out = Self::default();

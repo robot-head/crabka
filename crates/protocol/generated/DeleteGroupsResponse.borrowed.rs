@@ -20,31 +20,25 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteGroupsResponse<'a> {
     pub throttle_time_ms: i32,
     pub results: Vec<DeletableGroupResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteGroupsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            results: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteGroupsResponse<'a> {
+impl DeleteGroupsResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_groups_response::DeleteGroupsResponse {
         crate::owned::delete_groups_response::DeleteGroupsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            results: (self.results).iter().map(|it| it.to_owned()).collect(),
+            results: (self.results)
+                .iter()
+                .map(DeletableGroupResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteGroupsResponse<'a> {
+impl Encode for DeleteGroupsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -54,7 +48,7 @@ impl<'a> Encode for DeleteGroupsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -124,7 +118,7 @@ impl<'de> DecodeBorrow<'de> for DeleteGroupsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteGroupsResponse<'a> {
+impl DeleteGroupsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -137,22 +131,13 @@ impl<'a> DeleteGroupsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeletableGroupResult<'a> {
     pub group_id: &'a str,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeletableGroupResult<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeletableGroupResult<'a> {
+impl DeletableGroupResult<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_groups_response::DeletableGroupResult {
         crate::owned::delete_groups_response::DeletableGroupResult {
             group_id: (self.group_id).to_string(),
@@ -161,18 +146,18 @@ impl<'a> DeletableGroupResult<'a> {
         }
     }
 }
-impl<'a> Encode for DeletableGroupResult<'a> {
+impl Encode for DeletableGroupResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -221,7 +206,7 @@ impl<'de> DecodeBorrow<'de> for DeletableGroupResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeletableGroupResult<'a> {
+impl DeletableGroupResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

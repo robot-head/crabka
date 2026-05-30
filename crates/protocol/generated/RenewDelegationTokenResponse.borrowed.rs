@@ -16,22 +16,12 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RenewDelegationTokenResponse {
     pub error_code: i16,
     pub expiry_timestamp_ms: i64,
     pub throttle_time_ms: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for RenewDelegationTokenResponse {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            expiry_timestamp_ms: 0i64,
-            throttle_time_ms: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl RenewDelegationTokenResponse {
     pub fn to_owned(
@@ -55,13 +45,13 @@ impl Encode for RenewDelegationTokenResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i64(buf, self.expiry_timestamp_ms)
+            put_i64(buf, self.expiry_timestamp_ms);
         }
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

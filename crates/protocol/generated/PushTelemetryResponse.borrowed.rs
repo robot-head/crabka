@@ -16,20 +16,11 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PushTelemetryResponse {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for PushTelemetryResponse {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl PushTelemetryResponse {
     pub fn to_owned(&self) -> crate::owned::push_telemetry_response::PushTelemetryResponse {
@@ -50,10 +41,10 @@ impl Encode for PushTelemetryResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

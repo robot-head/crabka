@@ -18,33 +18,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteShareGroupOffsetsRequest<'a> {
     pub group_id: &'a str,
     pub topics: Vec<DeleteShareGroupOffsetsRequestTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteShareGroupOffsetsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteShareGroupOffsetsRequest<'a> {
+impl DeleteShareGroupOffsetsRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest {
         crate::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequest {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(DeleteShareGroupOffsetsRequestTopic::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteShareGroupOffsetsRequest<'a> {
+impl Encode for DeleteShareGroupOffsetsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -55,9 +49,9 @@ impl<'a> Encode for DeleteShareGroupOffsetsRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
@@ -135,7 +129,7 @@ impl<'de> DecodeBorrow<'de> for DeleteShareGroupOffsetsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteShareGroupOffsetsRequest<'a> {
+impl DeleteShareGroupOffsetsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -148,20 +142,12 @@ impl<'a> DeleteShareGroupOffsetsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteShareGroupOffsetsRequestTopic<'a> {
     pub topic_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteShareGroupOffsetsRequestTopic<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteShareGroupOffsetsRequestTopic<'a> {
+impl DeleteShareGroupOffsetsRequestTopic<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::delete_share_group_offsets_request::DeleteShareGroupOffsetsRequestTopic {
@@ -171,14 +157,14 @@ impl<'a> DeleteShareGroupOffsetsRequestTopic<'a> {
         }
     }
 }
-impl<'a> Encode for DeleteShareGroupOffsetsRequestTopic<'a> {
+impl Encode for DeleteShareGroupOffsetsRequestTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name)
+                put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name)
+                put_string(buf, self.topic_name);
             }
         }
         if flex {
@@ -222,7 +208,7 @@ impl<'de> DecodeBorrow<'de> for DeleteShareGroupOffsetsRequestTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteShareGroupOffsetsRequestTopic<'a> {
+impl DeleteShareGroupOffsetsRequestTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -37,7 +37,7 @@ impl Encode for ShareGroupDescribeResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -74,7 +74,7 @@ impl Encode for ShareGroupDescribeResponse {
         n
     }
 }
-impl<'de> Decode<'de> for ShareGroupDescribeResponse {
+impl Decode<'_> for ShareGroupDescribeResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -150,40 +150,40 @@ impl Encode for DescribedGroup {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_state)
+                put_compact_string(buf, &self.group_state);
             } else {
-                put_string(buf, &self.group_state)
+                put_string(buf, &self.group_state);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.group_epoch)
+            put_i32(buf, self.group_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.assignment_epoch)
+            put_i32(buf, self.assignment_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.assignor_name)
+                put_compact_string(buf, &self.assignor_name);
             } else {
-                put_string(buf, &self.assignor_name)
+                put_string(buf, &self.assignor_name);
             }
         }
         if version >= 0 {
@@ -195,7 +195,7 @@ impl Encode for DescribedGroup {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.authorized_operations)
+            put_i32(buf, self.authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -264,7 +264,7 @@ impl Encode for DescribedGroup {
         n
     }
 }
-impl<'de> Decode<'de> for DescribedGroup {
+impl Decode<'_> for DescribedGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -375,33 +375,33 @@ impl Encode for Member {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id.as_deref())
+                put_compact_nullable_string(buf, self.rack_id.as_deref());
             } else {
-                put_nullable_string(buf, self.rack_id.as_deref())
+                put_nullable_string(buf, self.rack_id.as_deref());
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.client_id)
+                put_compact_string(buf, &self.client_id);
             } else {
-                put_string(buf, &self.client_id)
+                put_string(buf, &self.client_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.client_host)
+                put_compact_string(buf, &self.client_host);
             } else {
-                put_string(buf, &self.client_host)
+                put_string(buf, &self.client_host);
             }
         }
         if version >= 0 {
@@ -413,15 +413,15 @@ impl Encode for Member {
                 );
                 for it in &self.subscribed_topic_names {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
         if version >= 0 {
-            self.assignment.encode(buf, version)?
+            self.assignment.encode(buf, version)?;
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -473,9 +473,9 @@ impl Encode for Member {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -492,7 +492,7 @@ impl Encode for Member {
         n
     }
 }
-impl<'de> Decode<'de> for Member {
+impl Decode<'_> for Member {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

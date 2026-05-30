@@ -59,7 +59,7 @@ impl Encode for ApiVersionsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
@@ -70,7 +70,7 @@ impl Encode for ApiVersionsResponse {
             }
         }
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -139,7 +139,7 @@ impl Encode for ApiVersionsResponse {
                 );
                 tagged.add(2, payload);
             }
-            if !(self.zk_migration_ready == false) {
+            if !(!self.zk_migration_ready) {
                 let payload = encode_to_bytes(1, |b| {
                     put_bool(b, self.zk_migration_ready);
                     Ok(())
@@ -201,7 +201,7 @@ impl Encode for ApiVersionsResponse {
                     prefix + body
                 }));
             }
-            if !(self.zk_migration_ready == false) {
+            if !(!self.zk_migration_ready) {
                 known_pairs.push((3, 1));
             }
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -209,7 +209,7 @@ impl Encode for ApiVersionsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for ApiVersionsResponse {
+impl Decode<'_> for ApiVersionsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -341,13 +341,13 @@ impl Encode for ApiVersion {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
-            put_i16(buf, self.api_key)
+            put_i16(buf, self.api_key);
         }
         if version >= 0 {
-            put_i16(buf, self.min_version)
+            put_i16(buf, self.min_version);
         }
         if version >= 0 {
-            put_i16(buf, self.max_version)
+            put_i16(buf, self.max_version);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -374,7 +374,7 @@ impl Encode for ApiVersion {
         n
     }
 }
-impl<'de> Decode<'de> for ApiVersion {
+impl Decode<'_> for ApiVersion {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -422,16 +422,16 @@ impl Encode for SupportedFeatureKey {
         let flex = version >= 3;
         if version >= 3 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 3 {
-            put_i16(buf, self.min_version)
+            put_i16(buf, self.min_version);
         }
         if version >= 3 {
-            put_i16(buf, self.max_version)
+            put_i16(buf, self.max_version);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -462,7 +462,7 @@ impl Encode for SupportedFeatureKey {
         n
     }
 }
-impl<'de> Decode<'de> for SupportedFeatureKey {
+impl Decode<'_> for SupportedFeatureKey {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -514,16 +514,16 @@ impl Encode for FinalizedFeatureKey {
         let flex = version >= 3;
         if version >= 3 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 3 {
-            put_i16(buf, self.max_version_level)
+            put_i16(buf, self.max_version_level);
         }
         if version >= 3 {
-            put_i16(buf, self.min_version_level)
+            put_i16(buf, self.min_version_level);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -554,7 +554,7 @@ impl Encode for FinalizedFeatureKey {
         n
     }
 }
-impl<'de> Decode<'de> for FinalizedFeatureKey {
+impl Decode<'_> for FinalizedFeatureKey {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

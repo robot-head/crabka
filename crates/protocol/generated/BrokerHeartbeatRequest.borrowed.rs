@@ -67,19 +67,19 @@ impl Encode for BrokerHeartbeatRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if version >= 0 {
-            put_i64(buf, self.broker_epoch)
+            put_i64(buf, self.broker_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.current_metadata_offset)
+            put_i64(buf, self.current_metadata_offset);
         }
         if version >= 0 {
-            put_bool(buf, self.want_fence)
+            put_bool(buf, self.want_fence);
         }
         if version >= 0 {
-            put_bool(buf, self.want_shut_down)
+            put_bool(buf, self.want_shut_down);
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -114,7 +114,7 @@ impl Encode for BrokerHeartbeatRequest {
                     {
                         let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
                         let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                            opt.map(|v| v.len()),
+                            opt.map(std::vec::Vec::len),
                             flex,
                         );
                         let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());
@@ -173,7 +173,7 @@ impl Encode for BrokerHeartbeatRequest {
                 known_pairs.push((1, {
                     let opt: Option<&Vec<_>> = (self.cordoned_log_dirs).as_ref();
                     let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                        opt.map(|v| v.len()),
+                        opt.map(std::vec::Vec::len),
                         flex,
                     );
                     let body: usize = opt.map_or(0, |v| v.iter().map(|_| 16).sum());

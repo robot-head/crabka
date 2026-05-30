@@ -39,7 +39,7 @@ impl Encode for DescribeConfigsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -79,7 +79,7 @@ impl Encode for DescribeConfigsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeConfigsResponse {
+impl Decode<'_> for DescribeConfigsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -135,23 +135,23 @@ impl Encode for DescribeConfigsResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.resource_name)
+                put_compact_string(buf, &self.resource_name);
             } else {
-                put_string(buf, &self.resource_name)
+                put_string(buf, &self.resource_name);
             }
         }
         if version >= 0 {
@@ -209,7 +209,7 @@ impl Encode for DescribeConfigsResult {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeConfigsResult {
+impl Decode<'_> for DescribeConfigsResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
@@ -304,26 +304,26 @@ impl Encode for DescribeConfigsResourceResult {
         let flex = version >= 4;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value.as_deref())
+                put_compact_nullable_string(buf, self.value.as_deref());
             } else {
-                put_nullable_string(buf, self.value.as_deref())
+                put_nullable_string(buf, self.value.as_deref());
             }
         }
         if version >= 0 {
-            put_bool(buf, self.read_only)
+            put_bool(buf, self.read_only);
         }
         if version >= 1 {
-            put_i8(buf, self.config_source)
+            put_i8(buf, self.config_source);
         }
         if version >= 0 {
-            put_bool(buf, self.is_sensitive)
+            put_bool(buf, self.is_sensitive);
         }
         if version >= 1 {
             {
@@ -334,13 +334,13 @@ impl Encode for DescribeConfigsResourceResult {
             }
         }
         if version >= 3 {
-            put_i8(buf, self.config_type)
+            put_i8(buf, self.config_type);
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.documentation.as_deref())
+                put_compact_nullable_string(buf, self.documentation.as_deref());
             } else {
-                put_nullable_string(buf, self.documentation.as_deref())
+                put_nullable_string(buf, self.documentation.as_deref());
             }
         }
         if flex {
@@ -403,7 +403,7 @@ impl Encode for DescribeConfigsResourceResult {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeConfigsResourceResult {
+impl Decode<'_> for DescribeConfigsResourceResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
@@ -500,20 +500,20 @@ impl Encode for DescribeConfigsSynonym {
         let flex = version >= 4;
         if version >= 1 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.value.as_deref())
+                put_compact_nullable_string(buf, self.value.as_deref());
             } else {
-                put_nullable_string(buf, self.value.as_deref())
+                put_nullable_string(buf, self.value.as_deref());
             }
         }
         if version >= 1 {
-            put_i8(buf, self.source)
+            put_i8(buf, self.source);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -548,7 +548,7 @@ impl Encode for DescribeConfigsSynonym {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeConfigsSynonym {
+impl Decode<'_> for DescribeConfigsSynonym {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

@@ -37,13 +37,13 @@ impl Encode for RenewDelegationTokenRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.hmac)
+                put_compact_bytes(buf, &self.hmac);
             } else {
-                put_bytes(buf, &self.hmac)
+                put_bytes(buf, &self.hmac);
             }
         }
         if version >= 0 {
-            put_i64(buf, self.renew_period_ms)
+            put_i64(buf, self.renew_period_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -71,7 +71,7 @@ impl Encode for RenewDelegationTokenRequest {
         n
     }
 }
-impl<'de> Decode<'de> for RenewDelegationTokenRequest {
+impl Decode<'_> for RenewDelegationTokenRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

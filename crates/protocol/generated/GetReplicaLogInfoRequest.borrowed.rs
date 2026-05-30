@@ -16,20 +16,11 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GetReplicaLogInfoRequest {
     pub broker_id: i32,
     pub topic_partitions: Vec<TopicPartitions>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for GetReplicaLogInfoRequest {
-    fn default() -> Self {
-        Self {
-            broker_id: 0i32,
-            topic_partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl GetReplicaLogInfoRequest {
     pub fn to_owned(&self) -> crate::owned::get_replica_log_info_request::GetReplicaLogInfoRequest {
@@ -37,7 +28,7 @@ impl GetReplicaLogInfoRequest {
             broker_id: (self.broker_id),
             topic_partitions: (self.topic_partitions)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(TopicPartitions::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -53,7 +44,7 @@ impl Encode for GetReplicaLogInfoRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if version >= 0 {
             {
@@ -138,20 +129,11 @@ impl GetReplicaLogInfoRequest {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartitions {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for TopicPartitions {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl TopicPartitions {
     pub fn to_owned(&self) -> crate::owned::get_replica_log_info_request::TopicPartitions {
@@ -166,7 +148,7 @@ impl Encode for TopicPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {

@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FindCoordinatorResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -35,35 +35,24 @@ pub struct FindCoordinatorResponse<'a> {
     pub coordinators: Vec<Coordinator<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for FindCoordinatorResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            node_id: 0i32,
-            host: "",
-            port: 0i32,
-            coordinators: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> FindCoordinatorResponse<'a> {
+impl FindCoordinatorResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::find_coordinator_response::FindCoordinatorResponse {
         crate::owned::find_coordinator_response::FindCoordinatorResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             node_id: (self.node_id),
             host: (self.host).to_string(),
             port: (self.port),
-            coordinators: (self.coordinators).iter().map(|it| it.to_owned()).collect(),
+            coordinators: (self.coordinators)
+                .iter()
+                .map(Coordinator::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for FindCoordinatorResponse<'a> {
+impl Encode for FindCoordinatorResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -73,30 +62,30 @@ impl<'a> Encode for FindCoordinatorResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
-        if version >= 0 && version <= 3 {
-            put_i16(buf, self.error_code)
+        if (0..=3).contains(&version) {
+            put_i16(buf, self.error_code);
         }
-        if version >= 1 && version <= 3 {
+        if (1..=3).contains(&version) {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
-        if version >= 0 && version <= 3 {
-            put_i32(buf, self.node_id)
+        if (0..=3).contains(&version) {
+            put_i32(buf, self.node_id);
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
-        if version >= 0 && version <= 3 {
-            put_i32(buf, self.port)
+        if (0..=3).contains(&version) {
+            put_i32(buf, self.port);
         }
         if version >= 4 {
             {
@@ -118,27 +107,27 @@ impl<'a> Encode for FindCoordinatorResponse<'a> {
         if version >= 1 {
             n += 4;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 2;
         }
-        if version >= 1 && version <= 3 {
+        if (1..=3).contains(&version) {
             n += if flex {
                 compact_nullable_string_len(self.error_message)
             } else {
                 nullable_string_len(self.error_message)
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 4;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += if flex {
                 compact_string_len(self.host)
             } else {
                 string_len(self.host)
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 4;
         }
         if version >= 4 {
@@ -172,27 +161,27 @@ impl<'de> DecodeBorrow<'de> for FindCoordinatorResponse<'de> {
         if version >= 1 {
             out.throttle_time_ms = get_i32(buf)?;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.error_code = get_i16(buf)?;
         }
-        if version >= 1 && version <= 3 {
+        if (1..=3).contains(&version) {
             out.error_message = if flex {
                 get_compact_nullable_string_borrowed(buf)?
             } else {
                 get_nullable_string_borrowed(buf)?
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.node_id = get_i32(buf)?;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.host = if flex {
                 get_compact_string_borrowed(buf)?
             } else {
                 get_string_borrowed(buf)?
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.port = get_i32(buf)?;
         }
         if version >= 4 {
@@ -212,26 +201,26 @@ impl<'de> DecodeBorrow<'de> for FindCoordinatorResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> FindCoordinatorResponse<'a> {
+impl FindCoordinatorResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
         if version >= 1 {
             m.throttle_time_ms = 1i32;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.error_code = 1i16;
         }
-        if version >= 1 && version <= 3 {
+        if (1..=3).contains(&version) {
             m.error_message = Some("x");
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.node_id = 1i32;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.host = "x";
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.port = 1i32;
         }
         if version >= 4 {
@@ -240,7 +229,7 @@ impl<'a> FindCoordinatorResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Coordinator<'a> {
     pub key: &'a str,
     pub node_id: i32,
@@ -250,20 +239,7 @@ pub struct Coordinator<'a> {
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Coordinator<'a> {
-    fn default() -> Self {
-        Self {
-            key: "",
-            node_id: 0i32,
-            host: "",
-            port: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Coordinator<'a> {
+impl Coordinator<'_> {
     pub fn to_owned(&self) -> crate::owned::find_coordinator_response::Coordinator {
         crate::owned::find_coordinator_response::Coordinator {
             key: (self.key).to_string(),
@@ -271,42 +247,42 @@ impl<'a> Coordinator<'a> {
             host: (self.host).to_string(),
             port: (self.port),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for Coordinator<'a> {
+impl Encode for Coordinator<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, self.key)
+                put_compact_string(buf, self.key);
             } else {
-                put_string(buf, self.key)
+                put_string(buf, self.key);
             }
         }
         if version >= 4 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 4 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 4 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 4 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 4 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if flex {
@@ -396,7 +372,7 @@ impl<'de> DecodeBorrow<'de> for Coordinator<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Coordinator<'a> {
+impl Coordinator<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

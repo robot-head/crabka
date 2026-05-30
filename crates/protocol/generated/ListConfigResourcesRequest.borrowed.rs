@@ -16,18 +16,10 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListConfigResourcesRequest {
     pub resource_types: Vec<i8>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for ListConfigResourcesRequest {
-    fn default() -> Self {
-        Self {
-            resource_types: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl ListConfigResourcesRequest {
     pub fn to_owned(

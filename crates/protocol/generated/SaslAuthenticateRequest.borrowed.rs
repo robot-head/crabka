@@ -16,20 +16,12 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SaslAuthenticateRequest<'a> {
     pub auth_bytes: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for SaslAuthenticateRequest<'a> {
-    fn default() -> Self {
-        Self {
-            auth_bytes: &[],
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> SaslAuthenticateRequest<'a> {
+impl SaslAuthenticateRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::sasl_authenticate_request::SaslAuthenticateRequest {
         crate::owned::sasl_authenticate_request::SaslAuthenticateRequest {
             auth_bytes: Bytes::copy_from_slice(self.auth_bytes),
@@ -37,7 +29,7 @@ impl<'a> SaslAuthenticateRequest<'a> {
         }
     }
 }
-impl<'a> Encode for SaslAuthenticateRequest<'a> {
+impl Encode for SaslAuthenticateRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -48,9 +40,9 @@ impl<'a> Encode for SaslAuthenticateRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.auth_bytes)
+                put_compact_bytes(buf, self.auth_bytes);
             } else {
-                put_bytes(buf, self.auth_bytes)
+                put_bytes(buf, self.auth_bytes);
             }
         }
         if flex {
@@ -102,7 +94,7 @@ impl<'de> DecodeBorrow<'de> for SaslAuthenticateRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> SaslAuthenticateRequest<'a> {
+impl SaslAuthenticateRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -47,10 +47,10 @@ impl Encode for AlterPartitionReassignmentsRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 1 {
-            put_bool(buf, self.allow_replication_factor_change)
+            put_bool(buf, self.allow_replication_factor_change);
         }
         if version >= 0 {
             {
@@ -90,7 +90,7 @@ impl Encode for AlterPartitionReassignmentsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for AlterPartitionReassignmentsRequest {
+impl Decode<'_> for AlterPartitionReassignmentsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -150,9 +150,9 @@ impl Encode for ReassignableTopic {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -197,7 +197,7 @@ impl Encode for ReassignableTopic {
         n
     }
 }
-impl<'de> Decode<'de> for ReassignableTopic {
+impl Decode<'_> for ReassignableTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -248,7 +248,7 @@ impl Encode for ReassignablePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
             {
@@ -277,7 +277,7 @@ impl Encode for ReassignablePartition {
             n += {
                 let opt: Option<&Vec<_>> = (self.replicas).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| v.iter().map(|_| 4).sum());
@@ -291,7 +291,7 @@ impl Encode for ReassignablePartition {
         n
     }
 }
-impl<'de> Decode<'de> for ReassignablePartition {
+impl Decode<'_> for ReassignablePartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

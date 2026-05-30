@@ -34,7 +34,7 @@ pub struct AddRaftVoterRequest<'a> {
     pub ack_when_committed: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AddRaftVoterRequest<'a> {
+impl Default for AddRaftVoterRequest<'_> {
     fn default() -> Self {
         Self {
             cluster_id: None,
@@ -47,20 +47,20 @@ impl<'a> Default for AddRaftVoterRequest<'a> {
         }
     }
 }
-impl<'a> AddRaftVoterRequest<'a> {
+impl AddRaftVoterRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::add_raft_voter_request::AddRaftVoterRequest {
         crate::owned::add_raft_voter_request::AddRaftVoterRequest {
-            cluster_id: (self.cluster_id).map(|s| s.to_string()),
+            cluster_id: (self.cluster_id).map(std::string::ToString::to_string),
             timeout_ms: (self.timeout_ms),
             voter_id: (self.voter_id),
             voter_directory_id: (self.voter_directory_id),
-            listeners: (self.listeners).iter().map(|it| it.to_owned()).collect(),
+            listeners: (self.listeners).iter().map(Listener::to_owned).collect(),
             ack_when_committed: (self.ack_when_committed),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AddRaftVoterRequest<'a> {
+impl Encode for AddRaftVoterRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -71,19 +71,19 @@ impl<'a> Encode for AddRaftVoterRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id)
+                put_compact_nullable_string(buf, self.cluster_id);
             } else {
-                put_nullable_string(buf, self.cluster_id)
+                put_nullable_string(buf, self.cluster_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
-            put_i32(buf, self.voter_id)
+            put_i32(buf, self.voter_id);
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
         }
         if version >= 0 {
             {
@@ -94,7 +94,7 @@ impl<'a> Encode for AddRaftVoterRequest<'a> {
             }
         }
         if version >= 1 {
-            put_bool(buf, self.ack_when_committed)
+            put_bool(buf, self.ack_when_committed);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -188,7 +188,7 @@ impl<'de> DecodeBorrow<'de> for AddRaftVoterRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AddRaftVoterRequest<'a> {
+impl AddRaftVoterRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -213,24 +213,14 @@ impl<'a> AddRaftVoterRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listener<'a> {
     pub name: &'a str,
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Listener<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            host: "",
-            port: 0u16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Listener<'a> {
+impl Listener<'_> {
     pub fn to_owned(&self) -> crate::owned::add_raft_voter_request::Listener {
         crate::owned::add_raft_voter_request::Listener {
             name: (self.name).to_string(),
@@ -240,25 +230,25 @@ impl<'a> Listener<'a> {
         }
     }
 }
-impl<'a> Encode for Listener<'a> {
+impl Encode for Listener<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -321,7 +311,7 @@ impl<'de> DecodeBorrow<'de> for Listener<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Listener<'a> {
+impl Listener<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

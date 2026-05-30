@@ -6,9 +6,8 @@ use crate::primitives::fixed::{
     get_i8, get_i16, get_i32, get_i64, put_i8, put_i16, put_i32, put_i64,
 };
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -72,7 +71,7 @@ impl Encode for ReadShareGroupStateResponse {
         n
     }
 }
-impl<'de> Decode<'de> for ReadShareGroupStateResponse {
+impl Decode<'_> for ReadShareGroupStateResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -119,7 +118,7 @@ impl Encode for ReadStateResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -159,7 +158,7 @@ impl Encode for ReadStateResult {
         n
     }
 }
-impl<'de> Decode<'de> for ReadStateResult {
+impl Decode<'_> for ReadStateResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -210,23 +209,23 @@ impl Encode for PartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
-            put_i32(buf, self.state_epoch)
+            put_i32(buf, self.state_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.start_offset)
+            put_i64(buf, self.start_offset);
         }
         if version >= 0 {
             {
@@ -284,7 +283,7 @@ impl Encode for PartitionResult {
         n
     }
 }
-impl<'de> Decode<'de> for PartitionResult {
+impl Decode<'_> for PartitionResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -361,16 +360,16 @@ impl Encode for StateBatch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.first_offset)
+            put_i64(buf, self.first_offset);
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset)
+            put_i64(buf, self.last_offset);
         }
         if version >= 0 {
-            put_i8(buf, self.delivery_state)
+            put_i8(buf, self.delivery_state);
         }
         if version >= 0 {
-            put_i16(buf, self.delivery_count)
+            put_i16(buf, self.delivery_count);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -400,7 +399,7 @@ impl Encode for StateBatch {
         n
     }
 }
-impl<'de> Decode<'de> for StateBatch {
+impl Decode<'_> for StateBatch {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

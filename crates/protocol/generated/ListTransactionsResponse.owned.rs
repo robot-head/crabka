@@ -38,10 +38,10 @@ impl Encode for ListTransactionsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
@@ -52,10 +52,10 @@ impl Encode for ListTransactionsResponse {
                 );
                 for it in &self.unknown_state_filters {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -92,9 +92,9 @@ impl Encode for ListTransactionsResponse {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -121,7 +121,7 @@ impl Encode for ListTransactionsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for ListTransactionsResponse {
+impl Decode<'_> for ListTransactionsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -199,19 +199,19 @@ impl Encode for TransactionState {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.transactional_id)
+                put_compact_string(buf, &self.transactional_id);
             } else {
-                put_string(buf, &self.transactional_id)
+                put_string(buf, &self.transactional_id);
             }
         }
         if version >= 0 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.transaction_state)
+                put_compact_string(buf, &self.transaction_state);
             } else {
-                put_string(buf, &self.transaction_state)
+                put_string(buf, &self.transaction_state);
             }
         }
         if flex {
@@ -247,7 +247,7 @@ impl Encode for TransactionState {
         n
     }
 }
-impl<'de> Decode<'de> for TransactionState {
+impl Decode<'_> for TransactionState {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

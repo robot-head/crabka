@@ -41,7 +41,7 @@ impl Default for TxnOffsetCommitRequest {
             producer_id: 0i64,
             producer_epoch: 0i16,
             generation_id: -1i32,
-            member_id: "".to_string(),
+            member_id: String::new(),
             group_instance_id: None,
             topics: Vec::new(),
             unknown_tagged_fields: Default::default(),
@@ -59,39 +59,39 @@ impl Encode for TxnOffsetCommitRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.transactional_id)
+                put_compact_string(buf, &self.transactional_id);
             } else {
-                put_string(buf, &self.transactional_id)
+                put_string(buf, &self.transactional_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 0 {
-            put_i16(buf, self.producer_epoch)
+            put_i16(buf, self.producer_epoch);
         }
         if version >= 3 {
-            put_i32(buf, self.generation_id)
+            put_i32(buf, self.generation_id);
         }
         if version >= 3 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref())
+                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref())
+                put_nullable_string(buf, self.group_instance_id.as_deref());
             }
         }
         if version >= 0 {
@@ -163,7 +163,7 @@ impl Encode for TxnOffsetCommitRequest {
         n
     }
 }
-impl<'de> Decode<'de> for TxnOffsetCommitRequest {
+impl Decode<'_> for TxnOffsetCommitRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -269,9 +269,9 @@ impl Encode for TxnOffsetCommitRequestTopic {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -316,7 +316,7 @@ impl Encode for TxnOffsetCommitRequestTopic {
         n
     }
 }
-impl<'de> Decode<'de> for TxnOffsetCommitRequestTopic {
+impl Decode<'_> for TxnOffsetCommitRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -380,19 +380,19 @@ impl Encode for TxnOffsetCommitRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.committed_offset)
+            put_i64(buf, self.committed_offset);
         }
         if version >= 2 {
-            put_i32(buf, self.committed_leader_epoch)
+            put_i32(buf, self.committed_leader_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.committed_metadata.as_deref())
+                put_compact_nullable_string(buf, self.committed_metadata.as_deref());
             } else {
-                put_nullable_string(buf, self.committed_metadata.as_deref())
+                put_nullable_string(buf, self.committed_metadata.as_deref());
             }
         }
         if flex {
@@ -427,7 +427,7 @@ impl Encode for TxnOffsetCommitRequestPartition {
         n
     }
 }
-impl<'de> Decode<'de> for TxnOffsetCommitRequestPartition {
+impl Decode<'_> for TxnOffsetCommitRequestPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -496,7 +496,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version >= 3 {
         obj.insert(
             "memberId".to_string(),
-            ::serde_json::Value::String("".to_string()),
+            ::serde_json::Value::String(String::new()),
         );
     }
     if version >= 3 {

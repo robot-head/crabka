@@ -29,10 +29,10 @@ impl Encode for KRaftVersionRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version)
+            put_i16(buf, self.version);
         }
         if version >= 0 {
-            put_i16(buf, self.k_raft_version)
+            put_i16(buf, self.k_raft_version);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -56,7 +56,7 @@ impl Encode for KRaftVersionRecord {
         n
     }
 }
-impl<'de> Decode<'de> for KRaftVersionRecord {
+impl Decode<'_> for KRaftVersionRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

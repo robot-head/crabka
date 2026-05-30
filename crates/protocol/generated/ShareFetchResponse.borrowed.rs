@@ -31,7 +31,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareFetchResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -41,36 +41,26 @@ pub struct ShareFetchResponse<'a> {
     pub node_endpoints: Vec<NodeEndpoint<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ShareFetchResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            acquisition_lock_timeout_ms: 0i32,
-            responses: Vec::new(),
-            node_endpoints: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ShareFetchResponse<'a> {
+impl ShareFetchResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::ShareFetchResponse {
         crate::owned::share_fetch_response::ShareFetchResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             acquisition_lock_timeout_ms: (self.acquisition_lock_timeout_ms),
-            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
+            responses: (self.responses)
+                .iter()
+                .map(ShareFetchableTopicResponse::to_owned)
+                .collect(),
             node_endpoints: (self.node_endpoints)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(NodeEndpoint::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ShareFetchResponse<'a> {
+impl Encode for ShareFetchResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -80,20 +70,20 @@ impl<'a> Encode for ShareFetchResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 1 {
-            put_i32(buf, self.acquisition_lock_timeout_ms)
+            put_i32(buf, self.acquisition_lock_timeout_ms);
         }
         if version >= 0 {
             {
@@ -220,7 +210,7 @@ impl<'de> DecodeBorrow<'de> for ShareFetchResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ShareFetchResponse<'a> {
+impl ShareFetchResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -245,35 +235,29 @@ impl<'a> ShareFetchResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ShareFetchableTopicResponse<'a> {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ShareFetchableTopicResponse<'a> {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ShareFetchableTopicResponse<'a> {
+impl ShareFetchableTopicResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::ShareFetchableTopicResponse {
         crate::owned::share_fetch_response::ShareFetchableTopicResponse {
             topic_id: (self.topic_id),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ShareFetchableTopicResponse<'a> {
+impl Encode for ShareFetchableTopicResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -337,7 +321,7 @@ impl<'de> DecodeBorrow<'de> for ShareFetchableTopicResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ShareFetchableTopicResponse<'a> {
+impl ShareFetchableTopicResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -350,7 +334,7 @@ impl<'a> ShareFetchableTopicResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionData<'a> {
     pub partition_index: i32,
     pub error_code: i16,
@@ -362,78 +346,64 @@ pub struct PartitionData<'a> {
     pub acquired_records: Vec<AcquiredRecords>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for PartitionData<'a> {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            acknowledge_error_code: 0i16,
-            acknowledge_error_message: None,
-            current_leader: Default::default(),
-            records: None,
-            acquired_records: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> PartitionData<'a> {
+impl PartitionData<'_> {
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::PartitionData {
         crate::owned::share_fetch_response::PartitionData {
             partition_index: (self.partition_index),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             acknowledge_error_code: (self.acknowledge_error_code),
-            acknowledge_error_message: (self.acknowledge_error_message).map(|s| s.to_string()),
+            acknowledge_error_message: (self.acknowledge_error_message)
+                .map(std::string::ToString::to_string),
             current_leader: (self.current_leader).to_owned(),
             records: (self.records)
                 .as_ref()
                 .map(|rb| rb.to_owned().expect("records to_owned")),
             acquired_records: (self.acquired_records)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(AcquiredRecords::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for PartitionData<'a> {
+impl Encode for PartitionData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_nullable_string(buf, self.error_message)
-            } else {
-                put_nullable_string(buf, self.error_message)
-            }
-        }
-        if version >= 0 {
-            put_i16(buf, self.acknowledge_error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.acknowledge_error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.acknowledge_error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
-            self.current_leader.encode(buf, version)?
+            put_i16(buf, self.acknowledge_error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.acknowledge_error_message);
+            } else {
+                put_nullable_string(buf, self.acknowledge_error_message);
+            }
+        }
+        if version >= 0 {
+            self.current_leader.encode(buf, version)?;
         }
         if version >= 0 {
             if version <= 0 {
                 match &self.records {
                     None => {
                         if flex {
-                            put_compact_nullable_bytes(buf, None)
+                            put_compact_nullable_bytes(buf, None);
                         } else {
-                            put_nullable_bytes(buf, None)
+                            put_nullable_bytes(buf, None);
                         }
                     }
                     Some(__rb) => {
@@ -444,9 +414,9 @@ impl<'a> Encode for PartitionData<'a> {
                             version,
                         )?;
                         if flex {
-                            put_compact_bytes(buf, &__rb_buf)
+                            put_compact_bytes(buf, &__rb_buf);
                         } else {
-                            put_bytes(buf, &__rb_buf)
+                            put_bytes(buf, &__rb_buf);
                         }
                     }
                 }
@@ -455,9 +425,9 @@ impl<'a> Encode for PartitionData<'a> {
                     None => {
                         let __rb_buf = bytes::BytesMut::new();
                         if flex {
-                            put_compact_bytes(buf, &__rb_buf)
+                            put_compact_bytes(buf, &__rb_buf);
                         } else {
-                            put_bytes(buf, &__rb_buf)
+                            put_bytes(buf, &__rb_buf);
                         }
                     }
                     Some(__rb) => {
@@ -468,9 +438,9 @@ impl<'a> Encode for PartitionData<'a> {
                             version,
                         )?;
                         if flex {
-                            put_compact_bytes(buf, &__rb_buf)
+                            put_compact_bytes(buf, &__rb_buf);
                         } else {
-                            put_bytes(buf, &__rb_buf)
+                            put_bytes(buf, &__rb_buf);
                         }
                     }
                 }
@@ -662,7 +632,7 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> PartitionData<'a> {
+impl PartitionData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -690,20 +660,11 @@ impl<'a> PartitionData<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderIdAndEpoch {
     pub leader_id: i32,
     pub leader_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for LeaderIdAndEpoch {
-    fn default() -> Self {
-        Self {
-            leader_id: 0i32,
-            leader_epoch: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl LeaderIdAndEpoch {
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::LeaderIdAndEpoch {
@@ -718,10 +679,10 @@ impl Encode for LeaderIdAndEpoch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -775,22 +736,12 @@ impl LeaderIdAndEpoch {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AcquiredRecords {
     pub first_offset: i64,
     pub last_offset: i64,
     pub delivery_count: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for AcquiredRecords {
-    fn default() -> Self {
-        Self {
-            first_offset: 0i64,
-            last_offset: 0i64,
-            delivery_count: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl AcquiredRecords {
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::AcquiredRecords {
@@ -806,13 +757,13 @@ impl Encode for AcquiredRecords {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.first_offset)
+            put_i64(buf, self.first_offset);
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset)
+            put_i64(buf, self.last_offset);
         }
         if version >= 0 {
-            put_i16(buf, self.delivery_count)
+            put_i16(buf, self.delivery_count);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -875,7 +826,7 @@ impl AcquiredRecords {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NodeEndpoint<'a> {
     pub node_id: i32,
     pub host: &'a str,
@@ -883,49 +834,38 @@ pub struct NodeEndpoint<'a> {
     pub rack: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for NodeEndpoint<'a> {
-    fn default() -> Self {
-        Self {
-            node_id: 0i32,
-            host: "",
-            port: 0i32,
-            rack: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> NodeEndpoint<'a> {
+impl NodeEndpoint<'_> {
     pub fn to_owned(&self) -> crate::owned::share_fetch_response::NodeEndpoint {
         crate::owned::share_fetch_response::NodeEndpoint {
             node_id: (self.node_id),
             host: (self.host).to_string(),
             port: (self.port),
-            rack: (self.rack).map(|s| s.to_string()),
+            rack: (self.rack).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for NodeEndpoint<'a> {
+impl Encode for NodeEndpoint<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack)
+                put_compact_nullable_string(buf, self.rack);
             } else {
-                put_nullable_string(buf, self.rack)
+                put_nullable_string(buf, self.rack);
             }
         }
         if flex {
@@ -995,7 +935,7 @@ impl<'de> DecodeBorrow<'de> for NodeEndpoint<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> NodeEndpoint<'a> {
+impl NodeEndpoint<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

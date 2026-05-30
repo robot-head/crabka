@@ -39,7 +39,7 @@ pub struct BrokerRegistrationRequest<'a> {
     pub previous_broker_epoch: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for BrokerRegistrationRequest<'a> {
+impl Default for BrokerRegistrationRequest<'_> {
     fn default() -> Self {
         Self {
             broker_id: 0i32,
@@ -55,15 +55,15 @@ impl<'a> Default for BrokerRegistrationRequest<'a> {
         }
     }
 }
-impl<'a> BrokerRegistrationRequest<'a> {
+impl BrokerRegistrationRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::broker_registration_request::BrokerRegistrationRequest {
         crate::owned::broker_registration_request::BrokerRegistrationRequest {
             broker_id: (self.broker_id),
             cluster_id: (self.cluster_id).to_string(),
             incarnation_id: (self.incarnation_id),
-            listeners: (self.listeners).iter().map(|it| it.to_owned()).collect(),
-            features: (self.features).iter().map(|it| it.to_owned()).collect(),
-            rack: (self.rack).map(|s| s.to_string()),
+            listeners: (self.listeners).iter().map(Listener::to_owned).collect(),
+            features: (self.features).iter().map(Feature::to_owned).collect(),
+            rack: (self.rack).map(std::string::ToString::to_string),
             is_migrating_zk_broker: (self.is_migrating_zk_broker),
             log_dirs: (self.log_dirs).clone(),
             previous_broker_epoch: (self.previous_broker_epoch),
@@ -71,7 +71,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
         }
     }
 }
-impl<'a> Encode for BrokerRegistrationRequest<'a> {
+impl Encode for BrokerRegistrationRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -81,17 +81,17 @@ impl<'a> Encode for BrokerRegistrationRequest<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.cluster_id)
+                put_compact_string(buf, self.cluster_id);
             } else {
-                put_string(buf, self.cluster_id)
+                put_string(buf, self.cluster_id);
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.incarnation_id)
+            crate::primitives::uuid::put_uuid(buf, self.incarnation_id);
         }
         if version >= 0 {
             {
@@ -111,13 +111,13 @@ impl<'a> Encode for BrokerRegistrationRequest<'a> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack)
+                put_compact_nullable_string(buf, self.rack);
             } else {
-                put_nullable_string(buf, self.rack)
+                put_nullable_string(buf, self.rack);
             }
         }
         if version >= 1 {
-            put_bool(buf, self.is_migrating_zk_broker)
+            put_bool(buf, self.is_migrating_zk_broker);
         }
         if version >= 2 {
             {
@@ -128,7 +128,7 @@ impl<'a> Encode for BrokerRegistrationRequest<'a> {
             }
         }
         if version >= 3 {
-            put_i64(buf, self.previous_broker_epoch)
+            put_i64(buf, self.previous_broker_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -275,7 +275,7 @@ impl<'de> DecodeBorrow<'de> for BrokerRegistrationRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> BrokerRegistrationRequest<'a> {
+impl BrokerRegistrationRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -309,7 +309,7 @@ impl<'a> BrokerRegistrationRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listener<'a> {
     pub name: &'a str,
     pub host: &'a str,
@@ -317,18 +317,7 @@ pub struct Listener<'a> {
     pub security_protocol: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Listener<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            host: "",
-            port: 0u16,
-            security_protocol: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Listener<'a> {
+impl Listener<'_> {
     pub fn to_owned(&self) -> crate::owned::broker_registration_request::Listener {
         crate::owned::broker_registration_request::Listener {
             name: (self.name).to_string(),
@@ -339,28 +328,28 @@ impl<'a> Listener<'a> {
         }
     }
 }
-impl<'a> Encode for Listener<'a> {
+impl Encode for Listener<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if version >= 0 {
-            put_i16(buf, self.security_protocol)
+            put_i16(buf, self.security_protocol);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -429,7 +418,7 @@ impl<'de> DecodeBorrow<'de> for Listener<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Listener<'a> {
+impl Listener<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -448,24 +437,14 @@ impl<'a> Listener<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Feature<'a> {
     pub name: &'a str,
     pub min_supported_version: i16,
     pub max_supported_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Feature<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            min_supported_version: 0i16,
-            max_supported_version: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Feature<'a> {
+impl Feature<'_> {
     pub fn to_owned(&self) -> crate::owned::broker_registration_request::Feature {
         crate::owned::broker_registration_request::Feature {
             name: (self.name).to_string(),
@@ -475,21 +454,21 @@ impl<'a> Feature<'a> {
         }
     }
 }
-impl<'a> Encode for Feature<'a> {
+impl Encode for Feature<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.min_supported_version)
+            put_i16(buf, self.min_supported_version);
         }
         if version >= 0 {
-            put_i16(buf, self.max_supported_version)
+            put_i16(buf, self.max_supported_version);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -544,7 +523,7 @@ impl<'de> DecodeBorrow<'de> for Feature<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Feature<'a> {
+impl Feature<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

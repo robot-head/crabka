@@ -45,7 +45,7 @@ impl Encode for IncrementalAlterConfigsRequest {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only)
+            put_bool(buf, self.validate_only);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -77,7 +77,7 @@ impl Encode for IncrementalAlterConfigsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for IncrementalAlterConfigsRequest {
+impl Decode<'_> for IncrementalAlterConfigsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -131,13 +131,13 @@ impl Encode for AlterConfigsResource {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.resource_name)
+                put_compact_string(buf, &self.resource_name);
             } else {
-                put_string(buf, &self.resource_name)
+                put_string(buf, &self.resource_name);
             }
         }
         if version >= 0 {
@@ -185,7 +185,7 @@ impl Encode for AlterConfigsResource {
         n
     }
 }
-impl<'de> Decode<'de> for AlterConfigsResource {
+impl Decode<'_> for AlterConfigsResource {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -244,19 +244,19 @@ impl Encode for AlterableConfig {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.config_operation)
+            put_i8(buf, self.config_operation);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value.as_deref())
+                put_compact_nullable_string(buf, self.value.as_deref());
             } else {
-                put_nullable_string(buf, self.value.as_deref())
+                put_nullable_string(buf, self.value.as_deref());
             }
         }
         if flex {
@@ -292,7 +292,7 @@ impl Encode for AlterableConfig {
         n
     }
 }
-impl<'de> Decode<'de> for AlterableConfig {
+impl Decode<'_> for AlterableConfig {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();

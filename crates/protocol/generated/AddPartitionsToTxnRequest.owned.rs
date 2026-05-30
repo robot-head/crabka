@@ -47,20 +47,20 @@ impl Encode for AddPartitionsToTxnRequest {
                 }
             }
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.v3_and_below_transactional_id)
+                put_compact_string(buf, &self.v3_and_below_transactional_id);
             } else {
-                put_string(buf, &self.v3_and_below_transactional_id)
+                put_string(buf, &self.v3_and_below_transactional_id);
             }
         }
-        if version >= 0 && version <= 3 {
-            put_i64(buf, self.v3_and_below_producer_id)
+        if (0..=3).contains(&version) {
+            put_i64(buf, self.v3_and_below_producer_id);
         }
-        if version >= 0 && version <= 3 {
-            put_i16(buf, self.v3_and_below_producer_epoch)
+        if (0..=3).contains(&version) {
+            put_i16(buf, self.v3_and_below_producer_epoch);
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             {
                 crate::primitives::array::put_array_len(
                     buf,
@@ -92,20 +92,20 @@ impl Encode for AddPartitionsToTxnRequest {
                 prefix + body
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += if flex {
                 compact_string_len(&self.v3_and_below_transactional_id)
             } else {
                 string_len(&self.v3_and_below_transactional_id)
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 8;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 2;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += {
                 let prefix = crate::primitives::array::array_len_prefix_len(
                     (self.v3_and_below_topics).len(),
@@ -125,7 +125,7 @@ impl Encode for AddPartitionsToTxnRequest {
         n
     }
 }
-impl<'de> Decode<'de> for AddPartitionsToTxnRequest {
+impl Decode<'_> for AddPartitionsToTxnRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -145,20 +145,20 @@ impl<'de> Decode<'de> for AddPartitionsToTxnRequest {
                 v
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.v3_and_below_transactional_id = if flex {
                 get_compact_string_owned(buf)?
             } else {
                 get_string_owned(buf)?
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.v3_and_below_producer_id = get_i64(buf)?;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.v3_and_below_producer_epoch = get_i16(buf)?;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.v3_and_below_topics = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -182,16 +182,16 @@ impl AddPartitionsToTxnRequest {
         if version >= 4 {
             m.transactions = vec![AddPartitionsToTxnTransaction::populated(version)];
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.v3_and_below_transactional_id = "x".to_string();
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.v3_and_below_producer_id = 1i64;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.v3_and_below_producer_epoch = 1i16;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.v3_and_below_topics = vec![
                 super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(
                     version,
@@ -215,19 +215,19 @@ impl Encode for AddPartitionsToTxnTransaction {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, &self.transactional_id)
+                put_compact_string(buf, &self.transactional_id);
             } else {
-                put_string(buf, &self.transactional_id)
+                put_string(buf, &self.transactional_id);
             }
         }
         if version >= 4 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 4 {
-            put_i16(buf, self.producer_epoch)
+            put_i16(buf, self.producer_epoch);
         }
         if version >= 4 {
-            put_bool(buf, self.verify_only)
+            put_bool(buf, self.verify_only);
         }
         if version >= 4 {
             {
@@ -277,7 +277,7 @@ impl Encode for AddPartitionsToTxnTransaction {
         n
     }
 }
-impl<'de> Decode<'de> for AddPartitionsToTxnTransaction {
+impl Decode<'_> for AddPartitionsToTxnTransaction {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

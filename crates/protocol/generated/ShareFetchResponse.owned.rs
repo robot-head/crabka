@@ -46,20 +46,20 @@ impl Encode for ShareFetchResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 1 {
-            put_i32(buf, self.acquisition_lock_timeout_ms)
+            put_i32(buf, self.acquisition_lock_timeout_ms);
         }
         if version >= 0 {
             {
@@ -133,7 +133,7 @@ impl Encode for ShareFetchResponse {
         n
     }
 }
-impl<'de> Decode<'de> for ShareFetchResponse {
+impl Decode<'_> for ShareFetchResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -221,7 +221,7 @@ impl Encode for ShareFetchableTopicResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -261,7 +261,7 @@ impl Encode for ShareFetchableTopicResponse {
         n
     }
 }
-impl<'de> Decode<'de> for ShareFetchableTopicResponse {
+impl Decode<'_> for ShareFetchableTopicResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -314,39 +314,39 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
-        }
-        if version >= 0 {
-            if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
-            } else {
-                put_nullable_string(buf, self.error_message.as_deref())
-            }
-        }
-        if version >= 0 {
-            put_i16(buf, self.acknowledge_error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.acknowledge_error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.acknowledge_error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
-            self.current_leader.encode(buf, version)?
+            put_i16(buf, self.acknowledge_error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.acknowledge_error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.acknowledge_error_message.as_deref());
+            }
+        }
+        if version >= 0 {
+            self.current_leader.encode(buf, version)?;
         }
         if version >= 0 {
             if version <= 0 {
                 match &self.records {
                     None => {
                         if flex {
-                            put_compact_nullable_bytes(buf, None)
+                            put_compact_nullable_bytes(buf, None);
                         } else {
-                            put_nullable_bytes(buf, None)
+                            put_nullable_bytes(buf, None);
                         }
                     }
                     Some(__rb) => {
@@ -357,9 +357,9 @@ impl Encode for PartitionData {
                             version,
                         )?;
                         if flex {
-                            put_compact_bytes(buf, &__rb_buf)
+                            put_compact_bytes(buf, &__rb_buf);
                         } else {
-                            put_bytes(buf, &__rb_buf)
+                            put_bytes(buf, &__rb_buf);
                         }
                     }
                 }
@@ -368,9 +368,9 @@ impl Encode for PartitionData {
                     None => {
                         let __rb_buf = bytes::BytesMut::new();
                         if flex {
-                            put_compact_bytes(buf, &__rb_buf)
+                            put_compact_bytes(buf, &__rb_buf);
                         } else {
-                            put_bytes(buf, &__rb_buf)
+                            put_bytes(buf, &__rb_buf);
                         }
                     }
                     Some(__rb) => {
@@ -381,9 +381,9 @@ impl Encode for PartitionData {
                             version,
                         )?;
                         if flex {
-                            put_compact_bytes(buf, &__rb_buf)
+                            put_compact_bytes(buf, &__rb_buf);
                         } else {
-                            put_bytes(buf, &__rb_buf)
+                            put_bytes(buf, &__rb_buf);
                         }
                     }
                 }
@@ -497,7 +497,7 @@ impl Encode for PartitionData {
         n
     }
 }
-impl<'de> Decode<'de> for PartitionData {
+impl Decode<'_> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -613,10 +613,10 @@ impl Encode for LeaderIdAndEpoch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -640,7 +640,7 @@ impl Encode for LeaderIdAndEpoch {
         n
     }
 }
-impl<'de> Decode<'de> for LeaderIdAndEpoch {
+impl Decode<'_> for LeaderIdAndEpoch {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -681,13 +681,13 @@ impl Encode for AcquiredRecords {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.first_offset)
+            put_i64(buf, self.first_offset);
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset)
+            put_i64(buf, self.last_offset);
         }
         if version >= 0 {
-            put_i16(buf, self.delivery_count)
+            put_i16(buf, self.delivery_count);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -714,7 +714,7 @@ impl Encode for AcquiredRecords {
         n
     }
 }
-impl<'de> Decode<'de> for AcquiredRecords {
+impl Decode<'_> for AcquiredRecords {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -762,23 +762,23 @@ impl Encode for NodeEndpoint {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack.as_deref())
+                put_compact_nullable_string(buf, self.rack.as_deref());
             } else {
-                put_nullable_string(buf, self.rack.as_deref())
+                put_nullable_string(buf, self.rack.as_deref());
             }
         }
         if flex {
@@ -817,7 +817,7 @@ impl Encode for NodeEndpoint {
         n
     }
 }
-impl<'de> Decode<'de> for NodeEndpoint {
+impl Decode<'_> for NodeEndpoint {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

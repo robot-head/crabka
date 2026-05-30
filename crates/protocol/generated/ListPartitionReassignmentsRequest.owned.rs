@@ -45,7 +45,7 @@ impl Encode for ListPartitionReassignmentsRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
             {
@@ -74,7 +74,7 @@ impl Encode for ListPartitionReassignmentsRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.topics).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -89,7 +89,7 @@ impl Encode for ListPartitionReassignmentsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for ListPartitionReassignmentsRequest {
+impl Decode<'_> for ListPartitionReassignmentsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -148,9 +148,9 @@ impl Encode for ListPartitionReassignmentsTopics {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -194,7 +194,7 @@ impl Encode for ListPartitionReassignmentsTopics {
         n
     }
 }
-impl<'de> Decode<'de> for ListPartitionReassignmentsTopics {
+impl Decode<'_> for ListPartitionReassignmentsTopics {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

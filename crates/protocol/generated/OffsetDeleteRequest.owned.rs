@@ -36,9 +36,9 @@ impl Encode for OffsetDeleteRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
@@ -72,7 +72,7 @@ impl Encode for OffsetDeleteRequest {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetDeleteRequest {
+impl Decode<'_> for OffsetDeleteRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -127,9 +127,9 @@ impl Encode for OffsetDeleteRequestTopic {
         let flex = version >= 32767;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -166,7 +166,7 @@ impl Encode for OffsetDeleteRequestTopic {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetDeleteRequestTopic {
+impl Decode<'_> for OffsetDeleteRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 32767;
         let mut out = Self::default();
@@ -213,7 +213,7 @@ impl Encode for OffsetDeleteRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 32767;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         Ok(())
     }
@@ -226,7 +226,7 @@ impl Encode for OffsetDeleteRequestPartition {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetDeleteRequestPartition {
+impl Decode<'_> for OffsetDeleteRequestPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 32767;
         let mut out = Self::default();

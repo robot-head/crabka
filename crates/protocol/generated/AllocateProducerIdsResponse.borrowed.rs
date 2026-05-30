@@ -16,24 +16,13 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AllocateProducerIdsResponse {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub producer_id_start: i64,
     pub producer_id_len: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for AllocateProducerIdsResponse {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            producer_id_start: 0i64,
-            producer_id_len: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl AllocateProducerIdsResponse {
     pub fn to_owned(
@@ -58,16 +47,16 @@ impl Encode for AllocateProducerIdsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i64(buf, self.producer_id_start)
+            put_i64(buf, self.producer_id_start);
         }
         if version >= 0 {
-            put_i32(buf, self.producer_id_len)
+            put_i32(buf, self.producer_id_len);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

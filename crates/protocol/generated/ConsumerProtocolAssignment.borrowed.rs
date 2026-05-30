@@ -21,36 +21,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConsumerProtocolAssignment<'a> {
     pub assigned_partitions: Vec<TopicPartition<'a>>,
     pub user_data: Option<&'a [u8]>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ConsumerProtocolAssignment<'a> {
-    fn default() -> Self {
-        Self {
-            assigned_partitions: Vec::new(),
-            user_data: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ConsumerProtocolAssignment<'a> {
+impl ConsumerProtocolAssignment<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_protocol_assignment::ConsumerProtocolAssignment {
         crate::owned::consumer_protocol_assignment::ConsumerProtocolAssignment {
             assigned_partitions: (self.assigned_partitions)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(TopicPartition::to_owned)
                 .collect(),
             user_data: (self.user_data).map(Bytes::copy_from_slice),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ConsumerProtocolAssignment<'a> {
+impl Encode for ConsumerProtocolAssignment<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -72,9 +63,9 @@ impl<'a> Encode for ConsumerProtocolAssignment<'a> {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.user_data)
+                put_compact_nullable_bytes(buf, self.user_data);
             } else {
-                put_nullable_bytes(buf, self.user_data)
+                put_nullable_bytes(buf, self.user_data);
             }
         }
         Ok(())
@@ -147,7 +138,7 @@ impl<'de> DecodeBorrow<'de> for ConsumerProtocolAssignment<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ConsumerProtocolAssignment<'a> {
+impl ConsumerProtocolAssignment<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -160,22 +151,13 @@ impl<'a> ConsumerProtocolAssignment<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartition<'a> {
     pub topic: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicPartition<'a> {
-    fn default() -> Self {
-        Self {
-            topic: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicPartition<'a> {
+impl TopicPartition<'_> {
     pub fn to_owned(&self) -> crate::owned::consumer_protocol_assignment::TopicPartition {
         crate::owned::consumer_protocol_assignment::TopicPartition {
             topic: (self.topic).to_string(),
@@ -184,14 +166,14 @@ impl<'a> TopicPartition<'a> {
         }
     }
 }
-impl<'a> Encode for TopicPartition<'a> {
+impl Encode for TopicPartition<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 32767;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic)
+                put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic)
+                put_string(buf, self.topic);
             }
         }
         if version >= 0 {
@@ -250,7 +232,7 @@ impl<'de> DecodeBorrow<'de> for TopicPartition<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicPartition<'a> {
+impl TopicPartition<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

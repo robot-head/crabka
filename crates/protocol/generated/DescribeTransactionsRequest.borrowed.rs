@@ -18,33 +18,25 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeTransactionsRequest<'a> {
     pub transactional_ids: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeTransactionsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            transactional_ids: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeTransactionsRequest<'a> {
+impl DescribeTransactionsRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_transactions_request::DescribeTransactionsRequest {
         crate::owned::describe_transactions_request::DescribeTransactionsRequest {
             transactional_ids: (self.transactional_ids)
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeTransactionsRequest<'a> {
+impl Encode for DescribeTransactionsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -58,10 +50,10 @@ impl<'a> Encode for DescribeTransactionsRequest<'a> {
                 crate::primitives::array::put_array_len(buf, (self.transactional_ids).len(), flex);
                 for it in &self.transactional_ids {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -84,9 +76,9 @@ impl<'a> Encode for DescribeTransactionsRequest<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -131,7 +123,7 @@ impl<'de> DecodeBorrow<'de> for DescribeTransactionsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeTransactionsRequest<'a> {
+impl DescribeTransactionsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

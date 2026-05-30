@@ -45,7 +45,7 @@ impl Encode for OffsetForLeaderEpochRequest {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.replica_id)
+            put_i32(buf, self.replica_id);
         }
         if version >= 0 {
             {
@@ -82,7 +82,7 @@ impl Encode for OffsetForLeaderEpochRequest {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetForLeaderEpochRequest {
+impl Decode<'_> for OffsetForLeaderEpochRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -136,9 +136,9 @@ impl Encode for OffsetForLeaderTopic {
         let flex = version >= 4;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic)
+                put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic)
+                put_string(buf, &self.topic);
             }
         }
         if version >= 0 {
@@ -183,7 +183,7 @@ impl Encode for OffsetForLeaderTopic {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetForLeaderTopic {
+impl Decode<'_> for OffsetForLeaderTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();
@@ -245,13 +245,13 @@ impl Encode for OffsetForLeaderPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 2 {
-            put_i32(buf, self.current_leader_epoch)
+            put_i32(buf, self.current_leader_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -278,7 +278,7 @@ impl Encode for OffsetForLeaderPartition {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetForLeaderPartition {
+impl Decode<'_> for OffsetForLeaderPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 4;
         let mut out = Self::default();

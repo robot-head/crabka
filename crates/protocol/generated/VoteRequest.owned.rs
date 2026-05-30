@@ -49,13 +49,13 @@ impl Encode for VoteRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id.as_deref())
+                put_compact_nullable_string(buf, self.cluster_id.as_deref());
             } else {
-                put_nullable_string(buf, self.cluster_id.as_deref())
+                put_nullable_string(buf, self.cluster_id.as_deref());
             }
         }
         if version >= 1 {
-            put_i32(buf, self.voter_id)
+            put_i32(buf, self.voter_id);
         }
         if version >= 0 {
             {
@@ -99,7 +99,7 @@ impl Encode for VoteRequest {
         n
     }
 }
-impl<'de> Decode<'de> for VoteRequest {
+impl Decode<'_> for VoteRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -163,9 +163,9 @@ impl Encode for TopicData {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic_name)
+                put_compact_string(buf, &self.topic_name);
             } else {
-                put_string(buf, &self.topic_name)
+                put_string(buf, &self.topic_name);
             }
         }
         if version >= 0 {
@@ -210,7 +210,7 @@ impl Encode for TopicData {
         n
     }
 }
-impl<'de> Decode<'de> for TopicData {
+impl Decode<'_> for TopicData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -267,28 +267,28 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i32(buf, self.replica_epoch)
+            put_i32(buf, self.replica_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.replica_id)
+            put_i32(buf, self.replica_id);
         }
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id)
+            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id);
         }
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
         }
         if version >= 0 {
-            put_i32(buf, self.last_offset_epoch)
+            put_i32(buf, self.last_offset_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset)
+            put_i64(buf, self.last_offset);
         }
         if version >= 2 {
-            put_bool(buf, self.pre_vote)
+            put_bool(buf, self.pre_vote);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -330,7 +330,7 @@ impl Encode for PartitionData {
         n
     }
 }
-impl<'de> Decode<'de> for PartitionData {
+impl Decode<'_> for PartitionData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

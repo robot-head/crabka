@@ -39,16 +39,16 @@ impl Encode for DescribeUserScramCredentialsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
@@ -99,7 +99,7 @@ impl Encode for DescribeUserScramCredentialsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeUserScramCredentialsResponse {
+impl Decode<'_> for DescribeUserScramCredentialsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -171,19 +171,19 @@ impl Encode for DescribeUserScramCredentialsResult {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.user)
+                put_compact_string(buf, &self.user);
             } else {
-                put_string(buf, &self.user)
+                put_string(buf, &self.user);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
@@ -240,7 +240,7 @@ impl Encode for DescribeUserScramCredentialsResult {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeUserScramCredentialsResult {
+impl Decode<'_> for DescribeUserScramCredentialsResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -307,10 +307,10 @@ impl Encode for CredentialInfo {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i8(buf, self.mechanism)
+            put_i8(buf, self.mechanism);
         }
         if version >= 0 {
-            put_i32(buf, self.iterations)
+            put_i32(buf, self.iterations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -334,7 +334,7 @@ impl Encode for CredentialInfo {
         n
     }
 }
-impl<'de> Decode<'de> for CredentialInfo {
+impl Decode<'_> for CredentialInfo {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

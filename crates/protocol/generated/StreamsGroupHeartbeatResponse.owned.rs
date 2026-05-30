@@ -49,36 +49,36 @@ impl Encode for StreamsGroupHeartbeatResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.heartbeat_interval_ms)
+            put_i32(buf, self.heartbeat_interval_ms);
         }
         if version >= 0 {
-            put_i32(buf, self.acceptable_recovery_lag)
+            put_i32(buf, self.acceptable_recovery_lag);
         }
         if version >= 0 {
-            put_i32(buf, self.task_offset_interval_ms)
+            put_i32(buf, self.task_offset_interval_ms);
         }
         if version >= 0 {
             {
@@ -125,7 +125,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.endpoint_information_epoch)
+            put_i32(buf, self.endpoint_information_epoch);
         }
         if version >= 0 {
             {
@@ -183,7 +183,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.status).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -195,7 +195,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.active_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -207,7 +207,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.standby_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -219,7 +219,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.warmup_tasks).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -234,7 +234,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             n += {
                 let opt: Option<&Vec<_>> = (self.partitions_by_user_endpoint).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -249,7 +249,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
         n
     }
 }
-impl<'de> Decode<'de> for StreamsGroupHeartbeatResponse {
+impl Decode<'_> for StreamsGroupHeartbeatResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -436,7 +436,7 @@ impl Encode for EndpointToPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            self.user_endpoint.encode(buf, version)?
+            self.user_endpoint.encode(buf, version)?;
         }
         if version >= 0 {
             {
@@ -499,7 +499,7 @@ impl Encode for EndpointToPartitions {
         n
     }
 }
-impl<'de> Decode<'de> for EndpointToPartitions {
+impl Decode<'_> for EndpointToPartitions {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

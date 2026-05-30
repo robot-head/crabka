@@ -36,25 +36,25 @@ impl Encode for FindCoordinatorRequest {
             });
         }
         let flex = is_flexible(version);
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.key)
+                put_compact_string(buf, &self.key);
             } else {
-                put_string(buf, &self.key)
+                put_string(buf, &self.key);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.key_type)
+            put_i8(buf, self.key_type);
         }
         if version >= 4 {
             {
                 crate::primitives::array::put_array_len(buf, (self.coordinator_keys).len(), flex);
                 for it in &self.coordinator_keys {
                     if flex {
-                        put_compact_string(buf, &*it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, &*it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -67,7 +67,7 @@ impl Encode for FindCoordinatorRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += if flex {
                 compact_string_len(&self.key)
             } else {
@@ -87,9 +87,9 @@ impl Encode for FindCoordinatorRequest {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(&*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(&*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -103,7 +103,7 @@ impl Encode for FindCoordinatorRequest {
         n
     }
 }
-impl<'de> Decode<'de> for FindCoordinatorRequest {
+impl Decode<'_> for FindCoordinatorRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -113,7 +113,7 @@ impl<'de> Decode<'de> for FindCoordinatorRequest {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.key = if flex {
                 get_compact_string_owned(buf)?
             } else {
@@ -148,7 +148,7 @@ impl FindCoordinatorRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.key = "x".to_string();
         }
         if version >= 1 {

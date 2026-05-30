@@ -8,9 +8,8 @@ use crate::primitives::string_bytes::{
     put_compact_bytes,
 };
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -43,24 +42,24 @@ impl Encode for SaslAuthenticateResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.auth_bytes)
+                put_compact_bytes(buf, &self.auth_bytes);
             } else {
-                put_bytes(buf, &self.auth_bytes)
+                put_bytes(buf, &self.auth_bytes);
             }
         }
         if version >= 1 {
-            put_i64(buf, self.session_lifetime_ms)
+            put_i64(buf, self.session_lifetime_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -98,7 +97,7 @@ impl Encode for SaslAuthenticateResponse {
         n
     }
 }
-impl<'de> Decode<'de> for SaslAuthenticateResponse {
+impl Decode<'_> for SaslAuthenticateResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

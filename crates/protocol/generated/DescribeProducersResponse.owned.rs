@@ -37,7 +37,7 @@ impl Encode for DescribeProducersResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -74,7 +74,7 @@ impl Encode for DescribeProducersResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeProducersResponse {
+impl Decode<'_> for DescribeProducersResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -128,9 +128,9 @@ impl Encode for TopicResponse {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -175,7 +175,7 @@ impl Encode for TopicResponse {
         n
     }
 }
-impl<'de> Decode<'de> for TopicResponse {
+impl Decode<'_> for TopicResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -228,16 +228,16 @@ impl Encode for PartitionResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
@@ -290,7 +290,7 @@ impl Encode for PartitionResponse {
         n
     }
 }
-impl<'de> Decode<'de> for PartitionResponse {
+impl Decode<'_> for PartitionResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -370,22 +370,22 @@ impl Encode for ProducerState {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 0 {
-            put_i32(buf, self.producer_epoch)
+            put_i32(buf, self.producer_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.last_sequence)
+            put_i32(buf, self.last_sequence);
         }
         if version >= 0 {
-            put_i64(buf, self.last_timestamp)
+            put_i64(buf, self.last_timestamp);
         }
         if version >= 0 {
-            put_i32(buf, self.coordinator_epoch)
+            put_i32(buf, self.coordinator_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.current_txn_start_offset)
+            put_i64(buf, self.current_txn_start_offset);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -421,7 +421,7 @@ impl Encode for ProducerState {
         n
     }
 }
-impl<'de> Decode<'de> for ProducerState {
+impl Decode<'_> for ProducerState {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

@@ -18,20 +18,12 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeUserScramCredentialsRequest<'a> {
     pub users: Option<Vec<UserName<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeUserScramCredentialsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            users: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeUserScramCredentialsRequest<'a> {
+impl DescribeUserScramCredentialsRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest
@@ -39,12 +31,12 @@ impl<'a> DescribeUserScramCredentialsRequest<'a> {
         crate::owned::describe_user_scram_credentials_request::DescribeUserScramCredentialsRequest {
             users: (self.users)
                 .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+                .map(|v| v.iter().map(UserName::to_owned).collect()),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeUserScramCredentialsRequest<'a> {
+impl Encode for DescribeUserScramCredentialsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -77,7 +69,7 @@ impl<'a> Encode for DescribeUserScramCredentialsRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.users).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -124,7 +116,7 @@ impl<'de> DecodeBorrow<'de> for DescribeUserScramCredentialsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeUserScramCredentialsRequest<'a> {
+impl DescribeUserScramCredentialsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -134,20 +126,12 @@ impl<'a> DescribeUserScramCredentialsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UserName<'a> {
     pub name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for UserName<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> UserName<'a> {
+impl UserName<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_user_scram_credentials_request::UserName {
         crate::owned::describe_user_scram_credentials_request::UserName {
             name: (self.name).to_string(),
@@ -155,14 +139,14 @@ impl<'a> UserName<'a> {
         }
     }
 }
-impl<'a> Encode for UserName<'a> {
+impl Encode for UserName<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if flex {
@@ -206,7 +190,7 @@ impl<'de> DecodeBorrow<'de> for UserName<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> UserName<'a> {
+impl UserName<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

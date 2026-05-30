@@ -39,22 +39,22 @@ impl Encode for PushTelemetryRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.client_instance_id)
+            crate::primitives::uuid::put_uuid(buf, self.client_instance_id);
         }
         if version >= 0 {
-            put_i32(buf, self.subscription_id)
+            put_i32(buf, self.subscription_id);
         }
         if version >= 0 {
-            put_bool(buf, self.terminating)
+            put_bool(buf, self.terminating);
         }
         if version >= 0 {
-            put_i8(buf, self.compression_type)
+            put_i8(buf, self.compression_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.metrics)
+                put_compact_bytes(buf, &self.metrics);
             } else {
-                put_bytes(buf, &self.metrics)
+                put_bytes(buf, &self.metrics);
             }
         }
         if flex {
@@ -92,7 +92,7 @@ impl Encode for PushTelemetryRequest {
         n
     }
 }
-impl<'de> Decode<'de> for PushTelemetryRequest {
+impl Decode<'_> for PushTelemetryRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

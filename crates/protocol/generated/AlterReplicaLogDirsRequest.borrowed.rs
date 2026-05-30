@@ -20,30 +20,25 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterReplicaLogDirsRequest<'a> {
     pub dirs: Vec<AlterReplicaLogDir<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterReplicaLogDirsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            dirs: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterReplicaLogDirsRequest<'a> {
+impl AlterReplicaLogDirsRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest {
         crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest {
-            dirs: (self.dirs).iter().map(|it| it.to_owned()).collect(),
+            dirs: (self.dirs)
+                .iter()
+                .map(AlterReplicaLogDir::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterReplicaLogDirsRequest<'a> {
+impl Encode for AlterReplicaLogDirsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -111,7 +106,7 @@ impl<'de> DecodeBorrow<'de> for AlterReplicaLogDirsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterReplicaLogDirsRequest<'a> {
+impl AlterReplicaLogDirsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -121,38 +116,32 @@ impl<'a> AlterReplicaLogDirsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterReplicaLogDir<'a> {
     pub path: &'a str,
     pub topics: Vec<AlterReplicaLogDirTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterReplicaLogDir<'a> {
-    fn default() -> Self {
-        Self {
-            path: "",
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterReplicaLogDir<'a> {
+impl AlterReplicaLogDir<'_> {
     pub fn to_owned(&self) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDir {
         crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDir {
             path: (self.path).to_string(),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(AlterReplicaLogDirTopic::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterReplicaLogDir<'a> {
+impl Encode for AlterReplicaLogDir<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.path)
+                put_compact_string(buf, self.path);
             } else {
-                put_string(buf, self.path)
+                put_string(buf, self.path);
             }
         }
         if version >= 0 {
@@ -222,7 +211,7 @@ impl<'de> DecodeBorrow<'de> for AlterReplicaLogDir<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterReplicaLogDir<'a> {
+impl AlterReplicaLogDir<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -235,22 +224,13 @@ impl<'a> AlterReplicaLogDir<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterReplicaLogDirTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterReplicaLogDirTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterReplicaLogDirTopic<'a> {
+impl AlterReplicaLogDirTopic<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirTopic {
@@ -261,14 +241,14 @@ impl<'a> AlterReplicaLogDirTopic<'a> {
         }
     }
 }
-impl<'a> Encode for AlterReplicaLogDirTopic<'a> {
+impl Encode for AlterReplicaLogDirTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -338,7 +318,7 @@ impl<'de> DecodeBorrow<'de> for AlterReplicaLogDirTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterReplicaLogDirTopic<'a> {
+impl AlterReplicaLogDirTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

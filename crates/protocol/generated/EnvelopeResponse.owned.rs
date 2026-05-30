@@ -37,13 +37,13 @@ impl Encode for EnvelopeResponse {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.response_data.as_deref())
+                put_compact_nullable_bytes(buf, self.response_data.as_deref());
             } else {
-                put_nullable_bytes(buf, self.response_data.as_deref())
+                put_nullable_bytes(buf, self.response_data.as_deref());
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -71,7 +71,7 @@ impl Encode for EnvelopeResponse {
         n
     }
 }
-impl<'de> Decode<'de> for EnvelopeResponse {
+impl Decode<'_> for EnvelopeResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

@@ -55,19 +55,19 @@ impl Encode for AddRaftVoterRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id.as_deref())
+                put_compact_nullable_string(buf, self.cluster_id.as_deref());
             } else {
-                put_nullable_string(buf, self.cluster_id.as_deref())
+                put_nullable_string(buf, self.cluster_id.as_deref());
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
-            put_i32(buf, self.voter_id)
+            put_i32(buf, self.voter_id);
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
         }
         if version >= 0 {
             {
@@ -78,7 +78,7 @@ impl Encode for AddRaftVoterRequest {
             }
         }
         if version >= 1 {
-            put_bool(buf, self.ack_when_committed)
+            put_bool(buf, self.ack_when_committed);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -126,7 +126,7 @@ impl Encode for AddRaftVoterRequest {
         n
     }
 }
-impl<'de> Decode<'de> for AddRaftVoterRequest {
+impl Decode<'_> for AddRaftVoterRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -209,20 +209,20 @@ impl Encode for Listener {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -257,7 +257,7 @@ impl Encode for Listener {
         n
     }
 }
-impl<'de> Decode<'de> for Listener {
+impl Decode<'_> for Listener {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

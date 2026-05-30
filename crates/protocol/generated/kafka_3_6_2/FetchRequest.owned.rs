@@ -51,7 +51,7 @@ impl Default for FetchRequest {
             session_epoch: -1i32,
             topics: Vec::new(),
             forgotten_topics_data: Vec::new(),
-            rack_id: "".to_string(),
+            rack_id: String::new(),
             cluster_id: None,
             replica_state: Default::default(),
             unknown_tagged_fields: Default::default(),
@@ -67,26 +67,26 @@ impl Encode for FetchRequest {
             });
         }
         let flex = is_flexible(version);
-        if version >= 0 && version <= 14 {
-            put_i32(buf, self.replica_id)
+        if (0..=14).contains(&version) {
+            put_i32(buf, self.replica_id);
         }
         if version >= 0 {
-            put_i32(buf, self.max_wait_ms)
+            put_i32(buf, self.max_wait_ms);
         }
         if version >= 0 {
-            put_i32(buf, self.min_bytes)
+            put_i32(buf, self.min_bytes);
         }
         if version >= 3 {
-            put_i32(buf, self.max_bytes)
+            put_i32(buf, self.max_bytes);
         }
         if version >= 4 {
-            put_i8(buf, self.isolation_level)
+            put_i8(buf, self.isolation_level);
         }
         if version >= 7 {
-            put_i32(buf, self.session_id)
+            put_i32(buf, self.session_id);
         }
         if version >= 7 {
-            put_i32(buf, self.session_epoch)
+            put_i32(buf, self.session_epoch);
         }
         if version >= 0 {
             {
@@ -110,9 +110,9 @@ impl Encode for FetchRequest {
         }
         if version >= 11 {
             if flex {
-                put_compact_string(buf, &self.rack_id)
+                put_compact_string(buf, &self.rack_id);
             } else {
-                put_string(buf, &self.rack_id)
+                put_string(buf, &self.rack_id);
             }
         }
         if flex {
@@ -126,10 +126,10 @@ impl Encode for FetchRequest {
                     },
                     |b| {
                         if flex {
-                            put_compact_nullable_string(b, self.cluster_id.as_deref())
+                            put_compact_nullable_string(b, self.cluster_id.as_deref());
                         } else {
-                            put_nullable_string(b, self.cluster_id.as_deref())
-                        };
+                            put_nullable_string(b, self.cluster_id.as_deref());
+                        }
                         Ok(())
                     },
                 );
@@ -149,7 +149,7 @@ impl Encode for FetchRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 && version <= 14 {
+        if (0..=14).contains(&version) {
             n += 4;
         }
         if version >= 0 {
@@ -218,7 +218,7 @@ impl Encode for FetchRequest {
         n
     }
 }
-impl<'de> Decode<'de> for FetchRequest {
+impl Decode<'_> for FetchRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -228,7 +228,7 @@ impl<'de> Decode<'de> for FetchRequest {
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 && version <= 14 {
+        if (0..=14).contains(&version) {
             out.replica_id = get_i32(buf)?;
         }
         if version >= 0 {
@@ -315,7 +315,7 @@ impl FetchRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 14 {
+        if (0..=14).contains(&version) {
             m.replica_id = 1i32;
         }
         if version >= 0 {
@@ -373,10 +373,10 @@ impl Encode for ReplicaState {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
         if version >= 15 {
-            put_i32(buf, self.replica_id)
+            put_i32(buf, self.replica_id);
         }
         if version >= 15 {
-            put_i64(buf, self.replica_epoch)
+            put_i64(buf, self.replica_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -400,7 +400,7 @@ impl Encode for ReplicaState {
         n
     }
 }
-impl<'de> Decode<'de> for ReplicaState {
+impl Decode<'_> for ReplicaState {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 12;
         let mut out = Self::default();
@@ -440,15 +440,15 @@ pub struct FetchTopic {
 impl Encode for FetchTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.topic)
+                put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic)
+                put_string(buf, &self.topic);
             }
         }
         if version >= 13 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -467,7 +467,7 @@ impl Encode for FetchTopic {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 12;
         let mut n: usize = 0;
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             n += if flex {
                 compact_string_len(&self.topic)
             } else {
@@ -495,11 +495,11 @@ impl Encode for FetchTopic {
         n
     }
 }
-impl<'de> Decode<'de> for FetchTopic {
+impl Decode<'_> for FetchTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 12;
         let mut out = Self::default();
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             out.topic = if flex {
                 get_compact_string_owned(buf)?
             } else {
@@ -530,7 +530,7 @@ impl FetchTopic {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             m.topic = "x".to_string();
         }
         if version >= 13 {
@@ -569,22 +569,22 @@ impl Encode for FetchPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 9 {
-            put_i32(buf, self.current_leader_epoch)
+            put_i32(buf, self.current_leader_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.fetch_offset)
+            put_i64(buf, self.fetch_offset);
         }
         if version >= 12 {
-            put_i32(buf, self.last_fetched_epoch)
+            put_i32(buf, self.last_fetched_epoch);
         }
         if version >= 5 {
-            put_i64(buf, self.log_start_offset)
+            put_i64(buf, self.log_start_offset);
         }
         if version >= 0 {
-            put_i32(buf, self.partition_max_bytes)
+            put_i32(buf, self.partition_max_bytes);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -620,7 +620,7 @@ impl Encode for FetchPartition {
         n
     }
 }
-impl<'de> Decode<'de> for FetchPartition {
+impl Decode<'_> for FetchPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 12;
         let mut out = Self::default();
@@ -684,15 +684,15 @@ pub struct ForgottenTopic {
 impl Encode for ForgottenTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 12;
-        if version >= 7 && version <= 12 {
+        if (7..=12).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.topic)
+                put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic)
+                put_string(buf, &self.topic);
             }
         }
         if version >= 13 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 7 {
             {
@@ -711,7 +711,7 @@ impl Encode for ForgottenTopic {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 12;
         let mut n: usize = 0;
-        if version >= 7 && version <= 12 {
+        if (7..=12).contains(&version) {
             n += if flex {
                 compact_string_len(&self.topic)
             } else {
@@ -736,11 +736,11 @@ impl Encode for ForgottenTopic {
         n
     }
 }
-impl<'de> Decode<'de> for ForgottenTopic {
+impl Decode<'_> for ForgottenTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 12;
         let mut out = Self::default();
-        if version >= 7 && version <= 12 {
+        if (7..=12).contains(&version) {
             out.topic = if flex {
                 get_compact_string_owned(buf)?
             } else {
@@ -771,7 +771,7 @@ impl ForgottenTopic {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 7 && version <= 12 {
+        if (7..=12).contains(&version) {
             m.topic = "x".to_string();
         }
         if version >= 13 {
@@ -828,7 +828,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version >= 11 {
         obj.insert(
             "rackId".to_string(),
-            ::serde_json::Value::String("".to_string()),
+            ::serde_json::Value::String(String::new()),
         );
     }
     ::serde_json::Value::Object(obj)

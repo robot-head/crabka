@@ -4,12 +4,11 @@ use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i8, put_i8};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -24,28 +23,23 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteAclsRequest<'a> {
     pub filters: Vec<DeleteAclsFilter<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteAclsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            filters: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteAclsRequest<'a> {
+impl DeleteAclsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_acls_request::DeleteAclsRequest {
         crate::owned::delete_acls_request::DeleteAclsRequest {
-            filters: (self.filters).iter().map(|it| it.to_owned()).collect(),
+            filters: (self.filters)
+                .iter()
+                .map(DeleteAclsFilter::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteAclsRequest<'a> {
+impl Encode for DeleteAclsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -116,7 +110,7 @@ impl<'de> DecodeBorrow<'de> for DeleteAclsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteAclsRequest<'a> {
+impl DeleteAclsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -137,7 +131,7 @@ pub struct DeleteAclsFilter<'a> {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteAclsFilter<'a> {
+impl Default for DeleteAclsFilter<'_> {
     fn default() -> Self {
         Self {
             resource_type_filter: 0i8,
@@ -151,55 +145,55 @@ impl<'a> Default for DeleteAclsFilter<'a> {
         }
     }
 }
-impl<'a> DeleteAclsFilter<'a> {
+impl DeleteAclsFilter<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_acls_request::DeleteAclsFilter {
         crate::owned::delete_acls_request::DeleteAclsFilter {
             resource_type_filter: (self.resource_type_filter),
-            resource_name_filter: (self.resource_name_filter).map(|s| s.to_string()),
+            resource_name_filter: (self.resource_name_filter).map(std::string::ToString::to_string),
             pattern_type_filter: (self.pattern_type_filter),
-            principal_filter: (self.principal_filter).map(|s| s.to_string()),
-            host_filter: (self.host_filter).map(|s| s.to_string()),
+            principal_filter: (self.principal_filter).map(std::string::ToString::to_string),
+            host_filter: (self.host_filter).map(std::string::ToString::to_string),
             operation: (self.operation),
             permission_type: (self.permission_type),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteAclsFilter<'a> {
+impl Encode for DeleteAclsFilter<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i8(buf, self.resource_type_filter)
+            put_i8(buf, self.resource_type_filter);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.resource_name_filter)
+                put_compact_nullable_string(buf, self.resource_name_filter);
             } else {
-                put_nullable_string(buf, self.resource_name_filter)
+                put_nullable_string(buf, self.resource_name_filter);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.pattern_type_filter)
+            put_i8(buf, self.pattern_type_filter);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.principal_filter)
+                put_compact_nullable_string(buf, self.principal_filter);
             } else {
-                put_nullable_string(buf, self.principal_filter)
+                put_nullable_string(buf, self.principal_filter);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.host_filter)
+                put_compact_nullable_string(buf, self.host_filter);
             } else {
-                put_nullable_string(buf, self.host_filter)
+                put_nullable_string(buf, self.host_filter);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.operation)
+            put_i8(buf, self.operation);
         }
         if version >= 0 {
-            put_i8(buf, self.permission_type)
+            put_i8(buf, self.permission_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -294,7 +288,7 @@ impl<'de> DecodeBorrow<'de> for DeleteAclsFilter<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteAclsFilter<'a> {
+impl DeleteAclsFilter<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

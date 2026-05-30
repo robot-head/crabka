@@ -69,7 +69,7 @@ impl Encode for CreateAclsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for CreateAclsRequest {
+impl Decode<'_> for CreateAclsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -135,37 +135,37 @@ impl Encode for AclCreation {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.resource_name)
+                put_compact_string(buf, &self.resource_name);
             } else {
-                put_string(buf, &self.resource_name)
+                put_string(buf, &self.resource_name);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.resource_pattern_type)
+            put_i8(buf, self.resource_pattern_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.principal)
+                put_compact_string(buf, &self.principal);
             } else {
-                put_string(buf, &self.principal)
+                put_string(buf, &self.principal);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.operation)
+            put_i8(buf, self.operation);
         }
         if version >= 0 {
-            put_i8(buf, self.permission_type)
+            put_i8(buf, self.permission_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -216,7 +216,7 @@ impl Encode for AclCreation {
         n
     }
 }
-impl<'de> Decode<'de> for AclCreation {
+impl Decode<'_> for AclCreation {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

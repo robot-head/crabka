@@ -44,16 +44,16 @@ impl Encode for ProduceRequest {
         let flex = is_flexible(version);
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.transactional_id.as_deref())
+                put_compact_nullable_string(buf, self.transactional_id.as_deref());
             } else {
-                put_nullable_string(buf, self.transactional_id.as_deref())
+                put_nullable_string(buf, self.transactional_id.as_deref());
             }
         }
         if version >= 0 {
-            put_i16(buf, self.acks)
+            put_i16(buf, self.acks);
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
             {
@@ -103,7 +103,7 @@ impl Encode for ProduceRequest {
         n
     }
 }
-impl<'de> Decode<'de> for ProduceRequest {
+impl Decode<'_> for ProduceRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -172,15 +172,15 @@ pub struct TopicProduceData {
 impl Encode for TopicProduceData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 13 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -199,7 +199,7 @@ impl Encode for TopicProduceData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 9;
         let mut n: usize = 0;
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             n += if flex {
                 compact_string_len(&self.name)
             } else {
@@ -229,11 +229,11 @@ impl Encode for TopicProduceData {
         n
     }
 }
-impl<'de> Decode<'de> for TopicProduceData {
+impl Decode<'_> for TopicProduceData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             out.name = if flex {
                 get_compact_string_owned(buf)?
             } else {
@@ -264,7 +264,7 @@ impl TopicProduceData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             m.name = "x".to_string();
         }
         if version >= 13 {
@@ -286,15 +286,15 @@ impl Encode for PartitionProduceData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.index)
+            put_i32(buf, self.index);
         }
         if version >= 0 {
             match &self.records {
                 None => {
                     if flex {
-                        put_compact_nullable_bytes(buf, None)
+                        put_compact_nullable_bytes(buf, None);
                     } else {
-                        put_nullable_bytes(buf, None)
+                        put_nullable_bytes(buf, None);
                     }
                 }
                 Some(__rb) => {
@@ -305,9 +305,9 @@ impl Encode for PartitionProduceData {
                         version,
                     )?;
                     if flex {
-                        put_compact_bytes(buf, &__rb_buf)
+                        put_compact_bytes(buf, &__rb_buf);
                     } else {
-                        put_bytes(buf, &__rb_buf)
+                        put_bytes(buf, &__rb_buf);
                     }
                 }
             }
@@ -352,7 +352,7 @@ impl Encode for PartitionProduceData {
         n
     }
 }
-impl<'de> Decode<'de> for PartitionProduceData {
+impl Decode<'_> for PartitionProduceData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();

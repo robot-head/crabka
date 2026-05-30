@@ -22,9 +22,9 @@ impl Encode for AddPartitionsToTxnTopic {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -67,7 +67,7 @@ impl Encode for AddPartitionsToTxnTopic {
     }
 }
 
-impl<'de> Decode<'de> for AddPartitionsToTxnTopic {
+impl Decode<'_> for AddPartitionsToTxnTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();

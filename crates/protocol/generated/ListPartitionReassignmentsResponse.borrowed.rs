@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListPartitionReassignmentsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -32,18 +32,7 @@ pub struct ListPartitionReassignmentsResponse<'a> {
     pub topics: Vec<OngoingTopicReassignment<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ListPartitionReassignmentsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ListPartitionReassignmentsResponse<'a> {
+impl ListPartitionReassignmentsResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse
@@ -51,13 +40,16 @@ impl<'a> ListPartitionReassignmentsResponse<'a> {
         crate::owned::list_partition_reassignments_response::ListPartitionReassignmentsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            topics: (self.topics)
+                .iter()
+                .map(OngoingTopicReassignment::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ListPartitionReassignmentsResponse<'a> {
+impl Encode for ListPartitionReassignmentsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -67,16 +59,16 @@ impl<'a> Encode for ListPartitionReassignmentsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
@@ -164,7 +156,7 @@ impl<'de> DecodeBorrow<'de> for ListPartitionReassignmentsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ListPartitionReassignmentsResponse<'a> {
+impl ListPartitionReassignmentsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -183,40 +175,34 @@ impl<'a> ListPartitionReassignmentsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OngoingTopicReassignment<'a> {
     pub name: &'a str,
     pub partitions: Vec<OngoingPartitionReassignment>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OngoingTopicReassignment<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OngoingTopicReassignment<'a> {
+impl OngoingTopicReassignment<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_partition_reassignments_response::OngoingTopicReassignment {
         crate::owned::list_partition_reassignments_response::OngoingTopicReassignment {
             name: (self.name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(OngoingPartitionReassignment::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OngoingTopicReassignment<'a> {
+impl Encode for OngoingTopicReassignment<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -289,7 +275,7 @@ impl<'de> DecodeBorrow<'de> for OngoingTopicReassignment<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OngoingTopicReassignment<'a> {
+impl OngoingTopicReassignment<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -302,24 +288,13 @@ impl<'a> OngoingTopicReassignment<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OngoingPartitionReassignment {
     pub partition_index: i32,
     pub replicas: Vec<i32>,
     pub adding_replicas: Vec<i32>,
     pub removing_replicas: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for OngoingPartitionReassignment {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            replicas: Vec::new(),
-            adding_replicas: Vec::new(),
-            removing_replicas: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl OngoingPartitionReassignment {
     pub fn to_owned(
@@ -338,7 +313,7 @@ impl Encode for OngoingPartitionReassignment {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
             {

@@ -41,26 +41,26 @@ impl Encode for ShareGroupHeartbeatRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id.as_deref())
+                put_compact_nullable_string(buf, self.rack_id.as_deref());
             } else {
-                put_nullable_string(buf, self.rack_id.as_deref())
+                put_nullable_string(buf, self.rack_id.as_deref());
             }
         }
         if version >= 0 {
@@ -70,10 +70,10 @@ impl Encode for ShareGroupHeartbeatRequest {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, &*it)
+                            put_compact_string(buf, it);
                         } else {
-                            put_string(buf, &*it)
-                        };
+                            put_string(buf, it);
+                        }
                     }
                 }
             }
@@ -115,16 +115,16 @@ impl Encode for ShareGroupHeartbeatRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize = opt.map_or(0, |v| {
                     v.iter()
                         .map(|it| {
                             if flex {
-                                compact_string_len(&*it)
+                                compact_string_len(it)
                             } else {
-                                string_len(&*it)
+                                string_len(it)
                             }
                         })
                         .sum()
@@ -139,7 +139,7 @@ impl Encode for ShareGroupHeartbeatRequest {
         n
     }
 }
-impl<'de> Decode<'de> for ShareGroupHeartbeatRequest {
+impl Decode<'_> for ShareGroupHeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

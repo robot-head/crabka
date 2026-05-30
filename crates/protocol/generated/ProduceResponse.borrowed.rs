@@ -26,34 +26,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProduceResponse<'a> {
     pub responses: Vec<TopicProduceResponse<'a>>,
     pub throttle_time_ms: i32,
     pub node_endpoints: Vec<crate::owned::produce_response::NodeEndpoint>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ProduceResponse<'a> {
-    fn default() -> Self {
-        Self {
-            responses: Vec::new(),
-            throttle_time_ms: 0i32,
-            node_endpoints: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ProduceResponse<'a> {
+impl ProduceResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::produce_response::ProduceResponse {
         crate::owned::produce_response::ProduceResponse {
-            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
+            responses: (self.responses)
+                .iter()
+                .map(TopicProduceResponse::to_owned)
+                .collect(),
             throttle_time_ms: (self.throttle_time_ms),
             node_endpoints: self.node_endpoints.clone(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ProduceResponse<'a> {
+impl Encode for ProduceResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -71,7 +64,7 @@ impl<'a> Encode for ProduceResponse<'a> {
             }
         }
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -197,7 +190,7 @@ impl<'de> DecodeBorrow<'de> for ProduceResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ProduceResponse<'a> {
+impl ProduceResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -215,48 +208,38 @@ impl<'a> ProduceResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicProduceResponse<'a> {
     pub name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partition_responses: Vec<PartitionProduceResponse<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicProduceResponse<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            topic_id: Default::default(),
-            partition_responses: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicProduceResponse<'a> {
+impl TopicProduceResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::produce_response::TopicProduceResponse {
         crate::owned::produce_response::TopicProduceResponse {
             name: (self.name).to_string(),
             topic_id: (self.topic_id),
             partition_responses: (self.partition_responses)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(PartitionProduceResponse::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for TopicProduceResponse<'a> {
+impl Encode for TopicProduceResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 13 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -279,7 +262,7 @@ impl<'a> Encode for TopicProduceResponse<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 9;
         let mut n: usize = 0;
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             n += if flex {
                 compact_string_len(self.name)
             } else {
@@ -313,7 +296,7 @@ impl<'de> DecodeBorrow<'de> for TopicProduceResponse<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             out.name = if flex {
                 get_compact_string_borrowed(buf)?
             } else {
@@ -340,11 +323,11 @@ impl<'de> DecodeBorrow<'de> for TopicProduceResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicProduceResponse<'a> {
+impl TopicProduceResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 12 {
+        if (0..=12).contains(&version) {
             m.name = "x";
         }
         if version >= 13 {
@@ -368,7 +351,7 @@ pub struct PartitionProduceResponse<'a> {
     pub current_leader: LeaderIdAndEpoch,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for PartitionProduceResponse<'a> {
+impl Default for PartitionProduceResponse<'_> {
     fn default() -> Self {
         Self {
             index: 0i32,
@@ -383,7 +366,7 @@ impl<'a> Default for PartitionProduceResponse<'a> {
         }
     }
 }
-impl<'a> PartitionProduceResponse<'a> {
+impl PartitionProduceResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::produce_response::PartitionProduceResponse {
         crate::owned::produce_response::PartitionProduceResponse {
             index: (self.index),
@@ -393,31 +376,31 @@ impl<'a> PartitionProduceResponse<'a> {
             log_start_offset: (self.log_start_offset),
             record_errors: (self.record_errors)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(BatchIndexAndErrorMessage::to_owned)
                 .collect(),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             current_leader: (self.current_leader).to_owned(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for PartitionProduceResponse<'a> {
+impl Encode for PartitionProduceResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 0 {
-            put_i32(buf, self.index)
+            put_i32(buf, self.index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i64(buf, self.base_offset)
+            put_i64(buf, self.base_offset);
         }
         if version >= 2 {
-            put_i64(buf, self.log_append_time_ms)
+            put_i64(buf, self.log_append_time_ms);
         }
         if version >= 5 {
-            put_i64(buf, self.log_start_offset)
+            put_i64(buf, self.log_start_offset);
         }
         if version >= 8 {
             {
@@ -429,9 +412,9 @@ impl<'a> Encode for PartitionProduceResponse<'a> {
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if flex {
@@ -551,7 +534,7 @@ impl<'de> DecodeBorrow<'de> for PartitionProduceResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> PartitionProduceResponse<'a> {
+impl PartitionProduceResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -582,41 +565,33 @@ impl<'a> PartitionProduceResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BatchIndexAndErrorMessage<'a> {
     pub batch_index: i32,
     pub batch_index_error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for BatchIndexAndErrorMessage<'a> {
-    fn default() -> Self {
-        Self {
-            batch_index: 0i32,
-            batch_index_error_message: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> BatchIndexAndErrorMessage<'a> {
+impl BatchIndexAndErrorMessage<'_> {
     pub fn to_owned(&self) -> crate::owned::produce_response::BatchIndexAndErrorMessage {
         crate::owned::produce_response::BatchIndexAndErrorMessage {
             batch_index: (self.batch_index),
-            batch_index_error_message: (self.batch_index_error_message).map(|s| s.to_string()),
+            batch_index_error_message: (self.batch_index_error_message)
+                .map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for BatchIndexAndErrorMessage<'a> {
+impl Encode for BatchIndexAndErrorMessage<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 8 {
-            put_i32(buf, self.batch_index)
+            put_i32(buf, self.batch_index);
         }
         if version >= 8 {
             if flex {
-                put_compact_nullable_string(buf, self.batch_index_error_message)
+                put_compact_nullable_string(buf, self.batch_index_error_message);
             } else {
-                put_nullable_string(buf, self.batch_index_error_message)
+                put_nullable_string(buf, self.batch_index_error_message);
             }
         }
         if flex {
@@ -666,7 +641,7 @@ impl<'de> DecodeBorrow<'de> for BatchIndexAndErrorMessage<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> BatchIndexAndErrorMessage<'a> {
+impl BatchIndexAndErrorMessage<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -707,10 +682,10 @@ impl Encode for LeaderIdAndEpoch {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 10 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 10 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -764,7 +739,7 @@ impl LeaderIdAndEpoch {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct NodeEndpoint<'a> {
     pub node_id: i32,
     pub host: &'a str,
@@ -772,49 +747,38 @@ pub struct NodeEndpoint<'a> {
     pub rack: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for NodeEndpoint<'a> {
-    fn default() -> Self {
-        Self {
-            node_id: 0i32,
-            host: "",
-            port: 0i32,
-            rack: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> NodeEndpoint<'a> {
+impl NodeEndpoint<'_> {
     pub fn to_owned(&self) -> crate::owned::produce_response::NodeEndpoint {
         crate::owned::produce_response::NodeEndpoint {
             node_id: (self.node_id),
             host: (self.host).to_string(),
             port: (self.port),
-            rack: (self.rack).map(|s| s.to_string()),
+            rack: (self.rack).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for NodeEndpoint<'a> {
+impl Encode for NodeEndpoint<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
         if version >= 10 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 10 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 10 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 10 {
             if flex {
-                put_compact_nullable_string(buf, self.rack)
+                put_compact_nullable_string(buf, self.rack);
             } else {
-                put_nullable_string(buf, self.rack)
+                put_nullable_string(buf, self.rack);
             }
         }
         if flex {
@@ -884,7 +848,7 @@ impl<'de> DecodeBorrow<'de> for NodeEndpoint<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> NodeEndpoint<'a> {
+impl NodeEndpoint<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

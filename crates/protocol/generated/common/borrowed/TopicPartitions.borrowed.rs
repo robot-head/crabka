@@ -6,21 +6,11 @@ use crate::primitives::fixed::{get_i32, put_i32};
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartitions {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-
-impl Default for TopicPartitions {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 
 impl TopicPartitions {
@@ -37,7 +27,7 @@ impl Encode for TopicPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {

@@ -20,22 +20,13 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EnvelopeResponse<'a> {
     pub response_data: Option<&'a [u8]>,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for EnvelopeResponse<'a> {
-    fn default() -> Self {
-        Self {
-            response_data: None,
-            error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> EnvelopeResponse<'a> {
+impl EnvelopeResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::envelope_response::EnvelopeResponse {
         crate::owned::envelope_response::EnvelopeResponse {
             response_data: (self.response_data).map(Bytes::copy_from_slice),
@@ -44,7 +35,7 @@ impl<'a> EnvelopeResponse<'a> {
         }
     }
 }
-impl<'a> Encode for EnvelopeResponse<'a> {
+impl Encode for EnvelopeResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -55,13 +46,13 @@ impl<'a> Encode for EnvelopeResponse<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.response_data)
+                put_compact_nullable_bytes(buf, self.response_data);
             } else {
-                put_nullable_bytes(buf, self.response_data)
+                put_nullable_bytes(buf, self.response_data);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -128,7 +119,7 @@ impl<'de> DecodeBorrow<'de> for EnvelopeResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> EnvelopeResponse<'a> {
+impl EnvelopeResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -14,18 +14,10 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GetTelemetrySubscriptionsRequest {
     pub client_instance_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for GetTelemetrySubscriptionsRequest {
-    fn default() -> Self {
-        Self {
-            client_instance_id: Default::default(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl GetTelemetrySubscriptionsRequest {
     pub fn to_owned(
@@ -47,7 +39,7 @@ impl Encode for GetTelemetrySubscriptionsRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.client_instance_id)
+            crate::primitives::uuid::put_uuid(buf, self.client_instance_id);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

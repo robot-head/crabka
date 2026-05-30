@@ -32,7 +32,7 @@ impl Encode for GetReplicaLogInfoRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if version >= 0 {
             {
@@ -74,7 +74,7 @@ impl Encode for GetReplicaLogInfoRequest {
         n
     }
 }
-impl<'de> Decode<'de> for GetReplicaLogInfoRequest {
+impl Decode<'_> for GetReplicaLogInfoRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -127,7 +127,7 @@ impl Encode for TopicPartitions {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -164,7 +164,7 @@ impl Encode for TopicPartitions {
         n
     }
 }
-impl<'de> Decode<'de> for TopicPartitions {
+impl Decode<'_> for TopicPartitions {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

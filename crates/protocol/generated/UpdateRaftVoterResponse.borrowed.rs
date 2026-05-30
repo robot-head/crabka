@@ -22,22 +22,12 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdateRaftVoterResponse {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub current_leader: crate::owned::update_raft_voter_response::CurrentLeader,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for UpdateRaftVoterResponse {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            current_leader: Default::default(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl UpdateRaftVoterResponse {
     pub fn to_owned(&self) -> crate::owned::update_raft_voter_response::UpdateRaftVoterResponse {
@@ -59,10 +49,10 @@ impl Encode for UpdateRaftVoterResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -157,7 +147,7 @@ pub struct CurrentLeader<'a> {
     pub port: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for CurrentLeader<'a> {
+impl Default for CurrentLeader<'_> {
     fn default() -> Self {
         Self {
             leader_id: -1i32,
@@ -168,7 +158,7 @@ impl<'a> Default for CurrentLeader<'a> {
         }
     }
 }
-impl<'a> CurrentLeader<'a> {
+impl CurrentLeader<'_> {
     pub fn to_owned(&self) -> crate::owned::update_raft_voter_response::CurrentLeader {
         crate::owned::update_raft_voter_response::CurrentLeader {
             leader_id: (self.leader_id),
@@ -179,24 +169,24 @@ impl<'a> CurrentLeader<'a> {
         }
     }
 }
-impl<'a> Encode for CurrentLeader<'a> {
+impl Encode for CurrentLeader<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -257,7 +247,7 @@ impl<'de> DecodeBorrow<'de> for CurrentLeader<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> CurrentLeader<'a> {
+impl CurrentLeader<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

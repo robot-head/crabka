@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreateDelegationTokenRequest<'a> {
     pub owner_principal_type: Option<&'a str>,
     pub owner_principal_name: Option<&'a str>,
@@ -32,31 +32,23 @@ pub struct CreateDelegationTokenRequest<'a> {
     pub max_lifetime_ms: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for CreateDelegationTokenRequest<'a> {
-    fn default() -> Self {
-        Self {
-            owner_principal_type: None,
-            owner_principal_name: None,
-            renewers: Vec::new(),
-            max_lifetime_ms: 0i64,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> CreateDelegationTokenRequest<'a> {
+impl CreateDelegationTokenRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::create_delegation_token_request::CreateDelegationTokenRequest {
         crate::owned::create_delegation_token_request::CreateDelegationTokenRequest {
-            owner_principal_type: (self.owner_principal_type).map(|s| s.to_string()),
-            owner_principal_name: (self.owner_principal_name).map(|s| s.to_string()),
-            renewers: (self.renewers).iter().map(|it| it.to_owned()).collect(),
+            owner_principal_type: (self.owner_principal_type).map(std::string::ToString::to_string),
+            owner_principal_name: (self.owner_principal_name).map(std::string::ToString::to_string),
+            renewers: (self.renewers)
+                .iter()
+                .map(CreatableRenewers::to_owned)
+                .collect(),
             max_lifetime_ms: (self.max_lifetime_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for CreateDelegationTokenRequest<'a> {
+impl Encode for CreateDelegationTokenRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -67,16 +59,16 @@ impl<'a> Encode for CreateDelegationTokenRequest<'a> {
         let flex = is_flexible(version);
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.owner_principal_type)
+                put_compact_nullable_string(buf, self.owner_principal_type);
             } else {
-                put_nullable_string(buf, self.owner_principal_type)
+                put_nullable_string(buf, self.owner_principal_type);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.owner_principal_name)
+                put_compact_nullable_string(buf, self.owner_principal_name);
             } else {
-                put_nullable_string(buf, self.owner_principal_name)
+                put_nullable_string(buf, self.owner_principal_name);
             }
         }
         if version >= 0 {
@@ -88,7 +80,7 @@ impl<'a> Encode for CreateDelegationTokenRequest<'a> {
             }
         }
         if version >= 0 {
-            put_i64(buf, self.max_lifetime_ms)
+            put_i64(buf, self.max_lifetime_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -178,7 +170,7 @@ impl<'de> DecodeBorrow<'de> for CreateDelegationTokenRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> CreateDelegationTokenRequest<'a> {
+impl CreateDelegationTokenRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -197,22 +189,13 @@ impl<'a> CreateDelegationTokenRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatableRenewers<'a> {
     pub principal_type: &'a str,
     pub principal_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for CreatableRenewers<'a> {
-    fn default() -> Self {
-        Self {
-            principal_type: "",
-            principal_name: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> CreatableRenewers<'a> {
+impl CreatableRenewers<'_> {
     pub fn to_owned(&self) -> crate::owned::create_delegation_token_request::CreatableRenewers {
         crate::owned::create_delegation_token_request::CreatableRenewers {
             principal_type: (self.principal_type).to_string(),
@@ -221,21 +204,21 @@ impl<'a> CreatableRenewers<'a> {
         }
     }
 }
-impl<'a> Encode for CreatableRenewers<'a> {
+impl Encode for CreatableRenewers<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_type)
+                put_compact_string(buf, self.principal_type);
             } else {
-                put_string(buf, self.principal_type)
+                put_string(buf, self.principal_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.principal_name)
+                put_compact_string(buf, self.principal_name);
             } else {
-                put_string(buf, self.principal_name)
+                put_string(buf, self.principal_name);
             }
         }
         if flex {
@@ -293,7 +276,7 @@ impl<'de> DecodeBorrow<'de> for CreatableRenewers<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> CreatableRenewers<'a> {
+impl CreatableRenewers<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

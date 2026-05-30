@@ -60,30 +60,30 @@ impl Encode for DescribeClusterResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 1 {
-            put_i8(buf, self.endpoint_type)
+            put_i8(buf, self.endpoint_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.cluster_id)
+                put_compact_string(buf, &self.cluster_id);
             } else {
-                put_string(buf, &self.cluster_id)
+                put_string(buf, &self.cluster_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.controller_id)
+            put_i32(buf, self.controller_id);
         }
         if version >= 0 {
             {
@@ -94,7 +94,7 @@ impl Encode for DescribeClusterResponse {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.cluster_authorized_operations)
+            put_i32(buf, self.cluster_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -152,7 +152,7 @@ impl Encode for DescribeClusterResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeClusterResponse {
+impl Decode<'_> for DescribeClusterResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -252,27 +252,27 @@ impl Encode for DescribeClusterBroker {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack.as_deref())
+                put_compact_nullable_string(buf, self.rack.as_deref());
             } else {
-                put_nullable_string(buf, self.rack.as_deref())
+                put_nullable_string(buf, self.rack.as_deref());
             }
         }
         if version >= 2 {
-            put_bool(buf, self.is_fenced)
+            put_bool(buf, self.is_fenced);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -313,7 +313,7 @@ impl Encode for DescribeClusterBroker {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeClusterBroker {
+impl Decode<'_> for DescribeClusterBroker {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

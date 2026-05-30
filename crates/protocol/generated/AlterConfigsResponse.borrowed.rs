@@ -24,31 +24,25 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterConfigsResponse<'a> {
     pub throttle_time_ms: i32,
     pub responses: Vec<AlterConfigsResourceResponse<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterConfigsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            responses: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterConfigsResponse<'a> {
+impl AlterConfigsResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::alter_configs_response::AlterConfigsResponse {
         crate::owned::alter_configs_response::AlterConfigsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
+            responses: (self.responses)
+                .iter()
+                .map(AlterConfigsResourceResponse::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterConfigsResponse<'a> {
+impl Encode for AlterConfigsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -58,7 +52,7 @@ impl<'a> Encode for AlterConfigsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -128,7 +122,7 @@ impl<'de> DecodeBorrow<'de> for AlterConfigsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterConfigsResponse<'a> {
+impl AlterConfigsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -141,7 +135,7 @@ impl<'a> AlterConfigsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterConfigsResourceResponse<'a> {
     pub error_code: i16,
     pub error_message: Option<&'a str>,
@@ -149,49 +143,38 @@ pub struct AlterConfigsResourceResponse<'a> {
     pub resource_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterConfigsResourceResponse<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            error_message: None,
-            resource_type: 0i8,
-            resource_name: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterConfigsResourceResponse<'a> {
+impl AlterConfigsResourceResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::alter_configs_response::AlterConfigsResourceResponse {
         crate::owned::alter_configs_response::AlterConfigsResourceResponse {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterConfigsResourceResponse<'a> {
+impl Encode for AlterConfigsResourceResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name)
+                put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name)
+                put_string(buf, self.resource_name);
             }
         }
         if flex {
@@ -261,7 +244,7 @@ impl<'de> DecodeBorrow<'de> for AlterConfigsResourceResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterConfigsResourceResponse<'a> {
+impl AlterConfigsResourceResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -36,10 +36,10 @@ impl Encode for OffsetDeleteResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -71,7 +71,7 @@ impl Encode for OffsetDeleteResponse {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetDeleteResponse {
+impl Decode<'_> for OffsetDeleteResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -128,9 +128,9 @@ impl Encode for OffsetDeleteResponseTopic {
         let flex = version >= 32767;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -167,7 +167,7 @@ impl Encode for OffsetDeleteResponseTopic {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetDeleteResponseTopic {
+impl Decode<'_> for OffsetDeleteResponseTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 32767;
         let mut out = Self::default();
@@ -215,10 +215,10 @@ impl Encode for OffsetDeleteResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 32767;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         Ok(())
     }
@@ -234,7 +234,7 @@ impl Encode for OffsetDeleteResponsePartition {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetDeleteResponsePartition {
+impl Decode<'_> for OffsetDeleteResponsePartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 32767;
         let mut out = Self::default();

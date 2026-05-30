@@ -22,34 +22,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaveGroupRequest<'a> {
     pub group_id: &'a str,
     pub member_id: &'a str,
     pub members: Vec<MemberIdentity<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for LeaveGroupRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            member_id: "",
-            members: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> LeaveGroupRequest<'a> {
+impl LeaveGroupRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::leave_group_request::LeaveGroupRequest {
         crate::owned::leave_group_request::LeaveGroupRequest {
             group_id: (self.group_id).to_string(),
             member_id: (self.member_id).to_string(),
-            members: (self.members).iter().map(|it| it.to_owned()).collect(),
+            members: (self.members)
+                .iter()
+                .map(MemberIdentity::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for LeaveGroupRequest<'a> {
+impl Encode for LeaveGroupRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -60,16 +53,16 @@ impl<'a> Encode for LeaveGroupRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
-        if version >= 0 && version <= 2 {
+        if (0..=2).contains(&version) {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 3 {
@@ -96,7 +89,7 @@ impl<'a> Encode for LeaveGroupRequest<'a> {
                 string_len(self.group_id)
             };
         }
-        if version >= 0 && version <= 2 {
+        if (0..=2).contains(&version) {
             n += if flex {
                 compact_string_len(self.member_id)
             } else {
@@ -138,7 +131,7 @@ impl<'de> DecodeBorrow<'de> for LeaveGroupRequest<'de> {
                 get_string_borrowed(buf)?
             };
         }
-        if version >= 0 && version <= 2 {
+        if (0..=2).contains(&version) {
             out.member_id = if flex {
                 get_compact_string_borrowed(buf)?
             } else {
@@ -162,14 +155,14 @@ impl<'de> DecodeBorrow<'de> for LeaveGroupRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> LeaveGroupRequest<'a> {
+impl LeaveGroupRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
         if version >= 0 {
             m.group_id = "x";
         }
-        if version >= 0 && version <= 2 {
+        if (0..=2).contains(&version) {
             m.member_id = "x";
         }
         if version >= 3 {
@@ -178,55 +171,45 @@ impl<'a> LeaveGroupRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MemberIdentity<'a> {
     pub member_id: &'a str,
     pub group_instance_id: Option<&'a str>,
     pub reason: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for MemberIdentity<'a> {
-    fn default() -> Self {
-        Self {
-            member_id: "",
-            group_instance_id: None,
-            reason: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> MemberIdentity<'a> {
+impl MemberIdentity<'_> {
     pub fn to_owned(&self) -> crate::owned::leave_group_request::MemberIdentity {
         crate::owned::leave_group_request::MemberIdentity {
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
-            reason: (self.reason).map(|s| s.to_string()),
+            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
+            reason: (self.reason).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for MemberIdentity<'a> {
+impl Encode for MemberIdentity<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 3 {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id)
+                put_compact_nullable_string(buf, self.group_instance_id);
             } else {
-                put_nullable_string(buf, self.group_instance_id)
+                put_nullable_string(buf, self.group_instance_id);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.reason)
+                put_compact_nullable_string(buf, self.reason);
             } else {
-                put_nullable_string(buf, self.reason)
+                put_nullable_string(buf, self.reason);
             }
         }
         if flex {
@@ -298,7 +281,7 @@ impl<'de> DecodeBorrow<'de> for MemberIdentity<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> MemberIdentity<'a> {
+impl MemberIdentity<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

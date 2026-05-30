@@ -42,30 +42,30 @@ impl Encode for FindCoordinatorResponse {
         }
         let flex = is_flexible(version);
         if version >= 1 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
-        if version >= 0 && version <= 3 {
-            put_i16(buf, self.error_code)
+        if (0..=3).contains(&version) {
+            put_i16(buf, self.error_code);
         }
-        if version >= 1 && version <= 3 {
+        if (1..=3).contains(&version) {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
-        if version >= 0 && version <= 3 {
-            put_i32(buf, self.node_id)
+        if (0..=3).contains(&version) {
+            put_i32(buf, self.node_id);
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
-        if version >= 0 && version <= 3 {
-            put_i32(buf, self.port)
+        if (0..=3).contains(&version) {
+            put_i32(buf, self.port);
         }
         if version >= 4 {
             {
@@ -87,27 +87,27 @@ impl Encode for FindCoordinatorResponse {
         if version >= 1 {
             n += 4;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 2;
         }
-        if version >= 1 && version <= 3 {
+        if (1..=3).contains(&version) {
             n += if flex {
                 compact_nullable_string_len(self.error_message.as_deref())
             } else {
                 nullable_string_len(self.error_message.as_deref())
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 4;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += if flex {
                 compact_string_len(&self.host)
             } else {
                 string_len(&self.host)
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             n += 4;
         }
         if version >= 4 {
@@ -128,7 +128,7 @@ impl Encode for FindCoordinatorResponse {
         n
     }
 }
-impl<'de> Decode<'de> for FindCoordinatorResponse {
+impl Decode<'_> for FindCoordinatorResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -141,27 +141,27 @@ impl<'de> Decode<'de> for FindCoordinatorResponse {
         if version >= 1 {
             out.throttle_time_ms = get_i32(buf)?;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.error_code = get_i16(buf)?;
         }
-        if version >= 1 && version <= 3 {
+        if (1..=3).contains(&version) {
             out.error_message = if flex {
                 get_compact_nullable_string_owned(buf)?
             } else {
                 get_nullable_string_owned(buf)?
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.node_id = get_i32(buf)?;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.host = if flex {
                 get_compact_string_owned(buf)?
             } else {
                 get_string_owned(buf)?
             };
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             out.port = get_i32(buf)?;
         }
         if version >= 4 {
@@ -188,19 +188,19 @@ impl FindCoordinatorResponse {
         if version >= 1 {
             m.throttle_time_ms = 1i32;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.error_code = 1i16;
         }
-        if version >= 1 && version <= 3 {
+        if (1..=3).contains(&version) {
             m.error_message = Some("x".to_string());
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.node_id = 1i32;
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.host = "x".to_string();
         }
-        if version >= 0 && version <= 3 {
+        if (0..=3).contains(&version) {
             m.port = 1i32;
         }
         if version >= 4 {
@@ -224,32 +224,32 @@ impl Encode for Coordinator {
         let flex = version >= 3;
         if version >= 4 {
             if flex {
-                put_compact_string(buf, &self.key)
+                put_compact_string(buf, &self.key);
             } else {
-                put_string(buf, &self.key)
+                put_string(buf, &self.key);
             }
         }
         if version >= 4 {
-            put_i32(buf, self.node_id)
+            put_i32(buf, self.node_id);
         }
         if version >= 4 {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
         if version >= 4 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 4 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 4 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {
@@ -298,7 +298,7 @@ impl Encode for Coordinator {
         n
     }
 }
-impl<'de> Decode<'de> for Coordinator {
+impl Decode<'_> for Coordinator {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
@@ -377,7 +377,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version <= 3 {
         obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     }
-    if version >= 1 && version <= 3 {
+    if (1..=3).contains(&version) {
         obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
     }
     if version <= 3 {

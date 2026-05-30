@@ -14,20 +14,11 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KRaftVersionRecord {
     pub version: i16,
     pub k_raft_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for KRaftVersionRecord {
-    fn default() -> Self {
-        Self {
-            version: 0i16,
-            k_raft_version: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl KRaftVersionRecord {
     pub fn to_owned(&self) -> crate::owned::k_raft_version_record::KRaftVersionRecord {
@@ -47,10 +38,10 @@ impl Encode for KRaftVersionRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version)
+            put_i16(buf, self.version);
         }
         if version >= 0 {
-            put_i16(buf, self.k_raft_version)
+            put_i16(buf, self.k_raft_version);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

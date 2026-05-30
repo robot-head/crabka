@@ -32,7 +32,7 @@ pub struct BeginQuorumEpochRequest<'a> {
     pub leader_endpoints: Vec<LeaderEndpoint<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for BeginQuorumEpochRequest<'a> {
+impl Default for BeginQuorumEpochRequest<'_> {
     fn default() -> Self {
         Self {
             cluster_id: None,
@@ -43,21 +43,21 @@ impl<'a> Default for BeginQuorumEpochRequest<'a> {
         }
     }
 }
-impl<'a> BeginQuorumEpochRequest<'a> {
+impl BeginQuorumEpochRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::begin_quorum_epoch_request::BeginQuorumEpochRequest {
         crate::owned::begin_quorum_epoch_request::BeginQuorumEpochRequest {
-            cluster_id: (self.cluster_id).map(|s| s.to_string()),
+            cluster_id: (self.cluster_id).map(std::string::ToString::to_string),
             voter_id: (self.voter_id),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
             leader_endpoints: (self.leader_endpoints)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(LeaderEndpoint::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for BeginQuorumEpochRequest<'a> {
+impl Encode for BeginQuorumEpochRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -68,13 +68,13 @@ impl<'a> Encode for BeginQuorumEpochRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id)
+                put_compact_nullable_string(buf, self.cluster_id);
             } else {
-                put_nullable_string(buf, self.cluster_id)
+                put_nullable_string(buf, self.cluster_id);
             }
         }
         if version >= 1 {
-            put_i32(buf, self.voter_id)
+            put_i32(buf, self.voter_id);
         }
         if version >= 0 {
             {
@@ -186,7 +186,7 @@ impl<'de> DecodeBorrow<'de> for BeginQuorumEpochRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> BeginQuorumEpochRequest<'a> {
+impl BeginQuorumEpochRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -205,38 +205,32 @@ impl<'a> BeginQuorumEpochRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicData<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     pub fn to_owned(&self) -> crate::owned::begin_quorum_epoch_request::TopicData {
         crate::owned::begin_quorum_epoch_request::TopicData {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for TopicData<'a> {
+impl Encode for TopicData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name)
+                put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name)
+                put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -309,7 +303,7 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -322,24 +316,13 @@ impl<'a> TopicData<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionData {
     pub partition_index: i32,
     pub voter_directory_id: crate::primitives::uuid::Uuid,
     pub leader_id: i32,
     pub leader_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for PartitionData {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            voter_directory_id: Default::default(),
-            leader_id: 0i32,
-            leader_epoch: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl PartitionData {
     pub fn to_owned(&self) -> crate::owned::begin_quorum_epoch_request::PartitionData {
@@ -356,16 +339,16 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -437,24 +420,14 @@ impl PartitionData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LeaderEndpoint<'a> {
     pub name: &'a str,
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for LeaderEndpoint<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            host: "",
-            port: 0u16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> LeaderEndpoint<'a> {
+impl LeaderEndpoint<'_> {
     pub fn to_owned(&self) -> crate::owned::begin_quorum_epoch_request::LeaderEndpoint {
         crate::owned::begin_quorum_epoch_request::LeaderEndpoint {
             name: (self.name).to_string(),
@@ -464,25 +437,25 @@ impl<'a> LeaderEndpoint<'a> {
         }
     }
 }
-impl<'a> Encode for LeaderEndpoint<'a> {
+impl Encode for LeaderEndpoint<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 1 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -545,7 +518,7 @@ impl<'de> DecodeBorrow<'de> for LeaderEndpoint<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> LeaderEndpoint<'a> {
+impl LeaderEndpoint<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

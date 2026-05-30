@@ -22,28 +22,23 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WriteTxnMarkersRequest<'a> {
     pub markers: Vec<WritableTxnMarker<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for WriteTxnMarkersRequest<'a> {
-    fn default() -> Self {
-        Self {
-            markers: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> WriteTxnMarkersRequest<'a> {
+impl WriteTxnMarkersRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_request::WriteTxnMarkersRequest {
         crate::owned::write_txn_markers_request::WriteTxnMarkersRequest {
-            markers: (self.markers).iter().map(|it| it.to_owned()).collect(),
+            markers: (self.markers)
+                .iter()
+                .map(WritableTxnMarker::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for WriteTxnMarkersRequest<'a> {
+impl Encode for WriteTxnMarkersRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -114,7 +109,7 @@ impl<'de> DecodeBorrow<'de> for WriteTxnMarkersRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> WriteTxnMarkersRequest<'a> {
+impl WriteTxnMarkersRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -124,7 +119,7 @@ impl<'a> WriteTxnMarkersRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WritableTxnMarker<'a> {
     pub producer_id: i64,
     pub producer_epoch: i16,
@@ -134,43 +129,33 @@ pub struct WritableTxnMarker<'a> {
     pub transaction_version: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for WritableTxnMarker<'a> {
-    fn default() -> Self {
-        Self {
-            producer_id: 0i64,
-            producer_epoch: 0i16,
-            transaction_result: false,
-            topics: Vec::new(),
-            coordinator_epoch: 0i32,
-            transaction_version: 0i8,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> WritableTxnMarker<'a> {
+impl WritableTxnMarker<'_> {
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_request::WritableTxnMarker {
         crate::owned::write_txn_markers_request::WritableTxnMarker {
             producer_id: (self.producer_id),
             producer_epoch: (self.producer_epoch),
             transaction_result: (self.transaction_result),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(WritableTxnMarkerTopic::to_owned)
+                .collect(),
             coordinator_epoch: (self.coordinator_epoch),
             transaction_version: (self.transaction_version),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for WritableTxnMarker<'a> {
+impl Encode for WritableTxnMarker<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 0 {
-            put_i16(buf, self.producer_epoch)
+            put_i16(buf, self.producer_epoch);
         }
         if version >= 0 {
-            put_bool(buf, self.transaction_result)
+            put_bool(buf, self.transaction_result);
         }
         if version >= 0 {
             {
@@ -181,10 +166,10 @@ impl<'a> Encode for WritableTxnMarker<'a> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.coordinator_epoch)
+            put_i32(buf, self.coordinator_epoch);
         }
         if version >= 2 {
-            put_i8(buf, self.transaction_version)
+            put_i8(buf, self.transaction_version);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -261,7 +246,7 @@ impl<'de> DecodeBorrow<'de> for WritableTxnMarker<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> WritableTxnMarker<'a> {
+impl WritableTxnMarker<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -286,22 +271,13 @@ impl<'a> WritableTxnMarker<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct WritableTxnMarkerTopic<'a> {
     pub name: &'a str,
     pub partition_indexes: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for WritableTxnMarkerTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partition_indexes: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> WritableTxnMarkerTopic<'a> {
+impl WritableTxnMarkerTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_request::WritableTxnMarkerTopic {
         crate::owned::write_txn_markers_request::WritableTxnMarkerTopic {
             name: (self.name).to_string(),
@@ -310,14 +286,14 @@ impl<'a> WritableTxnMarkerTopic<'a> {
         }
     }
 }
-impl<'a> Encode for WritableTxnMarkerTopic<'a> {
+impl Encode for WritableTxnMarkerTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -389,7 +365,7 @@ impl<'de> DecodeBorrow<'de> for WritableTxnMarkerTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> WritableTxnMarkerTopic<'a> {
+impl WritableTxnMarkerTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -26,7 +26,7 @@ pub struct ListPartitionReassignmentsRequest<'a> {
     pub topics: Option<Vec<ListPartitionReassignmentsTopics<'a>>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ListPartitionReassignmentsRequest<'a> {
+impl Default for ListPartitionReassignmentsRequest<'_> {
     fn default() -> Self {
         Self {
             timeout_ms: 60_000i32,
@@ -35,20 +35,22 @@ impl<'a> Default for ListPartitionReassignmentsRequest<'a> {
         }
     }
 }
-impl<'a> ListPartitionReassignmentsRequest<'a> {
+impl ListPartitionReassignmentsRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest {
         crate::owned::list_partition_reassignments_request::ListPartitionReassignmentsRequest {
             timeout_ms: (self.timeout_ms),
-            topics: (self.topics)
-                .as_ref()
-                .map(|v| v.iter().map(|it| it.to_owned()).collect()),
+            topics: (self.topics).as_ref().map(|v| {
+                v.iter()
+                    .map(ListPartitionReassignmentsTopics::to_owned)
+                    .collect()
+            }),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ListPartitionReassignmentsRequest<'a> {
+impl Encode for ListPartitionReassignmentsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -58,7 +60,7 @@ impl<'a> Encode for ListPartitionReassignmentsRequest<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
             {
@@ -87,7 +89,7 @@ impl<'a> Encode for ListPartitionReassignmentsRequest<'a> {
             n += {
                 let opt: Option<&Vec<_>> = (self.topics).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -139,7 +141,7 @@ impl<'de> DecodeBorrow<'de> for ListPartitionReassignmentsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ListPartitionReassignmentsRequest<'a> {
+impl ListPartitionReassignmentsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -152,22 +154,13 @@ impl<'a> ListPartitionReassignmentsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListPartitionReassignmentsTopics<'a> {
     pub name: &'a str,
     pub partition_indexes: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ListPartitionReassignmentsTopics<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partition_indexes: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ListPartitionReassignmentsTopics<'a> {
+impl ListPartitionReassignmentsTopics<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_partition_reassignments_request::ListPartitionReassignmentsTopics {
@@ -178,14 +171,14 @@ impl<'a> ListPartitionReassignmentsTopics<'a> {
         }
     }
 }
-impl<'a> Encode for ListPartitionReassignmentsTopics<'a> {
+impl Encode for ListPartitionReassignmentsTopics<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -257,7 +250,7 @@ impl<'de> DecodeBorrow<'de> for ListPartitionReassignmentsTopics<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ListPartitionReassignmentsTopics<'a> {
+impl ListPartitionReassignmentsTopics<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

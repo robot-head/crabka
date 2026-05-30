@@ -22,7 +22,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ControllerRegistrationRequest<'a> {
     pub controller_id: i32,
     pub incarnation_id: crate::primitives::uuid::Uuid,
@@ -31,19 +31,7 @@ pub struct ControllerRegistrationRequest<'a> {
     pub features: Vec<Feature<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ControllerRegistrationRequest<'a> {
-    fn default() -> Self {
-        Self {
-            controller_id: 0i32,
-            incarnation_id: Default::default(),
-            zk_migration_ready: false,
-            listeners: Vec::new(),
-            features: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ControllerRegistrationRequest<'a> {
+impl ControllerRegistrationRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::controller_registration_request::ControllerRegistrationRequest {
@@ -51,13 +39,13 @@ impl<'a> ControllerRegistrationRequest<'a> {
             controller_id: (self.controller_id),
             incarnation_id: (self.incarnation_id),
             zk_migration_ready: (self.zk_migration_ready),
-            listeners: (self.listeners).iter().map(|it| it.to_owned()).collect(),
-            features: (self.features).iter().map(|it| it.to_owned()).collect(),
+            listeners: (self.listeners).iter().map(Listener::to_owned).collect(),
+            features: (self.features).iter().map(Feature::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ControllerRegistrationRequest<'a> {
+impl Encode for ControllerRegistrationRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -67,13 +55,13 @@ impl<'a> Encode for ControllerRegistrationRequest<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.controller_id)
+            put_i32(buf, self.controller_id);
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.incarnation_id)
+            crate::primitives::uuid::put_uuid(buf, self.incarnation_id);
         }
         if version >= 0 {
-            put_bool(buf, self.zk_migration_ready)
+            put_bool(buf, self.zk_migration_ready);
         }
         if version >= 0 {
             {
@@ -184,7 +172,7 @@ impl<'de> DecodeBorrow<'de> for ControllerRegistrationRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ControllerRegistrationRequest<'a> {
+impl ControllerRegistrationRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -206,7 +194,7 @@ impl<'a> ControllerRegistrationRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Listener<'a> {
     pub name: &'a str,
     pub host: &'a str,
@@ -214,18 +202,7 @@ pub struct Listener<'a> {
     pub security_protocol: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Listener<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            host: "",
-            port: 0u16,
-            security_protocol: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Listener<'a> {
+impl Listener<'_> {
     pub fn to_owned(&self) -> crate::owned::controller_registration_request::Listener {
         crate::owned::controller_registration_request::Listener {
             name: (self.name).to_string(),
@@ -236,28 +213,28 @@ impl<'a> Listener<'a> {
         }
     }
 }
-impl<'a> Encode for Listener<'a> {
+impl Encode for Listener<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if version >= 0 {
-            put_i16(buf, self.security_protocol)
+            put_i16(buf, self.security_protocol);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -326,7 +303,7 @@ impl<'de> DecodeBorrow<'de> for Listener<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Listener<'a> {
+impl Listener<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -345,24 +322,14 @@ impl<'a> Listener<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Feature<'a> {
     pub name: &'a str,
     pub min_supported_version: i16,
     pub max_supported_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for Feature<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            min_supported_version: 0i16,
-            max_supported_version: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> Feature<'a> {
+impl Feature<'_> {
     pub fn to_owned(&self) -> crate::owned::controller_registration_request::Feature {
         crate::owned::controller_registration_request::Feature {
             name: (self.name).to_string(),
@@ -372,21 +339,21 @@ impl<'a> Feature<'a> {
         }
     }
 }
-impl<'a> Encode for Feature<'a> {
+impl Encode for Feature<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.min_supported_version)
+            put_i16(buf, self.min_supported_version);
         }
         if version >= 0 {
-            put_i16(buf, self.max_supported_version)
+            put_i16(buf, self.max_supported_version);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -441,7 +408,7 @@ impl<'de> DecodeBorrow<'de> for Feature<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> Feature<'a> {
+impl Feature<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

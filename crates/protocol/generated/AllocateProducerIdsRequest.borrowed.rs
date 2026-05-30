@@ -52,10 +52,10 @@ impl Encode for AllocateProducerIdsRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if version >= 0 {
-            put_i64(buf, self.broker_epoch)
+            put_i64(buf, self.broker_epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

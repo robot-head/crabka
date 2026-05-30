@@ -66,7 +66,7 @@ impl Encode for AlterReplicaLogDirsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for AlterReplicaLogDirsRequest {
+impl Decode<'_> for AlterReplicaLogDirsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -114,9 +114,9 @@ impl Encode for AlterReplicaLogDir {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.path)
+                put_compact_string(buf, &self.path);
             } else {
-                put_string(buf, &self.path)
+                put_string(buf, &self.path);
             }
         }
         if version >= 0 {
@@ -158,7 +158,7 @@ impl Encode for AlterReplicaLogDir {
         n
     }
 }
-impl<'de> Decode<'de> for AlterReplicaLogDir {
+impl Decode<'_> for AlterReplicaLogDir {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -210,9 +210,9 @@ impl Encode for AlterReplicaLogDirTopic {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -254,7 +254,7 @@ impl Encode for AlterReplicaLogDirTopic {
         n
     }
 }
-impl<'de> Decode<'de> for AlterReplicaLogDirTopic {
+impl Decode<'_> for AlterReplicaLogDirTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

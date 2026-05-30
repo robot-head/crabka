@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterShareGroupOffsetsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -32,31 +32,23 @@ pub struct AlterShareGroupOffsetsResponse<'a> {
     pub responses: Vec<AlterShareGroupOffsetsResponseTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterShareGroupOffsetsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            responses: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterShareGroupOffsetsResponse<'a> {
+impl AlterShareGroupOffsetsResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_share_group_offsets_response::AlterShareGroupOffsetsResponse {
         crate::owned::alter_share_group_offsets_response::AlterShareGroupOffsetsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
-            responses: (self.responses).iter().map(|it| it.to_owned()).collect(),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            responses: (self.responses)
+                .iter()
+                .map(AlterShareGroupOffsetsResponseTopic::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterShareGroupOffsetsResponse<'a> {
+impl Encode for AlterShareGroupOffsetsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -66,16 +58,16 @@ impl<'a> Encode for AlterShareGroupOffsetsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
@@ -168,7 +160,7 @@ impl<'de> DecodeBorrow<'de> for AlterShareGroupOffsetsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterShareGroupOffsetsResponse<'a> {
+impl AlterShareGroupOffsetsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -187,47 +179,40 @@ impl<'a> AlterShareGroupOffsetsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterShareGroupOffsetsResponseTopic<'a> {
     pub topic_name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<AlterShareGroupOffsetsResponsePartition<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterShareGroupOffsetsResponseTopic<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterShareGroupOffsetsResponseTopic<'a> {
+impl AlterShareGroupOffsetsResponseTopic<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_share_group_offsets_response::AlterShareGroupOffsetsResponseTopic {
         crate::owned::alter_share_group_offsets_response::AlterShareGroupOffsetsResponseTopic {
             topic_name: (self.topic_name).to_string(),
             topic_id: (self.topic_id),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(AlterShareGroupOffsetsResponsePartition::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterShareGroupOffsetsResponseTopic<'a> {
+impl Encode for AlterShareGroupOffsetsResponseTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name)
+                put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name)
+                put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -307,7 +292,7 @@ impl<'de> DecodeBorrow<'de> for AlterShareGroupOffsetsResponseTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterShareGroupOffsetsResponseTopic<'a> {
+impl AlterShareGroupOffsetsResponseTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -323,24 +308,14 @@ impl<'a> AlterShareGroupOffsetsResponseTopic<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterShareGroupOffsetsResponsePartition<'a> {
     pub partition_index: i32,
     pub error_code: i16,
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterShareGroupOffsetsResponsePartition<'a> {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterShareGroupOffsetsResponsePartition<'a> {
+impl AlterShareGroupOffsetsResponsePartition<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_share_group_offsets_response::AlterShareGroupOffsetsResponsePartition
@@ -348,25 +323,25 @@ impl<'a> AlterShareGroupOffsetsResponsePartition<'a> {
         crate::owned::alter_share_group_offsets_response::AlterShareGroupOffsetsResponsePartition {
             partition_index: (self.partition_index),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterShareGroupOffsetsResponsePartition<'a> {
+impl Encode for AlterShareGroupOffsetsResponsePartition<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if flex {
@@ -422,7 +397,7 @@ impl<'de> DecodeBorrow<'de> for AlterShareGroupOffsetsResponsePartition<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterShareGroupOffsetsResponsePartition<'a> {
+impl AlterShareGroupOffsetsResponsePartition<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

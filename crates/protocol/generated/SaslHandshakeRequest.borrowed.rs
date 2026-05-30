@@ -17,20 +17,12 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SaslHandshakeRequest<'a> {
     pub mechanism: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for SaslHandshakeRequest<'a> {
-    fn default() -> Self {
-        Self {
-            mechanism: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> SaslHandshakeRequest<'a> {
+impl SaslHandshakeRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::sasl_handshake_request::SaslHandshakeRequest {
         crate::owned::sasl_handshake_request::SaslHandshakeRequest {
             mechanism: (self.mechanism).to_string(),
@@ -38,7 +30,7 @@ impl<'a> SaslHandshakeRequest<'a> {
         }
     }
 }
-impl<'a> Encode for SaslHandshakeRequest<'a> {
+impl Encode for SaslHandshakeRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -49,9 +41,9 @@ impl<'a> Encode for SaslHandshakeRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.mechanism)
+                put_compact_string(buf, self.mechanism);
             } else {
-                put_string(buf, self.mechanism)
+                put_string(buf, self.mechanism);
             }
         }
         Ok(())
@@ -90,7 +82,7 @@ impl<'de> DecodeBorrow<'de> for SaslHandshakeRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> SaslHandshakeRequest<'a> {
+impl SaslHandshakeRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

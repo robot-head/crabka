@@ -10,24 +10,14 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AddPartitionsToTxnTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl<'a> Default for AddPartitionsToTxnTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> AddPartitionsToTxnTopic<'a> {
+impl AddPartitionsToTxnTopic<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic {
@@ -39,14 +29,14 @@ impl<'a> AddPartitionsToTxnTopic<'a> {
     }
 }
 
-impl<'a> Encode for AddPartitionsToTxnTopic<'a> {
+impl Encode for AddPartitionsToTxnTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -118,7 +108,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnTopic<'de> {
 }
 
 #[cfg(test)]
-impl<'a> AddPartitionsToTxnTopic<'a> {
+impl AddPartitionsToTxnTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

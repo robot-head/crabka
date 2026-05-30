@@ -34,7 +34,7 @@ pub struct ConsumerProtocolSubscription<'a> {
     pub rack_id: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ConsumerProtocolSubscription<'a> {
+impl Default for ConsumerProtocolSubscription<'_> {
     fn default() -> Self {
         Self {
             topics: Vec::new(),
@@ -46,24 +46,27 @@ impl<'a> Default for ConsumerProtocolSubscription<'a> {
         }
     }
 }
-impl<'a> ConsumerProtocolSubscription<'a> {
+impl ConsumerProtocolSubscription<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_protocol_subscription::ConsumerProtocolSubscription {
         crate::owned::consumer_protocol_subscription::ConsumerProtocolSubscription {
-            topics: (self.topics).iter().map(|s| s.to_string()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             user_data: (self.user_data).map(Bytes::copy_from_slice),
             owned_partitions: (self.owned_partitions)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(TopicPartition::to_owned)
                 .collect(),
             generation_id: (self.generation_id),
-            rack_id: (self.rack_id).map(|s| s.to_string()),
+            rack_id: (self.rack_id).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ConsumerProtocolSubscription<'a> {
+impl Encode for ConsumerProtocolSubscription<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -76,18 +79,18 @@ impl<'a> Encode for ConsumerProtocolSubscription<'a> {
                 crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
                 for it in &self.topics {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_bytes(buf, self.user_data)
+                put_compact_nullable_bytes(buf, self.user_data);
             } else {
-                put_nullable_bytes(buf, self.user_data)
+                put_nullable_bytes(buf, self.user_data);
             }
         }
         if version >= 1 {
@@ -99,13 +102,13 @@ impl<'a> Encode for ConsumerProtocolSubscription<'a> {
             }
         }
         if version >= 2 {
-            put_i32(buf, self.generation_id)
+            put_i32(buf, self.generation_id);
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id)
+                put_compact_nullable_string(buf, self.rack_id);
             } else {
-                put_nullable_string(buf, self.rack_id)
+                put_nullable_string(buf, self.rack_id);
             }
         }
         Ok(())
@@ -121,9 +124,9 @@ impl<'a> Encode for ConsumerProtocolSubscription<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -229,7 +232,7 @@ impl<'de> DecodeBorrow<'de> for ConsumerProtocolSubscription<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ConsumerProtocolSubscription<'a> {
+impl ConsumerProtocolSubscription<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -251,22 +254,13 @@ impl<'a> ConsumerProtocolSubscription<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartition<'a> {
     pub topic: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicPartition<'a> {
-    fn default() -> Self {
-        Self {
-            topic: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicPartition<'a> {
+impl TopicPartition<'_> {
     pub fn to_owned(&self) -> crate::owned::consumer_protocol_subscription::TopicPartition {
         crate::owned::consumer_protocol_subscription::TopicPartition {
             topic: (self.topic).to_string(),
@@ -275,14 +269,14 @@ impl<'a> TopicPartition<'a> {
         }
     }
 }
-impl<'a> Encode for TopicPartition<'a> {
+impl Encode for TopicPartition<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 32767;
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.topic)
+                put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic)
+                put_string(buf, self.topic);
             }
         }
         if version >= 1 {
@@ -341,7 +335,7 @@ impl<'de> DecodeBorrow<'de> for TopicPartition<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicPartition<'a> {
+impl TopicPartition<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -22,9 +22,9 @@ impl Encode for TaskIds {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.subtopology_id)
+                put_compact_string(buf, &self.subtopology_id);
             } else {
-                put_string(buf, &self.subtopology_id)
+                put_string(buf, &self.subtopology_id);
             }
         }
         if version >= 0 {
@@ -67,7 +67,7 @@ impl Encode for TaskIds {
     }
 }
 
-impl<'de> Decode<'de> for TaskIds {
+impl Decode<'_> for TaskIds {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

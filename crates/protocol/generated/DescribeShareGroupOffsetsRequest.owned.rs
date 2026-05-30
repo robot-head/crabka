@@ -66,7 +66,7 @@ impl Encode for DescribeShareGroupOffsetsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeShareGroupOffsetsRequest {
+impl Decode<'_> for DescribeShareGroupOffsetsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -114,9 +114,9 @@ impl Encode for DescribeShareGroupOffsetsRequestGroup {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
@@ -150,7 +150,7 @@ impl Encode for DescribeShareGroupOffsetsRequestGroup {
             n += {
                 let opt: Option<&Vec<_>> = (self.topics).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -165,7 +165,7 @@ impl Encode for DescribeShareGroupOffsetsRequestGroup {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeShareGroupOffsetsRequestGroup {
+impl Decode<'_> for DescribeShareGroupOffsetsRequestGroup {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -224,9 +224,9 @@ impl Encode for DescribeShareGroupOffsetsRequestTopic {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic_name)
+                put_compact_string(buf, &self.topic_name);
             } else {
-                put_string(buf, &self.topic_name)
+                put_string(buf, &self.topic_name);
             }
         }
         if version >= 0 {
@@ -268,7 +268,7 @@ impl Encode for DescribeShareGroupOffsetsRequestTopic {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeShareGroupOffsetsRequestTopic {
+impl Decode<'_> for DescribeShareGroupOffsetsRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

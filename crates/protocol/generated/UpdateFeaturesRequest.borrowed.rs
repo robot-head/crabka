@@ -29,7 +29,7 @@ pub struct UpdateFeaturesRequest<'a> {
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for UpdateFeaturesRequest<'a> {
+impl Default for UpdateFeaturesRequest<'_> {
     fn default() -> Self {
         Self {
             timeout_ms: 60_000i32,
@@ -39,20 +39,20 @@ impl<'a> Default for UpdateFeaturesRequest<'a> {
         }
     }
 }
-impl<'a> UpdateFeaturesRequest<'a> {
+impl UpdateFeaturesRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::update_features_request::UpdateFeaturesRequest {
         crate::owned::update_features_request::UpdateFeaturesRequest {
             timeout_ms: (self.timeout_ms),
             feature_updates: (self.feature_updates)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(FeatureUpdateKey::to_owned)
                 .collect(),
             validate_only: (self.validate_only),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for UpdateFeaturesRequest<'a> {
+impl Encode for UpdateFeaturesRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -62,7 +62,7 @@ impl<'a> Encode for UpdateFeaturesRequest<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
             {
@@ -73,7 +73,7 @@ impl<'a> Encode for UpdateFeaturesRequest<'a> {
             }
         }
         if version >= 1 {
-            put_bool(buf, self.validate_only)
+            put_bool(buf, self.validate_only);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -143,7 +143,7 @@ impl<'de> DecodeBorrow<'de> for UpdateFeaturesRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> UpdateFeaturesRequest<'a> {
+impl UpdateFeaturesRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -167,7 +167,7 @@ pub struct FeatureUpdateKey<'a> {
     pub upgrade_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for FeatureUpdateKey<'a> {
+impl Default for FeatureUpdateKey<'_> {
     fn default() -> Self {
         Self {
             feature: "",
@@ -178,7 +178,7 @@ impl<'a> Default for FeatureUpdateKey<'a> {
         }
     }
 }
-impl<'a> FeatureUpdateKey<'a> {
+impl FeatureUpdateKey<'_> {
     pub fn to_owned(&self) -> crate::owned::update_features_request::FeatureUpdateKey {
         crate::owned::update_features_request::FeatureUpdateKey {
             feature: (self.feature).to_string(),
@@ -189,24 +189,24 @@ impl<'a> FeatureUpdateKey<'a> {
         }
     }
 }
-impl<'a> Encode for FeatureUpdateKey<'a> {
+impl Encode for FeatureUpdateKey<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.feature)
+                put_compact_string(buf, self.feature);
             } else {
-                put_string(buf, self.feature)
+                put_string(buf, self.feature);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.max_version_level)
+            put_i16(buf, self.max_version_level);
         }
-        if version >= 0 && version <= 0 {
-            put_bool(buf, self.allow_downgrade)
+        if version == 0 {
+            put_bool(buf, self.allow_downgrade);
         }
         if version >= 1 {
-            put_i8(buf, self.upgrade_type)
+            put_i8(buf, self.upgrade_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -227,7 +227,7 @@ impl<'a> Encode for FeatureUpdateKey<'a> {
         if version >= 0 {
             n += 2;
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             n += 1;
         }
         if version >= 1 {
@@ -254,7 +254,7 @@ impl<'de> DecodeBorrow<'de> for FeatureUpdateKey<'de> {
         if version >= 0 {
             out.max_version_level = get_i16(buf)?;
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             out.allow_downgrade = get_bool(buf)?;
         }
         if version >= 1 {
@@ -267,7 +267,7 @@ impl<'de> DecodeBorrow<'de> for FeatureUpdateKey<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> FeatureUpdateKey<'a> {
+impl FeatureUpdateKey<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -277,7 +277,7 @@ impl<'a> FeatureUpdateKey<'a> {
         if version >= 0 {
             m.max_version_level = 1i16;
         }
-        if version >= 0 && version <= 0 {
+        if version == 0 {
             m.allow_downgrade = true;
         }
         if version >= 1 {

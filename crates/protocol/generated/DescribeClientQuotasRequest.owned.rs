@@ -45,7 +45,7 @@ impl Encode for DescribeClientQuotasRequest {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.strict)
+            put_bool(buf, self.strict);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -77,7 +77,7 @@ impl Encode for DescribeClientQuotasRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeClientQuotasRequest {
+impl Decode<'_> for DescribeClientQuotasRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -132,19 +132,19 @@ impl Encode for ComponentData {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.entity_type)
+                put_compact_string(buf, &self.entity_type);
             } else {
-                put_string(buf, &self.entity_type)
+                put_string(buf, &self.entity_type);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.match_type)
+            put_i8(buf, self.match_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.match_.as_deref())
+                put_compact_nullable_string(buf, self.match_.as_deref());
             } else {
-                put_nullable_string(buf, self.match_.as_deref())
+                put_nullable_string(buf, self.match_.as_deref());
             }
         }
         if flex {
@@ -180,7 +180,7 @@ impl Encode for ComponentData {
         n
     }
 }
-impl<'de> Decode<'de> for ComponentData {
+impl Decode<'_> for ComponentData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();

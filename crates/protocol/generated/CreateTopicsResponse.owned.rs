@@ -41,7 +41,7 @@ impl Encode for CreateTopicsResponse {
         }
         let flex = is_flexible(version);
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -78,7 +78,7 @@ impl Encode for CreateTopicsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for CreateTopicsResponse {
+impl Decode<'_> for CreateTopicsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -153,29 +153,29 @@ impl Encode for CreatableTopicResult {
         let flex = version >= 5;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 7 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 5 {
-            put_i32(buf, self.num_partitions)
+            put_i32(buf, self.num_partitions);
         }
         if version >= 5 {
-            put_i16(buf, self.replication_factor)
+            put_i16(buf, self.replication_factor);
         }
         if version >= 5 {
             {
@@ -234,7 +234,7 @@ impl Encode for CreatableTopicResult {
             n += {
                 let opt: Option<&Vec<_>> = (self.configs).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -252,7 +252,7 @@ impl Encode for CreatableTopicResult {
         n
     }
 }
-impl<'de> Decode<'de> for CreatableTopicResult {
+impl Decode<'_> for CreatableTopicResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
@@ -374,26 +374,26 @@ impl Encode for CreatableTopicConfigs {
         let flex = version >= 5;
         if version >= 5 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.value.as_deref())
+                put_compact_nullable_string(buf, self.value.as_deref());
             } else {
-                put_nullable_string(buf, self.value.as_deref())
+                put_nullable_string(buf, self.value.as_deref());
             }
         }
         if version >= 5 {
-            put_bool(buf, self.read_only)
+            put_bool(buf, self.read_only);
         }
         if version >= 5 {
-            put_i8(buf, self.config_source)
+            put_i8(buf, self.config_source);
         }
         if version >= 5 {
-            put_bool(buf, self.is_sensitive)
+            put_bool(buf, self.is_sensitive);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -434,7 +434,7 @@ impl Encode for CreatableTopicConfigs {
         n
     }
 }
-impl<'de> Decode<'de> for CreatableTopicConfigs {
+impl Decode<'_> for CreatableTopicConfigs {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();

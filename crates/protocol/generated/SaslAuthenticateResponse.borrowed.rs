@@ -4,14 +4,13 @@ use bytes::{BufMut, Bytes};
 
 use crate::primitives::fixed::{get_i16, get_i64, put_i16, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes::{put_bytes, put_compact_bytes};
 use crate::primitives::string_bytes_borrowed::{get_bytes_borrowed, get_compact_bytes_borrowed};
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -26,7 +25,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SaslAuthenticateResponse<'a> {
     pub error_code: i16,
     pub error_message: Option<&'a str>,
@@ -34,29 +33,18 @@ pub struct SaslAuthenticateResponse<'a> {
     pub session_lifetime_ms: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for SaslAuthenticateResponse<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            error_message: None,
-            auth_bytes: &[],
-            session_lifetime_ms: 0i64,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> SaslAuthenticateResponse<'a> {
+impl SaslAuthenticateResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::sasl_authenticate_response::SaslAuthenticateResponse {
         crate::owned::sasl_authenticate_response::SaslAuthenticateResponse {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             auth_bytes: Bytes::copy_from_slice(self.auth_bytes),
             session_lifetime_ms: (self.session_lifetime_ms),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for SaslAuthenticateResponse<'a> {
+impl Encode for SaslAuthenticateResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -66,24 +54,24 @@ impl<'a> Encode for SaslAuthenticateResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, self.auth_bytes)
+                put_compact_bytes(buf, self.auth_bytes);
             } else {
-                put_bytes(buf, self.auth_bytes)
+                put_bytes(buf, self.auth_bytes);
             }
         }
         if version >= 1 {
-            put_i64(buf, self.session_lifetime_ms)
+            put_i64(buf, self.session_lifetime_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -160,7 +148,7 @@ impl<'de> DecodeBorrow<'de> for SaslAuthenticateResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> SaslAuthenticateResponse<'a> {
+impl SaslAuthenticateResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

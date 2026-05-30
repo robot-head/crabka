@@ -24,34 +24,28 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeShareGroupOffsetsResponse<'a> {
     pub throttle_time_ms: i32,
     pub groups: Vec<DescribeShareGroupOffsetsResponseGroup<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeShareGroupOffsetsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            groups: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeShareGroupOffsetsResponse<'a> {
+impl DescribeShareGroupOffsetsResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponse
     {
         crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            groups: (self.groups).iter().map(|it| it.to_owned()).collect(),
+            groups: (self.groups)
+                .iter()
+                .map(DescribeShareGroupOffsetsResponseGroup::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeShareGroupOffsetsResponse<'a> {
+impl Encode for DescribeShareGroupOffsetsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -61,7 +55,7 @@ impl<'a> Encode for DescribeShareGroupOffsetsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -130,7 +124,7 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeShareGroupOffsetsResponse<'a> {
+impl DescribeShareGroupOffsetsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -143,7 +137,7 @@ impl<'a> DescribeShareGroupOffsetsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeShareGroupOffsetsResponseGroup<'a> {
     pub group_id: &'a str,
     pub topics: Vec<DescribeShareGroupOffsetsResponseTopic<'a>>,
@@ -151,33 +145,22 @@ pub struct DescribeShareGroupOffsetsResponseGroup<'a> {
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeShareGroupOffsetsResponseGroup<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            topics: Vec::new(),
-            error_code: 0i16,
-            error_message: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeShareGroupOffsetsResponseGroup<'a> {
+impl DescribeShareGroupOffsetsResponseGroup<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponseGroup
     {
-        crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponseGroup { group_id : (self . group_id) . to_string () , topics : (self . topics) . iter () . map (| it | it . to_owned ()) . collect () , error_code : (self . error_code) , error_message : (self . error_message) . map (| s | s . to_string ()) , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+        crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponseGroup { group_id : (self . group_id) . to_string () , topics : (self . topics) . iter () . map (DescribeShareGroupOffsetsResponseTopic::to_owned) . collect () , error_code : (self . error_code) , error_message : (self . error_message) . map (std::string::ToString::to_string) , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
     }
 }
-impl<'a> Encode for DescribeShareGroupOffsetsResponseGroup<'a> {
+impl Encode for DescribeShareGroupOffsetsResponseGroup<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
@@ -189,13 +172,13 @@ impl<'a> Encode for DescribeShareGroupOffsetsResponseGroup<'a> {
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if flex {
@@ -279,7 +262,7 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsResponseGroup<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeShareGroupOffsetsResponseGroup<'a> {
+impl DescribeShareGroupOffsetsResponseGroup<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -298,43 +281,33 @@ impl<'a> DescribeShareGroupOffsetsResponseGroup<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeShareGroupOffsetsResponseTopic<'a> {
     pub topic_name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<DescribeShareGroupOffsetsResponsePartition<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeShareGroupOffsetsResponseTopic<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeShareGroupOffsetsResponseTopic<'a> {
+impl DescribeShareGroupOffsetsResponseTopic<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponseTopic
     {
-        crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponseTopic { topic_name : (self . topic_name) . to_string () , topic_id : (self . topic_id) , partitions : (self . partitions) . iter () . map (| it | it . to_owned ()) . collect () , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+        crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponseTopic { topic_name : (self . topic_name) . to_string () , topic_id : (self . topic_id) , partitions : (self . partitions) . iter () . map (DescribeShareGroupOffsetsResponsePartition::to_owned) . collect () , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
     }
 }
-impl<'a> Encode for DescribeShareGroupOffsetsResponseTopic<'a> {
+impl Encode for DescribeShareGroupOffsetsResponseTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name)
+                put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name)
+                put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -414,7 +387,7 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsResponseTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeShareGroupOffsetsResponseTopic<'a> {
+impl DescribeShareGroupOffsetsResponseTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -442,7 +415,7 @@ pub struct DescribeShareGroupOffsetsResponsePartition<'a> {
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeShareGroupOffsetsResponsePartition<'a> {
+impl Default for DescribeShareGroupOffsetsResponsePartition<'_> {
     fn default() -> Self {
         Self {
             partition_index: 0i32,
@@ -455,34 +428,34 @@ impl<'a> Default for DescribeShareGroupOffsetsResponsePartition<'a> {
         }
     }
 }
-impl<'a> DescribeShareGroupOffsetsResponsePartition<'a> {
+impl DescribeShareGroupOffsetsResponsePartition<'_> {
     pub fn to_owned (& self) -> crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponsePartition{
-        crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponsePartition { partition_index : (self . partition_index) , start_offset : (self . start_offset) , leader_epoch : (self . leader_epoch) , lag : (self . lag) , error_code : (self . error_code) , error_message : (self . error_message) . map (| s | s . to_string ()) , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
+        crate :: owned :: describe_share_group_offsets_response :: DescribeShareGroupOffsetsResponsePartition { partition_index : (self . partition_index) , start_offset : (self . start_offset) , leader_epoch : (self . leader_epoch) , lag : (self . lag) , error_code : (self . error_code) , error_message : (self . error_message) . map (std::string::ToString::to_string) , unknown_tagged_fields : self . unknown_tagged_fields . clone () , }
     }
 }
-impl<'a> Encode for DescribeShareGroupOffsetsResponsePartition<'a> {
+impl Encode for DescribeShareGroupOffsetsResponsePartition<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.start_offset)
+            put_i64(buf, self.start_offset);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 1 {
-            put_i64(buf, self.lag)
+            put_i64(buf, self.lag);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if flex {
@@ -556,7 +529,7 @@ impl<'de> DecodeBorrow<'de> for DescribeShareGroupOffsetsResponsePartition<'de> 
     }
 }
 #[cfg(test)]
-impl<'a> DescribeShareGroupOffsetsResponsePartition<'a> {
+impl DescribeShareGroupOffsetsResponsePartition<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

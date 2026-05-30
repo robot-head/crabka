@@ -40,16 +40,16 @@ impl Encode for CreateDelegationTokenRequest {
         let flex = is_flexible(version);
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.owner_principal_type.as_deref())
+                put_compact_nullable_string(buf, self.owner_principal_type.as_deref());
             } else {
-                put_nullable_string(buf, self.owner_principal_type.as_deref())
+                put_nullable_string(buf, self.owner_principal_type.as_deref());
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.owner_principal_name.as_deref())
+                put_compact_nullable_string(buf, self.owner_principal_name.as_deref());
             } else {
-                put_nullable_string(buf, self.owner_principal_name.as_deref())
+                put_nullable_string(buf, self.owner_principal_name.as_deref());
             }
         }
         if version >= 0 {
@@ -61,7 +61,7 @@ impl Encode for CreateDelegationTokenRequest {
             }
         }
         if version >= 0 {
-            put_i64(buf, self.max_lifetime_ms)
+            put_i64(buf, self.max_lifetime_ms);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -107,7 +107,7 @@ impl Encode for CreateDelegationTokenRequest {
         n
     }
 }
-impl<'de> Decode<'de> for CreateDelegationTokenRequest {
+impl Decode<'_> for CreateDelegationTokenRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -181,16 +181,16 @@ impl Encode for CreatableRenewers {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.principal_type)
+                put_compact_string(buf, &self.principal_type);
             } else {
-                put_string(buf, &self.principal_type)
+                put_string(buf, &self.principal_type);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.principal_name)
+                put_compact_string(buf, &self.principal_name);
             } else {
-                put_string(buf, &self.principal_name)
+                put_string(buf, &self.principal_name);
             }
         }
         if flex {
@@ -223,7 +223,7 @@ impl Encode for CreatableRenewers {
         n
     }
 }
-impl<'de> Decode<'de> for CreatableRenewers {
+impl Decode<'_> for CreatableRenewers {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

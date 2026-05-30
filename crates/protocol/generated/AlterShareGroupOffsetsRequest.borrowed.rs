@@ -20,33 +20,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterShareGroupOffsetsRequest<'a> {
     pub group_id: &'a str,
     pub topics: Vec<AlterShareGroupOffsetsRequestTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterShareGroupOffsetsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            group_id: "",
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterShareGroupOffsetsRequest<'a> {
+impl AlterShareGroupOffsetsRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequest {
         crate::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequest {
             group_id: (self.group_id).to_string(),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(AlterShareGroupOffsetsRequestTopic::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterShareGroupOffsetsRequest<'a> {
+impl Encode for AlterShareGroupOffsetsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -57,9 +51,9 @@ impl<'a> Encode for AlterShareGroupOffsetsRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 0 {
@@ -137,7 +131,7 @@ impl<'de> DecodeBorrow<'de> for AlterShareGroupOffsetsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterShareGroupOffsetsRequest<'a> {
+impl AlterShareGroupOffsetsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -150,40 +144,34 @@ impl<'a> AlterShareGroupOffsetsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterShareGroupOffsetsRequestTopic<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<AlterShareGroupOffsetsRequestPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterShareGroupOffsetsRequestTopic<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterShareGroupOffsetsRequestTopic<'a> {
+impl AlterShareGroupOffsetsRequestTopic<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequestTopic {
         crate::owned::alter_share_group_offsets_request::AlterShareGroupOffsetsRequestTopic {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(AlterShareGroupOffsetsRequestPartition::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterShareGroupOffsetsRequestTopic<'a> {
+impl Encode for AlterShareGroupOffsetsRequestTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name)
+                put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name)
+                put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -258,7 +246,7 @@ impl<'de> DecodeBorrow<'de> for AlterShareGroupOffsetsRequestTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterShareGroupOffsetsRequestTopic<'a> {
+impl AlterShareGroupOffsetsRequestTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -271,20 +259,11 @@ impl<'a> AlterShareGroupOffsetsRequestTopic<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterShareGroupOffsetsRequestPartition {
     pub partition_index: i32,
     pub start_offset: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for AlterShareGroupOffsetsRequestPartition {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            start_offset: 0i64,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl AlterShareGroupOffsetsRequestPartition {
     pub fn to_owned(
@@ -302,10 +281,10 @@ impl Encode for AlterShareGroupOffsetsRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.start_offset)
+            put_i64(buf, self.start_offset);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

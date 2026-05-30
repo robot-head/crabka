@@ -4,12 +4,11 @@ use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -24,31 +23,26 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReadShareGroupStateSummaryResponse<'a> {
     pub results: Vec<ReadStateSummaryResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ReadShareGroupStateSummaryResponse<'a> {
-    fn default() -> Self {
-        Self {
-            results: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ReadShareGroupStateSummaryResponse<'a> {
+impl ReadShareGroupStateSummaryResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::read_share_group_state_summary_response::ReadShareGroupStateSummaryResponse
     {
         crate::owned::read_share_group_state_summary_response::ReadShareGroupStateSummaryResponse {
-            results: (self.results).iter().map(|it| it.to_owned()).collect(),
+            results: (self.results)
+                .iter()
+                .map(ReadStateSummaryResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ReadShareGroupStateSummaryResponse<'a> {
+impl Encode for ReadShareGroupStateSummaryResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -119,7 +113,7 @@ impl<'de> DecodeBorrow<'de> for ReadShareGroupStateSummaryResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ReadShareGroupStateSummaryResponse<'a> {
+impl ReadShareGroupStateSummaryResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -129,37 +123,31 @@ impl<'a> ReadShareGroupStateSummaryResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ReadStateSummaryResult<'a> {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ReadStateSummaryResult<'a> {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ReadStateSummaryResult<'a> {
+impl ReadStateSummaryResult<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::read_share_group_state_summary_response::ReadStateSummaryResult {
         crate::owned::read_share_group_state_summary_response::ReadStateSummaryResult {
             topic_id: (self.topic_id),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ReadStateSummaryResult<'a> {
+impl Encode for ReadStateSummaryResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -223,7 +211,7 @@ impl<'de> DecodeBorrow<'de> for ReadStateSummaryResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ReadStateSummaryResult<'a> {
+impl ReadStateSummaryResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -247,7 +235,7 @@ pub struct PartitionResult<'a> {
     pub delivery_complete_count: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for PartitionResult<'a> {
+impl Default for PartitionResult<'_> {
     fn default() -> Self {
         Self {
             partition: 0i32,
@@ -261,14 +249,14 @@ impl<'a> Default for PartitionResult<'a> {
         }
     }
 }
-impl<'a> PartitionResult<'a> {
+impl PartitionResult<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::read_share_group_state_summary_response::PartitionResult {
         crate::owned::read_share_group_state_summary_response::PartitionResult {
             partition: (self.partition),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             state_epoch: (self.state_epoch),
             leader_epoch: (self.leader_epoch),
             start_offset: (self.start_offset),
@@ -277,33 +265,33 @@ impl<'a> PartitionResult<'a> {
         }
     }
 }
-impl<'a> Encode for PartitionResult<'a> {
+impl Encode for PartitionResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.state_epoch)
+            put_i32(buf, self.state_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.start_offset)
+            put_i64(buf, self.start_offset);
         }
         if version >= 1 {
-            put_i32(buf, self.delivery_complete_count)
+            put_i32(buf, self.delivery_complete_count);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -382,7 +370,7 @@ impl<'de> DecodeBorrow<'de> for PartitionResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> PartitionResult<'a> {
+impl PartitionResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

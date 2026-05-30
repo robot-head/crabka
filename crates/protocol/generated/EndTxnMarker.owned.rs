@@ -27,7 +27,7 @@ impl Encode for EndTxnMarker {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.coordinator_epoch)
+            put_i32(buf, self.coordinator_epoch);
         }
         Ok(())
     }
@@ -40,7 +40,7 @@ impl Encode for EndTxnMarker {
         n
     }
 }
-impl<'de> Decode<'de> for EndTxnMarker {
+impl Decode<'_> for EndTxnMarker {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

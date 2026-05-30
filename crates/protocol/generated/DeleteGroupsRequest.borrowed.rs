@@ -18,28 +18,23 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteGroupsRequest<'a> {
     pub groups_names: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteGroupsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            groups_names: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteGroupsRequest<'a> {
+impl DeleteGroupsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_groups_request::DeleteGroupsRequest {
         crate::owned::delete_groups_request::DeleteGroupsRequest {
-            groups_names: (self.groups_names).iter().map(|s| s.to_string()).collect(),
+            groups_names: (self.groups_names)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteGroupsRequest<'a> {
+impl Encode for DeleteGroupsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -53,10 +48,10 @@ impl<'a> Encode for DeleteGroupsRequest<'a> {
                 crate::primitives::array::put_array_len(buf, (self.groups_names).len(), flex);
                 for it in &self.groups_names {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -77,9 +72,9 @@ impl<'a> Encode for DeleteGroupsRequest<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -124,7 +119,7 @@ impl<'de> DecodeBorrow<'de> for DeleteGroupsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteGroupsRequest<'a> {
+impl DeleteGroupsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

@@ -36,7 +36,7 @@ impl Encode for OffsetCommitResponse {
         }
         let flex = is_flexible(version);
         if version >= 3 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -73,7 +73,7 @@ impl Encode for OffsetCommitResponse {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetCommitResponse {
+impl Decode<'_> for OffsetCommitResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -126,15 +126,15 @@ pub struct OffsetCommitResponseTopic {
 impl Encode for OffsetCommitResponseTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -153,7 +153,7 @@ impl Encode for OffsetCommitResponseTopic {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 8;
         let mut n: usize = 0;
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             n += if flex {
                 compact_string_len(&self.name)
             } else {
@@ -181,11 +181,11 @@ impl Encode for OffsetCommitResponseTopic {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetCommitResponseTopic {
+impl Decode<'_> for OffsetCommitResponseTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             out.name = if flex {
                 get_compact_string_owned(buf)?
             } else {
@@ -216,7 +216,7 @@ impl OffsetCommitResponseTopic {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             m.name = "x".to_string();
         }
         if version >= 10 {
@@ -238,10 +238,10 @@ impl Encode for OffsetCommitResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -265,7 +265,7 @@ impl Encode for OffsetCommitResponsePartition {
         n
     }
 }
-impl<'de> Decode<'de> for OffsetCommitResponsePartition {
+impl Decode<'_> for OffsetCommitResponsePartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();

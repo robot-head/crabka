@@ -33,7 +33,7 @@ impl Encode for VotersRecord {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version)
+            put_i16(buf, self.version);
         }
         if version >= 0 {
             {
@@ -70,7 +70,7 @@ impl Encode for VotersRecord {
         n
     }
 }
-impl<'de> Decode<'de> for VotersRecord {
+impl Decode<'_> for VotersRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(
@@ -124,10 +124,10 @@ impl Encode for Voter {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.voter_id)
+            put_i32(buf, self.voter_id);
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
         }
         if version >= 0 {
             {
@@ -138,7 +138,7 @@ impl Encode for Voter {
             }
         }
         if version >= 0 {
-            self.k_raft_version_feature.encode(buf, version)?
+            self.k_raft_version_feature.encode(buf, version)?;
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -176,7 +176,7 @@ impl Encode for Voter {
         n
     }
 }
-impl<'de> Decode<'de> for Voter {
+impl Decode<'_> for Voter {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -237,20 +237,20 @@ impl Encode for Endpoint {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
         if version >= 0 {
-            put_u16(buf, self.port)
+            put_u16(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -285,7 +285,7 @@ impl Encode for Endpoint {
         n
     }
 }
-impl<'de> Decode<'de> for Endpoint {
+impl Decode<'_> for Endpoint {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -339,10 +339,10 @@ impl Encode for KRaftVersionFeature {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i16(buf, self.min_supported_version)
+            put_i16(buf, self.min_supported_version);
         }
         if version >= 0 {
-            put_i16(buf, self.max_supported_version)
+            put_i16(buf, self.max_supported_version);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -366,7 +366,7 @@ impl Encode for KRaftVersionFeature {
         n
     }
 }
-impl<'de> Decode<'de> for KRaftVersionFeature {
+impl Decode<'_> for KRaftVersionFeature {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

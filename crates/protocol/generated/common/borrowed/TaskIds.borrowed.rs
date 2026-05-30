@@ -10,24 +10,14 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskIds<'a> {
     pub subtopology_id: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl<'a> Default for TaskIds<'a> {
-    fn default() -> Self {
-        Self {
-            subtopology_id: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> TaskIds<'a> {
+impl TaskIds<'_> {
     pub fn to_owned(&self) -> crate::owned::common::task_ids::TaskIds {
         crate::owned::common::task_ids::TaskIds {
             subtopology_id: (self.subtopology_id).to_string(),
@@ -37,14 +27,14 @@ impl<'a> TaskIds<'a> {
     }
 }
 
-impl<'a> Encode for TaskIds<'a> {
+impl Encode for TaskIds<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.subtopology_id)
+                put_compact_string(buf, self.subtopology_id);
             } else {
-                put_string(buf, self.subtopology_id)
+                put_string(buf, self.subtopology_id);
             }
         }
         if version >= 0 {
@@ -116,7 +106,7 @@ impl<'de> DecodeBorrow<'de> for TaskIds<'de> {
 }
 
 #[cfg(test)]
-impl<'a> TaskIds<'a> {
+impl TaskIds<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

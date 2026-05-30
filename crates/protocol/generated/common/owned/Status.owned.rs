@@ -21,13 +21,13 @@ impl Encode for Status {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i8(buf, self.status_code)
+            put_i8(buf, self.status_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.status_detail)
+                put_compact_string(buf, &self.status_detail);
             } else {
-                put_string(buf, &self.status_detail)
+                put_string(buf, &self.status_detail);
             }
         }
         if flex {
@@ -57,7 +57,7 @@ impl Encode for Status {
     }
 }
 
-impl<'de> Decode<'de> for Status {
+impl Decode<'_> for Status {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

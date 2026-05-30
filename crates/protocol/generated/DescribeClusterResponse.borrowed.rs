@@ -38,7 +38,7 @@ pub struct DescribeClusterResponse<'a> {
     pub cluster_authorized_operations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeClusterResponse<'a> {
+impl Default for DescribeClusterResponse<'_> {
     fn default() -> Self {
         Self {
             throttle_time_ms: 0i32,
@@ -53,22 +53,25 @@ impl<'a> Default for DescribeClusterResponse<'a> {
         }
     }
 }
-impl<'a> DescribeClusterResponse<'a> {
+impl DescribeClusterResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_cluster_response::DescribeClusterResponse {
         crate::owned::describe_cluster_response::DescribeClusterResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             endpoint_type: (self.endpoint_type),
             cluster_id: (self.cluster_id).to_string(),
             controller_id: (self.controller_id),
-            brokers: (self.brokers).iter().map(|it| it.to_owned()).collect(),
+            brokers: (self.brokers)
+                .iter()
+                .map(DescribeClusterBroker::to_owned)
+                .collect(),
             cluster_authorized_operations: (self.cluster_authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeClusterResponse<'a> {
+impl Encode for DescribeClusterResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -78,30 +81,30 @@ impl<'a> Encode for DescribeClusterResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.endpoint_type)
+            put_i8(buf, self.endpoint_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.cluster_id)
+                put_compact_string(buf, self.cluster_id);
             } else {
-                put_string(buf, self.cluster_id)
+                put_string(buf, self.cluster_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.controller_id)
+            put_i32(buf, self.controller_id);
         }
         if version >= 0 {
             {
@@ -112,7 +115,7 @@ impl<'a> Encode for DescribeClusterResponse<'a> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.cluster_authorized_operations)
+            put_i32(buf, self.cluster_authorized_operations);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -226,7 +229,7 @@ impl<'de> DecodeBorrow<'de> for DescribeClusterResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeClusterResponse<'a> {
+impl DescribeClusterResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -257,7 +260,7 @@ impl<'a> DescribeClusterResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeClusterBroker<'a> {
     pub broker_id: i32,
     pub host: &'a str,
@@ -266,55 +269,43 @@ pub struct DescribeClusterBroker<'a> {
     pub is_fenced: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeClusterBroker<'a> {
-    fn default() -> Self {
-        Self {
-            broker_id: 0i32,
-            host: "",
-            port: 0i32,
-            rack: None,
-            is_fenced: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeClusterBroker<'a> {
+impl DescribeClusterBroker<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_cluster_response::DescribeClusterBroker {
         crate::owned::describe_cluster_response::DescribeClusterBroker {
             broker_id: (self.broker_id),
             host: (self.host).to_string(),
             port: (self.port),
-            rack: (self.rack).map(|s| s.to_string()),
+            rack: (self.rack).map(std::string::ToString::to_string),
             is_fenced: (self.is_fenced),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeClusterBroker<'a> {
+impl Encode for DescribeClusterBroker<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.host)
+                put_compact_string(buf, self.host);
             } else {
-                put_string(buf, self.host)
+                put_string(buf, self.host);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack)
+                put_compact_nullable_string(buf, self.rack);
             } else {
-                put_nullable_string(buf, self.rack)
+                put_nullable_string(buf, self.rack);
             }
         }
         if version >= 2 {
-            put_bool(buf, self.is_fenced)
+            put_bool(buf, self.is_fenced);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -389,7 +380,7 @@ impl<'de> DecodeBorrow<'de> for DescribeClusterBroker<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeClusterBroker<'a> {
+impl DescribeClusterBroker<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

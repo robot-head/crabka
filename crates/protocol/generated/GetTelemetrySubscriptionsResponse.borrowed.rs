@@ -22,7 +22,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GetTelemetrySubscriptionsResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -35,23 +35,7 @@ pub struct GetTelemetrySubscriptionsResponse<'a> {
     pub requested_metrics: Vec<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for GetTelemetrySubscriptionsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            client_instance_id: Default::default(),
-            subscription_id: 0i32,
-            accepted_compression_types: Vec::new(),
-            push_interval_ms: 0i32,
-            telemetry_max_bytes: 0i32,
-            delta_temporality: false,
-            requested_metrics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> GetTelemetrySubscriptionsResponse<'a> {
+impl GetTelemetrySubscriptionsResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::get_telemetry_subscriptions_response::GetTelemetrySubscriptionsResponse {
@@ -66,13 +50,13 @@ impl<'a> GetTelemetrySubscriptionsResponse<'a> {
             delta_temporality: (self.delta_temporality),
             requested_metrics: (self.requested_metrics)
                 .iter()
-                .map(|s| s.to_string())
+                .map(std::string::ToString::to_string)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for GetTelemetrySubscriptionsResponse<'a> {
+impl Encode for GetTelemetrySubscriptionsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -82,16 +66,16 @@ impl<'a> Encode for GetTelemetrySubscriptionsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            crate::primitives::uuid::put_uuid(buf, self.client_instance_id)
+            crate::primitives::uuid::put_uuid(buf, self.client_instance_id);
         }
         if version >= 0 {
-            put_i32(buf, self.subscription_id)
+            put_i32(buf, self.subscription_id);
         }
         if version >= 0 {
             {
@@ -106,23 +90,23 @@ impl<'a> Encode for GetTelemetrySubscriptionsResponse<'a> {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.push_interval_ms)
+            put_i32(buf, self.push_interval_ms);
         }
         if version >= 0 {
-            put_i32(buf, self.telemetry_max_bytes)
+            put_i32(buf, self.telemetry_max_bytes);
         }
         if version >= 0 {
-            put_bool(buf, self.delta_temporality)
+            put_bool(buf, self.delta_temporality);
         }
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.requested_metrics).len(), flex);
                 for it in &self.requested_metrics {
                     if flex {
-                        put_compact_string(buf, *it)
+                        put_compact_string(buf, it);
                     } else {
-                        put_string(buf, *it)
-                    };
+                        put_string(buf, it);
+                    }
                 }
             }
         }
@@ -176,9 +160,9 @@ impl<'a> Encode for GetTelemetrySubscriptionsResponse<'a> {
                     .iter()
                     .map(|it| {
                         if flex {
-                            compact_string_len(*it)
+                            compact_string_len(it)
                         } else {
-                            string_len(*it)
+                            string_len(it)
                         }
                     })
                     .sum();
@@ -254,7 +238,7 @@ impl<'de> DecodeBorrow<'de> for GetTelemetrySubscriptionsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> GetTelemetrySubscriptionsResponse<'a> {
+impl GetTelemetrySubscriptionsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

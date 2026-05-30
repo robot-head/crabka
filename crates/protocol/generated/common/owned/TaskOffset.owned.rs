@@ -23,16 +23,16 @@ impl Encode for TaskOffset {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.subtopology_id)
+                put_compact_string(buf, &self.subtopology_id);
             } else {
-                put_string(buf, &self.subtopology_id)
+                put_string(buf, &self.subtopology_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 0 {
-            put_i64(buf, self.offset)
+            put_i64(buf, self.offset);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -64,7 +64,7 @@ impl Encode for TaskOffset {
     }
 }
 
-impl<'de> Decode<'de> for TaskOffset {
+impl Decode<'_> for TaskOffset {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

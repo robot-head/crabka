@@ -24,33 +24,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeClientQuotasRequest<'a> {
     pub components: Vec<ComponentData<'a>>,
     pub strict: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DescribeClientQuotasRequest<'a> {
-    fn default() -> Self {
-        Self {
-            components: Vec::new(),
-            strict: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DescribeClientQuotasRequest<'a> {
+impl DescribeClientQuotasRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::describe_client_quotas_request::DescribeClientQuotasRequest {
         crate::owned::describe_client_quotas_request::DescribeClientQuotasRequest {
-            components: (self.components).iter().map(|it| it.to_owned()).collect(),
+            components: (self.components)
+                .iter()
+                .map(ComponentData::to_owned)
+                .collect(),
             strict: (self.strict),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DescribeClientQuotasRequest<'a> {
+impl Encode for DescribeClientQuotasRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -68,7 +62,7 @@ impl<'a> Encode for DescribeClientQuotasRequest<'a> {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.strict)
+            put_bool(buf, self.strict);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -130,7 +124,7 @@ impl<'de> DecodeBorrow<'de> for DescribeClientQuotasRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DescribeClientQuotasRequest<'a> {
+impl DescribeClientQuotasRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -143,51 +137,41 @@ impl<'a> DescribeClientQuotasRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ComponentData<'a> {
     pub entity_type: &'a str,
     pub match_type: i8,
     pub match_: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ComponentData<'a> {
-    fn default() -> Self {
-        Self {
-            entity_type: "",
-            match_type: 0i8,
-            match_: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ComponentData<'a> {
+impl ComponentData<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_client_quotas_request::ComponentData {
         crate::owned::describe_client_quotas_request::ComponentData {
             entity_type: (self.entity_type).to_string(),
             match_type: (self.match_type),
-            match_: (self.match_).map(|s| s.to_string()),
+            match_: (self.match_).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ComponentData<'a> {
+impl Encode for ComponentData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.entity_type)
+                put_compact_string(buf, self.entity_type);
             } else {
-                put_string(buf, self.entity_type)
+                put_string(buf, self.entity_type);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.match_type)
+            put_i8(buf, self.match_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.match_)
+                put_compact_nullable_string(buf, self.match_);
             } else {
-                put_nullable_string(buf, self.match_)
+                put_nullable_string(buf, self.match_);
             }
         }
         if flex {
@@ -251,7 +235,7 @@ impl<'de> DecodeBorrow<'de> for ComponentData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ComponentData<'a> {
+impl ComponentData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

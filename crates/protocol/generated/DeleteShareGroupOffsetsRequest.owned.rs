@@ -35,9 +35,9 @@ impl Encode for DeleteShareGroupOffsetsRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if version >= 0 {
@@ -79,7 +79,7 @@ impl Encode for DeleteShareGroupOffsetsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteShareGroupOffsetsRequest {
+impl Decode<'_> for DeleteShareGroupOffsetsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -136,9 +136,9 @@ impl Encode for DeleteShareGroupOffsetsRequestTopic {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic_name)
+                put_compact_string(buf, &self.topic_name);
             } else {
-                put_string(buf, &self.topic_name)
+                put_string(buf, &self.topic_name);
             }
         }
         if flex {
@@ -164,7 +164,7 @@ impl Encode for DeleteShareGroupOffsetsRequestTopic {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteShareGroupOffsetsRequestTopic {
+impl Decode<'_> for DeleteShareGroupOffsetsRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

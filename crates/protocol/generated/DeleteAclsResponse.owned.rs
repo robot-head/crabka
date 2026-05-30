@@ -37,7 +37,7 @@ impl Encode for DeleteAclsResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -79,7 +79,7 @@ impl Encode for DeleteAclsResponse {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteAclsResponse {
+impl Decode<'_> for DeleteAclsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -133,13 +133,13 @@ impl Encode for DeleteAclsFilterResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
@@ -189,7 +189,7 @@ impl Encode for DeleteAclsFilterResult {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteAclsFilterResult {
+impl Decode<'_> for DeleteAclsFilterResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -269,47 +269,47 @@ impl Encode for DeleteAclsMatchingAcl {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref())
+                put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref())
+                put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.resource_name)
+                put_compact_string(buf, &self.resource_name);
             } else {
-                put_string(buf, &self.resource_name)
+                put_string(buf, &self.resource_name);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.pattern_type)
+            put_i8(buf, self.pattern_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.principal)
+                put_compact_string(buf, &self.principal);
             } else {
-                put_string(buf, &self.principal)
+                put_string(buf, &self.principal);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.operation)
+            put_i8(buf, self.operation);
         }
         if version >= 0 {
-            put_i8(buf, self.permission_type)
+            put_i8(buf, self.permission_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -370,7 +370,7 @@ impl Encode for DeleteAclsMatchingAcl {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteAclsMatchingAcl {
+impl Decode<'_> for DeleteAclsMatchingAcl {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

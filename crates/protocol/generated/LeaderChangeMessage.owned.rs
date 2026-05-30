@@ -31,10 +31,10 @@ impl Encode for LeaderChangeMessage {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.version)
+            put_i16(buf, self.version);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
             {
@@ -95,7 +95,7 @@ impl Encode for LeaderChangeMessage {
         n
     }
 }
-impl<'de> Decode<'de> for LeaderChangeMessage {
+impl Decode<'_> for LeaderChangeMessage {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::SchemaMismatch(

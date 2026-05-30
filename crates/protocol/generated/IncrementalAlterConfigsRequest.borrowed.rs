@@ -24,33 +24,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IncrementalAlterConfigsRequest<'a> {
     pub resources: Vec<AlterConfigsResource<'a>>,
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for IncrementalAlterConfigsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            resources: Vec::new(),
-            validate_only: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> IncrementalAlterConfigsRequest<'a> {
+impl IncrementalAlterConfigsRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::incremental_alter_configs_request::IncrementalAlterConfigsRequest {
         crate::owned::incremental_alter_configs_request::IncrementalAlterConfigsRequest {
-            resources: (self.resources).iter().map(|it| it.to_owned()).collect(),
+            resources: (self.resources)
+                .iter()
+                .map(AlterConfigsResource::to_owned)
+                .collect(),
             validate_only: (self.validate_only),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for IncrementalAlterConfigsRequest<'a> {
+impl Encode for IncrementalAlterConfigsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -68,7 +62,7 @@ impl<'a> Encode for IncrementalAlterConfigsRequest<'a> {
             }
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only)
+            put_bool(buf, self.validate_only);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -130,7 +124,7 @@ impl<'de> DecodeBorrow<'de> for IncrementalAlterConfigsRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> IncrementalAlterConfigsRequest<'a> {
+impl IncrementalAlterConfigsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -143,46 +137,39 @@ impl<'a> IncrementalAlterConfigsRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterConfigsResource<'a> {
     pub resource_type: i8,
     pub resource_name: &'a str,
     pub configs: Vec<AlterableConfig<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterConfigsResource<'a> {
-    fn default() -> Self {
-        Self {
-            resource_type: 0i8,
-            resource_name: "",
-            configs: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterConfigsResource<'a> {
+impl AlterConfigsResource<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::incremental_alter_configs_request::AlterConfigsResource {
         crate::owned::incremental_alter_configs_request::AlterConfigsResource {
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
-            configs: (self.configs).iter().map(|it| it.to_owned()).collect(),
+            configs: (self.configs)
+                .iter()
+                .map(AlterableConfig::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterConfigsResource<'a> {
+impl Encode for AlterConfigsResource<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name)
+                put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name)
+                put_string(buf, self.resource_name);
             }
         }
         if version >= 0 {
@@ -261,7 +248,7 @@ impl<'de> DecodeBorrow<'de> for AlterConfigsResource<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterConfigsResource<'a> {
+impl AlterConfigsResource<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -277,51 +264,41 @@ impl<'a> AlterConfigsResource<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterableConfig<'a> {
     pub name: &'a str,
     pub config_operation: i8,
     pub value: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterableConfig<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            config_operation: 0i8,
-            value: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterableConfig<'a> {
+impl AlterableConfig<'_> {
     pub fn to_owned(&self) -> crate::owned::incremental_alter_configs_request::AlterableConfig {
         crate::owned::incremental_alter_configs_request::AlterableConfig {
             name: (self.name).to_string(),
             config_operation: (self.config_operation),
-            value: (self.value).map(|s| s.to_string()),
+            value: (self.value).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterableConfig<'a> {
+impl Encode for AlterableConfig<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
-            put_i8(buf, self.config_operation)
+            put_i8(buf, self.config_operation);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.value)
+                put_compact_nullable_string(buf, self.value);
             } else {
-                put_nullable_string(buf, self.value)
+                put_nullable_string(buf, self.value);
             }
         }
         if flex {
@@ -385,7 +362,7 @@ impl<'de> DecodeBorrow<'de> for AlterableConfig<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterableConfig<'a> {
+impl AlterableConfig<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

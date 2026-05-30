@@ -7,14 +7,11 @@ use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
     put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
-};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
 use crate::tagged_fields::{
     WriteTaggedFields, encode_to_bytes, read_tagged_fields, tagged_fields_len,
 };
-use crate::{Decode, DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
+use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 59;
 pub const MIN_VERSION: i16 = 0;
@@ -34,7 +31,7 @@ pub struct FetchSnapshotRequest<'a> {
     pub cluster_id: Option<String>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for FetchSnapshotRequest<'a> {
+impl Default for FetchSnapshotRequest<'_> {
     fn default() -> Self {
         Self {
             replica_id: -1i32,
@@ -45,18 +42,18 @@ impl<'a> Default for FetchSnapshotRequest<'a> {
         }
     }
 }
-impl<'a> FetchSnapshotRequest<'a> {
+impl FetchSnapshotRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_request::FetchSnapshotRequest {
         crate::owned::fetch_snapshot_request::FetchSnapshotRequest {
             replica_id: (self.replica_id),
             max_bytes: (self.max_bytes),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics).iter().map(TopicSnapshot::to_owned).collect(),
             cluster_id: self.cluster_id.clone(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for FetchSnapshotRequest<'a> {
+impl Encode for FetchSnapshotRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -66,10 +63,10 @@ impl<'a> Encode for FetchSnapshotRequest<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.replica_id)
+            put_i32(buf, self.replica_id);
         }
         if version >= 0 {
-            put_i32(buf, self.max_bytes)
+            put_i32(buf, self.max_bytes);
         }
         if version >= 0 {
             {
@@ -90,10 +87,10 @@ impl<'a> Encode for FetchSnapshotRequest<'a> {
                     },
                     |b| {
                         if flex {
-                            put_compact_nullable_string(b, self.cluster_id.as_deref())
+                            put_compact_nullable_string(b, self.cluster_id.as_deref());
                         } else {
-                            put_nullable_string(b, self.cluster_id.as_deref())
-                        };
+                            put_nullable_string(b, self.cluster_id.as_deref());
+                        }
                         Ok(())
                     },
                 );
@@ -187,7 +184,7 @@ impl<'de> DecodeBorrow<'de> for FetchSnapshotRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> FetchSnapshotRequest<'a> {
+impl FetchSnapshotRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -206,38 +203,32 @@ impl<'a> FetchSnapshotRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicSnapshot<'a> {
     pub name: &'a str,
     pub partitions: Vec<PartitionSnapshot>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicSnapshot<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicSnapshot<'a> {
+impl TopicSnapshot<'_> {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_request::TopicSnapshot {
         crate::owned::fetch_snapshot_request::TopicSnapshot {
             name: (self.name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionSnapshot::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for TopicSnapshot<'a> {
+impl Encode for TopicSnapshot<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -310,7 +301,7 @@ impl<'de> DecodeBorrow<'de> for TopicSnapshot<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicSnapshot<'a> {
+impl TopicSnapshot<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -323,7 +314,7 @@ impl<'a> TopicSnapshot<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionSnapshot {
     pub partition: i32,
     pub current_leader_epoch: i32,
@@ -331,18 +322,6 @@ pub struct PartitionSnapshot {
     pub position: i64,
     pub replica_directory_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for PartitionSnapshot {
-    fn default() -> Self {
-        Self {
-            partition: 0i32,
-            current_leader_epoch: 0i32,
-            snapshot_id: Default::default(),
-            position: 0i64,
-            replica_directory_id: Default::default(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl PartitionSnapshot {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_request::PartitionSnapshot {
@@ -360,16 +339,16 @@ impl Encode for PartitionSnapshot {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 0 {
-            put_i32(buf, self.current_leader_epoch)
+            put_i32(buf, self.current_leader_epoch);
         }
         if version >= 0 {
-            self.snapshot_id.encode(buf, version)?
+            self.snapshot_id.encode(buf, version)?;
         }
         if version >= 0 {
-            put_i64(buf, self.position)
+            put_i64(buf, self.position);
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -467,20 +446,11 @@ impl PartitionSnapshot {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotId {
     pub end_offset: i64,
     pub epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for SnapshotId {
-    fn default() -> Self {
-        Self {
-            end_offset: 0i64,
-            epoch: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl SnapshotId {
     pub fn to_owned(&self) -> crate::owned::fetch_snapshot_request::SnapshotId {
@@ -495,10 +465,10 @@ impl Encode for SnapshotId {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.end_offset)
+            put_i64(buf, self.end_offset);
         }
         if version >= 0 {
-            put_i32(buf, self.epoch)
+            put_i32(buf, self.epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

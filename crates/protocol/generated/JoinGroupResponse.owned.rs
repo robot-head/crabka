@@ -64,51 +64,51 @@ impl Encode for JoinGroupResponse {
         }
         let flex = is_flexible(version);
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i32(buf, self.generation_id)
+            put_i32(buf, self.generation_id);
         }
         if version >= 7 {
             if flex {
-                put_compact_nullable_string(buf, self.protocol_type.as_deref())
+                put_compact_nullable_string(buf, self.protocol_type.as_deref());
             } else {
-                put_nullable_string(buf, self.protocol_type.as_deref())
+                put_nullable_string(buf, self.protocol_type.as_deref());
             }
         }
         if version >= 0 {
             if version >= 7 {
                 if flex {
-                    put_compact_nullable_string(buf, self.protocol_name.as_deref())
+                    put_compact_nullable_string(buf, self.protocol_name.as_deref());
                 } else {
-                    put_nullable_string(buf, self.protocol_name.as_deref())
+                    put_nullable_string(buf, self.protocol_name.as_deref());
                 }
             } else {
                 if flex {
-                    put_compact_string(buf, (self.protocol_name).as_deref().unwrap_or(""))
+                    put_compact_string(buf, (self.protocol_name).as_deref().unwrap_or(""));
                 } else {
-                    put_string(buf, (self.protocol_name).as_deref().unwrap_or(""))
+                    put_string(buf, (self.protocol_name).as_deref().unwrap_or(""));
                 }
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.leader)
+                put_compact_string(buf, &self.leader);
             } else {
-                put_string(buf, &self.leader)
+                put_string(buf, &self.leader);
             }
         }
         if version >= 9 {
-            put_bool(buf, self.skip_assignment)
+            put_bool(buf, self.skip_assignment);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 0 {
@@ -194,7 +194,7 @@ impl Encode for JoinGroupResponse {
         n
     }
 }
-impl<'de> Decode<'de> for JoinGroupResponse {
+impl Decode<'_> for JoinGroupResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -315,23 +315,23 @@ impl Encode for JoinGroupResponseMember {
         let flex = version >= 6;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.member_id)
+                put_compact_string(buf, &self.member_id);
             } else {
-                put_string(buf, &self.member_id)
+                put_string(buf, &self.member_id);
             }
         }
         if version >= 5 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref())
+                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref())
+                put_nullable_string(buf, self.group_instance_id.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_bytes(buf, &self.metadata)
+                put_compact_bytes(buf, &self.metadata);
             } else {
-                put_bytes(buf, &self.metadata)
+                put_bytes(buf, &self.metadata);
             }
         }
         if flex {
@@ -371,7 +371,7 @@ impl Encode for JoinGroupResponseMember {
         n
     }
 }
-impl<'de> Decode<'de> for JoinGroupResponseMember {
+impl Decode<'_> for JoinGroupResponseMember {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();

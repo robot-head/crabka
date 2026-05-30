@@ -20,33 +20,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetForLeaderEpochResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<OffsetForLeaderTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetForLeaderEpochResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OffsetForLeaderEpochResponse<'a> {
+impl OffsetForLeaderEpochResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_response::OffsetForLeaderEpochResponse {
         crate::owned::offset_for_leader_epoch_response::OffsetForLeaderEpochResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(OffsetForLeaderTopicResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetForLeaderEpochResponse<'a> {
+impl Encode for OffsetForLeaderEpochResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -56,7 +50,7 @@ impl<'a> Encode for OffsetForLeaderEpochResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 2 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -123,7 +117,7 @@ impl<'de> DecodeBorrow<'de> for OffsetForLeaderEpochResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetForLeaderEpochResponse<'a> {
+impl OffsetForLeaderEpochResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -136,40 +130,34 @@ impl<'a> OffsetForLeaderEpochResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetForLeaderTopicResult<'a> {
     pub topic: &'a str,
     pub partitions: Vec<EpochEndOffset>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetForLeaderTopicResult<'a> {
-    fn default() -> Self {
-        Self {
-            topic: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OffsetForLeaderTopicResult<'a> {
+impl OffsetForLeaderTopicResult<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::offset_for_leader_epoch_response::OffsetForLeaderTopicResult {
         crate::owned::offset_for_leader_epoch_response::OffsetForLeaderTopicResult {
             topic: (self.topic).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(EpochEndOffset::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetForLeaderTopicResult<'a> {
+impl Encode for OffsetForLeaderTopicResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic)
+                put_compact_string(buf, self.topic);
             } else {
-                put_string(buf, self.topic)
+                put_string(buf, self.topic);
             }
         }
         if version >= 0 {
@@ -242,7 +230,7 @@ impl<'de> DecodeBorrow<'de> for OffsetForLeaderTopicResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetForLeaderTopicResult<'a> {
+impl OffsetForLeaderTopicResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -289,16 +277,16 @@ impl Encode for EpochEndOffset {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 1 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.end_offset)
+            put_i64(buf, self.end_offset);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -10,24 +10,14 @@ use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Status<'a> {
     pub status_code: i8,
     pub status_detail: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl<'a> Default for Status<'a> {
-    fn default() -> Self {
-        Self {
-            status_code: 0i8,
-            status_detail: "",
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> Status<'a> {
+impl Status<'_> {
     pub fn to_owned(&self) -> crate::owned::common::status::Status {
         crate::owned::common::status::Status {
             status_code: (self.status_code),
@@ -37,17 +27,17 @@ impl<'a> Status<'a> {
     }
 }
 
-impl<'a> Encode for Status<'a> {
+impl Encode for Status<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i8(buf, self.status_code)
+            put_i8(buf, self.status_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.status_detail)
+                put_compact_string(buf, self.status_detail);
             } else {
-                put_string(buf, self.status_detail)
+                put_string(buf, self.status_detail);
             }
         }
         if flex {
@@ -99,7 +89,7 @@ impl<'de> DecodeBorrow<'de> for Status<'de> {
 }
 
 #[cfg(test)]
-impl<'a> Status<'a> {
+impl Status<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

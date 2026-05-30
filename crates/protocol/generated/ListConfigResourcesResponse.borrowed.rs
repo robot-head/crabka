@@ -20,24 +20,14 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListConfigResourcesResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub config_resources: Vec<ConfigResource<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ListConfigResourcesResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            config_resources: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ListConfigResourcesResponse<'a> {
+impl ListConfigResourcesResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::list_config_resources_response::ListConfigResourcesResponse {
@@ -46,13 +36,13 @@ impl<'a> ListConfigResourcesResponse<'a> {
             error_code: (self.error_code),
             config_resources: (self.config_resources)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(ConfigResource::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ListConfigResourcesResponse<'a> {
+impl Encode for ListConfigResourcesResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -62,10 +52,10 @@ impl<'a> Encode for ListConfigResourcesResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
@@ -143,7 +133,7 @@ impl<'de> DecodeBorrow<'de> for ListConfigResourcesResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ListConfigResourcesResponse<'a> {
+impl ListConfigResourcesResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -165,7 +155,7 @@ pub struct ConfigResource<'a> {
     pub resource_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ConfigResource<'a> {
+impl Default for ConfigResource<'_> {
     fn default() -> Self {
         Self {
             resource_name: "",
@@ -174,7 +164,7 @@ impl<'a> Default for ConfigResource<'a> {
         }
     }
 }
-impl<'a> ConfigResource<'a> {
+impl ConfigResource<'_> {
     pub fn to_owned(&self) -> crate::owned::list_config_resources_response::ConfigResource {
         crate::owned::list_config_resources_response::ConfigResource {
             resource_name: (self.resource_name).to_string(),
@@ -183,18 +173,18 @@ impl<'a> ConfigResource<'a> {
         }
     }
 }
-impl<'a> Encode for ConfigResource<'a> {
+impl Encode for ConfigResource<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.resource_name)
+                put_compact_string(buf, self.resource_name);
             } else {
-                put_string(buf, self.resource_name)
+                put_string(buf, self.resource_name);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -243,7 +233,7 @@ impl<'de> DecodeBorrow<'de> for ConfigResource<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ConfigResource<'a> {
+impl ConfigResource<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

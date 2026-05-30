@@ -13,18 +13,10 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndTxnMarker {
     pub coordinator_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for EndTxnMarker {
-    fn default() -> Self {
-        Self {
-            coordinator_epoch: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl EndTxnMarker {
     pub fn to_owned(&self) -> crate::owned::end_txn_marker::EndTxnMarker {
@@ -43,7 +35,7 @@ impl Encode for EndTxnMarker {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.coordinator_epoch)
+            put_i32(buf, self.coordinator_epoch);
         }
         Ok(())
     }

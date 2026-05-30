@@ -19,34 +19,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetDeleteResponse<'a> {
     pub error_code: i16,
     pub throttle_time_ms: i32,
     pub topics: Vec<OffsetDeleteResponseTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetDeleteResponse<'a> {
-    fn default() -> Self {
-        Self {
-            error_code: 0i16,
-            throttle_time_ms: 0i32,
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OffsetDeleteResponse<'a> {
+impl OffsetDeleteResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_delete_response::OffsetDeleteResponse {
         crate::owned::offset_delete_response::OffsetDeleteResponse {
             error_code: (self.error_code),
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(OffsetDeleteResponseTopic::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetDeleteResponse<'a> {
+impl Encode for OffsetDeleteResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -56,10 +49,10 @@ impl<'a> Encode for OffsetDeleteResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -121,7 +114,7 @@ impl<'de> DecodeBorrow<'de> for OffsetDeleteResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetDeleteResponse<'a> {
+impl OffsetDeleteResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -137,38 +130,32 @@ impl<'a> OffsetDeleteResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetDeleteResponseTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<OffsetDeleteResponsePartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetDeleteResponseTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OffsetDeleteResponseTopic<'a> {
+impl OffsetDeleteResponseTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_delete_response::OffsetDeleteResponseTopic {
         crate::owned::offset_delete_response::OffsetDeleteResponseTopic {
             name: (self.name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(OffsetDeleteResponsePartition::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetDeleteResponseTopic<'a> {
+impl Encode for OffsetDeleteResponseTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 32767;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -230,7 +217,7 @@ impl<'de> DecodeBorrow<'de> for OffsetDeleteResponseTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetDeleteResponseTopic<'a> {
+impl OffsetDeleteResponseTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -243,20 +230,11 @@ impl<'a> OffsetDeleteResponseTopic<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetDeleteResponsePartition {
     pub partition_index: i32,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for OffsetDeleteResponsePartition {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl OffsetDeleteResponsePartition {
     pub fn to_owned(&self) -> crate::owned::offset_delete_response::OffsetDeleteResponsePartition {
@@ -271,10 +249,10 @@ impl Encode for OffsetDeleteResponsePartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 32767;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         Ok(())
     }

@@ -4,12 +4,11 @@ use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
@@ -24,7 +23,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConsumerGroupHeartbeatResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -35,37 +34,23 @@ pub struct ConsumerGroupHeartbeatResponse<'a> {
     pub assignment: Option<Assignment>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for ConsumerGroupHeartbeatResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            member_id: None,
-            member_epoch: 0i32,
-            heartbeat_interval_ms: 0i32,
-            assignment: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> ConsumerGroupHeartbeatResponse<'a> {
+impl ConsumerGroupHeartbeatResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse {
         crate::owned::consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
-            member_id: (self.member_id).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            member_id: (self.member_id).map(std::string::ToString::to_string),
             member_epoch: (self.member_epoch),
             heartbeat_interval_ms: (self.heartbeat_interval_ms),
-            assignment: (self.assignment).as_ref().map(|v| v.to_owned()),
+            assignment: (self.assignment).as_ref().map(Assignment::to_owned),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for ConsumerGroupHeartbeatResponse<'a> {
+impl Encode for ConsumerGroupHeartbeatResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -75,30 +60,30 @@ impl<'a> Encode for ConsumerGroupHeartbeatResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.member_id)
+                put_compact_nullable_string(buf, self.member_id);
             } else {
-                put_nullable_string(buf, self.member_id)
+                put_nullable_string(buf, self.member_id);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.member_epoch)
+            put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.heartbeat_interval_ms)
+            put_i32(buf, self.heartbeat_interval_ms);
         }
         if version >= 0 {
             match &self.assignment {
@@ -209,7 +194,7 @@ impl<'de> DecodeBorrow<'de> for ConsumerGroupHeartbeatResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> ConsumerGroupHeartbeatResponse<'a> {
+impl ConsumerGroupHeartbeatResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -237,25 +222,17 @@ impl<'a> ConsumerGroupHeartbeatResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Assignment {
     pub topic_partitions: Vec<super::common::topic_partitions::TopicPartitions>,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for Assignment {
-    fn default() -> Self {
-        Self {
-            topic_partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl Assignment {
     pub fn to_owned(&self) -> crate::owned::consumer_group_heartbeat_response::Assignment {
         crate::owned::consumer_group_heartbeat_response::Assignment {
             topic_partitions: (self.topic_partitions)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::common::topic_partitions::TopicPartitions::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }

@@ -20,33 +20,27 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterReplicaLogDirsResponse<'a> {
     pub throttle_time_ms: i32,
     pub results: Vec<AlterReplicaLogDirTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterReplicaLogDirsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            results: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterReplicaLogDirsResponse<'a> {
+impl AlterReplicaLogDirsResponse<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_response::AlterReplicaLogDirsResponse {
         crate::owned::alter_replica_log_dirs_response::AlterReplicaLogDirsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            results: (self.results).iter().map(|it| it.to_owned()).collect(),
+            results: (self.results)
+                .iter()
+                .map(AlterReplicaLogDirTopicResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterReplicaLogDirsResponse<'a> {
+impl Encode for AlterReplicaLogDirsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -56,7 +50,7 @@ impl<'a> Encode for AlterReplicaLogDirsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -126,7 +120,7 @@ impl<'de> DecodeBorrow<'de> for AlterReplicaLogDirsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterReplicaLogDirsResponse<'a> {
+impl AlterReplicaLogDirsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -139,40 +133,34 @@ impl<'a> AlterReplicaLogDirsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterReplicaLogDirTopicResult<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<AlterReplicaLogDirPartitionResult>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for AlterReplicaLogDirTopicResult<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> AlterReplicaLogDirTopicResult<'a> {
+impl AlterReplicaLogDirTopicResult<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::alter_replica_log_dirs_response::AlterReplicaLogDirTopicResult {
         crate::owned::alter_replica_log_dirs_response::AlterReplicaLogDirTopicResult {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(AlterReplicaLogDirPartitionResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for AlterReplicaLogDirTopicResult<'a> {
+impl Encode for AlterReplicaLogDirTopicResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name)
+                put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name)
+                put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -247,7 +235,7 @@ impl<'de> DecodeBorrow<'de> for AlterReplicaLogDirTopicResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> AlterReplicaLogDirTopicResult<'a> {
+impl AlterReplicaLogDirTopicResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -260,20 +248,11 @@ impl<'a> AlterReplicaLogDirTopicResult<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterReplicaLogDirPartitionResult {
     pub partition_index: i32,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for AlterReplicaLogDirPartitionResult {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl AlterReplicaLogDirPartitionResult {
     pub fn to_owned(
@@ -290,10 +269,10 @@ impl Encode for AlterReplicaLogDirPartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

@@ -34,7 +34,7 @@ pub struct OffsetCommitRequest<'a> {
     pub topics: Vec<OffsetCommitRequestTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetCommitRequest<'a> {
+impl Default for OffsetCommitRequest<'_> {
     fn default() -> Self {
         Self {
             group_id: "",
@@ -47,20 +47,23 @@ impl<'a> Default for OffsetCommitRequest<'a> {
         }
     }
 }
-impl<'a> OffsetCommitRequest<'a> {
+impl OffsetCommitRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequest {
         crate::owned::offset_commit_request::OffsetCommitRequest {
             group_id: (self.group_id).to_string(),
             generation_id_or_member_epoch: (self.generation_id_or_member_epoch),
             member_id: (self.member_id).to_string(),
-            group_instance_id: (self.group_instance_id).map(|s| s.to_string()),
+            group_instance_id: (self.group_instance_id).map(std::string::ToString::to_string),
             retention_time_ms: (self.retention_time_ms),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(OffsetCommitRequestTopic::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetCommitRequest<'a> {
+impl Encode for OffsetCommitRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -71,30 +74,30 @@ impl<'a> Encode for OffsetCommitRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.group_id)
+                put_compact_string(buf, self.group_id);
             } else {
-                put_string(buf, self.group_id)
+                put_string(buf, self.group_id);
             }
         }
         if version >= 1 {
-            put_i32(buf, self.generation_id_or_member_epoch)
+            put_i32(buf, self.generation_id_or_member_epoch);
         }
         if version >= 1 {
             if flex {
-                put_compact_string(buf, self.member_id)
+                put_compact_string(buf, self.member_id);
             } else {
-                put_string(buf, self.member_id)
+                put_string(buf, self.member_id);
             }
         }
         if version >= 7 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id)
+                put_compact_nullable_string(buf, self.group_instance_id);
             } else {
-                put_nullable_string(buf, self.group_instance_id)
+                put_nullable_string(buf, self.group_instance_id);
             }
         }
-        if version >= 2 && version <= 4 {
-            put_i64(buf, self.retention_time_ms)
+        if (2..=4).contains(&version) {
+            put_i64(buf, self.retention_time_ms);
         }
         if version >= 0 {
             {
@@ -137,7 +140,7 @@ impl<'a> Encode for OffsetCommitRequest<'a> {
                 nullable_string_len(self.group_instance_id)
             };
         }
-        if version >= 2 && version <= 4 {
+        if (2..=4).contains(&version) {
             n += 8;
         }
         if version >= 0 {
@@ -189,7 +192,7 @@ impl<'de> DecodeBorrow<'de> for OffsetCommitRequest<'de> {
                 get_nullable_string_borrowed(buf)?
             };
         }
-        if version >= 2 && version <= 4 {
+        if (2..=4).contains(&version) {
             out.retention_time_ms = get_i64(buf)?;
         }
         if version >= 0 {
@@ -209,7 +212,7 @@ impl<'de> DecodeBorrow<'de> for OffsetCommitRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetCommitRequest<'a> {
+impl OffsetCommitRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -225,7 +228,7 @@ impl<'a> OffsetCommitRequest<'a> {
         if version >= 7 {
             m.group_instance_id = Some("x");
         }
-        if version >= 2 && version <= 4 {
+        if (2..=4).contains(&version) {
             m.retention_time_ms = 1i64;
         }
         if version >= 0 {
@@ -234,45 +237,38 @@ impl<'a> OffsetCommitRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct OffsetCommitRequestTopic<'a> {
     pub name: &'a str,
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<OffsetCommitRequestPartition<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetCommitRequestTopic<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            topic_id: Default::default(),
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> OffsetCommitRequestTopic<'a> {
+impl OffsetCommitRequestTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequestTopic {
         crate::owned::offset_commit_request::OffsetCommitRequestTopic {
             name: (self.name).to_string(),
             topic_id: (self.topic_id),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(OffsetCommitRequestPartition::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetCommitRequestTopic<'a> {
+impl Encode for OffsetCommitRequestTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 10 {
-            crate::primitives::uuid::put_uuid(buf, self.topic_id)
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
         }
         if version >= 0 {
             {
@@ -291,7 +287,7 @@ impl<'a> Encode for OffsetCommitRequestTopic<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 8;
         let mut n: usize = 0;
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             n += if flex {
                 compact_string_len(self.name)
             } else {
@@ -323,7 +319,7 @@ impl<'de> DecodeBorrow<'de> for OffsetCommitRequestTopic<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 8;
         let mut out = Self::default();
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             out.name = if flex {
                 get_compact_string_borrowed(buf)?
             } else {
@@ -350,11 +346,11 @@ impl<'de> DecodeBorrow<'de> for OffsetCommitRequestTopic<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetCommitRequestTopic<'a> {
+impl OffsetCommitRequestTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 9 {
+        if (0..=9).contains(&version) {
             m.name = "x";
         }
         if version >= 10 {
@@ -374,7 +370,7 @@ pub struct OffsetCommitRequestPartition<'a> {
     pub committed_metadata: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for OffsetCommitRequestPartition<'a> {
+impl Default for OffsetCommitRequestPartition<'_> {
     fn default() -> Self {
         Self {
             partition_index: 0i32,
@@ -385,34 +381,34 @@ impl<'a> Default for OffsetCommitRequestPartition<'a> {
         }
     }
 }
-impl<'a> OffsetCommitRequestPartition<'a> {
+impl OffsetCommitRequestPartition<'_> {
     pub fn to_owned(&self) -> crate::owned::offset_commit_request::OffsetCommitRequestPartition {
         crate::owned::offset_commit_request::OffsetCommitRequestPartition {
             partition_index: (self.partition_index),
             committed_offset: (self.committed_offset),
             committed_leader_epoch: (self.committed_leader_epoch),
-            committed_metadata: (self.committed_metadata).map(|s| s.to_string()),
+            committed_metadata: (self.committed_metadata).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for OffsetCommitRequestPartition<'a> {
+impl Encode for OffsetCommitRequestPartition<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 8;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.committed_offset)
+            put_i64(buf, self.committed_offset);
         }
         if version >= 6 {
-            put_i32(buf, self.committed_leader_epoch)
+            put_i32(buf, self.committed_leader_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.committed_metadata)
+                put_compact_nullable_string(buf, self.committed_metadata);
             } else {
-                put_nullable_string(buf, self.committed_metadata)
+                put_nullable_string(buf, self.committed_metadata);
             }
         }
         if flex {
@@ -474,7 +470,7 @@ impl<'de> DecodeBorrow<'de> for OffsetCommitRequestPartition<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> OffsetCommitRequestPartition<'a> {
+impl OffsetCommitRequestPartition<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

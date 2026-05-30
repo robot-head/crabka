@@ -39,10 +39,10 @@ impl Encode for UpdateRaftVoterResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -76,7 +76,7 @@ impl Encode for UpdateRaftVoterResponse {
         n
     }
 }
-impl<'de> Decode<'de> for UpdateRaftVoterResponse {
+impl Decode<'_> for UpdateRaftVoterResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -151,20 +151,20 @@ impl Encode for CurrentLeader {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.leader_id)
+            put_i32(buf, self.leader_id);
         }
         if version >= 0 {
-            put_i32(buf, self.leader_epoch)
+            put_i32(buf, self.leader_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host)
+                put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                put_string(buf, &self.host);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.port)
+            put_i32(buf, self.port);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -198,7 +198,7 @@ impl Encode for CurrentLeader {
         n
     }
 }
-impl<'de> Decode<'de> for CurrentLeader {
+impl Decode<'_> for CurrentLeader {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

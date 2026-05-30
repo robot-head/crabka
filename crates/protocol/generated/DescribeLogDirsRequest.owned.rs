@@ -58,7 +58,7 @@ impl Encode for DescribeLogDirsRequest {
             n += {
                 let opt: Option<&Vec<_>> = (self.topics).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -73,7 +73,7 @@ impl Encode for DescribeLogDirsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DescribeLogDirsRequest {
+impl Decode<'_> for DescribeLogDirsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -126,9 +126,9 @@ impl Encode for DescribableLogDirTopic {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.topic)
+                put_compact_string(buf, &self.topic);
             } else {
-                put_string(buf, &self.topic)
+                put_string(buf, &self.topic);
             }
         }
         if version >= 0 {
@@ -170,7 +170,7 @@ impl Encode for DescribableLogDirTopic {
         n
     }
 }
-impl<'de> Decode<'de> for DescribableLogDirTopic {
+impl Decode<'_> for DescribableLogDirTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

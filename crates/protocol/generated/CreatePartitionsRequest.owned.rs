@@ -45,10 +45,10 @@ impl Encode for CreatePartitionsRequest {
             }
         }
         if version >= 0 {
-            put_i32(buf, self.timeout_ms)
+            put_i32(buf, self.timeout_ms);
         }
         if version >= 0 {
-            put_bool(buf, self.validate_only)
+            put_bool(buf, self.validate_only);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -80,7 +80,7 @@ impl Encode for CreatePartitionsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for CreatePartitionsRequest {
+impl Decode<'_> for CreatePartitionsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -141,13 +141,13 @@ impl Encode for CreatePartitionsTopic {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
-            put_i32(buf, self.count)
+            put_i32(buf, self.count);
         }
         if version >= 0 {
             {
@@ -183,7 +183,7 @@ impl Encode for CreatePartitionsTopic {
             n += {
                 let opt: Option<&Vec<_>> = (self.assignments).as_ref();
                 let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(|v| v.len()),
+                    opt.map(std::vec::Vec::len),
                     flex,
                 );
                 let body: usize =
@@ -198,7 +198,7 @@ impl Encode for CreatePartitionsTopic {
         n
     }
 }
-impl<'de> Decode<'de> for CreatePartitionsTopic {
+impl Decode<'_> for CreatePartitionsTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
@@ -290,7 +290,7 @@ impl Encode for CreatePartitionsAssignment {
         n
     }
 }
-impl<'de> Decode<'de> for CreatePartitionsAssignment {
+impl Decode<'_> for CreatePartitionsAssignment {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

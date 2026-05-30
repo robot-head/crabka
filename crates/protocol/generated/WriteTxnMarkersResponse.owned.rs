@@ -69,7 +69,7 @@ impl Encode for WriteTxnMarkersResponse {
         n
     }
 }
-impl<'de> Decode<'de> for WriteTxnMarkersResponse {
+impl Decode<'_> for WriteTxnMarkersResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -116,7 +116,7 @@ impl Encode for WritableTxnMarkerResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 0 {
             {
@@ -153,7 +153,7 @@ impl Encode for WritableTxnMarkerResult {
         n
     }
 }
-impl<'de> Decode<'de> for WritableTxnMarkerResult {
+impl Decode<'_> for WritableTxnMarkerResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -201,9 +201,9 @@ impl Encode for WritableTxnMarkerTopicResult {
         let flex = version >= 1;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -248,7 +248,7 @@ impl Encode for WritableTxnMarkerTopicResult {
         n
     }
 }
-impl<'de> Decode<'de> for WritableTxnMarkerTopicResult {
+impl Decode<'_> for WritableTxnMarkerTopicResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
@@ -299,10 +299,10 @@ impl Encode for WritableTxnMarkerPartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -326,7 +326,7 @@ impl Encode for WritableTxnMarkerPartitionResult {
         n
     }
 }
-impl<'de> Decode<'de> for WritableTxnMarkerPartitionResult {
+impl Decode<'_> for WritableTxnMarkerPartitionResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();

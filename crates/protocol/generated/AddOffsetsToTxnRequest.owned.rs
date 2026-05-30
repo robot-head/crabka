@@ -39,22 +39,22 @@ impl Encode for AddOffsetsToTxnRequest {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.transactional_id)
+                put_compact_string(buf, &self.transactional_id);
             } else {
-                put_string(buf, &self.transactional_id)
+                put_string(buf, &self.transactional_id);
             }
         }
         if version >= 0 {
-            put_i64(buf, self.producer_id)
+            put_i64(buf, self.producer_id);
         }
         if version >= 0 {
-            put_i16(buf, self.producer_epoch)
+            put_i16(buf, self.producer_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.group_id)
+                put_compact_string(buf, &self.group_id);
             } else {
-                put_string(buf, &self.group_id)
+                put_string(buf, &self.group_id);
             }
         }
         if flex {
@@ -93,7 +93,7 @@ impl Encode for AddOffsetsToTxnRequest {
         n
     }
 }
-impl<'de> Decode<'de> for AddOffsetsToTxnRequest {
+impl Decode<'_> for AddOffsetsToTxnRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {

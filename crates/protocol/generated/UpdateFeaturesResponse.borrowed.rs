@@ -24,7 +24,7 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdateFeaturesResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -32,29 +32,21 @@ pub struct UpdateFeaturesResponse<'a> {
     pub results: Vec<UpdatableFeatureResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for UpdateFeaturesResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            error_message: None,
-            results: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> UpdateFeaturesResponse<'a> {
+impl UpdateFeaturesResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::update_features_response::UpdateFeaturesResponse {
         crate::owned::update_features_response::UpdateFeaturesResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
-            results: (self.results).iter().map(|it| it.to_owned()).collect(),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
+            results: (self.results)
+                .iter()
+                .map(UpdatableFeatureResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for UpdateFeaturesResponse<'a> {
+impl Encode for UpdateFeaturesResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -64,19 +56,19 @@ impl<'a> Encode for UpdateFeaturesResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
-        if version >= 0 && version <= 1 {
+        if (0..=1).contains(&version) {
             {
                 crate::primitives::array::put_array_len(buf, (self.results).len(), flex);
                 for it in &self.results {
@@ -106,7 +98,7 @@ impl<'a> Encode for UpdateFeaturesResponse<'a> {
                 nullable_string_len(self.error_message)
             };
         }
-        if version >= 0 && version <= 1 {
+        if (0..=1).contains(&version) {
             n += {
                 let prefix =
                     crate::primitives::array::array_len_prefix_len((self.results).len(), flex);
@@ -147,7 +139,7 @@ impl<'de> DecodeBorrow<'de> for UpdateFeaturesResponse<'de> {
                 get_nullable_string_borrowed(buf)?
             };
         }
-        if version >= 0 && version <= 1 {
+        if (0..=1).contains(&version) {
             out.results = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
@@ -164,7 +156,7 @@ impl<'de> DecodeBorrow<'de> for UpdateFeaturesResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> UpdateFeaturesResponse<'a> {
+impl UpdateFeaturesResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -177,57 +169,47 @@ impl<'a> UpdateFeaturesResponse<'a> {
         if version >= 0 {
             m.error_message = Some("x");
         }
-        if version >= 0 && version <= 1 {
+        if (0..=1).contains(&version) {
             m.results = vec![UpdatableFeatureResult::populated(version)];
         }
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdatableFeatureResult<'a> {
     pub feature: &'a str,
     pub error_code: i16,
     pub error_message: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for UpdatableFeatureResult<'a> {
-    fn default() -> Self {
-        Self {
-            feature: "",
-            error_code: 0i16,
-            error_message: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> UpdatableFeatureResult<'a> {
+impl UpdatableFeatureResult<'_> {
     pub fn to_owned(&self) -> crate::owned::update_features_response::UpdatableFeatureResult {
         crate::owned::update_features_response::UpdatableFeatureResult {
             feature: (self.feature).to_string(),
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for UpdatableFeatureResult<'a> {
+impl Encode for UpdatableFeatureResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.feature)
+                put_compact_string(buf, self.feature);
             } else {
-                put_string(buf, self.feature)
+                put_string(buf, self.feature);
             }
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message)
+                put_compact_nullable_string(buf, self.error_message);
             } else {
-                put_nullable_string(buf, self.error_message)
+                put_nullable_string(buf, self.error_message);
             }
         }
         if flex {
@@ -291,7 +273,7 @@ impl<'de> DecodeBorrow<'de> for UpdatableFeatureResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> UpdatableFeatureResult<'a> {
+impl UpdatableFeatureResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

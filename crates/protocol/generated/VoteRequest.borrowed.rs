@@ -31,7 +31,7 @@ pub struct VoteRequest<'a> {
     pub topics: Vec<TopicData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for VoteRequest<'a> {
+impl Default for VoteRequest<'_> {
     fn default() -> Self {
         Self {
             cluster_id: None,
@@ -41,17 +41,17 @@ impl<'a> Default for VoteRequest<'a> {
         }
     }
 }
-impl<'a> VoteRequest<'a> {
+impl VoteRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::vote_request::VoteRequest {
         crate::owned::vote_request::VoteRequest {
-            cluster_id: (self.cluster_id).map(|s| s.to_string()),
+            cluster_id: (self.cluster_id).map(std::string::ToString::to_string),
             voter_id: (self.voter_id),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics).iter().map(TopicData::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for VoteRequest<'a> {
+impl Encode for VoteRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -62,13 +62,13 @@ impl<'a> Encode for VoteRequest<'a> {
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id)
+                put_compact_nullable_string(buf, self.cluster_id);
             } else {
-                put_nullable_string(buf, self.cluster_id)
+                put_nullable_string(buf, self.cluster_id);
             }
         }
         if version >= 1 {
-            put_i32(buf, self.voter_id)
+            put_i32(buf, self.voter_id);
         }
         if version >= 0 {
             {
@@ -149,7 +149,7 @@ impl<'de> DecodeBorrow<'de> for VoteRequest<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> VoteRequest<'a> {
+impl VoteRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -165,38 +165,32 @@ impl<'a> VoteRequest<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicData<'a> {
     pub topic_name: &'a str,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for TopicData<'a> {
-    fn default() -> Self {
-        Self {
-            topic_name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     pub fn to_owned(&self) -> crate::owned::vote_request::TopicData {
         crate::owned::vote_request::TopicData {
             topic_name: (self.topic_name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(PartitionData::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for TopicData<'a> {
+impl Encode for TopicData<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.topic_name)
+                put_compact_string(buf, self.topic_name);
             } else {
-                put_string(buf, self.topic_name)
+                put_string(buf, self.topic_name);
             }
         }
         if version >= 0 {
@@ -269,7 +263,7 @@ impl<'de> DecodeBorrow<'de> for TopicData<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> TopicData<'a> {
+impl TopicData<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -282,7 +276,7 @@ impl<'a> TopicData<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionData {
     pub partition_index: i32,
     pub replica_epoch: i32,
@@ -293,21 +287,6 @@ pub struct PartitionData {
     pub last_offset: i64,
     pub pre_vote: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for PartitionData {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            replica_epoch: 0i32,
-            replica_id: 0i32,
-            replica_directory_id: Default::default(),
-            voter_directory_id: Default::default(),
-            last_offset_epoch: 0i32,
-            last_offset: 0i64,
-            pre_vote: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl PartitionData {
     pub fn to_owned(&self) -> crate::owned::vote_request::PartitionData {
@@ -328,28 +307,28 @@ impl Encode for PartitionData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i32(buf, self.replica_epoch)
+            put_i32(buf, self.replica_epoch);
         }
         if version >= 0 {
-            put_i32(buf, self.replica_id)
+            put_i32(buf, self.replica_id);
         }
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id)
+            crate::primitives::uuid::put_uuid(buf, self.replica_directory_id);
         }
         if version >= 1 {
-            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id)
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
         }
         if version >= 0 {
-            put_i32(buf, self.last_offset_epoch)
+            put_i32(buf, self.last_offset_epoch);
         }
         if version >= 0 {
-            put_i64(buf, self.last_offset)
+            put_i64(buf, self.last_offset);
         }
         if version >= 2 {
-            put_bool(buf, self.pre_vote)
+            put_bool(buf, self.pre_vote);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

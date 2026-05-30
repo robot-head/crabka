@@ -4,7 +4,7 @@ use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Assignment<'a> {
     pub active_tasks: Vec<super::task_ids::TaskIds<'a>>,
     pub standby_tasks: Vec<super::task_ids::TaskIds<'a>>,
@@ -12,32 +12,27 @@ pub struct Assignment<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 
-impl<'a> Default for Assignment<'a> {
-    fn default() -> Self {
-        Self {
-            active_tasks: Vec::new(),
-            standby_tasks: Vec::new(),
-            warmup_tasks: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> Assignment<'a> {
+impl Assignment<'_> {
     pub fn to_owned(&self) -> crate::owned::common::assignment::Assignment {
         crate::owned::common::assignment::Assignment {
-            active_tasks: (self.active_tasks).iter().map(|it| it.to_owned()).collect(),
+            active_tasks: (self.active_tasks)
+                .iter()
+                .map(super::task_ids::TaskIds::to_owned)
+                .collect(),
             standby_tasks: (self.standby_tasks)
                 .iter()
-                .map(|it| it.to_owned())
+                .map(super::task_ids::TaskIds::to_owned)
                 .collect(),
-            warmup_tasks: (self.warmup_tasks).iter().map(|it| it.to_owned()).collect(),
+            warmup_tasks: (self.warmup_tasks)
+                .iter()
+                .map(super::task_ids::TaskIds::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
 
-impl<'a> Encode for Assignment<'a> {
+impl Encode for Assignment<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
@@ -158,7 +153,7 @@ impl<'de> DecodeBorrow<'de> for Assignment<'de> {
 }
 
 #[cfg(test)]
-impl<'a> Assignment<'a> {
+impl Assignment<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();

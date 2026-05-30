@@ -16,18 +16,10 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UnregisterBrokerRequest {
     pub broker_id: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for UnregisterBrokerRequest {
-    fn default() -> Self {
-        Self {
-            broker_id: 0i32,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl UnregisterBrokerRequest {
     pub fn to_owned(&self) -> crate::owned::unregister_broker_request::UnregisterBrokerRequest {
@@ -47,7 +39,7 @@ impl Encode for UnregisterBrokerRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.broker_id)
+            put_i32(buf, self.broker_id);
         }
         if flex {
             let tagged = WriteTaggedFields::new();

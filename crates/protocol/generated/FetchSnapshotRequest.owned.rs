@@ -52,10 +52,10 @@ impl Encode for FetchSnapshotRequest {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.replica_id)
+            put_i32(buf, self.replica_id);
         }
         if version >= 0 {
-            put_i32(buf, self.max_bytes)
+            put_i32(buf, self.max_bytes);
         }
         if version >= 0 {
             {
@@ -76,10 +76,10 @@ impl Encode for FetchSnapshotRequest {
                     },
                     |b| {
                         if flex {
-                            put_compact_nullable_string(b, self.cluster_id.as_deref())
+                            put_compact_nullable_string(b, self.cluster_id.as_deref());
                         } else {
-                            put_nullable_string(b, self.cluster_id.as_deref())
-                        };
+                            put_nullable_string(b, self.cluster_id.as_deref());
+                        }
                         Ok(())
                     },
                 );
@@ -123,7 +123,7 @@ impl Encode for FetchSnapshotRequest {
         n
     }
 }
-impl<'de> Decode<'de> for FetchSnapshotRequest {
+impl Decode<'_> for FetchSnapshotRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -203,9 +203,9 @@ impl Encode for TopicSnapshot {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -250,7 +250,7 @@ impl Encode for TopicSnapshot {
         n
     }
 }
-impl<'de> Decode<'de> for TopicSnapshot {
+impl Decode<'_> for TopicSnapshot {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -304,16 +304,16 @@ impl Encode for PartitionSnapshot {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i32(buf, self.partition)
+            put_i32(buf, self.partition);
         }
         if version >= 0 {
-            put_i32(buf, self.current_leader_epoch)
+            put_i32(buf, self.current_leader_epoch);
         }
         if version >= 0 {
-            self.snapshot_id.encode(buf, version)?
+            self.snapshot_id.encode(buf, version)?;
         }
         if version >= 0 {
-            put_i64(buf, self.position)
+            put_i64(buf, self.position);
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
@@ -353,7 +353,7 @@ impl Encode for PartitionSnapshot {
         n
     }
 }
-impl<'de> Decode<'de> for PartitionSnapshot {
+impl Decode<'_> for PartitionSnapshot {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
@@ -421,10 +421,10 @@ impl Encode for SnapshotId {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            put_i64(buf, self.end_offset)
+            put_i64(buf, self.end_offset);
         }
         if version >= 0 {
-            put_i32(buf, self.epoch)
+            put_i32(buf, self.epoch);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -448,7 +448,7 @@ impl Encode for SnapshotId {
         n
     }
 }
-impl<'de> Decode<'de> for SnapshotId {
+impl Decode<'_> for SnapshotId {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

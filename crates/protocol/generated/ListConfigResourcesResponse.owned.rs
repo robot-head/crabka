@@ -37,10 +37,10 @@ impl Encode for ListConfigResourcesResponse {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if version >= 0 {
             {
@@ -85,7 +85,7 @@ impl Encode for ListConfigResourcesResponse {
         n
     }
 }
-impl<'de> Decode<'de> for ListConfigResourcesResponse {
+impl Decode<'_> for ListConfigResourcesResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -154,13 +154,13 @@ impl Encode for ConfigResource {
         let flex = version >= 0;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.resource_name)
+                put_compact_string(buf, &self.resource_name);
             } else {
-                put_string(buf, &self.resource_name)
+                put_string(buf, &self.resource_name);
             }
         }
         if version >= 1 {
-            put_i8(buf, self.resource_type)
+            put_i8(buf, self.resource_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -188,7 +188,7 @@ impl Encode for ConfigResource {
         n
     }
 }
-impl<'de> Decode<'de> for ConfigResource {
+impl Decode<'_> for ConfigResource {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();

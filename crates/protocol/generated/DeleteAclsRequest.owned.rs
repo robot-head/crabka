@@ -4,9 +4,8 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i8, put_i8};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -70,7 +69,7 @@ impl Encode for DeleteAclsRequest {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteAclsRequest {
+impl Decode<'_> for DeleteAclsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -136,37 +135,37 @@ impl Encode for DeleteAclsFilter {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i8(buf, self.resource_type_filter)
+            put_i8(buf, self.resource_type_filter);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.resource_name_filter.as_deref())
+                put_compact_nullable_string(buf, self.resource_name_filter.as_deref());
             } else {
-                put_nullable_string(buf, self.resource_name_filter.as_deref())
+                put_nullable_string(buf, self.resource_name_filter.as_deref());
             }
         }
         if version >= 1 {
-            put_i8(buf, self.pattern_type_filter)
+            put_i8(buf, self.pattern_type_filter);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.principal_filter.as_deref())
+                put_compact_nullable_string(buf, self.principal_filter.as_deref());
             } else {
-                put_nullable_string(buf, self.principal_filter.as_deref())
+                put_nullable_string(buf, self.principal_filter.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.host_filter.as_deref())
+                put_compact_nullable_string(buf, self.host_filter.as_deref());
             } else {
-                put_nullable_string(buf, self.host_filter.as_deref())
+                put_nullable_string(buf, self.host_filter.as_deref());
             }
         }
         if version >= 0 {
-            put_i8(buf, self.operation)
+            put_i8(buf, self.operation);
         }
         if version >= 0 {
-            put_i8(buf, self.permission_type)
+            put_i8(buf, self.permission_type);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -217,7 +216,7 @@ impl Encode for DeleteAclsFilter {
         n
     }
 }
-impl<'de> Decode<'de> for DeleteAclsFilter {
+impl Decode<'_> for DeleteAclsFilter {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();

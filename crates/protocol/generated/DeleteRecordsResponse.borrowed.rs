@@ -20,31 +20,25 @@ fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteRecordsResponse<'a> {
     pub throttle_time_ms: i32,
     pub topics: Vec<DeleteRecordsTopicResult<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteRecordsResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            topics: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteRecordsResponse<'a> {
+impl DeleteRecordsResponse<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_records_response::DeleteRecordsResponse {
         crate::owned::delete_records_response::DeleteRecordsResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            topics: (self.topics).iter().map(|it| it.to_owned()).collect(),
+            topics: (self.topics)
+                .iter()
+                .map(DeleteRecordsTopicResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteRecordsResponse<'a> {
+impl Encode for DeleteRecordsResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
             return Err(ProtocolError::UnsupportedVersion {
@@ -54,7 +48,7 @@ impl<'a> Encode for DeleteRecordsResponse<'a> {
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            put_i32(buf, self.throttle_time_ms)
+            put_i32(buf, self.throttle_time_ms);
         }
         if version >= 0 {
             {
@@ -121,7 +115,7 @@ impl<'de> DecodeBorrow<'de> for DeleteRecordsResponse<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteRecordsResponse<'a> {
+impl DeleteRecordsResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -134,38 +128,32 @@ impl<'a> DeleteRecordsResponse<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteRecordsTopicResult<'a> {
     pub name: &'a str,
     pub partitions: Vec<DeleteRecordsPartitionResult>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl<'a> Default for DeleteRecordsTopicResult<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            partitions: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-impl<'a> DeleteRecordsTopicResult<'a> {
+impl DeleteRecordsTopicResult<'_> {
     pub fn to_owned(&self) -> crate::owned::delete_records_response::DeleteRecordsTopicResult {
         crate::owned::delete_records_response::DeleteRecordsTopicResult {
             name: (self.name).to_string(),
-            partitions: (self.partitions).iter().map(|it| it.to_owned()).collect(),
+            partitions: (self.partitions)
+                .iter()
+                .map(DeleteRecordsPartitionResult::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-impl<'a> Encode for DeleteRecordsTopicResult<'a> {
+impl Encode for DeleteRecordsTopicResult<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, self.name)
+                put_compact_string(buf, self.name);
             } else {
-                put_string(buf, self.name)
+                put_string(buf, self.name);
             }
         }
         if version >= 0 {
@@ -238,7 +226,7 @@ impl<'de> DecodeBorrow<'de> for DeleteRecordsTopicResult<'de> {
     }
 }
 #[cfg(test)]
-impl<'a> DeleteRecordsTopicResult<'a> {
+impl DeleteRecordsTopicResult<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
@@ -251,22 +239,12 @@ impl<'a> DeleteRecordsTopicResult<'a> {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteRecordsPartitionResult {
     pub partition_index: i32,
     pub low_watermark: i64,
     pub error_code: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
-}
-impl Default for DeleteRecordsPartitionResult {
-    fn default() -> Self {
-        Self {
-            partition_index: 0i32,
-            low_watermark: 0i64,
-            error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
 }
 impl DeleteRecordsPartitionResult {
     pub fn to_owned(&self) -> crate::owned::delete_records_response::DeleteRecordsPartitionResult {
@@ -282,13 +260,13 @@ impl Encode for DeleteRecordsPartitionResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            put_i32(buf, self.partition_index)
+            put_i32(buf, self.partition_index);
         }
         if version >= 0 {
-            put_i64(buf, self.low_watermark)
+            put_i64(buf, self.low_watermark);
         }
         if version >= 0 {
-            put_i16(buf, self.error_code)
+            put_i16(buf, self.error_code);
         }
         if flex {
             let tagged = WriteTaggedFields::new();
