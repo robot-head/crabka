@@ -229,6 +229,18 @@ pub const POSITION_OUT_OF_RANGE: i16 = 99;
 /// match this cluster's id.
 pub const INCONSISTENT_CLUSTER_ID: i16 = 104;
 
+/// `UNSUPPORTED_COMPRESSION_TYPE` (76) — KIP-714 `PushTelemetry` carried a
+/// `compression_type` the broker can't decompress.
+pub const UNSUPPORTED_COMPRESSION_TYPE: i16 = 76;
+
+/// `THROTTLING_QUOTA_EXCEEDED` (89) — KIP-714 client pushed/fetched
+/// telemetry faster than the configured interval allows.
+pub const THROTTLING_QUOTA_EXCEEDED: i16 = 89;
+
+/// `TELEMETRY_TOO_LARGE` (118) — KIP-714 `PushTelemetry` payload exceeded
+/// `telemetry.max.bytes`.
+pub const TELEMETRY_TOO_LARGE: i16 = 118;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.
