@@ -7,10 +7,22 @@
 //! D/E, so they are dead in the lib build until then.
 #![allow(dead_code)]
 
-use crabka_protocol::Decode;
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+use bytes::{BufMut, Bytes, BytesMut};
+
+use crabka_protocol::owned::consumer_protocol_assignment::{
+    ConsumerProtocolAssignment, TopicPartition,
+};
 use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
+use crabka_protocol::primitives::uuid::Uuid;
+use crabka_protocol::{Decode, Encode};
 
 use super::classic_state::Group as ClassicState;
+use super::consumer_state::{ClassicMemberFacade, GroupState as ConsumerState, MemberState};
+use super::persistence_next_gen::MemberAssignmentState;
+use super::reconciler::ReconcileInput;
 
 /// Decode a classic member's `protocol_metadata` blob as a
 /// `ConsumerProtocolSubscription`. The blob carries a leading `i16` version
@@ -55,17 +67,107 @@ pub(crate) fn classic_is_convertible(state: &ClassicState) -> bool {
 /// Kafka — a server-managed consumer group can always be re-expressed as a
 /// classic group (members become classic members, the server target becomes the
 /// seed assignment). Provided for symmetry; the real work is in Slice 64d-E.
-#[allow(dead_code)] // consumed by Slice 64d-E (downgrade trigger)
 pub(crate) fn consumer_is_convertible() -> bool {
     true
+}
+
+/// Convert a classic group into a consumer group that **hosts its classic
+/// members** (KIP-848 64d-D upgrade). Each classic member becomes a
+/// [`MemberState`] carrying a [`ClassicMemberFacade`]; its subscription is
+/// decoded from its `ConsumerProtocolSubscription` metadata (topic names — the
+/// reconciler resolves them to topic-IDs against the metadata image). The
+/// group is marked dirty so the next reconcile computes the unified target.
+///
+/// Precondition: the caller has checked [`classic_is_convertible`]. Committed
+/// offsets live on the kind-agnostic `Group` container and are untouched here.
+pub(crate) fn convert_classic_to_consumer(classic: &ClassicState) -> ConsumerState {
+    let mut state = ConsumerState::new(classic.group_id.clone());
+    // Seed the group epoch from the classic generation so epochs stay
+    // monotonic across the flip; the first reconcile bumps it.
+    state.group_epoch = classic.generation_id.max(0);
+    for m in classic.members.values() {
+        let names: HashSet<String> = decode_consumer_subscription(&m.protocol_metadata)
+            .map(|s| s.topics.into_iter().collect())
+            .unwrap_or_default();
+        let facade = ClassicMemberFacade {
+            generation_id: classic.generation_id,
+            supported_protocols: m.protocols.clone(),
+            session_timeout: m.session_timeout,
+            last_synced_assignment: m.assignment.clone().unwrap_or_default(),
+            awaiting_sync: true,
+        };
+        state.add_or_update_member(MemberState {
+            member_id: m.member_id.clone(),
+            instance_id: m.group_instance_id.clone(),
+            rack_id: None,
+            client_id: m.client_id.clone(),
+            client_host: m.host.clone(),
+            subscribed_topic_names: names,
+            subscribed_topic_regex: None,
+            compiled_regex: None,
+            server_assignor: None,
+            rebalance_timeout: m.rebalance_timeout,
+            member_epoch: state.group_epoch,
+            previous_member_epoch: 0,
+            assignment_state: MemberAssignmentState::Stable,
+            assigned_partitions: HashMap::new(),
+            partitions_pending_revocation: HashMap::new(),
+            last_seen: Instant::now(),
+            classic: Some(facade),
+        });
+    }
+    state.dirty = true;
+    state
+}
+
+/// Translate a member's server-side target (topic-ID → partitions) into a
+/// classic `ConsumerProtocolAssignment` wire blob (topic-name → partitions),
+/// with the leading `i16` version prefix a classic client expects in the
+/// `SyncGroup` assignment field. Topic IDs absent from the metadata image are
+/// dropped (the topic was deleted). Deterministic order (by topic name).
+pub(crate) fn target_to_consumer_assignment(
+    target: &HashMap<Uuid, Vec<i32>>,
+    image: &ReconcileInput,
+) -> Bytes {
+    let id_to_name: HashMap<Uuid, &str> = image
+        .topic_id_by_name
+        .iter()
+        .map(|(name, id)| (*id, name.as_str()))
+        .collect();
+    let mut assigned: Vec<TopicPartition> = target
+        .iter()
+        .filter_map(|(tid, parts)| {
+            id_to_name.get(tid).map(|name| {
+                let mut p = parts.clone();
+                p.sort_unstable();
+                TopicPartition {
+                    topic: (*name).to_string(),
+                    partitions: p,
+                    ..Default::default()
+                }
+            })
+        })
+        .collect();
+    assigned.sort_by(|a, b| a.topic.cmp(&b.topic));
+    let assignment = ConsumerProtocolAssignment {
+        assigned_partitions: assigned,
+        ..Default::default()
+    };
+    let mut out = BytesMut::new();
+    out.put_i16(0); // "consumer" embedded-protocol version-negotiation prefix
+    assignment
+        .encode(&mut out, 0)
+        .expect("ConsumerProtocolAssignment encode is infallible into BytesMut");
+    out.freeze()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use assert2::assert;
-    use bytes::{BufMut, Bytes, BytesMut};
+    use bytes::{Buf, BufMut, Bytes, BytesMut};
     use crabka_protocol::Encode;
+    use crabka_protocol::primitives::uuid::Uuid;
     use std::time::Duration;
 
     use super::super::classic_state::{Group, Member};
@@ -147,5 +249,81 @@ mod tests {
     #[test]
     fn consumer_group_always_downgradable() {
         assert!(consumer_is_convertible());
+    }
+
+    #[test]
+    fn convert_preserves_members_subscriptions_and_facade() {
+        let mut g = Group::new("g");
+        g.protocol_type = Some("consumer".into());
+        g.generation_id = 3;
+        g.add_member(consumer_member("m1", subscription_blob(&["t1"])));
+        g.add_member(consumer_member("m2", subscription_blob(&["t1", "t2"])));
+
+        let state = convert_classic_to_consumer(&g);
+        assert!(state.group_id == "g");
+        assert!(state.group_epoch == 3); // seeded from classic generation
+        assert!(state.members.len() == 2);
+        let m1 = &state.members["m1"];
+        assert!(m1.is_classic());
+        assert!(m1.subscribed_topic_names.contains("t1"));
+        let facade = m1.classic.as_ref().unwrap();
+        assert!(facade.generation_id == 3);
+        assert!(facade.awaiting_sync);
+        // m2 subscribed to both topics.
+        let m2 = &state.members["m2"];
+        assert!(m2.subscribed_topic_names.len() == 2);
+        // Marked dirty so the next reconcile computes the unified target.
+        assert!(state.dirty);
+    }
+
+    #[test]
+    fn target_translates_to_consumer_assignment_blob() {
+        let t1 = Uuid([1; 16]);
+        let t2 = Uuid([2; 16]);
+        let image = ReconcileInput {
+            topic_id_by_name: [("orders".to_string(), t1), ("events".to_string(), t2)].into(),
+            ..Default::default()
+        };
+        let target: std::collections::HashMap<Uuid, Vec<i32>> =
+            [(t1, vec![2, 0, 1]), (t2, vec![5])].into();
+
+        let blob = target_to_consumer_assignment(&target, &image);
+        // Strip the version prefix and decode back.
+        let mut cur = &blob[..];
+        let version = cur.get_i16();
+        assert!(version == 0);
+        let decoded = ConsumerProtocolAssignment::decode(&mut cur, version).unwrap();
+        // Deterministic order by topic name: events, orders.
+        let names: Vec<&str> = decoded
+            .assigned_partitions
+            .iter()
+            .map(|tp| tp.topic.as_str())
+            .collect();
+        assert!(names == vec!["events", "orders"]);
+        let orders = decoded
+            .assigned_partitions
+            .iter()
+            .find(|tp| tp.topic == "orders")
+            .unwrap();
+        // Partitions sorted.
+        assert!(orders.partitions == vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn target_drops_unknown_topic_ids() {
+        let known = Uuid([1; 16]);
+        let ghost = Uuid([9; 16]);
+        let image = ReconcileInput {
+            topic_id_by_name: [("orders".to_string(), known)].into(),
+            ..Default::default()
+        };
+        let target: std::collections::HashMap<Uuid, Vec<i32>> =
+            [(known, vec![0]), (ghost, vec![0])].into();
+        let blob = target_to_consumer_assignment(&target, &image);
+        let mut cur = &blob[..];
+        let _ = cur.get_i16();
+        let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
+        assert!(decoded.assigned_partitions.len() == 1);
+        assert!(decoded.assigned_partitions[0].topic == "orders");
     }
 }
