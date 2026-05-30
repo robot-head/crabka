@@ -11,9 +11,9 @@ use crabka_security::{KafkaPrincipal, SaslMechanism, ScramCredential};
 use crate::acl::{AclEntry, PatternType, ResourceType};
 use crate::error::MetadataError;
 use crate::records::{
-    BrokerConfigRecord, BrokerRegistrationRecord, ClientQuotaRecord, DelegationTokenRecord,
-    MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
-    TopicRecord,
+    BrokerConfigRecord, BrokerRegistrationRecord, ClientMetricsConfigRecord, ClientQuotaRecord,
+    DelegationTokenRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
+    ScramCredentialRecord, TopicConfigRecord, TopicRecord,
 };
 
 pub type EntityKey = Vec<(String, Option<String>)>;
@@ -61,6 +61,7 @@ pub struct MetadataImage {
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
     topic_configs: HashMap<String, BTreeMap<String, String>>,
     broker_configs: HashMap<NodeId, BTreeMap<String, String>>,
+    client_metrics_configs: HashMap<String, BTreeMap<String, String>>,
     scram_credentials: HashMap<(String, SaslMechanism), ScramCredential>,
     acls_literal: HashMap<(ResourceType, String), Vec<AclEntry>>,
     acls_prefixed: HashMap<ResourceType, Vec<AclEntry>>,
@@ -93,6 +94,7 @@ impl MetadataImage {
             brokers: HashMap::new(),
             topic_configs: HashMap::new(),
             broker_configs: HashMap::new(),
+            client_metrics_configs: HashMap::new(),
             scram_credentials: HashMap::new(),
             acls_literal: HashMap::new(),
             acls_prefixed: HashMap::new(),
@@ -176,6 +178,19 @@ impl MetadataImage {
         let v: i64 = raw.parse().ok()?;
         #[allow(clippy::cast_sign_loss)]
         if v < 0 { None } else { Some(v as u64) }
+    }
+
+    /// Override map for a single KIP-714 client-metrics subscription.
+    #[must_use]
+    pub fn client_metrics_config(&self, name: &str) -> Option<&BTreeMap<String, String>> {
+        self.client_metrics_configs.get(name)
+    }
+
+    /// All configured client-metrics subscriptions, `(name, overrides)`.
+    pub fn client_metrics_subscriptions(
+        &self,
+    ) -> impl Iterator<Item = (&String, &BTreeMap<String, String>)> {
+        self.client_metrics_configs.iter()
     }
 
     #[must_use]
@@ -487,6 +502,13 @@ impl MetadataImage {
                 // Monotonic epoch: -1 -> 0 on the first record, then +1.
                 self.features_epoch = self.features_epoch.saturating_add(1).max(0);
             }
+            MetadataRecord::V1ClientMetricsConfig(c) => {
+                if c.configs.is_empty() {
+                    self.client_metrics_configs.remove(&c.name);
+                } else {
+                    self.client_metrics_configs.insert(c.name.clone(), c.configs.clone());
+                }
+            }
         }
     }
 
@@ -592,6 +614,14 @@ impl MetadataImage {
             }));
         }
 
+        // Client-metrics subscriptions (KIP-714).
+        for (name, configs) in &self.client_metrics_configs {
+            out.push(MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
+                name: name.clone(),
+                configs: configs.clone(),
+            }));
+        }
+
         out
     }
 
@@ -676,7 +706,12 @@ impl MetadataImage {
             // KIP-584: feature-level admission is fully gated by the
             // UpdateFeatures handler (supported-range + downgrade checks);
             // image-level apply is an idempotent map upsert.
-            | MetadataRecord::V1FeatureLevel(_) => Ok(()),
+            | MetadataRecord::V1FeatureLevel(_)
+            // KIP-714: client-metrics subscription config. The
+            // IncrementalAlterConfigs handler validates the subscription
+            // name and config keys before submission; image-level apply
+            // is an idempotent map upsert (or removal on empty map).
+            | MetadataRecord::V1ClientMetricsConfig(_) => Ok(()),
         }
     }
 }
@@ -1803,6 +1838,29 @@ mod tests {
         use crate::metadata_version::METADATA_VERSION_MIN;
         let m = img();
         assert!(m.min_required_metadata_version() == METADATA_VERSION_MIN);
+    }
+
+    #[test]
+    fn client_metrics_config_apply_and_clear() {
+        use crate::records::ClientMetricsConfigRecord;
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        let mut cfgs = std::collections::BTreeMap::new();
+        cfgs.insert("interval.ms".to_string(), "60000".to_string());
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
+            name: "sub-a".into(),
+            configs: cfgs,
+        }));
+        assert_eq!(
+            img.client_metrics_config("sub-a").and_then(|m| m.get("interval.ms")).map(String::as_str),
+            Some("60000")
+        );
+        assert_eq!(img.client_metrics_subscriptions().count(), 1);
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
+            name: "sub-a".into(),
+            configs: std::collections::BTreeMap::new(),
+        }));
+        assert!(img.client_metrics_config("sub-a").is_none());
+        assert_eq!(img.client_metrics_subscriptions().count(), 0);
     }
 
     #[test]
