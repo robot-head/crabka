@@ -1,5 +1,7 @@
-//! `Group` — per-`group_id` state machine. Pure data + transitions; the
-//! coordinator handlers (Tasks 6–12) hold the mutex around it.
+//! Classic-protocol per-`group_id` state machine (`Group`). Pure data +
+//! transitions, owned by the unified per-group actor. Committed offsets are
+//! protocol-agnostic and live on the unified [`super::group::Group`]
+//! container, not here.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -179,7 +181,6 @@ pub struct Group {
     /// omits its `member_id` (KIP-394 bootstrap) or supplies a stale one
     /// from a prior session.
     pub static_members: HashMap<String, String>,
-    pub committed_offsets: HashMap<(String, i32), OffsetEntry>,
     pub rebalance_deadline: Option<Instant>,
     /// Members whose `JoinGroup` has arrived since the last transition into
     /// `PreparingRebalance`. The `JoinGroup` handler runs the rebalance early
@@ -204,7 +205,6 @@ impl Group {
             protocol_name: None,
             members: HashMap::new(),
             static_members: HashMap::new(),
-            committed_offsets: HashMap::new(),
             rebalance_deadline: None,
             joined_this_round: std::collections::HashSet::new(),
         }

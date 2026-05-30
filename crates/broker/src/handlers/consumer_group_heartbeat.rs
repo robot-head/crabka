@@ -12,7 +12,6 @@ use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::unified::GroupType;
 use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
@@ -23,23 +22,21 @@ pub(crate) fn handle(
     req_bytes: &[u8],
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
-    let group_manager = broker.group_manager.clone();
+    let coordinator = broker.group_coordinator.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ConsumerGroupHeartbeatRequest::decode(&mut cur, version)?;
 
-        let ng = match group_manager.next_gen() {
-            Some(c) if c.config.next_gen_enabled() => c.clone(),
-            _ => return encode(version, &error(codes::GROUP_ID_NOT_FOUND)),
-        };
-
-        if matches!(ng.group_type(&req.group_id), Some(GroupType::Classic)) {
+        if !coordinator.config.next_gen_enabled() {
             return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
         }
 
-        ng.mark_next_gen(&req.group_id);
-
-        let handle = ng.get_or_create(&req.group_id);
+        // The actor's kind is the per-group type lock: a classic group rejects
+        // a next-gen heartbeat (and `get_or_create_consumer` returns `None`),
+        // mirroring the old `group_type == Classic` rejection.
+        let Some(handle) = coordinator.get_or_create_consumer(&req.group_id) else {
+            return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
+        };
         let (tx, rx) = oneshot::channel();
         if handle
             .tx

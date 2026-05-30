@@ -4938,3 +4938,55 @@ introspection metadata).
   via `--test jvm_consumer_group_next_gen ... -- --ignored --test-threads=1`.
 - **Image alignment.** `jvm_consumer_group_next_gen` classic image moved from
   `cp-kafka:7.5.0` to `cp-kafka:7.4.0` to match the existing CI preload.
+
+## Slice 64d-B — Unified `GroupCoordinator` skeleton (2026-05-30)
+
+- **What.** Collapsed Crabka's two independent consumer-group coordinators —
+  the classic `GroupManager` (`Mutex<Group>` + `Notify` parking) and the
+  next-gen `NextGenCoordinator` (per-group tokio actor) — into one
+  `GroupCoordinator` under `coordinator/unified/`. One per-group actor registry,
+  one persistence path, one `Group` container holding either a `ClassicState`
+  or a `ConsumerState` behind a `GroupKind` enum. Mirrors Apache Kafka 4.0's
+  `GroupCoordinatorShard` and is the foundation Slices 64d-C..F (classic ↔
+  next-gen migration) build on.
+- **Behavior-preserving port.** Groups stay single-type (the `GroupKind` is
+  chosen at actor-spawn and never flipped); no live migration, no mixed
+  membership. State machines moved **verbatim** (classic `Group` →
+  `ClassicState`, next-gen `GroupState` → `ConsumerState`); committed offsets
+  (k0/k1) moved up to the kind-agnostic `Group` container.
+- **Classic parking → park/wake message protocol.** `JoinGroup`/`SyncGroup`
+  parking is re-expressed on the actor: the handler sends a `ClassicJoin` /
+  `ClassicSync` message and awaits a `oneshot` reply; the actor parks the
+  reply sender and resolves it at the rebalance boundary — its
+  rebalance-deadline timer (`min(rebalance_timeout, group.initial.rebalance.delay
+  = 3s)`), an all-members-joined early-complete, or the leader's `SyncGroup`
+  install. The deadline duration is identical to the old per-handler
+  `tokio::time::timeout`, so JVM-observable parking timing is unchanged. The
+  `SyncGroup` follower keeps a handler-side `FOLLOWER_WAIT = 30s` cap.
+- **Type lock.** The permanent `group_types` map + `mark_classic` /
+  `mark_next_gen` is gone; the actor's `kind` *is* the lock — a
+  `ConsumerGroupHeartbeat` hitting a classic actor (or a `JoinGroup` hitting a
+  consumer actor) is rejected exactly as before. Bootstrap decides each
+  replayed group's kind from its record types (k2 → classic, k3/5/6/7/8 →
+  consumer; an `OffsetCommit`-only group replays classic).
+- **Deleted:** `coordinator/group.rs`, `coordinator/next_gen/` (its contents
+  live under `coordinator/unified/`), `GroupManager`, `NextGenCoordinator`,
+  `GroupHandle`, `group_types`. 11 handlers + bootstrap + the broker field
+  (`group_manager` → `group_coordinator`) rewired with no wire-protocol or
+  `__consumer_offsets` record-schema change.
+- **Out of scope (Slices 64d-C..F):** `group.consumer.migration.policy`,
+  the mutable/policy-governed type with tombstone-on-convert, live upgrade
+  (classic → consumer) and downgrade (consumer → classic) with mixed
+  membership, and the rolling-migration JVM acceptance suite.
+- **Tests.** Behavior-preserving: every classic, next-gen, and JVM
+  group-coordinator suite passes unmodified — `group_protocol_negotiation`,
+  `static_membership`, `consumer_group_next_gen{,_persistence}`,
+  `offset_delete`, the 92 coordinator unit tests, and the full JVM group gate
+  (`jvm_acceptance` classic consumer / static membership / cooperative-sticky,
+  and all 4 `jvm_kip848_*` next-gen tests against `apache/kafka:4.0.0`). The
+  pre-existing multi-broker replication JVM failures (`acks_all_*`,
+  `three_node_*`, `*_raft_replication`) reproduce identically on `main` and are
+  unrelated to this slice.
+- Reference docs:
+  [`docs/superpowers/specs/2026-05-30-crabka-kip-848-unified-coordinator-64d-b-design.md`],
+  [`docs/superpowers/plans/2026-05-30-crabka-kip-848-unified-coordinator-64d-b.md`].
