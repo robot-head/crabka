@@ -121,6 +121,35 @@ holds this workload in **24 MiB**.
   buffers) alone (~200 MiB) exceeds Crabka's whole process. The gap is
   structural.
 
+## Can you even push Crabka to 256 MiB?
+
+Trying to escalate load until *Crabka* needs 256 MiB shows it can't be
+driven there on this box — it's a small fixed base plus ~3 KiB RAM per
+partition, so it hits OS limits first:
+
+- Each partition holds ~3 open files; the box's hard `ulimit -n` of 4096
+  caps Crabka at ~1,200 partitions (~25 MiB RSS) before FD exhaustion.
+- Reaching 256 MiB would need tens of thousands of partitions, far past
+  that FD ceiling.
+
+Measuring the inverse: take the heaviest workload the box allows —
+**1,024 partitions, saturating 1 KiB load, which Crabka serves in
+32.5 MiB at ~9.4k msgs/s** — and sweep Kafka's heap on the same scenario:
+
+| Kafka heap | producer msgs/s | p99 ack | broker RSS | vs Crabka (33 MiB) |
+|---|--:|--:|--:|--:|
+| 1024 MiB | 10 391 | 1.42 ms | 1 131 MiB | 35× |
+| 512 MiB | 9 322 | 1.71 ms | 769 MiB | 24× |
+| 384 MiB | 9 024 | 1.90 ms | 638 MiB | 20× |
+| 256 MiB | 7 480 | 4.28 ms | 530 MiB | 16× |
+
+Kafka stays competitive to ~384–512 MiB heap (≈640–770 MiB RSS, ~20–24×
+Crabka); at a 256 MiB heap it loses ~28 % throughput, triples p99, and
+still resides in 530 MiB (~16× Crabka). The 6→1024-partition jump adds
+~8 MiB to Crabka (24→33) but ~100 MiB to Kafka (1031→1131). There is no
+box-feasible workload that makes the Rust broker want 256 MiB, while the
+JVM needs ~256 MiB just to boot.
+
 ## Interop status (crabka *client* vs a real Kafka broker)
 
 The three client-side gaps that earlier runs surfaced are now closed:

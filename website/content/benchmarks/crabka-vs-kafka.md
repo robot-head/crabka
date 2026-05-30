@@ -121,6 +121,42 @@ in **24 MiB**.
   stacks, direct buffers — which alone is ~200 MiB, larger than Crabka's
   entire process. The gap is structural, not a tuning default.
 
+## Can you even push Crabka to 256 MiB?
+
+The natural escalation: scale the load up until *Crabka* needs 256 MiB,
+then see what the JVM needs for the same load. On this 4-vCPU box that's a
+trick question — **Crabka can't be driven to 256 MiB.** Its memory is a
+small fixed base plus a few KiB per partition, so the load that would get
+it there hits OS limits first:
+
+- Each partition holds ~3 open files; the box's hard `ulimit -n` of 4096
+  caps Crabka at **~1,200 partitions (~25 MiB RSS)** before it exhausts
+  file descriptors. Kafka pays the same per-partition FD cost.
+- Partitions cost Crabka **~3 KiB of RAM each** — reaching 256 MiB would
+  take tens of thousands of them, far past the FD ceiling.
+
+So we measured the inverse instead: take the heaviest workload the box
+lets Crabka run — **1,024 partitions under saturating 1 KiB load, which
+Crabka serves in 32.5 MiB at ~9.4k msgs/s** — and sweep Kafka's heap on
+the *same* workload:
+
+| Kafka heap | producer msgs/s | p99 ack | broker RSS | vs Crabka (33 MiB) |
+|---|--:|--:|--:|--:|
+| 1024 MiB | 10 391 | 1.42 ms | 1 131 MiB | **35×** |
+| 512 MiB | 9 322 | 1.71 ms | 769 MiB | 24× |
+| 384 MiB | 9 024 | 1.90 ms | 638 MiB | 20× |
+| 256 MiB | 7 480 | 4.28 ms | 530 MiB | 16× |
+
+Kafka stays competitive down to ~384–512 MiB heap (≈640–770 MiB RSS,
+**~20–24× Crabka**); crushed to a 256 MiB heap it loses ~28 % throughput
+and triples its tail latency, and *still* resides in 530 MiB — **~16×
+Crabka for the identical workload.** Going from 6 to 1,024 partitions adds
+~8 MiB to Crabka (24 → 33 MiB) but ~100 MiB to Kafka (1 031 → 1 131 MiB).
+
+The question inverts: there's no workload on this box heavy enough to make
+the Rust broker want 256 MiB, while the JVM needs ~256 MiB *just to boot*
+and 2–4× that to host a partition-heavy load Crabka handles in tens of MiB.
+
 ## Methodology notes
 
 - Crabka's broker is pinned to `RUST_LOG=warn` so per-request logging
