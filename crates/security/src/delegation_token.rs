@@ -44,20 +44,21 @@ pub fn compute_token_hmac(secret_key: &[u8], token_id: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn hmac_is_deterministic_for_same_inputs() {
         let h1 = compute_token_hmac(b"k", "tok-1");
         let h2 = compute_token_hmac(b"k", "tok-1");
-        assert_eq!(h1, h2);
-        assert_eq!(h1.len(), 32);
+        assert!(h1 == h2);
+        assert!(h1.len() == 32);
     }
 
     #[test]
     fn hmac_diverges_on_key_change() {
         let h1 = compute_token_hmac(b"k1", "tok-1");
         let h2 = compute_token_hmac(b"k2", "tok-1");
-        assert_ne!(h1, h2);
+        assert!(h1 != h2);
     }
 
     #[test]

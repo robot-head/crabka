@@ -1,3 +1,4 @@
+use assert2::assert;
 use std::process::Command;
 
 fn broker_bin() -> std::path::PathBuf {

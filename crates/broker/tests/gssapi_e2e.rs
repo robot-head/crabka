@@ -32,6 +32,7 @@
 //!   cargo test -p crabka-broker --test gssapi_e2e -- --ignored
 //! ```
 
+use assert2::assert;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};

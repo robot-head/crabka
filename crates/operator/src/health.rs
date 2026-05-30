@@ -81,6 +81,7 @@ async fn metrics(State(s): State<HealthState>) -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use axum::body::Body;
     use axum::http::Request;
     use http::StatusCode as Code;
@@ -103,7 +104,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), Code::OK);
+        assert!(resp.status() == Code::OK);
     }
 
     #[tokio::test]
@@ -120,7 +121,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), Code::SERVICE_UNAVAILABLE);
+        assert!(resp.status() == Code::SERVICE_UNAVAILABLE);
 
         state.mark_ready();
         let resp = app
@@ -132,7 +133,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), Code::OK);
+        assert!(resp.status() == Code::OK);
     }
 
     #[tokio::test]
@@ -147,7 +148,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), Code::OK);
+        assert!(resp.status() == Code::OK);
         let ct = resp
             .headers()
             .get("content-type")

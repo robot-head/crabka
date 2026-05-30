@@ -30,6 +30,7 @@ pub fn frame(stream: TcpStream) -> Framed<TcpStream, LengthDelimitedCodec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::Bytes;
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::AsyncWriteExt;
@@ -55,6 +56,6 @@ mod tests {
         framed.into_inner().shutdown().await.unwrap();
 
         let received = server.await.unwrap();
-        assert_eq!(received.as_ref(), b"hello broker");
+        assert!(received.as_ref() == b"hello broker");
     }
 }

@@ -71,6 +71,7 @@ impl DiskScanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::io::Write;
 
     #[test]
@@ -113,7 +114,7 @@ mod tests {
                 partition: 1,
             })
             .get();
-        assert_eq!(g0, 1234);
-        assert_eq!(g1, 5678);
+        assert!(g0 == 1234);
+        assert!(g1 == 5678);
     }
 }

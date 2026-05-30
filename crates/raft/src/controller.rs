@@ -984,6 +984,7 @@ impl Controller {
 #[cfg(test)]
 mod bootstrap_mode_tests {
     use super::*;
+    use assert2::assert;
     use tempfile::TempDir;
 
     #[tokio::test]
@@ -1110,7 +1111,7 @@ mod bootstrap_mode_tests {
             .fetch_metadata_from(addr, 0, 1_048_576)
             .await
             .expect("fetch");
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         assert!(resp.high_watermark >= 1);
 
         let mut buf: &[u8] = &resp.records;

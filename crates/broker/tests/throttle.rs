@@ -29,6 +29,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -239,9 +240,9 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -270,9 +271,9 @@ async fn create_topic_plaintext(addr: SocketAddr, topic: &str, partitions: i32, 
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -517,8 +518,8 @@ async fn produce_plaintext(addr: SocketAddr, topic: &str, record_bytes: usize, c
     let mut cur: &[u8] = &resp_bytes;
     let resp = ProduceResponse::decode(&mut cur, VERSION).expect("decode ProduceResponse");
     let part = &resp.responses[0].partition_responses[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "Produce must succeed: error_code={}",
         part.error_code
     );
@@ -614,7 +615,7 @@ async fn broker_scoped_alter_persists_in_image() {
         )],
     )
     .await;
-    assert_eq!(err, 0, "alter should succeed; got error_code={err}");
+    assert!(err == 0, "alter should succeed; got error_code={err}");
 
     // Poll the image until the config is visible (absorb raft commit latency).
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -658,7 +659,7 @@ async fn topic_throttle_config_propagates() {
         )],
     )
     .await;
-    assert_eq!(err, 0, "topic alter should succeed; got error_code={err}");
+    assert!(err == 0, "topic alter should succeed; got error_code={err}");
 
     // Allow raft commit to propagate.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -706,7 +707,7 @@ async fn throttle_rate_caps_fetch_response_size() {
         )],
     )
     .await;
-    assert_eq!(err, 0, "broker throttle alter failed: error_code={err}");
+    assert!(err == 0, "broker throttle alter failed: error_code={err}");
 
     // Mark partition 0 as throttled for follower replica_id=2.
     let err = drive_incremental_alter_configs_plaintext(
@@ -722,7 +723,7 @@ async fn throttle_rate_caps_fetch_response_size() {
         )],
     )
     .await;
-    assert_eq!(err, 0, "topic throttle alter failed: error_code={err}");
+    assert!(err == 0, "topic throttle alter failed: error_code={err}");
 
     // Wait for the configs to appear in the image before producing (so the
     // throttle enforcement is armed when the Fetch arrives).

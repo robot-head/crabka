@@ -66,6 +66,7 @@ pub fn partition_for_tid(transactional_id: &str, num_partitions: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     // Reference vectors generated from the canonical JVM implementation:
     //   Utils.abs(Utils.murmur2(tid.getBytes(StandardCharsets.UTF_8))) % 50
@@ -74,9 +75,8 @@ mod tests {
     fn matches_jvm_for_canonical_tids() {
         let cases: &[(&str, i32)] = &[("my-tid", 43), ("producer-1", 45), ("tx-orders-prod", 26)];
         for (tid, expected) in cases {
-            assert_eq!(
-                partition_for_tid(tid, 50),
-                *expected,
+            assert!(
+                partition_for_tid(tid, 50) == *expected,
                 "tid `{tid}` should hash to partition {expected}"
             );
         }

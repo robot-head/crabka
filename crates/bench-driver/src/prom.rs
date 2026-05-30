@@ -156,6 +156,7 @@ struct PromResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn parses_success_with_one_result() {
@@ -169,8 +170,8 @@ mod tests {
           }
         }"#;
         let p: PromResp = serde_json::from_str(json).unwrap();
-        assert_eq!(p.status, "success");
-        assert_eq!(p.data.unwrap().result.len(), 1);
+        assert!(p.status == "success");
+        assert!(p.data.unwrap().result.len() == 1);
     }
 
     #[test]
@@ -184,7 +185,7 @@ mod tests {
     fn parses_error_response() {
         let json = r#"{"status":"error","error":"bad query"}"#;
         let p: PromResp = serde_json::from_str(json).unwrap();
-        assert_eq!(p.status, "error");
-        assert_eq!(p.error.as_deref(), Some("bad query"));
+        assert!(p.status == "error");
+        assert!(p.error.as_deref() == Some("bad query"));
     }
 }

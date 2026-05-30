@@ -1,3 +1,4 @@
+use assert2::assert;
 use std::path::PathBuf;
 
 use crabka_protocol_codegen::emit::EmittedMessage;
@@ -50,9 +51,8 @@ fn check(snap_path: &std::path::Path, generated: &str) {
             snap_path.display()
         )
     });
-    assert_eq!(
-        generated,
-        expected,
+    assert!(
+        generated == expected,
         "snapshot mismatch in {}; UPDATE_SNAPSHOTS=1 to refresh",
         snap_path.display()
     );

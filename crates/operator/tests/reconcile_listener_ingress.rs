@@ -5,6 +5,7 @@
 //! `Ingress`/`Route` objects, a `ConfigMap` whose advertised address is
 //! `<host>:443`, and a `ListenersReady=True` status.
 
+use assert2::assert;
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
@@ -198,18 +199,21 @@ async fn ingress_listener_renders_ingress_objects_and_advertises_443() {
         &Method::PATCH,
         &format!("/ingresses/{name}-ext-0"),
     );
-    assert_eq!(
-        ing["metadata"]["annotations"]["nginx.ingress.kubernetes.io/ssl-passthrough"], "true",
+    assert!(
+        ing["metadata"]["annotations"]["nginx.ingress.kubernetes.io/ssl-passthrough"] == "true",
         "ingress = {ing}"
     );
-    assert_eq!(ing["spec"]["ingressClassName"], "nginx", "ingress = {ing}");
-    assert_eq!(
-        ing["spec"]["rules"][0]["host"], "broker-0.kafka.example.com",
+    assert!(
+        ing["spec"]["ingressClassName"] == "nginx",
         "ingress = {ing}"
     );
-    assert_eq!(
-        ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["name"],
-        format!("{name}-ext-0"),
+    assert!(
+        ing["spec"]["rules"][0]["host"] == "broker-0.kafka.example.com",
+        "ingress = {ing}"
+    );
+    assert!(
+        ing["spec"]["rules"][0]["http"]["paths"][0]["backend"]["service"]["name"]
+            == format!("{name}-ext-0"),
         "ingress = {ing}"
     );
 
@@ -227,16 +231,16 @@ async fn ingress_listener_renders_ingress_objects_and_advertises_443() {
         .iter()
         .find(|c| c["type"] == "ListenersReady")
         .unwrap();
-    assert_eq!(ready["status"], "True", "status = {status}");
+    assert!(ready["status"] == "True", "status = {status}");
     let ext = status["status"]["listeners"]
         .as_array()
         .unwrap()
         .iter()
         .find(|l| l["name"] == "ext")
         .unwrap_or_else(|| panic!("ext listener status missing; status = {status}"));
-    assert_eq!(ext["bootstrapServers"], "bootstrap.kafka.example.com:443");
+    assert!(ext["bootstrapServers"] == "bootstrap.kafka.example.com:443");
 
-    assert_eq!(state.remaining_rules(), 0, "all rules consumed");
+    assert!(state.remaining_rules() == 0, "all rules consumed");
 }
 
 // ── test 2: route ─────────────────────────────────────────────────────────────
@@ -292,18 +296,20 @@ async fn route_listener_renders_passthrough_route_objects() {
     let observed = state.take_observed();
 
     let route = body_of(&observed, &Method::PATCH, &format!("/routes/{name}-ext-0"));
-    assert_eq!(
-        route["spec"]["tls"]["termination"], "passthrough",
+    assert!(
+        route["spec"]["tls"]["termination"] == "passthrough",
         "route = {route}"
     );
-    assert_eq!(
-        route["spec"]["host"], "broker-0.kafka.example.com",
+    assert!(
+        route["spec"]["host"] == "broker-0.kafka.example.com",
         "route = {route}"
     );
-    assert_eq!(route["spec"]["port"]["targetPort"], 9094, "route = {route}");
-    assert_eq!(
-        route["spec"]["to"]["name"],
-        format!("{name}-ext-0"),
+    assert!(
+        route["spec"]["port"]["targetPort"] == 9094,
+        "route = {route}"
+    );
+    assert!(
+        route["spec"]["to"]["name"] == format!("{name}-ext-0"),
         "route = {route}"
     );
 
@@ -313,7 +319,7 @@ async fn route_listener_renders_passthrough_route_objects() {
         "expected route advertised on :443;\n{toml}"
     );
 
-    assert_eq!(state.remaining_rules(), 0, "all rules consumed");
+    assert!(state.remaining_rules() == 0, "all rules consumed");
 }
 
 // ── test 3: validation failure ────────────────────────────────────────────────
@@ -357,9 +363,9 @@ async fn ingress_without_tls_surfaces_validation_error() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap();
-    assert_eq!(valid["status"], "False", "status = {status}");
-    assert_eq!(
-        valid["reason"], "ListenerIngressRequiresTls",
+    assert!(valid["status"] == "False", "status = {status}");
+    assert!(
+        valid["reason"] == "ListenerIngressRequiresTls",
         "status = {status}"
     );
 }

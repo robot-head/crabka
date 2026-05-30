@@ -271,6 +271,7 @@ pub fn load_service_keys(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     /// Fields needed to synthesize a keytab entry body in tests.
     struct EntrySpec<'a> {
@@ -331,16 +332,16 @@ mod tests {
         let kt = keytab(&[body]);
 
         let entries = parse_keytab(&kt).expect("parse");
-        assert_eq!(entries.len(), 1);
+        assert!(entries.len() == 1);
         let e = &entries[0];
-        assert_eq!(e.components, vec!["kafka", "localhost"]);
-        assert_eq!(e.realm, "CRABKA.TEST");
-        assert_eq!(e.enctype, ENCTYPE_AES256_CTS_HMAC_SHA1_96);
-        assert_eq!(e.kvno, 1);
-        assert_eq!(e.key, key);
+        assert!(e.components == vec!["kafka", "localhost"]);
+        assert!(e.realm == "CRABKA.TEST");
+        assert!(e.enctype == ENCTYPE_AES256_CTS_HMAC_SHA1_96);
+        assert!(e.kvno == 1);
+        assert!(e.key == key);
 
         let found = load_service_key(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("found");
-        assert_eq!(found.key, key);
+        assert!(found.key == key);
     }
 
     #[test]
@@ -378,8 +379,8 @@ mod tests {
         ]);
 
         let found = load_service_key(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("found");
-        assert_eq!(found.kvno, 5);
-        assert_eq!(found.key, key_v5);
+        assert!(found.kvno == 5);
+        assert!(found.key == key_v5);
 
         // Wrong service name -> NotFound.
         let err = load_service_key(&kt, "http", ENCTYPE_AES256_CTS_HMAC_SHA1_96).unwrap_err();
@@ -440,13 +441,13 @@ mod tests {
 
         let keys = load_service_keys(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("load");
         // One key per distinct SPN, ordered by component list.
-        assert_eq!(keys.len(), 2);
-        assert_eq!(keys[0].components, vec!["kafka", "host.docker.internal"]);
-        assert_eq!(keys[0].key, dock);
-        assert_eq!(keys[1].components, vec!["kafka", "localhost"]);
+        assert!(keys.len() == 2);
+        assert!(keys[0].components == vec!["kafka", "host.docker.internal"]);
+        assert!(keys[0].key == dock);
+        assert!(keys[1].components == vec!["kafka", "localhost"]);
         // Highest kvno wins for the duplicated SPN; aes128 decoy excluded.
-        assert_eq!(keys[1].kvno, 3);
-        assert_eq!(keys[1].key, loc_v3);
+        assert!(keys[1].kvno == 3);
+        assert!(keys[1].key == loc_v3);
     }
 
     #[test]
@@ -485,8 +486,8 @@ mod tests {
         kt.extend_from_slice(&good);
 
         let entries = parse_keytab(&kt).expect("parse");
-        assert_eq!(entries.len(), 1, "hole must not produce an entry");
-        assert_eq!(entries[0].key, key);
+        assert!(entries.len() == 1, "hole must not produce an entry");
+        assert!(entries[0].key == key);
     }
 
     #[test]

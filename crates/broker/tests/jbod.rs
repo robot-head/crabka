@@ -12,6 +12,7 @@
 //!   2. `DescribeLogDirs` reports one result per directory whose union
 //!      covers every partition, consistent with what's on disk.
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -88,7 +89,7 @@ async fn create_topic(addr: SocketAddr, topic: &str, partitions: i32) {
     let resp_bytes = round_trip(&mut stream, 19, VERSION, &body).await.unwrap();
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics must succeed");
+    assert!(resp.topics[0].error_code == 0, "CreateTopics must succeed");
 }
 
 async fn describe_log_dirs(addr: SocketAddr) -> DescribeLogDirsResponse {
@@ -149,7 +150,10 @@ async fn partitions_spread_across_dirs_and_describe_log_dirs_reports_them() {
     // 1. Placement spread: both directories hold at least one partition of `t`.
     let in_primary = count_topic_dirs(primary.path(), "t");
     let in_extra = count_topic_dirs(extra.path(), "t");
-    assert_eq!(in_primary + in_extra, N as usize, "all partitions on disk");
+    assert!(
+        in_primary + in_extra == N as usize,
+        "all partitions on disk"
+    );
     assert!(
         in_primary > 0 && in_extra > 0,
         "partitions must spread across both dirs: primary={in_primary} extra={in_extra}"
@@ -158,12 +162,12 @@ async fn partitions_spread_across_dirs_and_describe_log_dirs_reports_them() {
     // 2. DescribeLogDirs reports one result per configured dir, and the
     //    union of `t` partitions across results is the full 0..N set.
     let resp = describe_log_dirs(addr).await;
-    assert_eq!(resp.error_code, 0);
-    assert_eq!(resp.results.len(), 2, "one result per log dir");
+    assert!(resp.error_code == 0);
+    assert!(resp.results.len() == 2, "one result per log dir");
 
     let mut reported: Vec<i32> = Vec::new();
     for result in &resp.results {
-        assert_eq!(result.error_code, 0);
+        assert!(result.error_code == 0);
         for topic in &result.topics {
             if topic.name == "t" {
                 for p in &topic.partitions {
@@ -175,9 +179,8 @@ async fn partitions_spread_across_dirs_and_describe_log_dirs_reports_them() {
         }
     }
     reported.sort_unstable();
-    assert_eq!(
-        reported,
-        (0..N).collect::<Vec<_>>(),
+    assert!(
+        reported == (0..N).collect::<Vec<_>>(),
         "all partitions reported"
     );
 

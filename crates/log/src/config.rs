@@ -100,12 +100,13 @@ impl Default for LogConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn defaults_match_kafka_4x() {
         let c = LogConfig::default();
-        assert_eq!(c.segment_bytes, 1 << 30);
-        assert_eq!(c.index_interval_bytes, 4096);
+        assert!(c.segment_bytes == 1 << 30);
+        assert!(c.index_interval_bytes == 4096);
         assert!(!c.flush_on_append);
         assert!(c.validate_on_open);
     }
@@ -113,19 +114,19 @@ mod tests {
     #[test]
     fn default_cleanup_policy_is_delete() {
         let c = LogConfig::default();
-        assert_eq!(c.cleanup_policy, CleanupPolicy::Delete);
+        assert!(c.cleanup_policy == CleanupPolicy::Delete);
     }
 
     #[test]
     fn default_compression_is_producer_passthrough() {
         let c = LogConfig::default();
-        assert_eq!(c.compression_type, None);
+        assert!(c.compression_type == None);
     }
 
     #[test]
     fn default_local_retention_is_none() {
         let c = LogConfig::default();
-        assert_eq!(c.local_retention_ms, None);
-        assert_eq!(c.local_retention_bytes, None);
+        assert!(c.local_retention_ms == None);
+        assert!(c.local_retention_bytes == None);
     }
 }

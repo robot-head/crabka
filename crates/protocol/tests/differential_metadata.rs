@@ -1,3 +1,4 @@
+use assert2::assert;
 mod support;
 use support::oracle;
 
@@ -93,18 +94,17 @@ fn metadata_request_default_byte_equal_every_version() {
         let rust = rust_encode(&req, version);
         let oracle_json = request_oracle_value(version);
         let java = o.encode(3, version, true, &oracle_json);
-        assert_eq!(
-            rust,
-            java,
+        assert!(
+            rust == java,
             "MetadataRequest v{version} byte mismatch\n  rust: {}\n  java: {}",
             hex::encode(&rust),
-            hex::encode(&java),
+            hex::encode(&java)
         );
         // Also verify decode roundtrip
         let decoded: MetadataRequest = rust_decode(&rust, version);
         let re_encoded = rust_encode(&decoded, version);
-        assert_eq!(
-            rust, re_encoded,
+        assert!(
+            rust == re_encoded,
             "MetadataRequest v{version} roundtrip mismatch after decode"
         );
     }
@@ -119,18 +119,17 @@ fn metadata_response_default_byte_equal_every_version() {
         let rust = rust_encode(&resp, version);
         let oracle_json = response_oracle_value(version);
         let java = o.encode(3, version, false, &oracle_json);
-        assert_eq!(
-            rust,
-            java,
+        assert!(
+            rust == java,
             "MetadataResponse v{version} byte mismatch\n  rust: {}\n  java: {}",
             hex::encode(&rust),
-            hex::encode(&java),
+            hex::encode(&java)
         );
         // Also verify decode roundtrip
         let decoded: MetadataResponse = rust_decode(&rust, version);
         let re_encoded = rust_encode(&decoded, version);
-        assert_eq!(
-            rust, re_encoded,
+        assert!(
+            rust == re_encoded,
             "MetadataResponse v{version} roundtrip mismatch after decode"
         );
     }

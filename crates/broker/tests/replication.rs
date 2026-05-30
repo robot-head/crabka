@@ -31,6 +31,7 @@
     clippy::too_many_lines
 )]
 
+use assert2::assert;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -103,7 +104,7 @@ async fn replication_factor_three_propagates_to_all_followers() {
         })
         .await
         .unwrap();
-    assert_eq!(resp.topics[0].error_code, 0);
+    assert!(resp.topics[0].error_code == 0);
     // ProduceRequest v13 wire format drops `topic.name` in favour of
     // `topic.topic_id` (KIP-516). The client negotiates the broker's
     // max supported version (v13), so we must echo the CreateTopics-
@@ -167,7 +168,7 @@ async fn replication_factor_three_propagates_to_all_followers() {
         })
         .await
         .unwrap();
-    assert_eq!(prod.responses[0].partition_responses[0].error_code, 0);
+    assert!(prod.responses[0].partition_responses[0].error_code == 0);
 
     // Wait until every broker's local log shows log_end_offset >= 20.
     let deadline = Instant::now() + Duration::from_mins(2);
@@ -235,7 +236,7 @@ async fn out_of_range_truncates_and_recovers() {
         })
         .await
         .unwrap();
-    assert_eq!(resp.topics[0].error_code, 0);
+    assert!(resp.topics[0].error_code == 0);
     let topic_id = resp.topics[0].topic_id;
 
     // Wait for the topic to propagate to every broker's MetadataImage.
@@ -298,7 +299,7 @@ async fn out_of_range_truncates_and_recovers() {
             })
             .await
             .unwrap();
-        assert_eq!(prod.responses[0].partition_responses[0].error_code, 0);
+        assert!(prod.responses[0].partition_responses[0].error_code == 0);
     }
 
     // Wait for every broker's local log to catch up to 50.

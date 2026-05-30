@@ -226,6 +226,7 @@ fn build_nodes(quorum: &QuorumState) -> Vec<Node> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_protocol::owned::describe_quorum_request::{
         PartitionData as ReqPartitionData, TopicData as ReqTopicData,
     };
@@ -271,18 +272,21 @@ mod tests {
             &[(1, 40), (2, 42), (3, 38)],
         );
         let out = build_topic_responses(&req, &q);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].topic_name, CLUSTER_METADATA_TOPIC);
+        assert!(out.len() == 1);
+        assert!(out[0].topic_name == CLUSTER_METADATA_TOPIC);
         let pd = &out[0].partitions[0];
-        assert_eq!(pd.error_code, codes::NONE);
-        assert_eq!(pd.leader_id, 2);
-        assert_eq!(pd.leader_epoch, 7, "current_term surfaces as leader_epoch");
-        assert_eq!(pd.high_watermark, 42, "last_applied_index surfaces as HW");
+        assert!(pd.error_code == codes::NONE);
+        assert!(pd.leader_id == 2);
+        assert!(
+            pd.leader_epoch == 7,
+            "current_term surfaces as leader_epoch"
+        );
+        assert!(pd.high_watermark == 42, "last_applied_index surfaces as HW");
         let voter_ids: Vec<i32> = pd.current_voters.iter().map(|v| v.replica_id).collect();
-        assert_eq!(voter_ids, vec![1, 2, 3]);
+        assert!(voter_ids == vec![1, 2, 3]);
         // Each voter's `log_end_offset` comes from the per-voter map.
         let leos: Vec<i64> = pd.current_voters.iter().map(|v| v.log_end_offset).collect();
-        assert_eq!(leos, vec![40, 42, 38]);
+        assert!(leos == vec![40, 42, 38]);
         assert!(pd.observers.is_empty(), "no observers in Crabka yet");
     }
 
@@ -301,8 +305,8 @@ mod tests {
         let out = build_topic_responses(&req, &q);
         let pd = &out[0].partitions[0];
         for v in &pd.current_voters {
-            assert_eq!(
-                v.log_end_offset, UNKNOWN_LOG_END_OFFSET,
+            assert!(
+                v.log_end_offset == UNKNOWN_LOG_END_OFFSET,
                 "follower replication map empty → voter LEOs all -1"
             );
         }
@@ -320,9 +324,9 @@ mod tests {
             .iter()
             .map(|v| (v.replica_id, v.log_end_offset))
             .collect();
-        assert_eq!(by_id[&1], 50, "matched index for voter 1");
-        assert_eq!(by_id[&2], UNKNOWN_LOG_END_OFFSET, "missing → -1");
-        assert_eq!(by_id[&3], UNKNOWN_LOG_END_OFFSET, "missing → -1");
+        assert!(by_id[&1] == 50, "matched index for voter 1");
+        assert!(by_id[&2] == UNKNOWN_LOG_END_OFFSET, "missing → -1");
+        assert!(by_id[&3] == UNKNOWN_LOG_END_OFFSET, "missing → -1");
     }
 
     #[test]
@@ -331,7 +335,7 @@ mod tests {
         let q = quorum_state(Some(1), 1, 0, &[1], &[]);
         let out = build_topic_responses(&req, &q);
         let pd = &out[0].partitions[0];
-        assert_eq!(pd.error_code, codes::INVALID_TOPIC_EXCEPTION);
+        assert!(pd.error_code == codes::INVALID_TOPIC_EXCEPTION);
         assert!(pd.current_voters.is_empty());
         assert!(
             pd.error_message
@@ -349,12 +353,11 @@ mod tests {
         let q = quorum_state(Some(1), 1, 0, &[1], &[]);
         let out = build_topic_responses(&req, &q);
         let pd = &out[0].partitions[0];
-        assert_eq!(
-            pd.error_code,
-            codes::INVALID_TOPIC_EXCEPTION,
+        assert!(
+            pd.error_code == codes::INVALID_TOPIC_EXCEPTION,
             "partition != 0 is not the metadata partition; reject"
         );
-        assert_eq!(pd.partition_index, 7, "echo the requested index back");
+        assert!(pd.partition_index == 7, "echo the requested index back");
     }
 
     #[test]
@@ -363,9 +366,9 @@ mod tests {
         let q = quorum_state(/*leader=*/ None, 0, 0, &[1, 2], &[]);
         let out = build_topic_responses(&req, &q);
         let pd = &out[0].partitions[0];
-        assert_eq!(pd.leader_id, -1, "leader unknown surfaces as -1 sentinel");
+        assert!(pd.leader_id == -1, "leader unknown surfaces as -1 sentinel");
         // Voter list still populated even when leader is unknown.
-        assert_eq!(pd.current_voters.len(), 2);
+        assert!(pd.current_voters.len() == 2);
     }
 
     #[test]
@@ -397,12 +400,9 @@ mod tests {
         ];
         let q = quorum_state(Some(1), 1, 0, &[1], &[]);
         let out = build_topic_responses(&req, &q);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].partitions[0].error_code, codes::NONE);
-        assert_eq!(
-            out[1].partitions[0].error_code,
-            codes::INVALID_TOPIC_EXCEPTION
-        );
+        assert!(out.len() == 2);
+        assert!(out[0].partitions[0].error_code == codes::NONE);
+        assert!(out[1].partitions[0].error_code == codes::INVALID_TOPIC_EXCEPTION);
     }
 
     #[test]
@@ -454,16 +454,16 @@ mod tests {
             .iter()
             .map(|v| (v.replica_id, v.replica_directory_id))
             .collect();
-        assert_eq!(dir_by_id[&1], Uuid(*dir1.as_bytes()));
-        assert_eq!(dir_by_id[&2], Uuid(*dir2.as_bytes()));
+        assert!(dir_by_id[&1] == Uuid(*dir1.as_bytes()));
+        assert!(dir_by_id[&2] == Uuid(*dir2.as_bytes()));
 
         // Top-level v2 Nodes block names each voter with its listeners.
         let nodes = build_nodes(&q);
-        assert_eq!(nodes.len(), 2);
+        assert!(nodes.len() == 2);
         let first_voter = nodes.iter().find(|n| n.node_id == 1).unwrap();
-        assert_eq!(first_voter.listeners[0].name, "CONTROLLER");
-        assert_eq!(first_voter.listeners[0].host, "10.0.0.1");
-        assert_eq!(first_voter.listeners[0].port, 9093);
+        assert!(first_voter.listeners[0].name == "CONTROLLER");
+        assert!(first_voter.listeners[0].host == "10.0.0.1");
+        assert!(first_voter.listeners[0].port == 9093);
     }
 
     #[test]
@@ -475,7 +475,7 @@ mod tests {
         let q = quorum_state(Some(1), 1, 0, &[1, 2], &[]);
         let topics = build_topic_responses(&req, &q);
         for v in &topics[0].partitions[0].current_voters {
-            assert_eq!(v.replica_directory_id, Uuid::ZERO);
+            assert!(v.replica_directory_id == Uuid::ZERO);
         }
         assert!(build_nodes(&q).is_empty());
     }
@@ -488,6 +488,6 @@ mod tests {
         let req = req_for(CLUSTER_METADATA_TOPIC, 0);
         let q = quorum_state(Some(1), u64::MAX, 0, &[1], &[]);
         let out = build_topic_responses(&req, &q);
-        assert_eq!(out[0].partitions[0].leader_epoch, i32::MAX);
+        assert!(out[0].partitions[0].leader_epoch == i32::MAX);
     }
 }

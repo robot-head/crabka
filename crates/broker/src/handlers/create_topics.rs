@@ -341,6 +341,7 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod replica_assignment_tests {
     use super::round_robin_replicas;
+    use assert2::assert;
 
     #[test]
     fn three_brokers_three_partitions_rf_three() {
@@ -350,12 +351,12 @@ mod replica_assignment_tests {
         let leaders: Vec<_> = out.iter().map(|r| r[0]).collect();
         let mut sorted = leaders.clone();
         sorted.sort_unstable();
-        assert_eq!(sorted, vec![1, 2, 3]);
+        assert!(sorted == vec![1, 2, 3]);
         // Each partition has all three brokers as replicas.
         for replicas in &out {
             let mut s = replicas.clone();
             s.sort_unstable();
-            assert_eq!(s, vec![1, 2, 3]);
+            assert!(s == vec![1, 2, 3]);
         }
     }
 
@@ -363,9 +364,9 @@ mod replica_assignment_tests {
     fn offset_per_partition_means_distinct_leaders() {
         let bs = vec![1u64, 2, 3];
         let out = round_robin_replicas(&bs, 3, 1);
-        assert_eq!(out[0], vec![1]);
-        assert_eq!(out[1], vec![2]);
-        assert_eq!(out[2], vec![3]);
+        assert!(out[0] == vec![1]);
+        assert!(out[1] == vec![2]);
+        assert!(out[2] == vec![3]);
     }
 
     #[test]
@@ -379,7 +380,7 @@ mod replica_assignment_tests {
     fn rf_one_single_broker_preserves_replica_shape() {
         let bs = vec![1u64];
         let out = round_robin_replicas(&bs, 2, 1);
-        assert_eq!(out, vec![vec![1u64], vec![1u64]]);
+        assert!(out == vec![vec![1u64], vec![1u64]]);
     }
 
     #[test]
@@ -410,9 +411,8 @@ mod replica_assignment_tests {
         let buckets2 = crate::quota::QuotaBuckets::new();
         let delay_other =
             crate::quota::consume_controller_mutation_quota(&img, &buckets2, "alice", "other", 10);
-        assert_eq!(
-            delay_other,
-            std::time::Duration::ZERO,
+        assert!(
+            delay_other == std::time::Duration::ZERO,
             "non-matching client_id should not throttle; got {delay_other:?}"
         );
     }

@@ -411,6 +411,7 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use tempfile::tempdir;
 
     #[test]
@@ -539,7 +540,7 @@ mod tests {
             extra.path(),
         )
         .expect("same-target alter must be idempotent");
-        assert_eq!(future_logs.len(), 1);
+        assert!(future_logs.len() == 1);
     }
 
     #[tokio::test]

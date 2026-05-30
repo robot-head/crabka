@@ -25,4 +25,5 @@ schemars = { workspace = true }
 kube = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 tempfile = { workspace = true }

@@ -1349,6 +1349,7 @@ fn encode_fetch_response(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     #[test]
     fn consume_consumer_quota_tuple_match_overage_throttles() {
         use crabka_metadata::{ClientQuotaRecord, MetadataImage, MetadataRecord, QuotaEntity};
@@ -1375,9 +1376,8 @@ mod tests {
         );
         let buckets2 = crate::quota::QuotaBuckets::new();
         let delay_other = super::consume_consumer_quota(&img, &buckets2, "alice", "other", 4096);
-        assert_eq!(
-            delay_other,
-            std::time::Duration::ZERO,
+        assert!(
+            delay_other == std::time::Duration::ZERO,
             "non-matching client_id should not throttle; got {delay_other:?}"
         );
     }

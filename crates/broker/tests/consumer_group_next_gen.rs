@@ -4,6 +4,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
+use assert2::assert;
 use std::sync::Arc;
 
 use crabka_broker::{Broker, BrokerConfig};
@@ -35,8 +36,8 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(
+        resp.topics[0].error_code == 0,
         "topic create failed: {resp:?}"
     );
 }
@@ -67,26 +68,26 @@ async fn single_member_full_lifecycle() {
     let mut req = heartbeat("g1", "", 0);
     req.subscribed_topic_names = Some(vec!["t1".into()]);
     let resp = client.send(req).await.unwrap();
-    assert_eq!(resp.error_code, 0);
+    assert!(resp.error_code == 0);
     let member_id = resp.member_id.clone().unwrap();
-    assert_eq!(resp.member_epoch, 1);
+    assert!(resp.member_epoch == 1);
     let assigned = resp.assignment.as_ref().unwrap();
     let total_partitions: usize = assigned
         .topic_partitions
         .iter()
         .map(|t| t.partitions.len())
         .sum();
-    assert_eq!(total_partitions, 4);
+    assert!(total_partitions == 4);
 
     let mut hb2 = heartbeat("g1", &member_id, 1);
     hb2.subscribed_topic_names = Some(vec!["t1".into()]);
     let resp2 = client.send(hb2).await.unwrap();
-    assert_eq!(resp2.error_code, 0);
-    assert_eq!(resp2.member_epoch, 1);
+    assert!(resp2.error_code == 0);
+    assert!(resp2.member_epoch == 1);
 
     let leave = heartbeat("g1", &member_id, -1);
     let resp3 = client.send(leave).await.unwrap();
-    assert_eq!(resp3.error_code, 0);
+    assert!(resp3.error_code == 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -105,13 +106,13 @@ async fn two_members_split_partitions() {
     let mut a = heartbeat("g2", "", 0);
     a.subscribed_topic_names = Some(vec!["t2".into()]);
     let ra = client.send(a).await.unwrap();
-    assert_eq!(ra.error_code, 0, "A join failed: {:?}", ra.error_code);
+    assert!(ra.error_code == 0, "A join failed: {:?}", ra.error_code);
     let mid_a = ra.member_id.unwrap();
 
     let mut b = heartbeat("g2", "", 0);
     b.subscribed_topic_names = Some(vec!["t2".into()]);
     let rb = client.send(b).await.unwrap();
-    assert_eq!(rb.error_code, 0, "B join failed: {:?}", rb.error_code);
+    assert!(rb.error_code == 0, "B join failed: {:?}", rb.error_code);
 
     // A re-heartbeats at its own epoch (1) to learn the rebalanced assignment.
     // B's join bumped the group epoch to 2 and updated A's target, but A's
@@ -119,7 +120,7 @@ async fn two_members_split_partitions() {
     let mut a3 = heartbeat("g2", &mid_a, ra.member_epoch);
     a3.subscribed_topic_names = Some(vec!["t2".into()]);
     let ra3 = client.send(a3).await.unwrap();
-    assert_eq!(ra3.error_code, 0, "A re-hb failed: {:?}", ra3.error_code);
+    assert!(ra3.error_code == 0, "A re-hb failed: {:?}", ra3.error_code);
 
     let parts_a: usize = ra3
         .assignment
@@ -135,7 +136,7 @@ async fn two_members_split_partitions() {
         .iter()
         .map(|t| t.partitions.len())
         .sum();
-    assert_eq!(parts_a + parts_b, 4);
+    assert!(parts_a + parts_b == 4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -165,7 +166,7 @@ async fn classic_group_locked_against_next_gen() {
     let mut req = heartbeat("g3", "", 0);
     req.subscribed_topic_names = Some(vec!["t3".into()]);
     let resp = client.send(req).await.unwrap();
-    assert_eq!(resp.error_code, crabka_broker::codes::GROUP_ID_NOT_FOUND);
+    assert!(resp.error_code == crabka_broker::codes::GROUP_ID_NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -188,7 +189,7 @@ async fn kill_switch_returns_group_id_not_found() {
     let mut req = heartbeat("g4", "", 0);
     req.subscribed_topic_names = Some(vec!["t".into()]);
     let resp = client.send(req).await.unwrap();
-    assert_eq!(resp.error_code, crabka_broker::codes::GROUP_ID_NOT_FOUND);
+    assert!(resp.error_code == crabka_broker::codes::GROUP_ID_NOT_FOUND);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -216,9 +217,9 @@ async fn describe_after_join() {
         })
         .await
         .unwrap();
-    assert_eq!(desc.groups.len(), 1);
-    assert_eq!(desc.groups[0].error_code, 0);
-    assert_eq!(desc.groups[0].group_state, "STABLE");
+    assert!(desc.groups.len() == 1);
+    assert!(desc.groups[0].error_code == 0);
+    assert!(desc.groups[0].group_state == "STABLE");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -238,26 +239,29 @@ async fn stale_epoch_rejected() {
     let mut req = heartbeat("g6", "", 0);
     req.subscribed_topic_names = Some(vec!["t6".into()]);
     let r = client.send(req).await.unwrap();
-    assert_eq!(r.error_code, 0);
+    assert!(r.error_code == 0);
     let mid = r.member_id.unwrap();
 
     // B joins; group_epoch goes 1→2, B's member_epoch = 2, A's is still 1.
     let mut req2 = heartbeat("g6", "", 0);
     req2.subscribed_topic_names = Some(vec!["t6".into()]);
     let rb = client.send(req2).await.unwrap();
-    assert_eq!(rb.error_code, 0);
+    assert!(rb.error_code == 0);
 
     // A catches up: heartbeat at epoch 1 succeeds and advances A's epoch to 2.
     let mut catch_up = heartbeat("g6", &mid, 1);
     catch_up.subscribed_topic_names = Some(vec!["t6".into()]);
     let rc = client.send(catch_up).await.unwrap();
-    assert_eq!(rc.error_code, 0);
-    assert_eq!(rc.member_epoch, 2, "A should be at epoch 2 after catch-up");
+    assert!(rc.error_code == 0);
+    assert!(
+        rc.member_epoch == 2,
+        "A should be at epoch 2 after catch-up"
+    );
 
     // Now A re-heartbeats at the OLD epoch 1; A's stored epoch is 2 → STALE.
     let stale = heartbeat("g6", &mid, 1);
     let resp = client.send(stale).await.unwrap();
-    assert_eq!(resp.error_code, crabka_broker::codes::STALE_MEMBER_EPOCH);
+    assert!(resp.error_code == crabka_broker::codes::STALE_MEMBER_EPOCH);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -278,10 +282,9 @@ async fn first_join_with_client_member_id_echoes_and_assigns() {
     req.subscribed_topic_names = Some(vec!["tc".into()]);
     let resp = client.send(req).await.unwrap();
 
-    assert_eq!(resp.error_code, 0, "client-id first-join failed");
-    assert_eq!(
-        resp.member_id.as_deref(),
-        Some("client-generated-id"),
+    assert!(resp.error_code == 0, "client-id first-join failed");
+    assert!(
+        resp.member_id.as_deref() == Some("client-generated-id"),
         "broker must echo the client-supplied member id"
     );
     let parts: usize = resp
@@ -291,5 +294,8 @@ async fn first_join_with_client_member_id_echoes_and_assigns() {
         .iter()
         .map(|t| t.partitions.len())
         .sum();
-    assert_eq!(parts, 2, "single member should be assigned both partitions");
+    assert!(
+        parts == 2,
+        "single member should be assigned both partitions"
+    );
 }

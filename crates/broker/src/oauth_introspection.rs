@@ -127,6 +127,7 @@ impl IntrospectionClient for ReqwestIntrospectionClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::net::SocketAddr;
     use std::sync::Mutex;
 
@@ -278,11 +279,8 @@ mod tests {
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
-        assert_eq!(
-            resp.get("active").and_then(serde_json::Value::as_bool),
-            Some(true)
-        );
-        assert_eq!(resp.get("sub").and_then(|v| v.as_str()), Some("alice"));
+        assert!(resp.get("active").and_then(serde_json::Value::as_bool) == Some(true));
+        assert!(resp.get("sub").and_then(|v| v.as_str()) == Some("alice"));
         srv_shutdown.cancel();
     }
 
@@ -299,10 +297,7 @@ mod tests {
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
-        assert_eq!(
-            resp.get("active").and_then(serde_json::Value::as_bool),
-            Some(false)
-        );
+        assert!(resp.get("active").and_then(serde_json::Value::as_bool) == Some(false));
         srv_shutdown.cancel();
     }
 
@@ -345,11 +340,8 @@ mod tests {
         .unwrap();
         client.introspect("tok").await.unwrap();
         let ui = client.userinfo("tok").await.unwrap().unwrap();
-        assert_eq!(
-            ui.get("preferred_username").and_then(|v| v.as_str()),
-            Some("alice"),
-        );
-        assert_eq!(observed.userinfo_auths.lock().unwrap().len(), 1);
+        assert!(ui.get("preferred_username").and_then(|v| v.as_str()) == Some("alice"));
+        assert!(observed.userinfo_auths.lock().unwrap().len() == 1);
         srv_shutdown.cancel();
     }
 
@@ -385,14 +377,8 @@ mod tests {
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
-        assert_eq!(
-            resp.get("client_id").and_then(|v| v.as_str()),
-            Some("kafka-client")
-        );
-        assert_eq!(
-            resp.get("scope").and_then(|v| v.as_str()),
-            Some("kafka.write profile")
-        );
+        assert!(resp.get("client_id").and_then(|v| v.as_str()) == Some("kafka-client"));
+        assert!(resp.get("scope").and_then(|v| v.as_str()) == Some("kafka.write profile"));
         srv_shutdown.cancel();
     }
 
@@ -411,9 +397,9 @@ mod tests {
         .unwrap();
         client.introspect("tok").await.unwrap();
         let auths = observed.introspect_auths.lock().unwrap();
-        assert_eq!(auths.len(), 1);
+        assert!(auths.len() == 1);
         // base64("kafka-broker:shh") = "a2Fma2EtYnJva2VyOnNoaA=="
-        assert_eq!(auths[0], "Basic a2Fma2EtYnJva2VyOnNoaA==");
+        assert!(auths[0] == "Basic a2Fma2EtYnJva2VyOnNoaA==");
         srv_shutdown.cancel();
     }
 
@@ -432,8 +418,8 @@ mod tests {
         .unwrap();
         client.introspect("opaque-abc").await.unwrap();
         let bodies = observed.introspect_bodies.lock().unwrap();
-        assert_eq!(bodies.len(), 1);
-        assert_eq!(bodies[0], "token=opaque-abc");
+        assert!(bodies.len() == 1);
+        assert!(bodies[0] == "token=opaque-abc");
         srv_shutdown.cancel();
     }
 

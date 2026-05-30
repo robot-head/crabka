@@ -60,6 +60,7 @@ impl ApiVersionTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 
     // `ApiVersionsRequest` acts as a sample `ProtocolRequest`. We only
@@ -89,6 +90,6 @@ mod tests {
     fn negotiate_picks_lowest_supported_when_broker_caps_low() {
         let t = ApiVersionTable::from_entries([(ApiVersionsRequest::API_KEY, 0, 0)]);
         // Both sides support 0; that's what's chosen.
-        assert_eq!(t.negotiate::<ApiVersionsRequest>().unwrap(), 0);
+        assert!(t.negotiate::<ApiVersionsRequest>().unwrap() == 0);
     }
 }

@@ -86,6 +86,7 @@ impl TxnEntry {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use serde_wincode::SerdeCompat;
     use wincode::{Deserialize as _, Serialize as _};
 
@@ -123,9 +124,9 @@ mod tests {
         let bytes = <SerdeCompat<TxnEntry>>::serialize(&e).unwrap();
         let decoded: TxnEntry = <SerdeCompat<TxnEntry>>::deserialize(&bytes).unwrap();
 
-        assert_eq!(decoded.transactional_id, "my-tid");
-        assert_eq!(decoded.producer_id, 1000);
-        assert_eq!(decoded.state, TxnState::Ongoing);
-        assert_eq!(decoded.partitions.len(), 1);
+        assert!(decoded.transactional_id == "my-tid");
+        assert!(decoded.producer_id == 1000);
+        assert!(decoded.state == TxnState::Ongoing);
+        assert!(decoded.partitions.len() == 1);
     }
 }

@@ -193,6 +193,7 @@ fn err_response(code: i16) -> DescribeDelegationTokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
     use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenOwner;
     use crabka_raft::ControllerHandle;
@@ -301,10 +302,7 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
         controller.cancel().await;
     }
 
@@ -329,10 +327,10 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert_eq!(ids.len(), 2);
+        assert!(ids.len() == 2);
         assert!(ids.contains("t-a"));
         assert!(ids.contains("t-b"));
         controller.cancel().await;
@@ -375,10 +373,10 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert_eq!(ids.len(), 1);
+        assert!(ids.len() == 1);
         assert!(ids.contains("t-b"));
         controller.cancel().await;
     }
@@ -411,10 +409,10 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert_eq!(ids.len(), 1);
+        assert!(ids.len() == 1);
         assert!(ids.contains("t-a"));
         controller.cancel().await;
     }
@@ -459,7 +457,7 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
         assert!(
@@ -502,7 +500,7 @@ mod tests {
             &simple_authz(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         // bob owns nothing — ACL extension MUST NOT surface alice's t-a.
         assert!(
             resp.tokens.is_empty(),

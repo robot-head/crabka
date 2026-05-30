@@ -143,6 +143,7 @@ fn build_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_raft::SnapshotSlice;
 
     #[test]
@@ -184,15 +185,15 @@ mod tests {
         };
         let resp = build_response(cid, &req, &resolve);
         let part = &resp.topics[0].partitions[0];
-        assert_eq!(resp.error_code, 0);
-        assert_eq!(part.error_code, 0);
-        assert_eq!(part.snapshot_id.end_offset, 6);
-        assert_eq!(part.snapshot_id.epoch, 1);
-        assert_eq!(part.size, 100);
-        assert_eq!(part.position, 0);
+        assert!(resp.error_code == 0);
+        assert!(part.error_code == 0);
+        assert!(part.snapshot_id.end_offset == 6);
+        assert!(part.snapshot_id.epoch == 1);
+        assert!(part.size == 100);
+        assert!(part.position == 0);
         let mut buf = bytes::BytesMut::new();
         part.unaligned_records.encode_to(&mut buf).unwrap();
-        assert_eq!(&buf[..], b"abc");
+        assert!(&buf[..] == b"abc");
     }
 
     #[test]
@@ -226,7 +227,7 @@ mod tests {
         };
         let resolve = |_pos: i64, _max: i32| SnapshotRange::NoSnapshot;
         let resp = build_response(cid, &req, &resolve);
-        assert_eq!(resp.error_code, codes::INCONSISTENT_CLUSTER_ID);
+        assert!(resp.error_code == codes::INCONSISTENT_CLUSTER_ID);
         assert!(resp.topics.is_empty());
     }
 
@@ -255,7 +256,7 @@ mod tests {
         let resolve = |_pos: i64, _max: i32| SnapshotRange::OutOfRange;
         let resp = build_response(cid, &req, &resolve);
         let part = &resp.topics[0].partitions[0];
-        assert_eq!(resp.error_code, codes::NONE);
-        assert_eq!(part.error_code, codes::POSITION_OUT_OF_RANGE);
+        assert!(resp.error_code == codes::NONE);
+        assert!(part.error_code == codes::POSITION_OUT_OF_RANGE);
     }
 }

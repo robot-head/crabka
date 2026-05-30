@@ -152,6 +152,7 @@ pub(crate) fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     // ── KIP-584 feature surface ────────────────────────────────────────────
 
@@ -162,8 +163,8 @@ mod tests {
             .iter()
             .find(|k| k.name == "metadata.version")
             .expect("metadata.version advertised");
-        assert_eq!(mv.min_version, crate::features::METADATA_VERSION_MIN);
-        assert_eq!(mv.max_version, crate::features::METADATA_VERSION_MAX);
+        assert!(mv.min_version == crate::features::METADATA_VERSION_MIN);
+        assert!(mv.max_version == crate::features::METADATA_VERSION_MAX);
     }
 
     #[test]
@@ -173,7 +174,7 @@ mod tests {
         // clients consume as `MetadataVersion.UNKNOWN`.
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
         assert!(finalized_feature_keys(&image).is_empty());
-        assert_eq!(image.finalized_features_epoch(), -1);
+        assert!(image.finalized_features_epoch() == -1);
     }
 
     #[test]
@@ -181,12 +182,12 @@ mod tests {
         let table = crate::api_catalog::supported_apis();
         let produce = table.iter().find(|v| v.api_key == 0).expect("produce");
         let fetch = table.iter().find(|v| v.api_key == 1).expect("fetch");
-        assert_eq!(
-            produce.min_version, 0,
+        assert!(
+            produce.min_version == 0,
             "Produce min must be 0 to advertise the legacy v0-2 support"
         );
-        assert_eq!(
-            fetch.min_version, 0,
+        assert!(
+            fetch.min_version == 0,
             "Fetch min must be 0 to advertise the legacy v0-3 support"
         );
     }
@@ -203,19 +204,18 @@ mod tests {
             (82, owned::update_raft_voter_request::MAX_VERSION),
         ] {
             let v = by_key(key).unwrap_or_else(|| panic!("api_key {key} advertised"));
-            assert_eq!(v.min_version, 0);
-            assert_eq!(v.max_version, max, "api_key {key} max matches codegen");
+            assert!(v.min_version == 0);
+            assert!(v.max_version == max, "api_key {key} max matches codegen");
         }
 
         // DescribeQuorum (55) max follows its schema const — now v2 (KIP-853
         // adds VoterDirectoryId + Nodes).
         let dq = by_key(55).expect("describe_quorum advertised");
-        assert_eq!(
-            dq.max_version,
-            owned::describe_quorum_request::MAX_VERSION,
-            "DescribeQuorum max tracks the codegen const",
+        assert!(
+            dq.max_version == owned::describe_quorum_request::MAX_VERSION,
+            "DescribeQuorum max tracks the codegen const"
         );
-        assert_eq!(dq.max_version, 2, "DescribeQuorum is v2 after KIP-853");
+        assert!(dq.max_version == 2, "DescribeQuorum is v2 after KIP-853");
     }
 
     // ── KIP-511 client-info validation ─────────────────────────────────────

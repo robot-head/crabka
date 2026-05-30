@@ -314,6 +314,7 @@ fn handle_broker_scoped(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn topic_throttle_config_value_validated() {
@@ -409,7 +410,7 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert_eq!(out.error_code, codes::INVALID_REQUEST);
+        assert!(out.error_code == codes::INVALID_REQUEST);
         assert!(to_submit.is_empty());
     }
 
@@ -420,7 +421,7 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert_eq!(out.error_code, codes::INVALID_REQUEST);
+        assert!(out.error_code == codes::INVALID_REQUEST);
     }
 
     #[test]
@@ -430,7 +431,7 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert_eq!(out.error_code, codes::INVALID_CONFIG);
+        assert!(out.error_code == codes::INVALID_CONFIG);
         assert!(to_submit.is_empty());
     }
 
@@ -447,13 +448,13 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert_eq!(out.error_code, codes::NONE);
-        assert_eq!(to_submit.len(), 1);
+        assert!(out.error_code == codes::NONE);
+        assert!(to_submit.len() == 1);
         match &to_submit[0] {
             MetadataRecord::V1BrokerConfig(rec) => {
-                assert_eq!(rec.node_id, 1);
-                assert_eq!(rec.config_name, crate::throttle::LEADER_THROTTLED_RATE_KEY);
-                assert_eq!(rec.config_value, Some("2048".into()));
+                assert!(rec.node_id == 1);
+                assert!(rec.config_name == crate::throttle::LEADER_THROTTLED_RATE_KEY);
+                assert!(rec.config_value == Some("2048".into()));
             }
             other => panic!("expected V1BrokerConfig, got {other:?}"),
         }
@@ -469,16 +470,13 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert_eq!(out.error_code, codes::NONE);
-        assert_eq!(to_submit.len(), 1);
+        assert!(out.error_code == codes::NONE);
+        assert!(to_submit.len() == 1);
         match &to_submit[0] {
             MetadataRecord::V1BrokerConfig(rec) => {
-                assert_eq!(rec.node_id, 1);
-                assert_eq!(
-                    rec.config_name,
-                    crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
-                );
-                assert_eq!(rec.config_value, None);
+                assert!(rec.node_id == 1);
+                assert!(rec.config_name == crate::throttle::FOLLOWER_THROTTLED_RATE_KEY);
+                assert!(rec.config_value == None);
             }
             other => panic!("expected V1BrokerConfig, got {other:?}"),
         }
@@ -497,7 +495,7 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert_eq!(out.error_code, codes::INVALID_CONFIG);
+        assert!(out.error_code == codes::INVALID_CONFIG);
         assert!(to_submit.is_empty());
     }
 }

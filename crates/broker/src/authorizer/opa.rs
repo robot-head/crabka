@@ -301,6 +301,7 @@ fn resource_type_str(t: ResourceType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use uuid::Uuid;
@@ -358,10 +359,7 @@ mod tests {
         let image = img();
         let p = test_principal("admin");
         let h = host();
-        assert_eq!(
-            auth.authorize(&image, &req(&p, &h, "anything")),
-            AuthorizationResult::Allow,
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "anything")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -379,14 +377,8 @@ mod tests {
         let image = img();
         let p = test_principal("alice");
         let h = host();
-        assert_eq!(
-            auth.authorize(&image, &req(&p, &h, "t")),
-            AuthorizationResult::Allow,
-        );
-        assert_eq!(
-            auth.authorize(&image, &req(&p, &h, "t")),
-            AuthorizationResult::Allow,
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -404,16 +396,10 @@ mod tests {
         let image = img();
         let p = test_principal("alice");
         let h = host();
-        assert_eq!(
-            auth.authorize(&image, &req(&p, &h, "fresh-topic")),
-            AuthorizationResult::Allow,
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "fresh-topic")) == AuthorizationResult::Allow);
         // Cache populated; introspect by asserting a second call doesn't
         // bump the mock's request count when the assertion fires on drop.
-        assert_eq!(
-            auth.authorize(&image, &req(&p, &h, "fresh-topic")),
-            AuthorizationResult::Allow,
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "fresh-topic")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -433,15 +419,9 @@ mod tests {
         let image = img();
         let p = test_principal("alice");
         let h = host();
-        assert_eq!(
-            auth.authorize(&image, &req(&p, &h, "t")),
-            AuthorizationResult::Allow,
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(
-            auth.authorize(&image, &req(&p, &h, "t")),
-            AuthorizationResult::Allow,
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -457,10 +437,7 @@ mod tests {
         let image = img();
         let p = test_principal("alice");
         let h = host();
-        assert_eq!(
-            auth.authorize(&image, &req(&p, &h, "t")),
-            AuthorizationResult::Allow,
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -475,10 +452,7 @@ mod tests {
         let image = img();
         let p = test_principal("alice");
         let h = host();
-        assert_eq!(
-            auth.authorize(&image, &req(&p, &h, "t")),
-            AuthorizationResult::Deny,
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -498,16 +472,10 @@ mod tests {
 
         let auth_open =
             OpaAuthorizer::new(HashSet::new(), opa_url(&mock), true, 100, 60_000).unwrap();
-        assert_eq!(
-            auth_open.authorize(&image, &req(&p, &h, "t")),
-            AuthorizationResult::Allow,
-        );
+        assert!(auth_open.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
 
         let auth_closed =
             OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
-        assert_eq!(
-            auth_closed.authorize(&image, &req(&p, &h, "t")),
-            AuthorizationResult::Deny,
-        );
+        assert!(auth_closed.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny);
     }
 }

@@ -510,6 +510,7 @@ async fn patch_status(
 mod tests {
     use super::*;
     use crate::crd::{KafkaCondition, KafkaSpec, KafkaStatus, ListenerStatus, ListenerType};
+    use assert2::assert;
 
     fn kafka_ready(name: &str, namespace: &str, listener_port: i32) -> Kafka {
         let mut k = Kafka::new(
@@ -595,7 +596,7 @@ mod tests {
         let current = BTreeMap::new();
         let desired = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
         let ops = diff_configs(&current, &desired, "foo");
-        assert_eq!(ops.len(), 1);
+        assert!(ops.len() == 1);
         assert!(matches!(&ops[0], IncrementalAlterOp::Set { key, value, .. }
             if key == "retention.ms" && value == "60000"));
     }
@@ -605,7 +606,7 @@ mod tests {
         let current = BTreeMap::from([("retention.ms".to_string(), "30000".to_string())]);
         let desired = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
         let ops = diff_configs(&current, &desired, "foo");
-        assert_eq!(ops.len(), 1);
+        assert!(ops.len() == 1);
         assert!(matches!(&ops[0], IncrementalAlterOp::Set { value, .. } if value == "60000"));
     }
 
@@ -614,7 +615,7 @@ mod tests {
         let current = BTreeMap::from([("cleanup.policy".to_string(), "delete".to_string())]);
         let desired = BTreeMap::new();
         let ops = diff_configs(&current, &desired, "foo");
-        assert_eq!(ops.len(), 1);
+        assert!(ops.len() == 1);
         assert!(
             matches!(&ops[0], IncrementalAlterOp::Delete { key, .. } if key == "cleanup.policy")
         );
@@ -637,9 +638,8 @@ mod tests {
             ("segment.bytes".to_string(), "1048576".to_string()),
         ]);
         let ops = diff_configs(&current, &desired, "foo");
-        assert_eq!(
-            ops.len(),
-            3,
+        assert!(
+            ops.len() == 3,
             "expected SET(retention.ms), SET(segment.bytes), DELETE(cleanup.policy)"
         );
     }
@@ -647,9 +647,9 @@ mod tests {
     #[test]
     fn internal_listener_bootstrap_returns_listener_when_ready() {
         let k = kafka_ready("demo", "default", 9092);
-        assert_eq!(
-            internal_listener_bootstrap(&k).as_deref(),
-            Some("demo-broker-headless.default.svc.cluster.local:9092"),
+        assert!(
+            internal_listener_bootstrap(&k).as_deref()
+                == Some("demo-broker-headless.default.svc.cluster.local:9092")
         );
     }
 

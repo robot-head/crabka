@@ -235,6 +235,7 @@ impl DetectorMetrics {
 mod tests {
     use super::*;
     use crate::health::new_registry;
+    use assert2::assert;
 
     #[test]
     fn register_emits_all_metric_names() {

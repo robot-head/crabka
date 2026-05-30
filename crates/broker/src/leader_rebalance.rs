@@ -108,6 +108,7 @@ pub(crate) async fn rebalance_tick(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{PartitionRecord, TopicRecord};
     use std::sync::Mutex;
     use uuid::Uuid;
@@ -221,9 +222,8 @@ mod tests {
             imbalance_threshold_pct: 0,
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
-        assert_eq!(
-            mock.submit_calls.load(std::sync::atomic::Ordering::SeqCst),
-            0,
+        assert!(
+            mock.submit_calls.load(std::sync::atomic::Ordering::SeqCst) == 0,
             "must not submit when there is nothing to rebalance"
         );
     }
@@ -239,11 +239,11 @@ mod tests {
         };
         rebalance_tick(&mock, &liveness, &cfg).await;
         let submitted = mock.submitted.lock().unwrap();
-        assert_eq!(submitted.len(), 20);
+        assert!(submitted.len() == 20);
         // Every submitted record must promote preferred (replicas[0] = 1).
         for record in submitted.iter() {
             match record {
-                MetadataRecord::V1Partition(p) => assert_eq!(p.leader, 1),
+                MetadataRecord::V1Partition(p) => assert!(p.leader == 1),
                 _ => panic!("unexpected record type"),
             }
         }

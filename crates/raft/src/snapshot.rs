@@ -252,6 +252,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), RaftError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use uuid::Uuid;
@@ -262,8 +263,8 @@ mod tests {
             end_offset: 1847,
             epoch: 3,
         };
-        assert_eq!(id.file_name(), "00000000000000001847-0000000003.checkpoint");
-        assert_eq!(SnapshotId::parse(&id.file_name()), Some(id));
+        assert!(id.file_name() == "00000000000000001847-0000000003.checkpoint");
+        assert!(SnapshotId::parse(&id.file_name()) == Some(id));
     }
 
     #[test]
@@ -279,7 +280,7 @@ mod tests {
 
         let bytes = SnapshotWriter::serialize(&image, 1_700_000_000_000).unwrap();
         let records = SnapshotReader::read_records(&bytes).unwrap();
-        assert_eq!(MetadataImage::from_records(cid, &records), image);
+        assert!(MetadataImage::from_records(cid, &records) == image);
     }
 
     #[test]
@@ -290,7 +291,7 @@ mod tests {
         let bytes = SnapshotWriter::serialize(&image, 0).unwrap();
         let records = SnapshotReader::read_records(&bytes).unwrap();
         assert!(records.is_empty());
-        assert_eq!(MetadataImage::from_records(cid, &records), image);
+        assert!(MetadataImage::from_records(cid, &records) == image);
     }
 
     #[test]
@@ -311,9 +312,9 @@ mod tests {
         let (loaded_id, loaded_bytes, loaded_meta) = load_latest(dir.path())
             .unwrap()
             .expect("checkpoint present");
-        assert_eq!(loaded_id, id);
-        assert_eq!(loaded_bytes, bytes);
-        assert_eq!(loaded_meta.snapshot_id, id.file_name());
+        assert!(loaded_id == id);
+        assert!(loaded_bytes == bytes);
+        assert!(loaded_meta.snapshot_id == id.file_name());
     }
 
     #[test]
@@ -338,10 +339,10 @@ mod tests {
     fn byte_range_returns_expected_slice() {
         let buf: Vec<u8> = (0u8..=255).collect();
         // In-range read.
-        assert_eq!(SnapshotReader::byte_range(&buf, 10, 5), &buf[10..15]);
+        assert!(SnapshotReader::byte_range(&buf, 10, 5) == &buf[10..15]);
         // Position past EOF → empty.
         assert!(SnapshotReader::byte_range(&buf, 1000, 5).is_empty());
         // Length clamps to buffer end.
-        assert_eq!(SnapshotReader::byte_range(&buf, 250, 100), &buf[250..]);
+        assert!(SnapshotReader::byte_range(&buf, 250, 100) == &buf[250..]);
     }
 }

@@ -8,6 +8,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::path::Path;
 use std::process::{Command, Stdio};
 

@@ -430,14 +430,15 @@ impl KafkaUserQuotas {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaUser::crd();
-        assert_eq!(crd.spec.group, "crabka.io");
-        assert_eq!(crd.spec.names.kind, "KafkaUser");
-        assert_eq!(crd.spec.names.plural, "kafkausers");
+        assert!(crd.spec.group == "crabka.io");
+        assert!(crd.spec.names.kind == "KafkaUser");
+        assert!(crd.spec.names.plural == "kafkausers");
         assert!(
             crd.spec
                 .names
@@ -446,8 +447,8 @@ mod tests {
                 .is_some_and(|v| v.contains(&"ku".to_string())),
             "expected shortname `ku`",
         );
-        assert_eq!(crd.spec.versions.len(), 1);
-        assert_eq!(crd.spec.versions[0].name, "v1alpha1");
+        assert!(crd.spec.versions.len() == 1);
+        assert!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -485,7 +486,7 @@ mod tests {
         assert!(json.contains("\"type\":\"simple\""), "got: {json}");
         assert!(json.contains("\"name\":\"orders\""), "got: {json}");
         let back: KafkaUser = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.spec, ku.spec);
+        assert!(back.spec == ku.spec);
     }
 
     #[test]
@@ -509,9 +510,9 @@ mod tests {
             "operations":["Read"]
         }"#;
         let rule: AclRule = serde_json::from_str(json).unwrap();
-        assert_eq!(rule.host, "*");
-        assert_eq!(rule.permission, AclPermission::Allow);
-        assert_eq!(rule.resource.pattern_type, AclPatternType::Literal);
+        assert!(rule.host == "*");
+        assert!(rule.permission == AclPermission::Allow);
+        assert!(rule.resource.pattern_type == AclPatternType::Literal);
     }
 
     #[test]
@@ -562,7 +563,7 @@ mod tests {
     fn quotas_empty_serializes_as_empty_object() {
         let q = KafkaUserQuotas::default();
         let j = serde_json::to_string(&q).unwrap();
-        assert_eq!(j, "{}");
+        assert!(j == "{}");
         assert!(q.to_quota_map().is_empty());
     }
 
@@ -575,7 +576,7 @@ mod tests {
             controller_mutation_rate: None,
         };
         let m = q.to_quota_map();
-        assert_eq!(m.len(), 2);
+        assert!(m.len() == 2);
         assert!((m["producer_byte_rate"] - 1_048_576.0).abs() < f64::EPSILON);
         assert!((m["request_percentage"] - 25.0).abs() < f64::EPSILON);
     }
@@ -587,7 +588,7 @@ mod tests {
             ..Default::default()
         };
         let m = q.to_quota_map();
-        assert_eq!(m.len(), 1);
+        assert!(m.len() == 1);
         assert!((m["controller_mutation_rate"] - 2.5).abs() < f64::EPSILON);
     }
 
@@ -600,10 +601,10 @@ mod tests {
             "controllerMutationRate": 10.5
         }"#;
         let q: KafkaUserQuotas = serde_json::from_str(json).unwrap();
-        assert_eq!(q.producer_byte_rate, Some(1_048_576));
-        assert_eq!(q.consumer_byte_rate, Some(2_097_152));
-        assert_eq!(q.request_percentage, Some(55));
-        assert_eq!(q.controller_mutation_rate, Some(10.5));
+        assert!(q.producer_byte_rate == Some(1_048_576));
+        assert!(q.consumer_byte_rate == Some(2_097_152));
+        assert!(q.request_percentage == Some(55));
+        assert!(q.controller_mutation_rate == Some(10.5));
     }
 
     #[test]
@@ -630,9 +631,9 @@ mod tests {
     fn tls_auth_round_trips() {
         let auth = Authentication::Tls(TlsAuth::default());
         let v = serde_json::to_value(&auth).unwrap();
-        assert_eq!(v, serde_json::json!({"type": "tls"}));
+        assert!(v == serde_json::json!({"type": "tls"}));
         let back: Authentication = serde_json::from_value(v).unwrap();
-        assert_eq!(back, auth);
+        assert!(back == auth);
     }
 
     #[test]
@@ -642,25 +643,24 @@ mod tests {
             renewal_days: Some(14),
         });
         let v = serde_json::to_value(&auth).unwrap();
-        assert_eq!(
-            v,
-            serde_json::json!({
+        assert!(
+            v == serde_json::json!({
                 "type": "tls",
                 "validityDays": 180,
                 "renewalDays": 14,
             })
         );
         let back: Authentication = serde_json::from_value(v).unwrap();
-        assert_eq!(back, auth);
+        assert!(back == auth);
     }
 
     #[test]
     fn authentication_scram_round_trips_unchanged() {
         let auth = Authentication::ScramSha512(ScramSha512Auth::default());
         let v = serde_json::to_value(&auth).unwrap();
-        assert_eq!(v, serde_json::json!({"type": "scram-sha-512"}));
+        assert!(v == serde_json::json!({"type": "scram-sha-512"}));
         let back: Authentication = serde_json::from_value(v).unwrap();
-        assert_eq!(back, auth);
+        assert!(back == auth);
     }
 
     #[test]
@@ -672,25 +672,24 @@ mod tests {
         // Secret).
         let auth_default = Authentication::ScramSha256(ScramSha256Auth::default());
         let v = serde_json::to_value(&auth_default).unwrap();
-        assert_eq!(v, serde_json::json!({"type": "scram-sha-256"}));
+        assert!(v == serde_json::json!({"type": "scram-sha-256"}));
         let back: Authentication = serde_json::from_value(v).unwrap();
-        assert_eq!(back, auth_default);
+        assert!(back == auth_default);
 
         let auth_overrides = Authentication::ScramSha256(ScramSha256Auth {
             iterations: Some(16_384),
             password_length: Some(64),
         });
         let v = serde_json::to_value(&auth_overrides).unwrap();
-        assert_eq!(
-            v,
-            serde_json::json!({
+        assert!(
+            v == serde_json::json!({
                 "type": "scram-sha-256",
                 "iterations": 16_384,
                 "passwordLength": 64,
-            }),
+            })
         );
         let back: Authentication = serde_json::from_value(v).unwrap();
-        assert_eq!(back, auth_overrides);
+        assert!(back == auth_overrides);
     }
 
     #[test]
@@ -716,24 +715,18 @@ mod tests {
             ..Default::default()
         };
         let v = serde_json::to_value(&status).unwrap();
-        assert_eq!(v.get("tls"), Some(&serde_json::Value::Bool(true)));
-        assert_eq!(
-            v.get("tlsCertNotAfter").and_then(|x| x.as_str()),
-            Some("2027-05-19T00:00:00Z")
-        );
-        assert_eq!(
-            v.get("tlsPrincipal").and_then(|x| x.as_str()),
-            Some("User:CN=alice")
-        );
+        assert!(v.get("tls") == Some(&serde_json::Value::Bool(true)));
+        assert!(v.get("tlsCertNotAfter").and_then(|x| x.as_str()) == Some("2027-05-19T00:00:00Z"));
+        assert!(v.get("tlsPrincipal").and_then(|x| x.as_str()) == Some("User:CN=alice"));
     }
 
     #[test]
     fn tls_external_round_trips() {
         let auth = Authentication::TlsExternal;
         let j = serde_json::to_string(&auth).unwrap();
-        assert_eq!(j, r#"{"type":"tls-external"}"#);
+        assert!(j == r#"{"type":"tls-external"}"#);
         let back: Authentication = serde_json::from_str(&j).unwrap();
-        assert_eq!(back, auth);
+        assert!(back == auth);
     }
 
     #[test]
@@ -762,14 +755,14 @@ mod tests {
         assert!(j.contains("\"name\":\"orders\""), "got: {j}");
         assert!(j.contains("\"producerByteRate\":1048576"), "got: {j}");
         let back: KafkaUserSpec = serde_json::from_str(&j).unwrap();
-        assert_eq!(back, spec);
+        assert!(back == spec);
     }
 
     #[test]
     fn tls_external_minimum_spec_parses() {
         let json = r#"{"authentication":{"type":"tls-external"}}"#;
         let spec: KafkaUserSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.authentication, Authentication::TlsExternal);
+        assert!(spec.authentication == Authentication::TlsExternal);
         assert!(spec.authorization.is_none());
         assert!(spec.quotas.is_none());
     }
@@ -781,7 +774,7 @@ mod tests {
             ..Default::default()
         };
         let v = serde_json::to_value(&status).unwrap();
-        assert_eq!(v.get("external"), Some(&serde_json::Value::Bool(true)));
+        assert!(v.get("external") == Some(&serde_json::Value::Bool(true)));
     }
 
     #[test]
@@ -809,9 +802,9 @@ spec:
         let Authentication::DelegationToken(dt) = user.spec.authentication else {
             panic!("expected DelegationToken variant");
         };
-        assert_eq!(dt.renewers, vec!["User:bob", "User:carol"]);
-        assert_eq!(dt.max_lifetime_ms, Some(86_400_000));
-        assert_eq!(dt.renew_before_expiry_ms, Some(7_200_000));
+        assert!(dt.renewers == vec!["User:bob", "User:carol"]);
+        assert!(dt.max_lifetime_ms == Some(86_400_000));
+        assert!(dt.renew_before_expiry_ms == Some(7_200_000));
     }
 
     #[test]

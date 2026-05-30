@@ -1,4 +1,5 @@
 // Tests the coordinator's safety guards against an in-memory mock (no real raft).
+use assert2::assert;
 use crabka_metadata::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
 use crabka_raft::reconfig::{
     AddVoter, Coordinator, ReconfigOps, ReconfigOutcome, RemoveVoter, UpdateVoter,
@@ -97,10 +98,10 @@ async fn add_voter_succeeds_when_caught_up() {
     let lock = tokio::sync::Mutex::new(());
     let coord = Coordinator::new(&mock, &lock, 10);
     let out = coord.add_voter(AddVoter { voter: voter(2) }).await.unwrap();
-    assert_eq!(out, ReconfigOutcome::Committed);
+    assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert_eq!(st.membership.as_ref().unwrap(), &BTreeSet::from([1, 2]));
-    assert_eq!(st.submitted.len(), 1); // one V1Voters record
+    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([1, 2]));
+    assert!(st.submitted.len() == 1); // one V1Voters record
 }
 
 #[tokio::test]
@@ -174,10 +175,10 @@ async fn update_voter_submits_record_without_membership_change() {
         .update_voter(UpdateVoter { voter: updated })
         .await
         .unwrap();
-    assert_eq!(out, ReconfigOutcome::Committed);
+    assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
     assert!(st.membership.is_none()); // id set unchanged -> no change_membership
-    assert_eq!(st.submitted.len(), 1); // one V1Voters record
+    assert!(st.submitted.len() == 1); // one V1Voters record
 }
 
 #[tokio::test]
@@ -196,10 +197,10 @@ async fn remove_non_last_voter_succeeds() {
         })
         .await
         .unwrap();
-    assert_eq!(out, ReconfigOutcome::Committed);
+    assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert_eq!(st.membership.as_ref().unwrap(), &BTreeSet::from([1]));
-    assert_eq!(st.submitted.len(), 1); // one V1Voters record
+    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([1]));
+    assert!(st.submitted.len() == 1); // one V1Voters record
 }
 
 #[tokio::test]
@@ -219,7 +220,7 @@ async fn remove_voter_with_mismatched_directory_id_is_noop() {
         })
         .await
         .unwrap();
-    assert_eq!(out, ReconfigOutcome::Committed); // idempotent no-op
+    assert!(out == ReconfigOutcome::Committed); // idempotent no-op
     let st = mock.0.lock().unwrap();
     assert!(st.membership.is_none()); // current voter must NOT be removed
     assert!(st.submitted.is_empty());

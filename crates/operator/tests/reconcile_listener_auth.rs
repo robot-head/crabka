@@ -1,5 +1,6 @@
 //! Integration tests for listener authentication wiring — SCRAM-SHA-512, SCRAM-SHA-256, mTLS, and `NodePort` SAN injection.
 
+use assert2::assert;
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
@@ -254,13 +255,13 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert_eq!(valid["status"], "False", "body = {body}");
-    assert_eq!(
-        valid["reason"], "ListenerMtlsRequiresTransportTls",
+    assert!(valid["status"] == "False", "body = {body}");
+    assert!(
+        valid["reason"] == "ListenerMtlsRequiresTransportTls",
         "body = {body}"
     );
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 // ── test 6 ────────────────────────────────────────────────────────────────────
@@ -327,16 +328,15 @@ async fn auth_change_bumps_config_hash() {
         .unwrap_or_else(|| panic!("config-hash label missing; body = {body2}"))
         .to_string();
 
-    assert_ne!(
-        hash1, hash2,
+    assert!(
+        hash1 != hash2,
         "config-hash must differ between SCRAM-SHA-512 and mTLS configs"
     );
 
     // Both hashes must be valid 16-char hex strings.
     for (hash, label) in [(&hash1, "scram"), (&hash2, "mtls")] {
-        assert_eq!(
-            hash.len(),
-            16,
+        assert!(
+            hash.len() == 16,
             "{label} config-hash must be 16 hex chars, got {hash:?}"
         );
         assert!(
@@ -684,8 +684,8 @@ async fn nodeport_listener_external_san_added_to_per_broker_cert() {
     // ExternalIP). This proves the SAN computation reached the keystore-write path, but does
     // not parse the cert PEM itself — issue_broker_cert is independently tested in
     // security/src/ca.rs and operator/src/controller/cluster_ca.rs::san_tests.
-    assert_eq!(
-        stored_digest, expected_digest,
+    assert!(
+        stored_digest == expected_digest,
         "keystore 0.sans-digest must include the NodePort external IP {ext_node_ip}"
     );
 }

@@ -129,6 +129,7 @@ impl Goal for MinTopicLeadersPerBroker {
 mod tests {
     use super::*;
     use crate::model::BrokerView;
+    use assert2::assert;
 
     fn ctx_with(min: u32) -> GoalContext {
         GoalContext {
@@ -201,7 +202,7 @@ mod tests {
             mvs.len()
         );
         for m in &mvs {
-            assert_eq!(m.old_replicas, m.new_replicas, "leader-only move");
+            assert!(m.old_replicas == m.new_replicas, "leader-only move");
         }
     }
 
@@ -211,7 +212,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = MinTopicLeadersPerBroker.propose(&s, &ctx_with(1));
         for m in &mvs {
-            assert_ne!(m.new_leader, 3, "broker 3 must not get leadership of t");
+            assert!(m.new_leader != 3, "broker 3 must not get leadership of t");
         }
     }
 

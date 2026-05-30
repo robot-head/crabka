@@ -288,6 +288,7 @@ impl RaftLogStorage<TypeConfig> for Arc<RaftLogStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use openraft::{Entry, EntryPayload, LeaderId, LogId};
     use tempfile::TempDir;
 
@@ -314,7 +315,7 @@ mod tests {
             store.append(vec![entry]).await.unwrap();
         }
         let store2 = RaftLogStore::open(dir_path).await.unwrap();
-        assert_eq!(store2.last_log_id().await.unwrap().index, 1);
+        assert!(store2.last_log_id().await.unwrap().index == 1);
     }
 
     #[tokio::test]
@@ -343,7 +344,7 @@ mod tests {
         .unwrap();
 
         let state = RaftLogStorage::get_log_state(&mut store).await.unwrap();
-        assert_eq!(state.last_purged_log_id.map(|l| l.index), Some(3));
+        assert!(state.last_purged_log_id.map(|l| l.index) == Some(3));
         // Entries at or below the purge point are gone from the cache.
         assert!(
             store
@@ -358,7 +359,7 @@ mod tests {
     async fn read_range_and_log_start_index() {
         let dir = TempDir::new().unwrap();
         let store = RaftLogStore::open(dir.path().to_path_buf()).await.unwrap();
-        assert_eq!(store.log_start_index().await, 0);
+        assert!(store.log_start_index().await == 0);
 
         let entries: Vec<Entry<TypeConfig>> = (1..=3)
             .map(|i| Entry {
@@ -371,10 +372,10 @@ mod tests {
             .collect();
         store.append(entries).await.unwrap();
 
-        assert_eq!(store.log_start_index().await, 1);
+        assert!(store.log_start_index().await == 1);
         let got = store.read_range(2..=3).await;
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].log_id.index, 2);
-        assert_eq!(got[1].log_id.index, 3);
+        assert!(got.len() == 2);
+        assert!(got[0].log_id.index == 2);
+        assert!(got[1].log_id.index == 3);
     }
 }

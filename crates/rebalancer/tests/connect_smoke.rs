@@ -13,6 +13,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
+use assert2::assert;
 use std::time::{Duration, Instant};
 
 use crabka_broker::{Broker, BrokerConfig};
@@ -192,9 +193,8 @@ async fn connect_execute_proposal_and_cancel_over_http_json() {
         .await
         .expect("execute POST");
     // Connect's FailedPrecondition maps to HTTP 400.
-    assert_eq!(
-        exec.status(),
-        reqwest::StatusCode::BAD_REQUEST,
+    assert!(
+        exec.status() == reqwest::StatusCode::BAD_REQUEST,
         "expected FailedPrecondition for zero-movement proposal; got {}",
         exec.status()
     );

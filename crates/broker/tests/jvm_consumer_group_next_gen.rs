@@ -5,6 +5,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
+use assert2::assert;
 use std::process::{Command, Stdio};
 
 use crabka_broker::{Broker, BrokerConfig};

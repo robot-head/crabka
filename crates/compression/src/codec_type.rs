@@ -38,6 +38,7 @@ impl CompressionType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn attribute_bits_roundtrip() {
@@ -48,25 +49,22 @@ mod tests {
             CompressionType::Lz4,
             CompressionType::Zstd,
         ] {
-            assert_eq!(
-                CompressionType::from_attribute_bits(ct.as_attribute_bits()),
-                Some(ct)
-            );
+            assert!(CompressionType::from_attribute_bits(ct.as_attribute_bits()) == Some(ct));
         }
     }
 
     #[test]
     fn attribute_bits_mask() {
         // Only the low 3 bits define the codec; upper bits are other flags.
-        assert_eq!(
-            CompressionType::from_attribute_bits(0b1111_1000 | 0b0000_0001),
-            Some(CompressionType::Gzip)
+        assert!(
+            CompressionType::from_attribute_bits(0b1111_1000 | 0b0000_0001)
+                == Some(CompressionType::Gzip)
         );
     }
 
     #[test]
     fn attribute_bits_unknown() {
-        assert_eq!(CompressionType::from_attribute_bits(5), None);
-        assert_eq!(CompressionType::from_attribute_bits(7), None);
+        assert!(CompressionType::from_attribute_bits(5) == None);
+        assert!(CompressionType::from_attribute_bits(7) == None);
     }
 }

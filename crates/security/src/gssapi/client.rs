@@ -90,6 +90,7 @@ impl GssapiClientExchange {
 mod tests {
     use super::*;
     use crate::gssapi::{GssError, GssInitiator, InitStep};
+    use assert2::assert;
 
     struct FakeInitiator {
         done: bool,
@@ -130,6 +131,6 @@ mod tests {
             ClientStep::Done => panic!("expected reply token"),
         };
         // reply = wrapped (identity) choice: selected 0x01 auth + 3-byte size
-        assert_eq!(reply[0], 0x01);
+        assert!(reply[0] == 0x01);
     }
 }

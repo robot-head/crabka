@@ -16,6 +16,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -161,9 +162,9 @@ async fn create_topic_with_configs(
     let mut cur: &[u8] = &resp_bytes;
     let resp =
         CreateTopicsResponse::decode(&mut cur, VERSION).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -234,8 +235,8 @@ async fn produce_record(addr: SocketAddr, topic: &str, topic_id: Uuid, key: &[u8
     let mut cur: &[u8] = &resp_bytes;
     let resp = ProduceResponse::decode(&mut cur, VERSION).expect("decode ProduceResponse");
     let part = &resp.responses[0].partition_responses[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "Produce must succeed: error_code={}",
         part.error_code
     );
@@ -291,8 +292,8 @@ async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRec
         let mut got_any = false;
         for topic_resp in &resp.responses {
             for part_resp in &topic_resp.partitions {
-                assert_eq!(
-                    part_resp.error_code, 0,
+                assert!(
+                    part_resp.error_code == 0,
                     "Fetch partition error: {}",
                     part_resp.error_code
                 );
@@ -444,11 +445,11 @@ async fn compaction_dedupes_via_native_client() {
         .map(|r| String::from_utf8(r.key.clone()).unwrap())
         .filter(|k| k != "__pad__")
         .collect();
-    assert_eq!(
-        distinct_keys,
-        ["k1".to_string(), "k2".to_string(), "k3".to_string()]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>(),
+    assert!(
+        distinct_keys
+            == ["k1".to_string(), "k2".to_string(), "k3".to_string()]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>(),
         "k1, k2, k3 must all survive compaction; got: {distinct_keys:?}"
     );
 

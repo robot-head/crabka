@@ -104,43 +104,44 @@ pub fn router(state: Arc<handlers::AppState>) -> axum::Router {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn default_registry_has_sixteen_goals() {
         let r = GoalRegistry::default_registry();
         let all = r.select(&[]).unwrap();
-        assert_eq!(all.len(), 16);
+        assert!(all.len() == 16);
     }
 
     #[test]
     fn default_registry_order_matches_spec() {
         let r = GoalRegistry::default_registry();
         let names: Vec<&str> = r.select(&[]).unwrap().iter().map(|g| g.name()).collect();
-        assert_eq!(
-            names,
-            vec![
-                // Hard goals (priority order matters for the optimizer's
-                // Hard-first ordering).
-                "PreferredLeaderIdempotency",
-                "RackAware",
-                "ReplicaCapacity",
-                "DiskCapacity",
-                "NetworkInCapacity",
-                "NetworkOutCapacity",
-                "CpuCapacity",
-                // Soft goals.
-                "ReplicaDistribution",
-                "LeaderDistribution",
-                "TopicReplicaDistribution",
-                "MinTopicLeadersPerBroker",
-                // New in 43e:
-                "DiskUsage",
-                "LeaderBytesIn",
-                "NetworkInUsage",
-                "NetworkOutUsage",
-                // New in 43f:
-                "CpuUsage",
-            ],
+        assert!(
+            names
+                == vec![
+                    // Hard goals (priority order matters for the optimizer's
+                    // Hard-first ordering).
+                    "PreferredLeaderIdempotency",
+                    "RackAware",
+                    "ReplicaCapacity",
+                    "DiskCapacity",
+                    "NetworkInCapacity",
+                    "NetworkOutCapacity",
+                    "CpuCapacity",
+                    // Soft goals.
+                    "ReplicaDistribution",
+                    "LeaderDistribution",
+                    "TopicReplicaDistribution",
+                    "MinTopicLeadersPerBroker",
+                    // New in 43e:
+                    "DiskUsage",
+                    "LeaderBytesIn",
+                    "NetworkInUsage",
+                    "NetworkOutUsage",
+                    // New in 43f:
+                    "CpuUsage",
+                ],
             "registry order must match the spec's documented priority"
         );
     }
@@ -149,8 +150,8 @@ mod tests {
     fn select_by_name() {
         let r = GoalRegistry::default_registry();
         let one = r.select(&["ReplicaDistribution".into()]).unwrap();
-        assert_eq!(one.len(), 1);
-        assert_eq!(one[0].name(), "ReplicaDistribution");
+        assert!(one.len() == 1);
+        assert!(one[0].name() == "ReplicaDistribution");
     }
 
     #[test]

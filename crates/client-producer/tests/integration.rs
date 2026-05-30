@@ -7,6 +7,7 @@
 //! runtime can't drive the broker's accept loop concurrently with the
 //! producer's sender task and the test body.
 
+use assert2::assert;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -51,8 +52,8 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(
+        resp.topics[0].error_code == 0,
         "create_topic failed: {resp:?}"
     );
 }
@@ -142,7 +143,7 @@ async fn idempotent_produce_then_consume() {
             .await
             .expect("oneshot")
             .unwrap_or_else(|e| panic!("record {i} failed: {e:?}"));
-        assert_eq!(m.partition, 0, "single-partition topic");
+        assert!(m.partition == 0, "single-partition topic");
     }
 
     // Consume them back through a group.
@@ -168,7 +169,10 @@ async fn idempotent_produce_then_consume() {
             .expect("poll")
             .len();
     }
-    assert_eq!(seen, PRODUCE_N, "expected {PRODUCE_N} records, saw {seen}");
+    assert!(
+        seen == PRODUCE_N,
+        "expected {PRODUCE_N} records, saw {seen}"
+    );
 
     consumer.close().await.expect("consumer close");
     producer.close().await.expect("producer close");

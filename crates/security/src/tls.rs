@@ -134,6 +134,7 @@ fn load_private_key(path: &PathBuf) -> Result<PrivateKeyDer<'static>, TlsError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::fs::File;
     use std::io::Write;
 

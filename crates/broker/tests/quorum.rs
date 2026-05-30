@@ -32,6 +32,7 @@
     clippy::default_trait_access
 )]
 
+use assert2::assert;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -125,7 +126,7 @@ async fn create_topic_on_any_node_propagates() {
         })
         .await
         .unwrap();
-    assert_eq!(resp.topics[0].error_code, 0);
+    assert!(resp.topics[0].error_code == 0);
 
     // Metadata against node 2 should see it within 1s.
     let c2 = Client::builder()
@@ -211,7 +212,7 @@ async fn leader_kill_recovers() {
         })
         .await
         .unwrap();
-    assert_eq!(resp.topics[0].error_code, 0);
+    assert!(resp.topics[0].error_code == 0);
 
     for (h, _, _) in cluster {
         h.shutdown().await;
@@ -252,7 +253,7 @@ async fn follower_forwards_create_topic() {
         })
         .await
         .unwrap();
-    assert_eq!(resp.topics[0].error_code, 0);
+    assert!(resp.topics[0].error_code == 0);
 
     for (h, _, _) in cluster {
         h.shutdown().await;
@@ -316,8 +317,8 @@ async fn concurrent_topic_creates_one_wins() {
             other => panic!("unexpected error_code {other}"),
         }
     }
-    assert_eq!(zero, 1, "exactly one winner");
-    assert_eq!(already, 2, "two losers see TOPIC_ALREADY_EXISTS");
+    assert!(zero == 1, "exactly one winner");
+    assert!(already == 2, "two losers see TOPIC_ALREADY_EXISTS");
 
     for (h, _, _) in cluster {
         h.shutdown().await;

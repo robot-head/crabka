@@ -147,6 +147,7 @@ fn render_default(v: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use serde_json::json;
 
     #[test]
@@ -268,6 +269,6 @@ mod tests {
             .match_indices('|')
             .filter(|(i, _)| *i == 0 || row.as_bytes()[i - 1] != b'\\')
             .count();
-        assert_eq!(unescaped_bars, 6, "{row}");
+        assert!(unescaped_bars == 6, "{row}");
     }
 }

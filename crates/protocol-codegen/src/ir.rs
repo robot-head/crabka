@@ -225,31 +225,26 @@ fn strip_line_comments(src: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn version_range_parsing() {
-        assert_eq!(
-            parse_version_range("0+").unwrap(),
-            VersionRange {
-                min: 0,
-                max: i16::MAX
-            }
+        assert!(
+            parse_version_range("0+").unwrap()
+                == VersionRange {
+                    min: 0,
+                    max: i16::MAX
+                }
         );
-        assert_eq!(
-            parse_version_range("3+").unwrap(),
-            VersionRange {
-                min: 3,
-                max: i16::MAX
-            }
+        assert!(
+            parse_version_range("3+").unwrap()
+                == VersionRange {
+                    min: 3,
+                    max: i16::MAX
+                }
         );
-        assert_eq!(
-            parse_version_range("0-2").unwrap(),
-            VersionRange { min: 0, max: 2 }
-        );
-        assert_eq!(
-            parse_version_range("4").unwrap(),
-            VersionRange { min: 4, max: 4 }
-        );
+        assert!(parse_version_range("0-2").unwrap() == VersionRange { min: 0, max: 2 });
+        assert!(parse_version_range("4").unwrap() == VersionRange { min: 4, max: 4 });
         assert!(parse_version_range("none").is_err()); // handled at call site
     }
 

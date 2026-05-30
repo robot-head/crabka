@@ -409,6 +409,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use uuid::Uuid;
 
     fn tp() -> TopicIdPartition {
@@ -443,14 +444,14 @@ mod tests {
         let event = MetadataEvent::AddSegment(add(1, 0, 99, Some(vec![1, 2, 3, 4])));
         let bytes = event.encode();
         let back = MetadataEvent::decode(&bytes).expect("decodes");
-        assert_eq!(back, event);
+        assert!(back == event);
     }
 
     #[test]
     fn round_trip_add_without_custom_metadata() {
         let event = MetadataEvent::AddSegment(add(2, 100, 199, None));
         let bytes = event.encode();
-        assert_eq!(MetadataEvent::decode(&bytes).unwrap(), event);
+        assert!(MetadataEvent::decode(&bytes).unwrap() == event);
     }
 
     #[test]
@@ -463,7 +464,7 @@ mod tests {
             broker_id: 13,
         });
         let bytes = event.encode();
-        assert_eq!(MetadataEvent::decode(&bytes).unwrap(), event);
+        assert!(MetadataEvent::decode(&bytes).unwrap() == event);
     }
 
     #[test]
@@ -476,7 +477,7 @@ mod tests {
             broker_id: 0,
         });
         let bytes = event.encode();
-        assert_eq!(MetadataEvent::decode(&bytes).unwrap(), event);
+        assert!(MetadataEvent::decode(&bytes).unwrap() == event);
     }
 
     #[test]
@@ -493,7 +494,7 @@ mod tests {
                 broker_id: 1,
             });
             let bytes = event.encode();
-            assert_eq!(MetadataEvent::decode(&bytes).unwrap(), event);
+            assert!(MetadataEvent::decode(&bytes).unwrap() == event);
         }
     }
 
@@ -549,7 +550,7 @@ mod tests {
             write_uvarint(v, &mut buf);
             let bytes = buf.freeze();
             let mut r = Reader::new(&bytes);
-            assert_eq!(read_uvarint(&mut r).unwrap(), v);
+            assert!(read_uvarint(&mut r).unwrap() == v);
         }
     }
 
@@ -559,7 +560,7 @@ mod tests {
         encode_string("", &mut buf);
         let bytes = buf.freeze();
         let mut r = Reader::new(&bytes);
-        assert_eq!(decode_string(&mut r).unwrap(), "");
+        assert!(decode_string(&mut r).unwrap() == "");
     }
 
     #[test]

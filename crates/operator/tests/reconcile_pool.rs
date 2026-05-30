@@ -12,6 +12,7 @@
 //! entirely when the cluster label is missing). Monotonic-
 //! storage failures short-circuit after step 2.
 
+use assert2::assert;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -158,7 +159,7 @@ async fn pool_applies_statefulset_with_pool_name() {
         sts_patch.uri(),
     );
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -182,11 +183,11 @@ async fn pool_status_ready_when_sts_ready() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["type"], "Ready", "body = {body}");
-    assert_eq!(cond["status"], "True", "body = {body}");
-    assert_eq!(cond["reason"], "Available", "body = {body}");
+    assert!(cond["type"] == "Ready", "body = {body}");
+    assert!(cond["status"] == "True", "body = {body}");
+    assert!(cond["reason"] == "Available", "body = {body}");
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -215,26 +216,25 @@ async fn pool_validation_rejects_replicas_two() {
             "validation must not look up the parent Kafka: {uri}",
         );
     }
-    assert_eq!(
-        observed.len(),
-        1,
+    assert!(
+        observed.len() == 1,
         "validation path should issue exactly one request, saw: {:?}",
         observed
             .iter()
             .map(|r| (r.method().clone(), r.uri().to_string()))
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>()
     );
 
     let status_patch = &observed[0];
-    assert_eq!(status_patch.method(), Method::PATCH);
+    assert!(status_patch.method() == Method::PATCH);
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["type"], "Ready");
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "UnsupportedReplicaCount");
+    assert!(cond["type"] == "Ready");
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "UnsupportedReplicaCount");
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -317,11 +317,11 @@ async fn pool_status_parent_not_found() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["type"], "Ready", "body = {body}");
-    assert_eq!(cond["status"], "False", "body = {body}");
-    assert_eq!(cond["reason"], "ParentNotFound", "body = {body}");
+    assert!(cond["type"] == "Ready", "body = {body}");
+    assert!(cond["status"] == "False", "body = {body}");
+    assert!(cond["reason"] == "ParentNotFound", "body = {body}");
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -398,18 +398,18 @@ async fn pool_persistent_claim_renders_volume_claim_template() {
     let vct = body["spec"]["volumeClaimTemplates"]
         .as_array()
         .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
-    assert_eq!(vct.len(), 1, "body = {body}");
-    assert_eq!(vct[0]["metadata"]["name"], "data", "body = {body}");
-    assert_eq!(
-        vct[0]["spec"]["resources"]["requests"]["storage"], "10Gi",
+    assert!(vct.len() == 1, "body = {body}");
+    assert!(vct[0]["metadata"]["name"] == "data", "body = {body}");
+    assert!(
+        vct[0]["spec"]["resources"]["requests"]["storage"] == "10Gi",
         "body = {body}"
     );
-    assert_eq!(
-        vct[0]["spec"]["accessModes"][0], "ReadWriteOnce",
+    assert!(
+        vct[0]["spec"]["accessModes"][0] == "ReadWriteOnce",
         "body = {body}"
     );
-    assert_eq!(
-        vct[0]["spec"]["storageClassName"], "fast-ssd",
+    assert!(
+        vct[0]["spec"]["storageClassName"] == "fast-ssd",
         "body = {body}"
     );
 
@@ -428,7 +428,7 @@ async fn pool_persistent_claim_renders_volume_claim_template() {
         }
     }
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 #[tokio::test]
@@ -500,11 +500,11 @@ async fn pool_storage_shrink_is_rejected() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["type"], "Ready", "body = {body}");
-    assert_eq!(cond["status"], "False", "body = {body}");
-    assert_eq!(cond["reason"], "StorageImmutable", "body = {body}");
+    assert!(cond["type"] == "Ready", "body = {body}");
+    assert!(cond["status"] == "False", "body = {body}");
+    assert!(cond["reason"] == "StorageImmutable", "body = {body}");
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 /// A JBOD pool renders one `volumeClaimTemplate` per disk
@@ -594,22 +594,25 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
     let vct = body["spec"]["volumeClaimTemplates"]
         .as_array()
         .unwrap_or_else(|| panic!("volumeClaimTemplates present; body = {body}"));
-    assert_eq!(vct.len(), 2, "body = {body}");
-    assert_eq!(vct[0]["metadata"]["name"], "data", "body = {body}");
-    assert_eq!(vct[1]["metadata"]["name"], "data-1", "body = {body}");
-    assert_eq!(
-        vct[0]["spec"]["resources"]["requests"]["storage"], "1Gi",
+    assert!(vct.len() == 2, "body = {body}");
+    assert!(vct[0]["metadata"]["name"] == "data", "body = {body}");
+    assert!(vct[1]["metadata"]["name"] == "data-1", "body = {body}");
+    assert!(
+        vct[0]["spec"]["resources"]["requests"]["storage"] == "1Gi",
         "body = {body}"
     );
-    assert_eq!(
-        vct[1]["spec"]["resources"]["requests"]["storage"], "2Gi",
+    assert!(
+        vct[1]["spec"]["resources"]["requests"]["storage"] == "2Gi",
         "body = {body}"
     );
-    assert_eq!(vct[1]["spec"]["storageClassName"], "fast", "body = {body}");
+    assert!(
+        vct[1]["spec"]["storageClassName"] == "fast",
+        "body = {body}"
+    );
 
     // Set-wide retention honors the JBOD-level deleteClaim.
-    assert_eq!(
-        body["spec"]["persistentVolumeClaimRetentionPolicy"]["whenDeleted"], "Delete",
+    assert!(
+        body["spec"]["persistentVolumeClaimRetentionPolicy"]["whenDeleted"] == "Delete",
         "body = {body}"
     );
 
@@ -624,9 +627,9 @@ async fn pool_jbod_renders_multiple_volume_claim_templates() {
         .iter()
         .find(|e| e["name"] == "CRABKA_EXTRA_LOG_DIRS")
         .unwrap_or_else(|| panic!("CRABKA_EXTRA_LOG_DIRS env present; body = {body}"));
-    assert_eq!(extra["value"], "/var/lib/crabka/data-1", "body = {body}");
+    assert!(extra["value"] == "/var/lib/crabka/data-1", "body = {body}");
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 /// The rendered `StatefulSet` must:
@@ -711,8 +714,8 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
         .iter()
         .find(|v| v["name"] == "broker-config")
         .unwrap_or_else(|| panic!("broker-config volume missing; volumes = {volumes:?}"));
-    assert_eq!(
-        broker_config_vol["configMap"]["name"], "demo-broker-config",
+    assert!(
+        broker_config_vol["configMap"]["name"] == "demo-broker-config",
         "broker-config volume must reference <parent>-broker-config; body = {body}"
     );
 
@@ -749,13 +752,12 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
         .iter()
         .find(|m| m["name"] == "broker-config")
         .unwrap_or_else(|| panic!("broker-config volumeMount missing; mounts = {volume_mounts:?}"));
-    assert_eq!(
-        config_mount["mountPath"], "/etc/crabka/config",
+    assert!(
+        config_mount["mountPath"] == "/etc/crabka/config",
         "broker-config must mount at /etc/crabka/config; body = {body}"
     );
-    assert_eq!(
-        config_mount["readOnly"],
-        serde_json::Value::Bool(true),
+    assert!(
+        config_mount["readOnly"] == serde_json::Value::Bool(true),
         "broker-config mount must be readOnly; body = {body}"
     );
 
@@ -771,7 +773,7 @@ async fn statefulset_mounts_broker_config_volume_and_uses_config_file() {
         "CRABKA_ADVERTISED_LISTENER must not be in broker env (replaced by per-broker TOML); body = {body}"
     );
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 /// A fresh cluster whose parent Kafka has an invalid `kafkaVersion` must
@@ -830,9 +832,9 @@ async fn pool_blocks_pod_creation_when_parent_version_invalid() {
     let body: serde_json::Value =
         serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["type"], "Ready", "body = {body}");
-    assert_eq!(cond["status"], "False", "body = {body}");
-    assert_eq!(cond["reason"], "KafkaVersionInvalid", "body = {body}");
+    assert!(cond["type"] == "Ready", "body = {body}");
+    assert!(cond["status"] == "False", "body = {body}");
+    assert!(cond["reason"] == "KafkaVersionInvalid", "body = {body}");
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }

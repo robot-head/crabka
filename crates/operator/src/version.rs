@@ -200,34 +200,35 @@ pub fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn parse_major_minor_patch() {
-        assert_eq!(
-            KafkaVersion::parse("3.7.1").unwrap(),
-            KafkaVersion {
-                major: 3,
-                minor: 7,
-                patch: 1
-            }
+        assert!(
+            KafkaVersion::parse("3.7.1").unwrap()
+                == KafkaVersion {
+                    major: 3,
+                    minor: 7,
+                    patch: 1
+                }
         );
     }
 
     #[test]
     fn parse_major_minor() {
         let v = KafkaVersion::parse("3.7").unwrap();
-        assert_eq!(v.metadata_key(), (3, 7));
-        assert_eq!(v.short(), "3.7");
+        assert!(v.metadata_key() == (3, 7));
+        assert!(v.short() == "3.7");
     }
 
     #[test]
     fn parse_bare_major() {
-        assert_eq!(KafkaVersion::parse("4").unwrap().metadata_key(), (4, 0));
+        assert!(KafkaVersion::parse("4").unwrap().metadata_key() == (4, 0));
     }
 
     #[test]
     fn parse_strips_ibp_suffix() {
-        assert_eq!(KafkaVersion::parse("3.7-IV2").unwrap().short(), "3.7");
+        assert!(KafkaVersion::parse("3.7-IV2").unwrap().short() == "3.7");
     }
 
     #[test]
@@ -241,9 +242,8 @@ mod tests {
     #[test]
     fn evaluate_default_tracks_binary() {
         let out = evaluate("3.7.0", None, None);
-        assert_eq!(
-            out,
-            VersionOutcome::Valid {
+        assert!(
+            out == VersionOutcome::Valid {
                 resolved_metadata: "3.7".into()
             }
         );
@@ -252,9 +252,8 @@ mod tests {
     #[test]
     fn evaluate_explicit_pin_below_binary_ok() {
         let out = evaluate("3.7.0", Some("3.6"), None);
-        assert_eq!(
-            out,
-            VersionOutcome::Valid {
+        assert!(
+            out == VersionOutcome::Valid {
                 resolved_metadata: "3.6".into()
             }
         );
@@ -263,9 +262,8 @@ mod tests {
     #[test]
     fn evaluate_pin_equal_binary_ok() {
         let out = evaluate("3.7", Some("3.7-IV4"), None);
-        assert_eq!(
-            out,
-            VersionOutcome::Valid {
+        assert!(
+            out == VersionOutcome::Valid {
                 resolved_metadata: "3.7".into()
             }
         );
@@ -276,7 +274,7 @@ mod tests {
         let out = evaluate("3.6.0", Some("3.7"), None);
         match out {
             VersionOutcome::Invalid { reason, .. } => {
-                assert_eq!(reason, VersionReason::MetadataVersionTooHigh);
+                assert!(reason == VersionReason::MetadataVersionTooHigh);
             }
             other @ VersionOutcome::Valid { .. } => {
                 panic!("expected MetadataVersionTooHigh, got {other:?}")
@@ -290,7 +288,7 @@ mod tests {
         let out = evaluate("3.7.0", Some("3.6"), Some("3.7"));
         match out {
             VersionOutcome::Invalid { reason, .. } => {
-                assert_eq!(reason, VersionReason::MetadataVersionDowngrade);
+                assert!(reason == VersionReason::MetadataVersionDowngrade);
             }
             other @ VersionOutcome::Valid { .. } => {
                 panic!("expected MetadataVersionDowngrade, got {other:?}")
@@ -305,7 +303,7 @@ mod tests {
         let out = evaluate("3.6.0", None, Some("3.7"));
         match out {
             VersionOutcome::Invalid { reason, .. } => {
-                assert_eq!(reason, VersionReason::MetadataVersionDowngrade);
+                assert!(reason == VersionReason::MetadataVersionDowngrade);
             }
             other @ VersionOutcome::Valid { .. } => {
                 panic!("expected MetadataVersionDowngrade, got {other:?}")
@@ -316,9 +314,8 @@ mod tests {
     #[test]
     fn evaluate_same_finalized_is_ok() {
         let out = evaluate("3.7.0", None, Some("3.7"));
-        assert_eq!(
-            out,
-            VersionOutcome::Valid {
+        assert!(
+            out == VersionOutcome::Valid {
                 resolved_metadata: "3.7".into()
             }
         );
@@ -327,9 +324,8 @@ mod tests {
     #[test]
     fn evaluate_upgrade_above_finalized_ok() {
         let out = evaluate("3.8.0", None, Some("3.7"));
-        assert_eq!(
-            out,
-            VersionOutcome::Valid {
+        assert!(
+            out == VersionOutcome::Valid {
                 resolved_metadata: "3.8".into()
             }
         );
@@ -340,7 +336,7 @@ mod tests {
         let out = evaluate("nope", None, None);
         match out {
             VersionOutcome::Invalid { reason, .. } => {
-                assert_eq!(reason, VersionReason::InvalidVersion);
+                assert!(reason == VersionReason::InvalidVersion);
             }
             other @ VersionOutcome::Valid { .. } => {
                 panic!("expected InvalidVersion, got {other:?}")
@@ -353,7 +349,7 @@ mod tests {
         let out = evaluate("3.7.0", Some("nope"), None);
         match out {
             VersionOutcome::Invalid { reason, .. } => {
-                assert_eq!(reason, VersionReason::InvalidVersion);
+                assert!(reason == VersionReason::InvalidVersion);
             }
             other @ VersionOutcome::Valid { .. } => {
                 panic!("expected InvalidVersion, got {other:?}")
@@ -365,9 +361,8 @@ mod tests {
     fn evaluate_unparseable_finalized_is_ignored() {
         // A malformed finalized value should not block progress.
         let out = evaluate("3.7.0", None, Some("garbage"));
-        assert_eq!(
-            out,
-            VersionOutcome::Valid {
+        assert!(
+            out == VersionOutcome::Valid {
                 resolved_metadata: "3.7".into()
             }
         );

@@ -1,3 +1,4 @@
+use assert2::assert;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -56,7 +57,7 @@ fn corpus_round_trips() {
                 assert!(cur.is_empty(), "trailing bytes in {}", stem.display());
                 let mut re = BytesMut::new();
                 decoded.encode(&mut re, meta.version).unwrap();
-                assert_eq!(re.as_ref(), bytes, "byte mismatch in {}", stem.display());
+                assert!(re.as_ref() == bytes, "byte mismatch in {}", stem.display());
             }
             _ => panic!("unhandled corpus entry: {}", stem.display()),
         }

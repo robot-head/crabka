@@ -18,6 +18,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 
@@ -296,13 +297,16 @@ async fn describe_all_users_round_trip() {
     let (top_err, per_user) =
         drive_describe_user_scram_credentials_sasl(addr, "admin", "admin-secret", None).await;
 
-    assert_eq!(top_err, 0, "top-level error should be 0");
+    assert!(top_err == 0, "top-level error should be 0");
 
     let alice_row = per_user
         .iter()
         .find(|(u, _, _)| u == "alice")
         .expect("alice must appear in response");
-    assert_eq!(alice_row.1, 0, "per-user error_code should be 0 for alice");
+    assert!(
+        alice_row.1 == 0,
+        "per-user error_code should be 0 for alice"
+    );
     assert!(
         alice_row.2.iter().any(|(mech, _)| *mech == 2),
         "expected mechanism=2 (SCRAM-SHA-512) in credential_infos; got {:?}",
@@ -325,15 +329,15 @@ async fn describe_unknown_user_returns_error() {
     )
     .await;
 
-    assert_eq!(top_err, 0, "top-level error_code should be 0");
+    assert!(top_err == 0, "top-level error_code should be 0");
 
     let row = per_user
         .iter()
         .find(|(u, _, _)| u == "ghost")
         .expect("ghost must appear in response");
-    assert_eq!(
-        row.1, 83, /* RESOURCE_NOT_FOUND */
+    assert!(
+        row.1 == 83, /* RESOURCE_NOT_FOUND */
         "expected RESOURCE_NOT_FOUND (83) for unknown user ghost; got {}",
-        row.1,
+        row.1
     );
 }

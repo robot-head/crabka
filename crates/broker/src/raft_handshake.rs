@@ -371,6 +371,7 @@ mod tests {
     //! `requires_*` would be caught at this layer.
 
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn plaintext_passthrough_short_circuits() {

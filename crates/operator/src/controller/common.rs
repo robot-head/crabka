@@ -749,6 +749,7 @@ pub(crate) fn parse_quantity(s: &str) -> Result<i128, &'static str> {
 #[cfg(test)]
 mod config_hash_tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn config_hash_is_truncated_sha256_hex() {
@@ -756,15 +757,15 @@ mod config_hash_tests {
         //   2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
         //   ^^^^^^^^^^^^^^^^
         let h = config_hash("hello");
-        assert_eq!(h, "2cf24dba5fb0a30e");
-        assert_eq!(h.len(), 16, "must fit within K8s 63-char label limit");
+        assert!(h == "2cf24dba5fb0a30e");
+        assert!(h.len() == 16, "must fit within K8s 63-char label limit");
     }
 
     #[test]
     fn config_hash_empty_string() {
         // First 16 hex chars of sha256("").
         let h = config_hash("");
-        assert_eq!(h, "e3b0c44298fc1c14");
+        assert!(h == "e3b0c44298fc1c14");
     }
 
     #[test]
@@ -803,7 +804,7 @@ mod config_hash_tests {
         };
         let h = combined_config_hash(&spec_a, None, None, None);
         let h_again = combined_config_hash(&spec_a, None, None, None);
-        assert_eq!(h, h_again);
+        assert!(h == h_again);
 
         // Hash-collapse compat: the hash for empty listeners + no metrics MUST
         // equal `config_hash(serialized broker-properties)`. That's what
@@ -811,9 +812,8 @@ mod config_hash_tests {
         // hash-driven roll (the e2e job `kind-upgrade` asserts this
         // against a real config-only cluster).
         let config_only_form = "log.retention.hours=24\n";
-        assert_eq!(
-            h,
-            config_hash(config_only_form),
+        assert!(
+            h == config_hash(config_only_form),
             "combined hash for empty listeners must equal config_hash(spec.config)"
         );
 
@@ -821,8 +821,8 @@ mod config_hash_tests {
         spec_b.listeners = vec![crate::controller::listeners::synthesized_default_listener()];
         spec_b.inter_broker_listener_name = Some("PLAIN".into());
         let h_with_listener = combined_config_hash(&spec_b, None, None, None);
-        assert_ne!(
-            h, h_with_listener,
+        assert!(
+            h != h_with_listener,
             "non-empty listener intent must change hash"
         );
     }
@@ -857,8 +857,8 @@ mod config_hash_tests {
             ..Default::default()
         });
         let h_on = combined_config_hash(&spec_on, None, None, None);
-        assert_ne!(
-            h_off, h_on,
+        assert!(
+            h_off != h_on,
             "enabling metrics_config must bump the hash (triggers pool reconcile + StatefulSet re-render)"
         );
 
@@ -872,10 +872,9 @@ mod config_hash_tests {
                 ..Default::default()
             });
         }
-        assert_eq!(
-            h_on,
-            combined_config_hash(&spec_on_diff_interval, None, None, None),
-            "PodMonitor interval change must NOT roll the broker pod",
+        assert!(
+            h_on == combined_config_hash(&spec_on_diff_interval, None, None, None),
+            "PodMonitor interval change must NOT roll the broker pod"
         );
     }
 
@@ -912,8 +911,8 @@ mod config_hash_tests {
             None,
             None,
         );
-        assert_ne!(h_none, h_a, "absent vs present CA must differ");
-        assert_ne!(h_a, h_b, "different CA PEM must differ");
+        assert!(h_none != h_a, "absent vs present CA must differ");
+        assert!(h_a != h_b, "different CA PEM must differ");
     }
 
     #[test]
@@ -942,7 +941,7 @@ mod config_hash_tests {
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
-        assert_eq!(h1, h2);
+        assert!(h1 == h2);
     }
 
     #[test]
@@ -1031,14 +1030,14 @@ mod config_hash_tests {
         // No explicit pin => hash collapse preserved (== config_hash of
         // the empty config part).
         let h_default = combined_config_hash(&spec, None, None, None);
-        assert_eq!(h_default, config_hash(""));
+        assert!(h_default == config_hash(""));
 
         // An explicit pin enters the hash and changes it.
         let h_pin = combined_config_hash(&spec, None, Some("3.6"), None);
-        assert_ne!(h_default, h_pin, "explicit metadata pin must change hash");
+        assert!(h_default != h_pin, "explicit metadata pin must change hash");
         // A different pin differs again.
         let h_pin2 = combined_config_hash(&spec, None, Some("3.7"), None);
-        assert_ne!(h_pin, h_pin2, "different metadata pin must differ");
+        assert!(h_pin != h_pin2, "different metadata pin must differ");
     }
 
     #[test]
@@ -1097,6 +1096,7 @@ mod config_hash_tests {
 #[cfg(test)]
 mod rollout_tests {
     use super::{PoolRolloutState, plan_rollout};
+    use assert2::assert;
 
     fn st(name: &str, hash: Option<&str>, ready: bool) -> PoolRolloutState {
         PoolRolloutState {
@@ -1120,29 +1120,26 @@ mod rollout_tests {
             st("c", None, false),
         ];
         let plan = plan_rollout(&pools, "H1");
-        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H1"), ("c", "H1")]);
+        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H1"), ("c", "H1")]);
     }
 
     #[test]
     fn single_pool_first_reconcile_gets_desired() {
         let pools = vec![st("only", None, false)];
-        assert_eq!(targets(&plan_rollout(&pools, "H1")), vec![("only", "H1")]);
+        assert!(targets(&plan_rollout(&pools, "H1")) == vec![("only", "H1")]);
     }
 
     #[test]
     fn single_pool_roll_advances() {
         // Established single pool moving to a new hash.
         let pools = vec![st("only", Some("H0"), true)];
-        assert_eq!(targets(&plan_rollout(&pools, "H1")), vec![("only", "H1")]);
+        assert!(targets(&plan_rollout(&pools, "H1")) == vec![("only", "H1")]);
     }
 
     #[test]
     fn steady_state_all_desired_is_noop() {
         let pools = vec![st("a", Some("H1"), true), st("b", Some("H1"), true)];
-        assert_eq!(
-            targets(&plan_rollout(&pools, "H1")),
-            vec![("a", "H1"), ("b", "H1")]
-        );
+        assert!(targets(&plan_rollout(&pools, "H1")) == vec![("a", "H1"), ("b", "H1")]);
     }
 
     #[test]
@@ -1155,7 +1152,7 @@ mod rollout_tests {
             st("c", Some("H0"), true),
         ];
         let plan = plan_rollout(&pools, "H1");
-        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H0"), ("c", "H0")]);
+        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H0"), ("c", "H0")]);
     }
 
     #[test]
@@ -1167,7 +1164,7 @@ mod rollout_tests {
             st("c", Some("H0"), true),
         ];
         let plan = plan_rollout(&pools, "H1");
-        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H0"), ("c", "H0")]);
+        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H0"), ("c", "H0")]);
     }
 
     #[test]
@@ -1179,7 +1176,7 @@ mod rollout_tests {
             st("c", Some("H0"), true),
         ];
         let plan = plan_rollout(&pools, "H1");
-        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H1"), ("c", "H0")]);
+        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H1"), ("c", "H0")]);
     }
 
     #[test]
@@ -1188,37 +1185,38 @@ mod rollout_tests {
         // roll; apply `desired` to all (recovery).
         let pools = vec![st("a", Some("H0"), true), st("b", Some("HX"), true)];
         let plan = plan_rollout(&pools, "H1");
-        assert_eq!(targets(&plan), vec![("a", "H1"), ("b", "H1")]);
+        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H1")]);
     }
 }
 
 #[cfg(test)]
 mod parse_quantity_tests {
     use super::parse_quantity;
+    use assert2::assert;
 
     #[test]
     fn quantity_parse_binary_suffixes() {
-        assert_eq!(parse_quantity("1Ki").unwrap(), 1024);
-        assert_eq!(parse_quantity("512Mi").unwrap(), 512 * 1024 * 1024);
-        assert_eq!(parse_quantity("10Gi").unwrap(), 10 * 1024 * 1024 * 1024);
+        assert!(parse_quantity("1Ki").unwrap() == 1024);
+        assert!(parse_quantity("512Mi").unwrap() == 512 * 1024 * 1024);
+        assert!(parse_quantity("10Gi").unwrap() == 10 * 1024 * 1024 * 1024);
     }
 
     #[test]
     fn quantity_parse_decimal_suffixes() {
-        assert_eq!(parse_quantity("1K").unwrap(), 1_000);
-        assert_eq!(parse_quantity("500M").unwrap(), 500_000_000);
-        assert_eq!(parse_quantity("10G").unwrap(), 10_000_000_000);
+        assert!(parse_quantity("1K").unwrap() == 1_000);
+        assert!(parse_quantity("500M").unwrap() == 500_000_000);
+        assert!(parse_quantity("10G").unwrap() == 10_000_000_000);
     }
 
     #[test]
     fn quantity_parse_decimal_mantissa() {
         // 1.5Gi = 1.5 * 1024^3 = 1,610,612,736
-        assert_eq!(parse_quantity("1.5Gi").unwrap(), 1_610_612_736);
+        assert!(parse_quantity("1.5Gi").unwrap() == 1_610_612_736);
     }
 
     #[test]
     fn quantity_parse_no_suffix_is_bytes() {
-        assert_eq!(parse_quantity("1024").unwrap(), 1024);
+        assert!(parse_quantity("1024").unwrap() == 1024);
     }
 
     #[test]

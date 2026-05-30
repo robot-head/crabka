@@ -47,11 +47,12 @@ pub enum ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn display_is_useful() {
         let e = ClientError::Timeout(Duration::from_secs(5));
-        assert_eq!(e.to_string(), "request timed out after 5s");
+        assert!(e.to_string() == "request timed out after 5s");
     }
 
     #[test]

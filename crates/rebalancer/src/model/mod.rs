@@ -108,6 +108,7 @@ pub fn validate_movement(state: &ClusterState, mv: &Movement) -> Result<(), Move
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn fixture_state() -> ClusterState {
         ClusterState {

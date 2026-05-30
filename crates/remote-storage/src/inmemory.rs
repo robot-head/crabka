@@ -176,6 +176,7 @@ impl RemoteLogMetadataManager for InmemoryRemoteLogMetadataManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -223,17 +224,17 @@ mod tests {
             .remote_log_segment_metadata(&tp(), 0, 42)
             .unwrap()
             .expect("segment found");
-        assert_eq!(got.remote_log_segment_id().id, Uuid::from_u128(10));
-        assert_eq!(got.custom_metadata(), Some(&CustomMetadata(vec![7])));
-        assert_eq!(m.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(99));
+        assert!(got.remote_log_segment_id().id == Uuid::from_u128(10));
+        assert!(got.custom_metadata() == Some(&CustomMetadata(vec![7])));
+        assert!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
     }
 
     #[test]
     fn query_unknown_partition_is_none_not_error() {
         let m = InmemoryRemoteLogMetadataManager::new();
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        assert_eq!(m.remote_log_segment_metadata(&other, 0, 0).unwrap(), None);
-        assert_eq!(m.highest_offset_for_epoch(&other, 0).unwrap(), None);
+        assert!(m.remote_log_segment_metadata(&other, 0, 0).unwrap() == None);
+        assert!(m.highest_offset_for_epoch(&other, 0).unwrap() == None);
         assert!(m.list_remote_log_segments(&other).unwrap().is_empty());
     }
 
@@ -282,9 +283,9 @@ mod tests {
             .unwrap();
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
         let listed = m.list_remote_log_segments(&tp()).unwrap();
-        assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].start_offset(), 0);
-        assert_eq!(listed[1].start_offset(), 100);
+        assert!(listed.len() == 2);
+        assert!(listed[0].start_offset() == 0);
+        assert!(listed[1].start_offset() == 100);
     }
 
     #[test]
@@ -328,14 +329,11 @@ mod tests {
         // list_remote_log_segments matches across the partition.
         let before = m.list_remote_log_segments(&tp()).unwrap();
         let after = restored.list_remote_log_segments(&tp()).unwrap();
-        assert_eq!(before, after);
+        assert!(before == after);
         // Finished segment still queryable post-import.
-        assert_eq!(
-            restored.highest_offset_for_epoch(&tp(), 0).unwrap(),
-            Some(99)
-        );
+        assert!(restored.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
         // Re-exporting yields the same dump (idempotent round trip).
-        assert_eq!(m.export(), restored.export());
+        assert!(m.export() == restored.export());
     }
 
     #[test]

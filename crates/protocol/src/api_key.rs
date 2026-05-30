@@ -25,6 +25,7 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/api_key.rs"));
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn all_keys_unique() {
@@ -37,9 +38,9 @@ mod tests {
     #[test]
     fn from_i16_round_trip() {
         for k in ApiKey::ALL {
-            assert_eq!(ApiKey::from_i16(*k as i16), Some(*k));
+            assert!(ApiKey::from_i16(*k as i16) == Some(*k));
         }
-        assert_eq!(ApiKey::from_i16(-1), None);
-        assert_eq!(ApiKey::from_i16(9999), None);
+        assert!(ApiKey::from_i16(-1) == None);
+        assert!(ApiKey::from_i16(9999) == None);
     }
 }

@@ -124,6 +124,7 @@ impl RemoteLogMetadataManager for SwappableRlmm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -159,7 +160,7 @@ mod tests {
         // Write through the facade lands in `first`.
         swap.add_remote_log_segment_metadata(started(10, 0, 99))
             .unwrap();
-        assert_eq!(first.list_remote_log_segments(&tp()).unwrap().len(), 1);
+        assert!(first.list_remote_log_segments(&tp()).unwrap().len() == 1);
 
         // Swap in a fresh empty backing impl; reads now show the new
         // (empty) one, not the original.
@@ -169,12 +170,12 @@ mod tests {
         assert!(swap.list_remote_log_segments(&tp()).unwrap().is_empty());
         // The previous `first` is undisturbed — the facade just stopped
         // pointing at it.
-        assert_eq!(first.list_remote_log_segments(&tp()).unwrap().len(), 1);
+        assert!(first.list_remote_log_segments(&tp()).unwrap().len() == 1);
 
         // Writes after the swap go to `second`.
         swap.add_remote_log_segment_metadata(started(11, 100, 199))
             .unwrap();
-        assert_eq!(second.list_remote_log_segments(&tp()).unwrap().len(), 1);
-        assert_eq!(first.list_remote_log_segments(&tp()).unwrap().len(), 1);
+        assert!(second.list_remote_log_segments(&tp()).unwrap().len() == 1);
+        assert!(first.list_remote_log_segments(&tp()).unwrap().len() == 1);
     }
 }

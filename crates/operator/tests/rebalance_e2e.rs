@@ -12,6 +12,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
+use assert2::assert;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -154,9 +155,8 @@ async fn operator_client_round_trips_against_real_rebalancer() {
     // CreateProposal — single-broker cluster ⇒ Computed (likely zero
     // movements). The point is the wire round-trip + enum decode.
     let proposal = client.create_proposal(&[]).await.expect("create_proposal");
-    assert_eq!(
-        proposal.status,
-        ProposalStatus::Computed,
+    assert!(
+        proposal.status == ProposalStatus::Computed,
         "CreateProposal must decode to Computed"
     );
     assert!(!proposal.id.is_empty(), "proposal must carry an id");
@@ -166,8 +166,8 @@ async fn operator_client_round_trips_against_real_rebalancer() {
         .get_proposal(&proposal.id)
         .await
         .expect("get_proposal");
-    assert_eq!(fetched.id, proposal.id);
-    assert_eq!(fetched.status, ProposalStatus::Computed);
+    assert!(fetched.id == proposal.id);
+    assert!(fetched.status == ProposalStatus::Computed);
 
     // GetProposal on an unknown id surfaces a Connect error mapped to Rpc.
     match client.get_proposal("does-not-exist").await {
@@ -188,7 +188,7 @@ async fn operator_client_round_trips_against_real_rebalancer() {
         }
         // If the optimizer happened to produce movements (it shouldn't on
         // a single broker) execution would start instead; accept that too.
-        Ok(p) => assert_eq!(p.status, ProposalStatus::Executing),
+        Ok(p) => assert!(p.status == ProposalStatus::Executing),
         other => panic!("unexpected execute outcome: {other:?}"),
     }
 

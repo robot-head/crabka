@@ -1,3 +1,4 @@
+use assert2::assert;
 use std::path::PathBuf;
 
 use crabka_protocol_codegen::{emit, ir};

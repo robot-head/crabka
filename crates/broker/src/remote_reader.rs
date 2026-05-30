@@ -374,6 +374,7 @@ fn first_batch_at_or_after(data: &[u8], floor: i64) -> Option<RecordBatch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn parse_offset_index_round_trips_known_entries() {
@@ -388,7 +389,7 @@ mod tests {
             .iter()
             .map(|e| (e.relative_offset.get(), e.position.get()))
             .collect();
-        assert_eq!(decoded, vec![(0, 0), (10, 256), (20, 512)]);
+        assert!(decoded == vec![(0, 0), (10, 256), (20, 512)]);
     }
 
     fn offset_entries(pairs: &[(u32, u32)]) -> Vec<OffsetIndexEntry> {
@@ -414,26 +415,24 @@ mod tests {
     #[test]
     fn position_for_relative_offset_returns_floor() {
         let entries = offset_entries(&[(0, 0), (10, 256), (20, 512), (30, 1024)]);
-        assert_eq!(position_for_relative_offset(&entries, 10), 256, "exact");
-        assert_eq!(position_for_relative_offset(&entries, 15), 256, "between");
-        assert_eq!(
-            position_for_relative_offset(&entries, 0),
-            0,
+        assert!(position_for_relative_offset(&entries, 10) == 256, "exact");
+        assert!(position_for_relative_offset(&entries, 15) == 256, "between");
+        assert!(
+            position_for_relative_offset(&entries, 0) == 0,
             "first entry exact"
         );
-        assert_eq!(
-            position_for_relative_offset(&entries, 100),
-            1024,
+        assert!(
+            position_for_relative_offset(&entries, 100) == 1024,
             "after last"
         );
-        assert_eq!(position_for_relative_offset(&[], 50), 0, "empty");
+        assert!(position_for_relative_offset(&[], 50) == 0, "empty");
     }
 
     #[test]
     fn position_for_relative_offset_below_first() {
         // Synthetic: first entry isn't at rel=0. Floor below it returns 0.
         let entries = offset_entries(&[(5, 100), (10, 200)]);
-        assert_eq!(position_for_relative_offset(&entries, 3), 0);
+        assert!(position_for_relative_offset(&entries, 3) == 0);
     }
 
     #[test]
@@ -448,41 +447,38 @@ mod tests {
             .iter()
             .map(|e| (e.timestamp.get(), e.relative_offset.get()))
             .collect();
-        assert_eq!(decoded, vec![(1_000, 0), (2_000, 10), (3_000, 20)]);
+        assert!(decoded == vec![(1_000, 0), (2_000, 10), (3_000, 20)]);
     }
 
     #[test]
     fn relative_offset_for_timestamp_returns_first_ge() {
         let entries = time_entries(&[(1_000, 0), (2_000, 10), (3_000, 20)]);
-        assert_eq!(
-            relative_offset_for_timestamp(&entries, 1_000),
-            Some(0),
+        assert!(
+            relative_offset_for_timestamp(&entries, 1_000) == Some(0),
             "exact match"
         );
-        assert_eq!(
-            relative_offset_for_timestamp(&entries, 1_500),
-            Some(10),
+        assert!(
+            relative_offset_for_timestamp(&entries, 1_500) == Some(10),
             "between → next"
         );
-        assert_eq!(
-            relative_offset_for_timestamp(&entries, 4_000),
-            None,
+        assert!(
+            relative_offset_for_timestamp(&entries, 4_000) == None,
             "after last"
         );
-        assert_eq!(relative_offset_for_timestamp(&[], 1_000), None, "empty");
+        assert!(relative_offset_for_timestamp(&[], 1_000) == None, "empty");
     }
 
     #[test]
     fn end_position_for_caps_with_max_bytes() {
         // start=0, segment=1024, max_bytes=256 → exclusive_end=256 →
         // inclusive=255.
-        assert_eq!(end_position_for(0, 1024, 256), Some(255));
+        assert!(end_position_for(0, 1024, 256) == Some(255));
         // max_bytes >= remaining → read to end.
-        assert_eq!(end_position_for(512, 1024, 999_999), None);
+        assert!(end_position_for(512, 1024, 999_999) == None);
         // max_bytes=0 → read to end (zero is a no-cap sentinel).
-        assert_eq!(end_position_for(0, 1024, 0), None);
+        assert!(end_position_for(0, 1024, 0) == None);
         // start past the segment-end cap still safe via saturating add.
-        assert_eq!(end_position_for(u32::MAX, 1024, 100), None);
+        assert!(end_position_for(u32::MAX, 1024, 100) == None);
     }
 
     #[test]
@@ -522,11 +518,11 @@ mod tests {
         let bytes = buf.freeze();
 
         let got = first_batch_at_or_after(&bytes, 10).expect("found batch");
-        assert_eq!(got.base_offset, 10);
+        assert!(got.base_offset == 10);
 
         // Floor below everything → first batch.
         let got = first_batch_at_or_after(&bytes, 0).expect("found batch");
-        assert_eq!(got.base_offset, 0);
+        assert!(got.base_offset == 0);
 
         // Floor above everything → None.
         assert!(first_batch_at_or_after(&bytes, 1_000).is_none());
@@ -546,13 +542,13 @@ mod tests {
             buf.extend_from_slice(&pid.to_be_bytes());
         }
         let entries = parse_txn_index(&buf).expect("valid txn index");
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].start_offset.get(), 0);
-        assert_eq!(entries[0].last_offset.get(), 4);
-        assert_eq!(entries[0].producer_id.get(), 1000);
-        assert_eq!(entries[1].start_offset.get(), 10);
-        assert_eq!(entries[1].last_offset.get(), 14);
-        assert_eq!(entries[1].producer_id.get(), 2000);
+        assert!(entries.len() == 2);
+        assert!(entries[0].start_offset.get() == 0);
+        assert!(entries[0].last_offset.get() == 4);
+        assert!(entries[0].producer_id.get() == 1000);
+        assert!(entries[1].start_offset.get() == 10);
+        assert!(entries[1].last_offset.get() == 14);
+        assert!(entries[1].producer_id.get() == 2000);
     }
 
     #[test]
@@ -564,8 +560,8 @@ mod tests {
         // 5 trailing bytes that don't complete a 24-byte entry.
         buf.extend_from_slice(&[0xAA; 5]);
         let entries = parse_txn_index(&buf).expect("valid txn index");
-        assert_eq!(entries.len(), 1, "partial trailing entry ignored");
-        assert_eq!(entries[0].producer_id.get(), 1000);
+        assert!(entries.len() == 1, "partial trailing entry ignored");
+        assert!(entries[0].producer_id.get() == 1000);
     }
 
     #[test]
@@ -817,10 +813,10 @@ mod tests {
             .aborted_transactions(&tp(), 0, start, last)
             .await
             .expect("ok");
-        assert_eq!(got.len(), 1, "the copied abort is returned");
-        assert_eq!(got[0].start_offset, start);
-        assert_eq!(got[0].last_offset, last);
-        assert_eq!(got[0].producer_id, pid);
+        assert!(got.len() == 1, "the copied abort is returned");
+        assert!(got[0].start_offset == start);
+        assert!(got[0].last_offset == last);
+        assert!(got[0].producer_id == pid);
     }
 
     #[tokio::test]
@@ -935,7 +931,7 @@ mod tests {
         let exports = log.tierable_segments();
         let expected = exports.iter().map(|e| e.base_offset).min().unwrap();
         let got = reader.earliest_offset(&tp()).unwrap();
-        assert_eq!(got, Some(expected));
+        assert!(got == Some(expected));
     }
 
     #[tokio::test]
@@ -946,7 +942,7 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let reader = RemoteReader::new(rsm, rlmm);
-        assert_eq!(reader.earliest_offset(&tp()).unwrap(), None);
+        assert!(reader.earliest_offset(&tp()).unwrap() == None);
     }
 
     #[tokio::test]
@@ -967,7 +963,7 @@ mod tests {
             .expect("first segment matches ts=0");
         // The first finished segment is the lowest-base one.
         let expected = exports.iter().map(|e| e.base_offset).min().unwrap();
-        assert_eq!(got, expected);
+        assert!(got == expected);
     }
 
     #[tokio::test]
@@ -978,7 +974,7 @@ mod tests {
         // All segments have max_ts=0 by construction (see test above); any
         // strictly-positive target is past every remote segment.
         let got = reader.offset_for_timestamp(&tp(), 1).await.unwrap();
-        assert_eq!(got, None);
+        assert!(got == None);
     }
 
     // ── 48q: `NotReady` from the RLMM must propagate out of the reader
@@ -1107,7 +1103,7 @@ mod tests {
         let n = 16;
         let mp_owned = metadata_partition_for(&owned, n);
         let mp_other = metadata_partition_for(&not_owned, n);
-        assert_ne!(mp_owned, mp_other, "test needs distinct metadata buckets");
+        assert!(mp_owned != mp_other, "test needs distinct metadata buckets");
 
         let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(n);
 
@@ -1184,9 +1180,8 @@ mod tests {
 
         // Unowned partition (never assigned) → the list path treats it as a
         // genuine miss: empty, not an error.
-        assert_eq!(
-            reader.earliest_offset(&not_owned).unwrap(),
-            None,
+        assert!(
+            reader.earliest_offset(&not_owned).unwrap() == None,
             "unassigned partition is an empty list-path result, not NotReady"
         );
 
@@ -1194,18 +1189,16 @@ mod tests {
         // NotReady through the reader. Poll until ready; observe at least the
         // ready (Some) terminal state.
         assign_and_wait_ready(&m, mp_owned, &owned).await;
-        assert_eq!(
-            reader.earliest_offset(&owned).unwrap(),
-            Some(0),
+        assert!(
+            reader.earliest_offset(&owned).unwrap() == Some(0),
             "owned + caught up → real earliest from the remote tier"
         );
 
         // Remove the owned partition: the list path now returns empty (the
         // broker no longer owns it), NOT a stale segment.
         m.reconcile_assignment(&[]).await;
-        assert_eq!(
-            reader.earliest_offset(&owned).unwrap(),
-            None,
+        assert!(
+            reader.earliest_offset(&owned).unwrap() == None,
             "removed partition's list path returns empty, not stale segments"
         );
 

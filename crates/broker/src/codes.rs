@@ -269,6 +269,7 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
 mod tests {
     use super::*;
     use crate::error::BrokerError;
+    use assert2::assert;
 
     #[test]
     fn maps_unsupported_to_35() {
@@ -276,7 +277,7 @@ mod tests {
             api_key: 0,
             version: 99,
         };
-        assert_eq!(from_broker_error(&e), UNSUPPORTED_VERSION);
+        assert!(from_broker_error(&e) == UNSUPPORTED_VERSION);
     }
 
     #[test]
@@ -285,7 +286,7 @@ mod tests {
             topic: "t".into(),
             partition: 0,
         };
-        assert_eq!(from_broker_error(&e), NOT_LEADER_OR_FOLLOWER);
+        assert!(from_broker_error(&e) == NOT_LEADER_OR_FOLLOWER);
     }
 
     #[test]
@@ -294,7 +295,7 @@ mod tests {
             group_id: "g".into(),
             state: "PreparingRebalance".into(),
         };
-        assert_eq!(from_broker_error(&e), REBALANCE_IN_PROGRESS);
+        assert!(from_broker_error(&e) == REBALANCE_IN_PROGRESS);
     }
 
     #[test]
@@ -303,7 +304,7 @@ mod tests {
             group_id: "g".into(),
             member_id: "m".into(),
         };
-        assert_eq!(from_broker_error(&e), UNKNOWN_MEMBER_ID);
+        assert!(from_broker_error(&e) == UNKNOWN_MEMBER_ID);
     }
 
     #[test]
@@ -313,7 +314,7 @@ mod tests {
             current: 5,
             requested: 4,
         };
-        assert_eq!(from_broker_error(&e), ILLEGAL_GENERATION);
+        assert!(from_broker_error(&e) == ILLEGAL_GENERATION);
     }
 
     #[test]
@@ -323,20 +324,20 @@ mod tests {
             current: 2,
             requested: 1,
         };
-        assert_eq!(from_broker_error(&e), INVALID_PRODUCER_EPOCH);
-        assert_eq!(from_broker_error(&e), 47);
+        assert!(from_broker_error(&e) == INVALID_PRODUCER_EPOCH);
+        assert!(from_broker_error(&e) == 47);
     }
 
     #[test]
     fn txn_variant_maps_to_unknown_server_error() {
         let e = BrokerError::Txn("test".into());
-        assert_eq!(from_broker_error(&e), UNKNOWN_SERVER_ERROR);
+        assert!(from_broker_error(&e) == UNKNOWN_SERVER_ERROR);
     }
 
     #[test]
     fn not_enough_replicas_codes_have_expected_values() {
-        assert_eq!(NOT_ENOUGH_REPLICAS, 19);
-        assert_eq!(NOT_ENOUGH_REPLICAS_AFTER_APPEND, 20);
+        assert!(NOT_ENOUGH_REPLICAS == 19);
+        assert!(NOT_ENOUGH_REPLICAS_AFTER_APPEND == 20);
     }
 
     #[test]
@@ -345,12 +346,12 @@ mod tests {
             have: 0,
             current: 1,
         };
-        assert_eq!(from_broker_error(&e), FENCED_LEADER_EPOCH);
+        assert!(from_broker_error(&e) == FENCED_LEADER_EPOCH);
     }
 
     #[test]
     fn unknown_leader_epoch_maps_correctly() {
         let e = BrokerError::UnknownLeaderEpoch(2);
-        assert_eq!(from_broker_error(&e), UNKNOWN_LEADER_EPOCH);
+        assert!(from_broker_error(&e) == UNKNOWN_LEADER_EPOCH);
     }
 }

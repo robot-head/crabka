@@ -57,6 +57,7 @@ impl OperatorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use clap::Parser;
 
     #[derive(Parser)]
@@ -69,13 +70,13 @@ mod tests {
     fn cli_defaults_compute_cluster_scope() {
         let parsed = Wrap::parse_from(["bin"]);
         assert!(parsed.cfg.watched().is_none());
-        assert_eq!(parsed.cfg.operator_namespace, "crabka-operator");
+        assert!(parsed.cfg.operator_namespace == "crabka-operator");
     }
 
     #[test]
     fn comma_separated_namespaces_parse() {
         let parsed = Wrap::parse_from(["bin", "--watch-namespaces=a,b,c"]);
-        assert_eq!(parsed.cfg.watch_namespaces, vec!["a", "b", "c"]);
+        assert!(parsed.cfg.watch_namespaces == vec!["a", "b", "c"]);
         assert!(parsed.cfg.watched().is_some());
     }
 }

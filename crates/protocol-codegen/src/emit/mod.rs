@@ -29,6 +29,7 @@ pub struct EmittedMessage {
 mod tests {
     use super::*;
     use crate::{ir, name_conv, validate};
+    use assert2::assert;
     use std::path::PathBuf;
 
     fn schemas_dir() -> PathBuf {

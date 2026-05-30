@@ -102,6 +102,7 @@ pub mod fake {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[tokio::test]
     async fn fake_records_in_order() {
@@ -114,8 +115,8 @@ mod tests {
         log.append(b1.clone()).await.unwrap();
         log.append(b2.clone()).await.unwrap();
         let got = log.batches().await;
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[1].max_timestamp, 42);
+        assert!(got.len() == 2);
+        assert!(got[1].max_timestamp == 42);
     }
 
     #[tokio::test]

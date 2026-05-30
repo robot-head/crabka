@@ -6,6 +6,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::cast_possible_truncation, clippy::default_trait_access)]
 
+use assert2::assert;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -145,7 +146,7 @@ async fn fenced_leader_epoch_truncates_zombie_writes() {
         .expect("fetch");
     let pd = &resp.responses[0].partitions[0];
     // FENCED_LEADER_EPOCH = 74
-    assert_eq!(pd.error_code, 74, "expected FENCED_LEADER_EPOCH");
+    assert!(pd.error_code == 74, "expected FENCED_LEADER_EPOCH");
 
     broker.shutdown().await;
 }
@@ -186,7 +187,7 @@ async fn unknown_leader_epoch_on_metadata_lag() {
         .expect("fetch");
     let pd = &resp.responses[0].partitions[0];
     // UNKNOWN_LEADER_EPOCH = 75
-    assert_eq!(pd.error_code, 75, "expected UNKNOWN_LEADER_EPOCH");
+    assert!(pd.error_code == 75, "expected UNKNOWN_LEADER_EPOCH");
 
     broker.shutdown().await;
 }

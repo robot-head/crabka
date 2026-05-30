@@ -329,6 +329,7 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_protocol::owned::create_partitions_request::CreatePartitionsAssignment;
 
     fn assn(broker_ids: &[i32]) -> CreatePartitionsAssignment {
@@ -343,9 +344,9 @@ mod tests {
         let brokers: Vec<NodeId> = vec![0, 1, 2];
         let out = resolve_new_partition_assignments(None, &brokers, 0, 3, 2)
             .expect("round-robin should succeed");
-        assert_eq!(out.len(), 3);
+        assert!(out.len() == 3);
         for r in &out {
-            assert_eq!(r.len(), 2, "each replica list must be rf=2");
+            assert!(r.len() == 2, "each replica list must be rf=2");
             for b in r {
                 assert!(brokers.contains(b));
             }
@@ -361,7 +362,7 @@ mod tests {
         let new_tail = resolve_new_partition_assignments(None, &brokers, 2, 2, 2)
             .expect("round-robin tail should succeed");
         let full = crate::handlers::create_topics::round_robin_replicas(&brokers, 4, 2);
-        assert_eq!(new_tail, full[2..]);
+        assert!(new_tail == full[2..]);
     }
 
     #[test]
@@ -369,7 +370,7 @@ mod tests {
         let brokers: Vec<NodeId> = vec![0, 1];
         let err = resolve_new_partition_assignments(None, &brokers, 0, 1, 3)
             .expect_err("rf=3 against 2 brokers must fail");
-        assert_eq!(err.0, codes::INVALID_REPLICATION_FACTOR);
+        assert!(err.0 == codes::INVALID_REPLICATION_FACTOR);
     }
 
     #[test]
@@ -378,7 +379,7 @@ mod tests {
         let provided = vec![assn(&[3, 1]), assn(&[2, 0]), assn(&[1, 3])];
         let out = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
             .expect("explicit assignments should pass validation");
-        assert_eq!(out, vec![vec![3, 1], vec![2, 0], vec![1, 3]]);
+        assert!(out == vec![vec![3, 1], vec![2, 0], vec![1, 3]]);
     }
 
     #[test]
@@ -387,7 +388,7 @@ mod tests {
         let provided = vec![assn(&[0, 1]), assn(&[1, 2])];
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 3, 2)
             .expect_err("2 assignments for 3 new partitions must fail");
-        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
         assert!(err.1.contains("assignments.len()=2"));
         assert!(err.1.contains("new partition count=3"));
     }
@@ -398,7 +399,7 @@ mod tests {
         let provided = vec![assn(&[0, 1, 2])]; // 3 replicas, but rf=2
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
             .expect_err("rf mismatch must fail");
-        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
         assert!(err.1.contains("does not match replication_factor=2"));
     }
 
@@ -408,7 +409,7 @@ mod tests {
         let provided = vec![assn(&[1, 1])]; // duplicate
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
             .expect_err("duplicate broker must fail");
-        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
         assert!(err.1.contains("duplicate broker id 1"));
     }
 
@@ -418,7 +419,7 @@ mod tests {
         let provided = vec![assn(&[0, 9])]; // 9 unknown
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
             .expect_err("unknown broker must fail");
-        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
         assert!(err.1.contains("unknown broker id 9"));
     }
 
@@ -428,7 +429,7 @@ mod tests {
         let provided = vec![assn(&[0, -1])];
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 1, 2)
             .expect_err("negative broker id must fail");
-        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
         assert!(err.1.contains("negative broker id -1"));
     }
 
@@ -438,7 +439,7 @@ mod tests {
         let provided: Vec<CreatePartitionsAssignment> = vec![];
         let err = resolve_new_partition_assignments(Some(&provided), &brokers, 0, 2, 1)
             .expect_err("Some(empty) for >0 new partitions must fail");
-        assert_eq!(err.0, codes::INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.0 == codes::INVALID_REPLICA_ASSIGNMENT);
         assert!(err.1.contains("assignments.len()=0"));
     }
 }

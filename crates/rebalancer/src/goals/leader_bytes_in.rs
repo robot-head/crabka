@@ -149,6 +149,7 @@ mod tests {
     use crate::model::BrokerView;
     use crate::scraper::parse::ParsedSample;
     use crate::scraper::{MetricKind, UsageStore, WindowConfig};
+    use assert2::assert;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -251,8 +252,8 @@ mod tests {
         let mvs = LeaderBytesIn.propose(&s, &ctx);
         assert!(!mvs.is_empty(), "expected leader-only swaps");
         for m in &mvs {
-            assert_eq!(m.old_replicas, m.new_replicas, "leader-only");
-            assert_eq!(m.new_leader, 2, "cold broker becomes new leader");
+            assert!(m.old_replicas == m.new_replicas, "leader-only");
+            assert!(m.new_leader == 2, "cold broker becomes new leader");
         }
     }
 
@@ -275,7 +276,10 @@ mod tests {
         let ctx = ctx_with(store);
         let mvs = LeaderBytesIn.propose(&s, &ctx);
         for m in &mvs {
-            assert_ne!(m.new_leader, 2, "broker 2 not in ISR must not be promoted");
+            assert!(
+                m.new_leader != 2,
+                "broker 2 not in ISR must not be promoted"
+            );
         }
     }
 }

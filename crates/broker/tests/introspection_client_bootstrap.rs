@@ -13,6 +13,7 @@
 //! is ever removed, this test panics on startup just like the broker
 //! binary did in the kind-oauth-introspection e2e job.
 
+use assert2::assert;
 use crabka_broker::config::BrokerConfig;
 use crabka_broker::file_config::FileConfig;
 

@@ -143,6 +143,7 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn snapshot_starts_as_none() {
@@ -165,7 +166,7 @@ mod tests {
         let g = s.load();
         let inner: &Option<ClusterState> = &g;
         let v = inner.as_ref().expect("Some after swap");
-        assert_eq!(v.snapshot_at_ms, 42);
-        assert_eq!(v.cluster_id.as_deref(), Some("c"));
+        assert!(v.snapshot_at_ms == 42);
+        assert!(v.cluster_id.as_deref() == Some("c"));
     }
 }

@@ -332,6 +332,7 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
     use crate::model::{BrokerView, PartitionView};
+    use assert2::assert;
 
     fn make_state(snapshot_at_ms: i64, broker_ids: &[i32]) -> ClusterState {
         ClusterState {
@@ -363,9 +364,9 @@ mod tests {
         h.push(&make_state(10, &[1, 2]));
         h.push(&make_state(20, &[1, 2]));
         h.push(&make_state(30, &[1, 2, 3]));
-        assert_eq!(h.len(), 2);
+        assert!(h.len() == 2);
         let oldest = h.iter_recent().next().expect("at least one memo");
-        assert_eq!(oldest.snapshot_at_ms, 20);
+        assert!(oldest.snapshot_at_ms == 20);
     }
 
     #[test]
@@ -375,7 +376,7 @@ mod tests {
         h.push(&make_state(20, &[1]));
         h.push(&make_state(30, &[1]));
         let got = h.oldest_since(15).expect("memo at 20 satisfies cutoff");
-        assert_eq!(got.snapshot_at_ms, 20);
+        assert!(got.snapshot_at_ms == 20);
         assert!(h.oldest_since(1000).is_none());
     }
 }

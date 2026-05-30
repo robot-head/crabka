@@ -168,6 +168,7 @@ impl RemoteStorageManager for LocalTieredStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::collections::BTreeMap;
     use std::io::Write;
 
@@ -225,7 +226,7 @@ mod tests {
                 .is_none()
         );
         let full = rsm.fetch_log_segment(&md, 0, None).unwrap();
-        assert_eq!(full, b"0123456789");
+        assert!(full == b"0123456789");
     }
 
     #[test]
@@ -237,13 +238,13 @@ mod tests {
         rsm.copy_log_segment_data(&md, &sample_data(src.path(), false))
             .unwrap();
         // Inclusive [2, 5] -> "2345".
-        assert_eq!(rsm.fetch_log_segment(&md, 2, Some(5)).unwrap(), b"2345");
+        assert!(rsm.fetch_log_segment(&md, 2, Some(5)).unwrap() == b"2345");
         // Open-ended from 7 -> "789".
-        assert_eq!(rsm.fetch_log_segment(&md, 7, None).unwrap(), b"789");
+        assert!(rsm.fetch_log_segment(&md, 7, None).unwrap() == b"789");
         // End past EOF clamps.
-        assert_eq!(rsm.fetch_log_segment(&md, 8, Some(99)).unwrap(), b"89");
+        assert!(rsm.fetch_log_segment(&md, 8, Some(99)).unwrap() == b"89");
         // Start at EOF -> empty.
-        assert_eq!(rsm.fetch_log_segment(&md, 10, None).unwrap(), b"");
+        assert!(rsm.fetch_log_segment(&md, 10, None).unwrap() == b"");
     }
 
     #[test]
@@ -254,26 +255,11 @@ mod tests {
         let md = metadata(10);
         rsm.copy_log_segment_data(&md, &sample_data(src.path(), true))
             .unwrap();
-        assert_eq!(
-            rsm.fetch_index(&md, IndexType::Offset).unwrap(),
-            b"OFFSET-IDX"
-        );
-        assert_eq!(
-            rsm.fetch_index(&md, IndexType::Timestamp).unwrap(),
-            b"TIME-IDX"
-        );
-        assert_eq!(
-            rsm.fetch_index(&md, IndexType::ProducerSnapshot).unwrap(),
-            b"SNAP"
-        );
-        assert_eq!(
-            rsm.fetch_index(&md, IndexType::LeaderEpoch).unwrap(),
-            b"EPOCH-BYTES"
-        );
-        assert_eq!(
-            rsm.fetch_index(&md, IndexType::Transaction).unwrap(),
-            b"TXN-IDX"
-        );
+        assert!(rsm.fetch_index(&md, IndexType::Offset).unwrap() == b"OFFSET-IDX");
+        assert!(rsm.fetch_index(&md, IndexType::Timestamp).unwrap() == b"TIME-IDX");
+        assert!(rsm.fetch_index(&md, IndexType::ProducerSnapshot).unwrap() == b"SNAP");
+        assert!(rsm.fetch_index(&md, IndexType::LeaderEpoch).unwrap() == b"EPOCH-BYTES");
+        assert!(rsm.fetch_index(&md, IndexType::Transaction).unwrap() == b"TXN-IDX");
     }
 
     #[test]
@@ -327,6 +313,6 @@ mod tests {
             .unwrap();
         rsm.delete_log_segment_data(&a).unwrap();
         // Deleting `a` leaves `b` intact.
-        assert_eq!(rsm.fetch_log_segment(&b, 0, None).unwrap(), b"0123456789");
+        assert!(rsm.fetch_log_segment(&b, 0, None).unwrap() == b"0123456789");
     }
 }

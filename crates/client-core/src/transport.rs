@@ -56,6 +56,7 @@ pub(crate) fn put_uvarint<B: BufMut>(buf: &mut B, mut v: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::{Bytes, BytesMut};
     use futures_util::SinkExt;
     use futures_util::StreamExt;
@@ -83,17 +84,17 @@ mod tests {
         framed.into_inner().shutdown().await.unwrap();
 
         let received = server.await.unwrap();
-        assert_eq!(received.as_ref(), b"hello kafka");
+        assert!(received.as_ref() == b"hello kafka");
     }
 
     #[test]
     fn put_uvarint_single_byte() {
         let mut buf = BytesMut::new();
         put_uvarint(&mut buf, 0);
-        assert_eq!(buf.as_ref(), &[0u8]);
+        assert!(buf.as_ref() == &[0u8]);
         buf.clear();
         put_uvarint(&mut buf, 127);
-        assert_eq!(buf.as_ref(), &[0x7Fu8]);
+        assert!(buf.as_ref() == &[0x7Fu8]);
     }
 
     #[test]
@@ -101,6 +102,6 @@ mod tests {
         // 128 encodes to 0x80 0x01
         let mut buf = BytesMut::new();
         put_uvarint(&mut buf, 128);
-        assert_eq!(buf.as_ref(), &[0x80u8, 0x01u8]);
+        assert!(buf.as_ref() == &[0x80u8, 0x01u8]);
     }
 }

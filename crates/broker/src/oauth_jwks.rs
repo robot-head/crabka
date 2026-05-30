@@ -208,6 +208,7 @@ fn current_epoch_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::net::SocketAddr;
 
     /// Serve a fixed body at `/jwks` on an ephemeral port; returns the bound
@@ -264,7 +265,7 @@ mod tests {
         let jwks = fetch_jwks(&client, &format!("http://{addr}/jwks"), false)
             .await
             .unwrap();
-        assert_eq!(jwks.len(), 1);
+        assert!(jwks.len() == 1);
         shutdown.cancel();
     }
 
@@ -301,7 +302,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(handle.load().len(), 1);
+        assert!(handle.load().len() == 1);
 
         shutdown.cancel();
         task.await.unwrap();
@@ -405,7 +406,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(handle.load().len(), 1);
+        assert!(handle.load().len() == 1);
         shutdown.cancel();
         task.await.unwrap();
         srv_shutdown.cancel();
@@ -554,9 +555,8 @@ mod tests {
             count.load(Ordering::Relaxed) >= 1,
             "server should have served the on-demand request"
         );
-        assert_eq!(
-            handle.load().len(),
-            1,
+        assert!(
+            handle.load().len() == 1,
             "refresher must store the fetched key set"
         );
 
@@ -597,15 +597,13 @@ mod tests {
             tokio::task::yield_now().await;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(
-            last_on_demand.load(Ordering::Relaxed),
-            first_ts,
-            "second signal within min_pause must not advance timestamp",
+        assert!(
+            last_on_demand.load(Ordering::Relaxed) == first_ts,
+            "second signal within min_pause must not advance timestamp"
         );
-        assert_eq!(
-            count.load(Ordering::Relaxed),
-            count_after_first,
-            "server must not see a second on-demand HTTP request",
+        assert!(
+            count.load(Ordering::Relaxed) == count_after_first,
+            "server must not see a second on-demand HTTP request"
         );
 
         shutdown.cancel();
@@ -621,7 +619,7 @@ mod tests {
             make_signal_refresher(endpoint, Duration::from_millis(0));
         let task = tokio::spawn(refresher.run());
 
-        assert_eq!(last_successful.load(Ordering::Relaxed), 0);
+        assert!(last_successful.load(Ordering::Relaxed) == 0);
         signal_tx.send(()).await.unwrap();
         for _ in 0..100 {
             if last_successful.load(Ordering::Relaxed) > 0 {
@@ -679,10 +677,9 @@ mod tests {
             last_on_demand.load(Ordering::Relaxed) > 0,
             "on-demand rate-limit timestamp updates even when the fetch itself fails",
         );
-        assert_eq!(
-            last_successful.load(Ordering::Relaxed),
-            0,
-            "failed fetch must leave last_successful_fetch_ms at sentinel 0",
+        assert!(
+            last_successful.load(Ordering::Relaxed) == 0,
+            "failed fetch must leave last_successful_fetch_ms at sentinel 0"
         );
 
         shutdown.cancel();
@@ -711,10 +708,9 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(
-            handle.load().len(),
-            1,
-            "ignore_key_use=true must keep the use=enc key in the installed set",
+        assert!(
+            handle.load().len() == 1,
+            "ignore_key_use=true must keep the use=enc key in the installed set"
         );
 
         shutdown.cancel();

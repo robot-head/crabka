@@ -60,6 +60,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use uuid::Uuid;
 
     fn tp(name: &str, partition: i32) -> TopicIdPartition {
@@ -82,7 +83,7 @@ mod tests {
     fn is_deterministic_across_calls() {
         let a = metadata_partition_for(&tp("orders", 7), 50);
         let b = metadata_partition_for(&tp("orders", 7), 50);
-        assert_eq!(a, b);
+        assert!(a == b);
     }
 
     #[test]
@@ -90,7 +91,7 @@ mod tests {
         // Identity is (topic_id, partition); name is informational.
         let a = metadata_partition_for(&tp("orders", 3), 50);
         let b = metadata_partition_for(&tp("renamed", 3), 50);
-        assert_eq!(a, b, "renaming a topic must not re-bucket its metadata");
+        assert!(a == b, "renaming a topic must not re-bucket its metadata");
     }
 
     #[test]
@@ -110,7 +111,7 @@ mod tests {
     #[test]
     fn single_partition_count_collapses_to_zero() {
         for p in 0..20 {
-            assert_eq!(metadata_partition_for(&tp("t", p), 1), 0);
+            assert!(metadata_partition_for(&tp("t", p), 1) == 0);
         }
     }
 
@@ -132,7 +133,7 @@ mod tests {
         let mut expected: Vec<i32> = vec![pa, pb];
         expected.sort_unstable();
         expected.dedup();
-        assert_eq!(got, expected);
+        assert!(got == expected);
         assert!(got.windows(2).all(|w| w[0] < w[1]), "sorted, deduped");
     }
 

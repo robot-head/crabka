@@ -98,6 +98,7 @@ pub fn get_nullable_array_len<B: Buf>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::BytesMut;
 
     // --- non-nullable, non-flexible -----------------------------------------
@@ -106,9 +107,9 @@ mod tests {
     fn non_flex_empty_array_roundtrip() {
         let mut buf = BytesMut::new();
         put_array_len(&mut buf, 0, false);
-        assert_eq!(buf.len(), 4, "prefix must be 4 bytes");
+        assert!(buf.len() == 4, "prefix must be 4 bytes");
         let mut cur = &buf[..];
-        assert_eq!(get_array_len(&mut cur, false).unwrap(), 0);
+        assert!(get_array_len(&mut cur, false).unwrap() == 0);
         assert!(cur.is_empty());
     }
 
@@ -116,9 +117,9 @@ mod tests {
     fn non_flex_three_element_array_roundtrip() {
         let mut buf = BytesMut::new();
         put_array_len(&mut buf, 3, false);
-        assert_eq!(buf.len(), 4);
+        assert!(buf.len() == 4);
         let mut cur = &buf[..];
-        assert_eq!(get_array_len(&mut cur, false).unwrap(), 3);
+        assert!(get_array_len(&mut cur, false).unwrap() == 3);
         assert!(cur.is_empty());
     }
 
@@ -129,9 +130,9 @@ mod tests {
         let mut buf = BytesMut::new();
         put_array_len(&mut buf, 0, true);
         // len=0 → encode 1 → single byte 0x01
-        assert_eq!(&buf[..], &[0x01]);
+        assert!(&buf[..] == &[0x01]);
         let mut cur = &buf[..];
-        assert_eq!(get_array_len(&mut cur, true).unwrap(), 0);
+        assert!(get_array_len(&mut cur, true).unwrap() == 0);
         assert!(cur.is_empty());
     }
 
@@ -140,9 +141,9 @@ mod tests {
         let mut buf = BytesMut::new();
         put_array_len(&mut buf, 3, true);
         // len=3 → encode 4 → single byte 0x04
-        assert_eq!(&buf[..], &[0x04]);
+        assert!(&buf[..] == &[0x04]);
         let mut cur = &buf[..];
-        assert_eq!(get_array_len(&mut cur, true).unwrap(), 3);
+        assert!(get_array_len(&mut cur, true).unwrap() == 3);
         assert!(cur.is_empty());
     }
 
@@ -152,9 +153,9 @@ mod tests {
     fn non_flex_nullable_null_roundtrip() {
         let mut buf = BytesMut::new();
         put_nullable_array_len(&mut buf, None, false);
-        assert_eq!(&buf[..], &[0xFF, 0xFF, 0xFF, 0xFF]); // -1 in big-endian
+        assert!(&buf[..] == &[0xFF, 0xFF, 0xFF, 0xFF]); // -1 in big-endian
         let mut cur = &buf[..];
-        assert_eq!(get_nullable_array_len(&mut cur, false).unwrap(), None);
+        assert!(get_nullable_array_len(&mut cur, false).unwrap() == None);
         assert!(cur.is_empty());
     }
 
@@ -163,7 +164,7 @@ mod tests {
         let mut buf = BytesMut::new();
         put_nullable_array_len(&mut buf, Some(3), false);
         let mut cur = &buf[..];
-        assert_eq!(get_nullable_array_len(&mut cur, false).unwrap(), Some(3));
+        assert!(get_nullable_array_len(&mut cur, false).unwrap() == Some(3));
         assert!(cur.is_empty());
     }
 
@@ -173,9 +174,9 @@ mod tests {
     fn flex_nullable_null_roundtrip() {
         let mut buf = BytesMut::new();
         put_nullable_array_len(&mut buf, None, true);
-        assert_eq!(&buf[..], &[0x00]); // 0 = null in compact encoding
+        assert!(&buf[..] == &[0x00]); // 0 = null in compact encoding
         let mut cur = &buf[..];
-        assert_eq!(get_nullable_array_len(&mut cur, true).unwrap(), None);
+        assert!(get_nullable_array_len(&mut cur, true).unwrap() == None);
         assert!(cur.is_empty());
     }
 
@@ -184,9 +185,9 @@ mod tests {
         let mut buf = BytesMut::new();
         put_nullable_array_len(&mut buf, Some(3), true);
         // Some(3) → encode 4 → 0x04
-        assert_eq!(&buf[..], &[0x04]);
+        assert!(&buf[..] == &[0x04]);
         let mut cur = &buf[..];
-        assert_eq!(get_nullable_array_len(&mut cur, true).unwrap(), Some(3));
+        assert!(get_nullable_array_len(&mut cur, true).unwrap() == Some(3));
         assert!(cur.is_empty());
     }
 
@@ -194,29 +195,29 @@ mod tests {
 
     #[test]
     fn array_len_prefix_len_non_flex() {
-        assert_eq!(array_len_prefix_len(0, false), 4);
-        assert_eq!(array_len_prefix_len(100, false), 4);
+        assert!(array_len_prefix_len(0, false) == 4);
+        assert!(array_len_prefix_len(100, false) == 4);
     }
 
     #[test]
     fn array_len_prefix_len_flex() {
         // len=0 → varint(1) = 1 byte; len=126 → varint(127) = 1 byte;
         // len=127 → varint(128) = 2 bytes.
-        assert_eq!(array_len_prefix_len(0, true), 1);
-        assert_eq!(array_len_prefix_len(126, true), 1);
-        assert_eq!(array_len_prefix_len(127, true), 2);
+        assert!(array_len_prefix_len(0, true) == 1);
+        assert!(array_len_prefix_len(126, true) == 1);
+        assert!(array_len_prefix_len(127, true) == 2);
     }
 
     #[test]
     fn nullable_prefix_len_non_flex_always_4() {
-        assert_eq!(nullable_array_len_prefix_len(None, false), 4);
-        assert_eq!(nullable_array_len_prefix_len(Some(3), false), 4);
+        assert!(nullable_array_len_prefix_len(None, false) == 4);
+        assert!(nullable_array_len_prefix_len(Some(3), false) == 4);
     }
 
     #[test]
     fn nullable_prefix_len_flex_null_is_1() {
         // null → varint(0) = 1 byte
-        assert_eq!(nullable_array_len_prefix_len(None, true), 1);
+        assert!(nullable_array_len_prefix_len(None, true) == 1);
     }
 
     // --- error cases --------------------------------------------------------

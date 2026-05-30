@@ -24,13 +24,11 @@ pub enum CompressionError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn feature_disabled_display() {
         let e = CompressionError::FeatureDisabled("snappy");
-        assert_eq!(
-            e.to_string(),
-            "compression feature `snappy` not enabled at compile time"
-        );
+        assert!(e.to_string() == "compression feature `snappy` not enabled at compile time");
     }
 }

@@ -21,6 +21,7 @@ pub fn extract_principal_from_cert(cert_der: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::PemObject;
 
@@ -34,7 +35,7 @@ mod tests {
         // x509-parser preserves that order (most-significant first),
         // comma-separated, no spaces. Operators pin this DN verbatim in
         // ACLs and super_users.
-        assert_eq!(dn, "CN=test-client,OU=integration,O=crabka");
+        assert!(dn == "CN=test-client,OU=integration,O=crabka");
     }
 
     #[test]

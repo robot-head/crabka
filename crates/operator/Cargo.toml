@@ -48,6 +48,7 @@ uuid = { workspace = true }
 x509-parser = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 crabka-broker = { version = "0.1", path = "../broker" }
 crabka-client-core = { version = "0.1", path = "../client-core" }
 crabka-rebalancer = { version = "0.1", path = "../rebalancer" }

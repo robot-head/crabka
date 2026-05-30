@@ -399,6 +399,7 @@ impl ReplicatorSupervisor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
     use uuid::Uuid;
 
@@ -432,7 +433,7 @@ mod tests {
         ]);
         let d = desired_follower_set(2, &img);
         assert!(d.contains(&("t".into(), 0)));
-        assert_eq!(d.len(), 1);
+        assert!(d.len() == 1);
     }
 
     #[test]
@@ -501,7 +502,7 @@ mod tests {
         // Mirror what reconcile does for leader partitions.
         part.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = part.replica_state.lock().await;
-        assert_eq!(st.isr.len(), 3);
+        assert!(st.isr.len() == 3);
     }
 
     #[test]
@@ -554,7 +555,7 @@ mod tests {
         assert!(d.contains(&("a".into(), 0)));
         assert!(d.contains(&("b".into(), 0)));
         assert!(!d.contains(&("b".into(), 1))); // self is leader for b/1
-        assert_eq!(d.len(), 2);
+        assert!(d.len() == 2);
     }
 
     #[tokio::test]
@@ -616,7 +617,7 @@ mod tests {
         // Verify the partition's Log now has retention.ms=60s.
         let part = partitions.get("t", 0).expect("partition materialized");
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert_eq!(snap.retention_ms, Some(std::time::Duration::from_mins(1)));
+        assert!(snap.retention_ms == Some(std::time::Duration::from_mins(1)));
     }
 
     #[tokio::test]
@@ -665,6 +666,6 @@ mod tests {
         // No overrides → default retention applies.
         let part = partitions.get("t", 0).expect("partition");
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert_eq!(snap.retention_ms, LogConfig::default().retention_ms);
+        assert!(snap.retention_ms == LogConfig::default().retention_ms);
     }
 }

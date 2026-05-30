@@ -383,6 +383,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn ri(broker_id: NodeId, epoch: i32, leo: i64) -> ReplicaLogInfo {
         ReplicaLogInfo {
@@ -397,24 +398,24 @@ mod tests {
     fn picks_highest_epoch_then_offset() {
         // Broker 3 has a higher epoch even though broker 2 has a longer log.
         let r = [ri(2, 4, 100), ri(3, 5, 10)];
-        assert_eq!(select_best_replica(&r), Some(3));
+        assert!(select_best_replica(&r) == Some(3));
     }
 
     #[test]
     fn ties_on_epoch_break_by_offset() {
         let r = [ri(2, 5, 90), ri(3, 5, 120)];
-        assert_eq!(select_best_replica(&r), Some(3));
+        assert!(select_best_replica(&r) == Some(3));
     }
 
     #[test]
     fn ties_on_epoch_and_offset_break_by_lowest_broker_id() {
         let r = [ri(3, 5, 100), ri(1, 5, 100), ri(2, 5, 100)];
-        assert_eq!(select_best_replica(&r), Some(1));
+        assert!(select_best_replica(&r) == Some(1));
     }
 
     #[test]
     fn empty_input_returns_none() {
-        assert_eq!(select_best_replica(&[]), None);
+        assert!(select_best_replica(&[]) == None);
     }
 
     #[test]
@@ -433,6 +434,7 @@ mod tests {
 #[cfg(test)]
 mod urm_tests {
     use super::*;
+    use assert2::assert;
     use std::time::Duration;
 
     fn info(id: NodeId, leo: i64) -> ReplicaLogInfo {
@@ -452,8 +454,8 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_secs(5)).await;
-        assert_eq!(got.len(), 2);
-        assert_eq!(select_best_replica(&got), Some(2));
+        assert!(got.len() == 2);
+        assert!(select_best_replica(&got) == Some(2));
     }
 
     #[tokio::test]
@@ -464,8 +466,8 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
-        assert_eq!(got.len(), 1, "must return what arrived before the cap");
-        assert_eq!(got[0].broker_id, 1);
+        assert!(got.len() == 1, "must return what arrived before the cap");
+        assert!(got[0].broker_id == 1);
     }
 
     #[tokio::test]
@@ -476,7 +478,7 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
-        assert_eq!(got, vec![info(1, 50)]);
+        assert!(got == vec![info(1, 50)]);
     }
 }
 
@@ -485,6 +487,7 @@ mod run_recovery_tests {
     use super::*;
     use crate::heartbeat::controller_state::ControllerLivenessState;
     use crate::metadata_source::MetadataSource;
+    use assert2::assert;
     use crabka_metadata::{
         BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
     };
@@ -636,7 +639,7 @@ mod run_recovery_tests {
             MockSource::new(Some(99), image_with_partition(1, &[1, 2])),
             liveness_with_alive(&[]).await,
         );
-        assert_eq!(mgr.run_recovery(&job()).await, RecoveryOutcome::NotNeeded);
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
     }
 
     #[tokio::test]
@@ -645,7 +648,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), MetadataImage::new(Uuid::nil())),
             liveness_with_alive(&[]).await,
         );
-        assert_eq!(mgr.run_recovery(&job()).await, RecoveryOutcome::NotNeeded);
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
     }
 
     #[tokio::test]
@@ -654,7 +657,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), image_with_partition(1, &[1, 2])),
             liveness_with_alive(&[1]).await,
         );
-        assert_eq!(mgr.run_recovery(&job()).await, RecoveryOutcome::NotNeeded);
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
     }
 
     #[tokio::test]
@@ -664,10 +667,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), image_with_partition(1, &[1, 2])),
             liveness_with_alive(&[]).await,
         );
-        assert_eq!(
-            mgr.run_recovery(&job()).await,
-            RecoveryOutcome::NoEligibleReplica
-        );
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
     }
 
     #[tokio::test]
@@ -680,10 +680,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), img),
             liveness_with_alive(&[2]).await,
         );
-        assert_eq!(
-            mgr.run_recovery(&job()).await,
-            RecoveryOutcome::NoEligibleReplica
-        );
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
     }
 
     #[tokio::test]
@@ -702,6 +699,6 @@ mod run_recovery_tests {
             reply: Some(tx),
         };
         mgr.clone().recover_one(j).await;
-        assert_eq!(rx.await.unwrap(), RecoveryOutcome::InProgress);
+        assert!(rx.await.unwrap() == RecoveryOutcome::InProgress);
     }
 }

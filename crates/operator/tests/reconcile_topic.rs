@@ -4,6 +4,7 @@
 //! finalizer patches). Admin-client behavior is covered by the
 //! integration test in `crates/client-admin/tests/round_trip.rs`.
 
+use assert2::assert;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -96,9 +97,9 @@ async fn missing_cluster_label_sets_status() {
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["type"], "Ready");
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "MissingClusterLabel");
+    assert!(cond["type"] == "Ready");
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "MissingClusterLabel");
 }
 
 /// `KafkaTopic` referencing a Kafka that doesn't exist → status
@@ -139,8 +140,8 @@ async fn cluster_not_found_sets_status_cluster_not_ready() {
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "ClusterNotReady");
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "ClusterNotReady");
 }
 
 /// `KafkaTopic` whose effective name is invalid
@@ -174,8 +175,8 @@ async fn invalid_topic_name_sets_status() {
         .expect("status PATCH");
     let body: serde_json::Value = serde_json::from_slice(status_patch.body()).unwrap();
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "InvalidTopicName");
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "InvalidTopicName");
 }
 
 /// A `KafkaTopic` referencing a Ready Kafka but with no
@@ -204,10 +205,9 @@ async fn finalizer_add_path_patches_metadata_and_requeues_immediately() {
 
     let kt = topic("foo", "y", Some("demo"));
     let action = reconcile(Arc::new(kt), ctx).await.unwrap();
-    assert_eq!(
-        action,
-        Action::requeue(Duration::ZERO),
-        "finalizer add re-enters immediately",
+    assert!(
+        action == Action::requeue(Duration::ZERO),
+        "finalizer add re-enters immediately"
     );
 
     let observed = state.take_observed();
@@ -221,10 +221,9 @@ async fn finalizer_add_path_patches_metadata_and_requeues_immediately() {
         .expect("finalizer PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(finalizer_patch.body()).unwrap();
     let finalizers = &body["metadata"]["finalizers"];
-    assert_eq!(
-        finalizers,
-        &serde_json::json!(["crabka.io/topic-finalizer"]),
-        "patch must add the topic finalizer",
+    assert!(
+        finalizers == &serde_json::json!(["crabka.io/topic-finalizer"]),
+        "patch must add the topic finalizer"
     );
 
     // No /status PATCH — the finalizer-add path bails before any status
@@ -351,26 +350,25 @@ async fn creates_topic_on_first_reconcile() {
     reconcile(Arc::new(kt), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    assert_eq!(
-        calls.len(),
-        2,
+    assert!(
+        calls.len() == 2,
         "expected Metadata + CreateTopics, got {calls:?}"
     );
     assert!(matches!(&calls[0], RecordedCall::Metadata(t) if t == &vec![TOPIC_NAME.to_string()]));
     match &calls[1] {
         RecordedCall::CreateTopics(specs) => {
-            assert_eq!(specs.len(), 1);
-            assert_eq!(specs[0].name, TOPIC_NAME);
-            assert_eq!(specs[0].partitions, 3);
-            assert_eq!(specs[0].replicas, 1);
+            assert!(specs.len() == 1);
+            assert!(specs[0].name == TOPIC_NAME);
+            assert!(specs[0].partitions == 3);
+            assert!(specs[0].replicas == 1);
         }
         other => panic!("expected CreateTopics, got {other:?}"),
     }
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["status"], "True");
-    assert_eq!(cond["reason"], "Ready");
+    assert!(cond["status"] == "True");
+    assert!(cond["reason"] == "Ready");
     assert!(
         body["status"]["topicId"].is_string(),
         "topicId should be a uuid string, got {:?}",
@@ -424,8 +422,8 @@ async fn noop_when_spec_matches_cluster() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["status"], "True");
-    assert_eq!(cond["reason"], "Ready");
+    assert!(cond["status"] == "True");
+    assert!(cond["reason"] == "Ready");
 }
 
 /// current=3 partitions, spec=5 → one CreatePartitions(5) call,
@@ -461,13 +459,13 @@ async fn partition_increase_triggers_create_partitions() {
             _ => None,
         })
         .expect("CreatePartitions call expected");
-    assert_eq!(cp.len(), 1);
-    assert_eq!(cp[0].name, TOPIC_NAME);
-    assert_eq!(cp[0].new_total_count, 5);
+    assert!(cp.len() == 1);
+    assert!(cp[0].name == TOPIC_NAME);
+    assert!(cp[0].new_total_count == 5);
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
-    assert_eq!(body["status"]["conditions"][0]["status"], "True");
-    assert_eq!(body["status"]["conditions"][0]["reason"], "Ready");
+    assert!(body["status"]["conditions"][0]["status"] == "True");
+    assert!(body["status"]["conditions"][0]["reason"] == "Ready");
 }
 
 /// current=5 partitions, spec=2 → no mutating admin calls,
@@ -511,8 +509,8 @@ async fn partition_decrease_sets_immutable_field_changed() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "ImmutableFieldChanged");
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "ImmutableFieldChanged");
 }
 
 /// `current.replication_factor=1`, spec=2 → no mutating admin
@@ -556,8 +554,8 @@ async fn replicas_change_sets_immutable_field_changed() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "ImmutableFieldChanged");
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "ImmutableFieldChanged");
 }
 
 /// current overrides `{foo: 1}`, desired `{bar: 2}` →
@@ -616,8 +614,8 @@ async fn config_diff_sets_and_deletes() {
     assert!(has_delete_foo, "expected DELETE foo, got {ops:?}");
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
-    assert_eq!(body["status"]["conditions"][0]["status"], "True");
-    assert_eq!(body["status"]["conditions"][0]["reason"], "Ready");
+    assert!(body["status"]["conditions"][0]["status"] == "True");
+    assert!(body["status"]["conditions"][0]["reason"] == "Ready");
 }
 
 /// deletionTimestamp set, preserveTopic=false → one `DeleteTopics`
@@ -656,7 +654,7 @@ async fn delete_with_finalizer_calls_delete_topics() {
             _ => None,
         })
         .expect("DeleteTopics call expected");
-    assert_eq!(dt, vec![TOPIC_NAME.to_string()]);
+    assert!(dt == vec![TOPIC_NAME.to_string()]);
 
     // Finalizer-removal patch: metadata.finalizers=[].
     let observed = state.take_observed();
@@ -671,7 +669,7 @@ async fn delete_with_finalizer_calls_delete_topics() {
         })
         .expect("metadata PATCH for finalizer removal");
     let body: serde_json::Value = serde_json::from_slice(metadata_patch.body()).unwrap();
-    assert_eq!(body["metadata"]["finalizers"], serde_json::json!([]));
+    assert!(body["metadata"]["finalizers"] == serde_json::json!([]));
 }
 
 // ---- Broker-error / transport-error reconcile tests ----------------------
@@ -701,8 +699,8 @@ async fn creates_topic_broker_error_surfaces_in_status() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "BrokerError");
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "BrokerError");
     let msg = cond["message"].as_str().unwrap();
     assert!(msg.contains("CreateTopics"), "message {msg:?}");
     assert!(msg.contains("TOPIC_ALREADY_EXISTS"), "message {msg:?}");
@@ -736,8 +734,8 @@ async fn create_partitions_broker_error_surfaces_in_status() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "BrokerError");
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "BrokerError");
     let msg = cond["message"].as_str().unwrap();
     assert!(msg.contains("CreatePartitions"), "message {msg:?}");
     assert!(msg.contains("INVALID_PARTITIONS"), "message {msg:?}");
@@ -777,8 +775,8 @@ async fn incremental_alter_configs_broker_error_surfaces_in_status() {
 
     let body = last_status_patch_body(&state, TOPIC_NAME);
     let cond = &body["status"]["conditions"][0];
-    assert_eq!(cond["status"], "False");
-    assert_eq!(cond["reason"], "BrokerError");
+    assert!(cond["status"] == "False");
+    assert!(cond["reason"] == "BrokerError");
     let msg = cond["message"].as_str().unwrap();
     assert!(msg.contains("IncrementalAlterConfigs"), "message {msg:?}");
     assert!(msg.contains("INVALID_CONFIG"), "message {msg:?}");
@@ -817,7 +815,7 @@ async fn describe_configs_broker_error_requeues_without_status_update() {
 
     let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
     let action = reconcile(Arc::new(kt), ctx.clone()).await.unwrap();
-    assert_eq!(action, Action::requeue(Duration::from_secs(15)));
+    assert!(action == Action::requeue(Duration::from_secs(15)));
 
     // No /status PATCH observed.
     let observed = state.take_observed();
@@ -890,7 +888,7 @@ async fn delete_topics_broker_error_during_finalizer_does_not_block_cleanup() {
         })
         .expect("metadata PATCH for finalizer removal");
     let body: serde_json::Value = serde_json::from_slice(metadata_patch.body()).unwrap();
-    assert_eq!(body["metadata"]["finalizers"], serde_json::json!([]));
+    assert!(body["metadata"]["finalizers"] == serde_json::json!([]));
 }
 
 /// A Transport error on `metadata` → reconcile
@@ -916,7 +914,7 @@ async fn metadata_transport_error_requeues_and_evicts_admin_client() {
 
     let kt = topic_with_finalizer(TOPIC_NAME, 3, 1, None);
     let action = reconcile(Arc::new(kt), ctx.clone()).await.unwrap();
-    assert_eq!(action, Action::requeue(Duration::from_secs(15)));
+    assert!(action == Action::requeue(Duration::from_secs(15)));
 
     let observed = state.take_observed();
     assert!(
@@ -983,5 +981,5 @@ async fn delete_with_preserve_topic_skips_delete_topics() {
         })
         .expect("metadata PATCH for finalizer removal");
     let body: serde_json::Value = serde_json::from_slice(metadata_patch.body()).unwrap();
-    assert_eq!(body["metadata"]["finalizers"], serde_json::json!([]));
+    assert!(body["metadata"]["finalizers"] == serde_json::json!([]));
 }

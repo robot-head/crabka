@@ -220,6 +220,7 @@ fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn upsert_creates_new_when_absent() {
@@ -233,7 +234,7 @@ mod tests {
         );
         assert!(is_new);
         assert!(!id.is_empty());
-        assert_eq!(s.list(0, false).len(), 1);
+        assert!(s.list(0, false).len() == 1);
     }
 
     #[test]
@@ -255,12 +256,12 @@ mod tests {
         );
         assert!(new1);
         assert!(!new2);
-        assert_eq!(id1, id2);
+        assert!(id1 == id2);
         let all = s.list(0, false);
-        assert_eq!(all.len(), 1);
-        assert_eq!(all[0].last_seen_at_ms, 250);
-        assert_eq!(all[0].severity, AnomalySeverity::Critical);
-        assert_eq!(all[0].details, "still down");
+        assert!(all.len() == 1);
+        assert!(all[0].last_seen_at_ms == 250);
+        assert!(all[0].severity == AnomalySeverity::Critical);
+        assert!(all[0].details == "still down");
     }
 
     #[test]
@@ -275,7 +276,7 @@ mod tests {
         );
         assert!(s.mark_resolved(AnomalyKind::DiskPressure, &AnomalyKey::Broker(3), 20));
         let all = s.list(0, true);
-        assert_eq!(all[0].resolved_at_ms, Some(20));
+        assert!(all[0].resolved_at_ms == Some(20));
         assert!(!s.mark_resolved(AnomalyKind::DiskPressure, &AnomalyKey::Broker(3), 30));
     }
 
@@ -304,9 +305,9 @@ mod tests {
             3,
         );
         let listed = s.list(0, true);
-        assert_eq!(listed.len(), 2);
+        assert!(listed.len() == 2);
         let keys: Vec<_> = listed.into_iter().map(|a| a.key).collect();
-        assert_eq!(keys, vec![AnomalyKey::Broker(3), AnomalyKey::Broker(2)]);
+        assert!(keys == vec![AnomalyKey::Broker(3), AnomalyKey::Broker(2)]);
     }
 
     #[test]
@@ -333,10 +334,10 @@ mod tests {
         let s2 = AnomalyStore::open(dir.path(), 4).unwrap();
         let got_a = s2.get(&id_a).expect("a persisted");
         let got_b = s2.get(&id_b).expect("b persisted");
-        assert_eq!(got_a.details, "a");
-        assert_eq!(got_a.kind, AnomalyKind::BrokerDeath);
-        assert_eq!(got_b.details, "b");
-        assert_eq!(got_b.kind, AnomalyKind::SlowBroker);
+        assert!(got_a.details == "a");
+        assert!(got_a.kind == AnomalyKind::BrokerDeath);
+        assert!(got_b.details == "b");
+        assert!(got_b.kind == AnomalyKind::SlowBroker);
     }
 
     #[test]

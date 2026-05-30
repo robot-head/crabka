@@ -243,6 +243,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "assert2"
+version = "0.3.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d6c710e60d14b07d8f42d0e702b16120865eea39edb751e75cd6bf401d18f14"
+dependencies = [
+ "assert2-macros",
+ "diff",
+ "yansi",
+]
+
+[[package]]
+name = "assert2-macros"
+version = "0.3.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9008cbbba9e1d655538870b91fd93814bd82e6968f27788fc734375120ac6f57"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "astral-tokio-tar"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1117,6 +1140,7 @@ name = "crabka-bench-driver"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "assert2",
  "bytes",
  "chrono",
  "clap",
@@ -1144,6 +1168,7 @@ name = "crabka-broker"
 version = "0.1.2"
 dependencies = [
  "arc-swap",
+ "assert2",
  "async-trait",
  "axum",
  "base64",
@@ -1205,6 +1230,7 @@ dependencies = [
 name = "crabka-cli"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "clap",
  "crabka-metadata",
  "crabka-security",
@@ -1225,6 +1251,7 @@ dependencies = [
 name = "crabka-client-admin"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "async-trait",
  "bytes",
  "crabka-broker",
@@ -1245,6 +1272,7 @@ dependencies = [
 name = "crabka-client-consumer"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "bon",
  "bytes",
  "crabka-broker",
@@ -1265,6 +1293,7 @@ dependencies = [
 name = "crabka-client-core"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "bon",
  "bytes",
  "crabka-protocol",
@@ -1291,6 +1320,7 @@ dependencies = [
 name = "crabka-client-producer"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "bon",
  "bytes",
  "crabka-broker",
@@ -1312,6 +1342,7 @@ dependencies = [
 name = "crabka-compression"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "bytes",
  "codspeed-criterion-compat",
  "flate2",
@@ -1331,6 +1362,7 @@ name = "crabka-docgen"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "assert2",
  "clap",
  "crabka-broker",
  "crabka-operator",
@@ -1345,6 +1377,7 @@ dependencies = [
 name = "crabka-log"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "bytes",
  "codspeed-criterion-compat",
  "crabka-compression",
@@ -1376,6 +1409,7 @@ dependencies = [
 name = "crabka-metadata"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "bytes",
  "codspeed-criterion-compat",
  "crabka-protocol",
@@ -1393,6 +1427,7 @@ name = "crabka-operator"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "assert2",
  "async-trait",
  "axum",
  "base64",
@@ -1437,6 +1472,7 @@ name = "crabka-protocol"
 version = "0.1.2"
 dependencies = [
  "arbitrary",
+ "assert2",
  "bytes",
  "codspeed-criterion-compat",
  "crabka-compression",
@@ -1456,6 +1492,7 @@ dependencies = [
 name = "crabka-protocol-codegen"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "proc-macro2",
  "quote",
  "serde",
@@ -1468,6 +1505,7 @@ dependencies = [
 name = "crabka-raft"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "async-trait",
  "bytes",
  "crabka-client-core",
@@ -1494,6 +1532,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "assert2",
  "async-trait",
  "axum",
  "bytes",
@@ -1528,6 +1567,7 @@ dependencies = [
 name = "crabka-records-legacy"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "bytes",
  "crabka-compression",
  "crabka-protocol",
@@ -1541,6 +1581,7 @@ dependencies = [
 name = "crabka-remote-storage"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "bytes",
  "object_store",
  "tempfile",
@@ -1554,6 +1595,7 @@ dependencies = [
 name = "crabka-remote-storage-topic"
 version = "0.1.2"
 dependencies = [
+ "assert2",
  "async-trait",
  "bytes",
  "crabka-client-admin",
@@ -1575,6 +1617,7 @@ name = "crabka-security"
 version = "0.1.2"
 dependencies = [
  "arc-swap",
+ "assert2",
  "async-trait",
  "base64",
  "bytes",
@@ -1932,6 +1975,12 @@ checksum = "916a94e407b54f9034d71dd748234cd1e516ced6284009906ae246f177eafe5a"
 dependencies = [
  "cipher 0.5.2",
 ]
+
+[[package]]
+name = "diff"
+version = "0.1.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
 
 [[package]]
 name = "digest"
@@ -7244,6 +7293,12 @@ dependencies = [
  "libc",
  "rustix",
 ]
+
+[[package]]
+name = "yansi"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cfe53a6657fd280eaa890a3bc59152892ffa3e30101319d168b781ed6529b049"
 
 [[package]]
 name = "yasna"

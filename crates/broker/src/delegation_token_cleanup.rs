@@ -84,6 +84,7 @@ pub(crate) async fn sweep(controller: &dyn DelegationTokenController) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::sync::Mutex;
 
     use crabka_metadata::{DelegationTokenRecord, MetadataImage, MetadataRecord};
@@ -152,7 +153,7 @@ mod tests {
         // Two tombstones submitted, one per expired token (order in the
         // batch is HashMap-iteration order, so check by id-set).
         let submitted = mock.submitted.lock().unwrap();
-        assert_eq!(submitted.len(), 2);
+        assert!(submitted.len() == 2);
         let mut tombstone_ids: Vec<String> = submitted
             .iter()
             .map(|r| match r {
@@ -161,15 +162,12 @@ mod tests {
             })
             .collect();
         tombstone_ids.sort();
-        assert_eq!(
-            tombstone_ids,
-            vec!["expired-1".to_string(), "expired-2".to_string()]
-        );
+        assert!(tombstone_ids == vec!["expired-1".to_string(), "expired-2".to_string()]);
         drop(submitted);
 
         // Post-sweep image keeps only the fresh token.
         let after = mock.current_image();
-        assert_eq!(after.all_delegation_tokens().count(), 1);
+        assert!(after.all_delegation_tokens().count() == 1);
         assert!(after.delegation_token_by_id("fresh").is_some());
         assert!(after.delegation_token_by_id("expired-1").is_none());
         assert!(after.delegation_token_by_id("expired-2").is_none());
@@ -188,6 +186,6 @@ mod tests {
         sweep(&*mock).await;
 
         assert!(mock.submitted.lock().unwrap().is_empty());
-        assert_eq!(mock.current_image().all_delegation_tokens().count(), 1);
+        assert!(mock.current_image().all_delegation_tokens().count() == 1);
     }
 }

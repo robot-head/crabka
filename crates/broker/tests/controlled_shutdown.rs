@@ -18,6 +18,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -103,9 +104,9 @@ async fn create_topic(addr: SocketAddr, name: &str, partitions: i32, rf: i16) {
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, CREATE_TOPICS_VERSION)
         .expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -265,15 +266,14 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
 
     // Sanity: target leads everything before we start. Use the raft
     // leader's image since the target is about to be drained.
-    assert_eq!(
+    assert!(
         leader_count(
             &cluster[raft_leader_idx].0,
             TOPIC,
             PARTITIONS,
             target_node_id
-        ),
-        PARTITIONS as usize,
-        "target should lead all partitions before shutdown",
+        ) == PARTITIONS as usize,
+        "target should lead all partitions before shutdown"
     );
 
     // Pop the target out of the cluster vec — `controlled_shutdown`

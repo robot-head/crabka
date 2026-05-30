@@ -9,6 +9,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::time::Duration;

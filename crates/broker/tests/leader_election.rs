@@ -12,6 +12,7 @@
     clippy::too_many_lines
 )]
 
+use assert2::assert;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -68,7 +69,7 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics: {resp:?}");
+    assert!(resp.topics[0].error_code == 0, "CreateTopics: {resp:?}");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !broker.has_partition(name, 0).await {
         assert!(
@@ -237,7 +238,7 @@ async fn acks_all_completes_after_isr_shrink() {
         .await
         .expect("acks=-1 after shrink");
     let elapsed = start.elapsed();
-    assert_eq!(offset, 0);
+    assert!(offset == 0);
     assert!(
         elapsed < Duration::from_secs(10),
         "shrink should be quick on for_tests config; took {elapsed:?}"

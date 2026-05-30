@@ -1,3 +1,4 @@
+use assert2::assert;
 use std::path::PathBuf;
 
 #[test]

@@ -1017,6 +1017,7 @@ impl FileListener {
 #[cfg(test)]
 mod listener_auth_tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn file_listener_parses_per_listener_tls_config_inline() {
@@ -1039,22 +1040,15 @@ protocol = "Ssl"
 tls_config = { cert_path = "/tls/broker.crt", key_path = "/tls/broker.key", client_ca_path = "/tls/clients-ca.crt", client_auth = "Required" }
 "#;
         let cfg: FileConfig = toml::from_str(toml).unwrap();
-        assert_eq!(cfg.listeners.len(), 2);
+        assert!(cfg.listeners.len() == 2);
         assert!(cfg.listeners[0].tls_config.is_none());
         let data_tls = cfg.listeners[1].tls_config.as_ref().unwrap();
-        assert_eq!(
-            data_tls.cert_path,
-            std::path::PathBuf::from("/tls/broker.crt")
+        assert!(data_tls.cert_path == std::path::PathBuf::from("/tls/broker.crt"));
+        assert!(data_tls.key_path == std::path::PathBuf::from("/tls/broker.key"));
+        assert!(
+            data_tls.client_ca_path.as_deref() == Some(std::path::Path::new("/tls/clients-ca.crt"))
         );
-        assert_eq!(
-            data_tls.key_path,
-            std::path::PathBuf::from("/tls/broker.key")
-        );
-        assert_eq!(
-            data_tls.client_ca_path.as_deref(),
-            Some(std::path::Path::new("/tls/clients-ca.crt"))
-        );
-        assert_eq!(data_tls.client_auth, FileClientAuthMode::Required);
+        assert!(data_tls.client_auth == FileClientAuthMode::Required);
     }
 
     #[test]
@@ -1074,10 +1068,7 @@ sasl_config = { enabled_mechanisms = ["SCRAM-SHA-512"] }
 "#;
         let cfg: FileConfig = toml::from_str(toml).unwrap();
         let sasl = cfg.listeners[0].sasl_config.as_ref().unwrap();
-        assert_eq!(
-            sasl.enabled_mechanisms,
-            vec![crabka_security::SaslMechanism::ScramSha512]
-        );
+        assert!(sasl.enabled_mechanisms == vec![crabka_security::SaslMechanism::ScramSha512]);
     }
 
     #[test]
@@ -1109,6 +1100,7 @@ client_auth = "Required"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::sync::{Mutex, OnceLock};
 
     /// Serializes any test that mutates process-wide env vars. Tests in
@@ -1122,7 +1114,7 @@ mod tests {
     #[test]
     fn empty_toml_round_trips() {
         let cfg: FileConfig = toml::from_str("").unwrap();
-        assert_eq!(cfg, FileConfig::default());
+        assert!(cfg == FileConfig::default());
     }
 
     #[test]
@@ -1148,17 +1140,17 @@ protocol = "Plaintext"
 "log.retention.hours" = "24"
 "#;
         let cfg: FileConfig = toml::from_str(src).unwrap();
-        assert_eq!(cfg.broker_id, Some(0));
-        assert_eq!(cfg.log_dir.as_deref(), Some("/var/lib/crabka/data"));
-        assert_eq!(cfg.inter_broker_listener_name.as_deref(), Some("PLAIN"));
-        assert_eq!(cfg.listeners.len(), 2);
-        assert_eq!(cfg.listeners[0].name, "PLAIN");
-        assert_eq!(cfg.listeners[0].protocol, ListenerProtocol::Plaintext);
-        assert_eq!(
+        assert!(cfg.broker_id == Some(0));
+        assert!(cfg.log_dir.as_deref() == Some("/var/lib/crabka/data"));
+        assert!(cfg.inter_broker_listener_name.as_deref() == Some("PLAIN"));
+        assert!(cfg.listeners.len() == 2);
+        assert!(cfg.listeners[0].name == "PLAIN");
+        assert!(cfg.listeners[0].protocol == ListenerProtocol::Plaintext);
+        assert!(
             cfg.server_properties
                 .get("log.retention.hours")
-                .map(String::as_str),
-            Some("24")
+                .map(String::as_str)
+                == Some("24")
         );
     }
 
@@ -1170,7 +1162,7 @@ broker_id = 0
 some_future_field = "from-a-later-slice"
 "#;
         let cfg: FileConfig = toml::from_str(src).unwrap();
-        assert_eq!(cfg.broker_id, Some(0));
+        assert!(cfg.broker_id == Some(0));
     }
 
     #[test]
@@ -1183,7 +1175,7 @@ advertised = "h:9094"
 protocol = "SaslSsl"
 "#;
         let cfg: FileConfig = toml::from_str(src).unwrap();
-        assert_eq!(cfg.listeners[0].protocol, ListenerProtocol::SaslSsl);
+        assert!(cfg.listeners[0].protocol == ListenerProtocol::SaslSsl);
     }
 
     #[test]
@@ -1213,9 +1205,9 @@ protocol = "Plaintext"
             sasl_config: None,
         };
         let spec = fl.into_spec();
-        assert_eq!(spec.name, "X");
-        assert_eq!(spec.advertised, "h:9094");
-        assert_eq!(spec.protocol, ListenerProtocol::Plaintext);
+        assert!(spec.name == "X");
+        assert!(spec.advertised == "h:9094");
+        assert!(spec.protocol == ListenerProtocol::Plaintext);
     }
 
     #[test]
@@ -1235,10 +1227,10 @@ protocol = "Plaintext"
         let mut cfg = BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
 
-        assert_eq!(cfg.listeners.len(), 1);
-        assert_eq!(cfg.listeners[0].name, "PLAIN");
-        assert_eq!(cfg.listeners[0].advertised, "demo-0:9092");
-        assert_eq!(cfg.inter_broker_listener_name, "PLAIN");
+        assert!(cfg.listeners.len() == 1);
+        assert!(cfg.listeners[0].name == "PLAIN");
+        assert!(cfg.listeners[0].advertised == "demo-0:9092");
+        assert!(cfg.inter_broker_listener_name == "PLAIN");
     }
 
     #[test]
@@ -1256,7 +1248,7 @@ protocol = "Plaintext"
         file.apply_to(&mut cfg).unwrap();
 
         // CLI value wins because it differs from default.
-        assert_eq!(cfg.broker_id, 7);
+        assert!(cfg.broker_id == 7);
     }
 
     #[test]
@@ -1269,7 +1261,7 @@ protocol = "Plaintext"
 
         file.apply_to(&mut cfg).unwrap();
 
-        assert_eq!(cfg.broker_id, 42);
+        assert!(cfg.broker_id == 42);
     }
 
     #[test]
@@ -1284,16 +1276,10 @@ client_ca_path = "/etc/crabka/cluster-ca/ca.crt"
 client_auth = "Required"
 "#;
         let cfg: FileConfig = toml::from_str(src).expect("parse TLS config");
-        assert_eq!(
-            cfg.controller_listener_protocol,
-            Some(ListenerProtocol::Ssl)
-        );
+        assert!(cfg.controller_listener_protocol == Some(ListenerProtocol::Ssl));
         let tls = cfg.tls_config.expect("tls_config present");
-        assert_eq!(
-            tls.cert_path,
-            std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt")
-        );
-        assert_eq!(tls.client_auth, FileClientAuthMode::Required);
+        assert!(tls.cert_path == std::path::PathBuf::from("/etc/crabka/broker-tls/0.crt"));
+        assert!(tls.client_auth == FileClientAuthMode::Required);
     }
 
     #[test]
@@ -1307,7 +1293,7 @@ advertised = "demo-0:9092"
 protocol = "Plaintext"
 "#;
         let cfg: FileConfig = toml::from_str(src).expect("parse no-TLS");
-        assert_eq!(cfg.controller_listener_protocol, None);
+        assert!(cfg.controller_listener_protocol == None);
         assert!(cfg.tls_config.is_none());
     }
 
@@ -1324,12 +1310,9 @@ client_auth = "Required"
         let file: FileConfig = toml::from_str(src).expect("parse");
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
-        assert_eq!(
-            cfg.controller_listener_protocol,
-            crabka_security::ListenerProtocol::Ssl
-        );
+        assert!(cfg.controller_listener_protocol == crabka_security::ListenerProtocol::Ssl);
         let tls = cfg.tls_config.expect("tls_config propagated");
-        assert_eq!(tls.cert_chain_path, std::path::PathBuf::from("/c"));
+        assert!(tls.cert_chain_path == std::path::PathBuf::from("/c"));
     }
 
     #[test]
@@ -1345,19 +1328,13 @@ jwks_refresh_interval_ms = 60000
         let file: FileConfig = toml::from_str(src).expect("parse");
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
-        assert_eq!(
-            cfg.oauthbearer_jwks_endpoint.as_deref(),
-            Some("https://idp.example/jwks")
-        );
-        assert_eq!(
-            cfg.oauthbearer_jwks_refresh_interval,
-            std::time::Duration::from_mins(1)
-        );
+        assert!(cfg.oauthbearer_jwks_endpoint.as_deref() == Some("https://idp.example/jwks"));
+        assert!(cfg.oauthbearer_jwks_refresh_interval == std::time::Duration::from_mins(1));
         match cfg.oauthbearer_validator {
             crabka_security::OAuthBearerValidator::Signed(v) => {
-                assert_eq!(v.valid_issuer.as_deref(), Some("https://idp.example"));
-                assert_eq!(v.expected_audience.as_deref(), Some("kafka"));
-                assert_eq!(v.principal_claim_name, "client_id");
+                assert!(v.valid_issuer.as_deref() == Some("https://idp.example"));
+                assert!(v.expected_audience.as_deref() == Some("kafka"));
+                assert!(v.principal_claim_name == "client_id");
             }
             other => panic!("jwks_endpoint_uri must select the Signed validator; got {other:?}"),
         }
@@ -1376,7 +1353,7 @@ allowable_clock_skew_ms = 5000
         assert!(cfg.oauthbearer_jwks_endpoint.is_none());
         match cfg.oauthbearer_validator {
             crabka_security::OAuthBearerValidator::Unsecured(v) => {
-                assert_eq!(v.allowable_clock_skew_ms, 5000);
+                assert!(v.allowable_clock_skew_ms == 5000);
             }
             other => {
                 panic!("no jwks_endpoint_uri must keep the unsecured validator; got {other:?}")
@@ -1394,9 +1371,9 @@ idp_tls_trust = "/etc/crabka/oauth/idp-ca.pem"
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
-        assert_eq!(
-            cfg.oauthbearer_idp_tls_trust.as_deref(),
-            Some(std::path::Path::new("/etc/crabka/oauth/idp-ca.pem")),
+        assert!(
+            cfg.oauthbearer_idp_tls_trust.as_deref()
+                == Some(std::path::Path::new("/etc/crabka/oauth/idp-ca.pem"))
         );
     }
 
@@ -1554,8 +1531,8 @@ introspection_client_secret_path = '{}'
 
         file.apply_to(&mut cfg).unwrap();
 
-        assert_eq!(cfg.listeners.len(), 1);
-        assert_eq!(cfg.listeners[0].name, "X");
+        assert!(cfg.listeners.len() == 1);
+        assert!(cfg.listeners[0].name == "X");
     }
 
     #[test]
@@ -1569,7 +1546,7 @@ storage_dir = "/var/lib/crabka/tier"
         file.apply_to(&mut cfg).unwrap();
         match cfg.remote_storage_backend {
             Some(crate::config::RemoteStorageBackend::Local { dir }) => {
-                assert_eq!(dir, std::path::PathBuf::from("/var/lib/crabka/tier"));
+                assert!(dir == std::path::PathBuf::from("/var/lib/crabka/tier"));
             }
             other => panic!("expected Local backend, got {other:?}"),
         }
@@ -1597,9 +1574,9 @@ bootstrap = "127.0.0.1:9092"
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
         let km = cfg.remote_log_metadata_kafka.expect("kafka rlmm config");
-        assert_eq!(km.bootstrap, "127.0.0.1:9092");
-        assert_eq!(km.num_partitions, 50);
-        assert_eq!(km.replication, 3);
+        assert!(km.bootstrap == "127.0.0.1:9092");
+        assert!(km.num_partitions == 50);
+        assert!(km.replication == 3);
     }
 
     #[test]
@@ -1617,9 +1594,9 @@ replication = 1
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
         let km = cfg.remote_log_metadata_kafka.expect("kafka rlmm config");
-        assert_eq!(km.bootstrap, "broker-0:9094");
-        assert_eq!(km.num_partitions, 8);
-        assert_eq!(km.replication, 1);
+        assert!(km.bootstrap == "broker-0:9094");
+        assert!(km.num_partitions == 8);
+        assert!(km.replication == 1);
     }
 
     #[test]
@@ -1637,20 +1614,18 @@ allow_http = true
         file.apply_to(&mut cfg).unwrap();
         match cfg.remote_storage_backend {
             Some(crate::config::RemoteStorageBackend::S3(s3)) => {
-                assert_eq!(s3.bucket, "crabka-prod");
-                assert_eq!(s3.region, "us-east-1");
-                assert_eq!(s3.prefix.as_deref(), Some("cluster-a"));
-                assert_eq!(s3.endpoint.as_deref(), Some("http://minio:9000"));
+                assert!(s3.bucket == "crabka-prod");
+                assert!(s3.region == "us-east-1");
+                assert!(s3.prefix.as_deref() == Some("cluster-a"));
+                assert!(s3.endpoint.as_deref() == Some("http://minio:9000"));
                 assert!(s3.allow_http);
                 assert!(s3.access_key_id.is_none());
                 // Multipart knobs default when the TOML omits them.
-                assert_eq!(
-                    s3.multipart_threshold,
-                    crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD
+                assert!(
+                    s3.multipart_threshold == crabka_remote_storage::DEFAULT_MULTIPART_THRESHOLD
                 );
-                assert_eq!(
-                    s3.multipart_chunk_size,
-                    crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE
+                assert!(
+                    s3.multipart_chunk_size == crabka_remote_storage::DEFAULT_MULTIPART_CHUNK_SIZE
                 );
             }
             other => panic!("expected S3 backend, got {other:?}"),
@@ -1671,8 +1646,8 @@ multipart_chunk_size = 5242880
         file.apply_to(&mut cfg).unwrap();
         match cfg.remote_storage_backend {
             Some(crate::config::RemoteStorageBackend::S3(s3)) => {
-                assert_eq!(s3.multipart_threshold, 8192);
-                assert_eq!(s3.multipart_chunk_size, 5_242_880);
+                assert!(s3.multipart_threshold == 8192);
+                assert!(s3.multipart_chunk_size == 5_242_880);
             }
             other => panic!("expected S3 backend, got {other:?}"),
         }
@@ -1715,26 +1690,17 @@ secret_key = "abcdef"
             let mut cfg = crate::config::BrokerConfig::default();
             file.apply_to(&mut cfg).unwrap();
 
-            assert_eq!(
+            assert!(
                 cfg.delegation_token_secret_key
                     .as_ref()
-                    .map(|s| s.as_bytes().to_vec()),
-                Some(b"abcdef".to_vec()),
+                    .map(|s| s.as_bytes().to_vec())
+                    == Some(b"abcdef".to_vec())
             );
             // KIP-48 defaults: 7 days max lifetime, 1 hour sweep cadence,
             // 24 hour default renew period.
-            assert_eq!(
-                cfg.delegation_token_max_lifetime_ms,
-                7 * 24 * 60 * 60 * 1_000
-            );
-            assert_eq!(
-                cfg.delegation_token_expiry_check_interval_ms,
-                60 * 60 * 1_000
-            );
-            assert_eq!(
-                cfg.delegation_token_default_renew_period_ms,
-                24 * 60 * 60 * 1_000
-            );
+            assert!(cfg.delegation_token_max_lifetime_ms == 7 * 24 * 60 * 60 * 1_000);
+            assert!(cfg.delegation_token_expiry_check_interval_ms == 60 * 60 * 1_000);
+            assert!(cfg.delegation_token_default_renew_period_ms == 24 * 60 * 60 * 1_000);
         });
     }
 
@@ -1751,10 +1717,9 @@ secret_key = "abcdef"
             let file: FileConfig = toml::from_str(toml).unwrap();
             let mut cfg = crate::config::BrokerConfig::default();
             file.apply_to(&mut cfg).unwrap();
-            assert_eq!(
-                cfg.delegation_token_default_renew_period_ms,
-                24 * 60 * 60 * 1_000,
-                "absent default_renew_period_ms should leave the 24h default in place",
+            assert!(
+                cfg.delegation_token_default_renew_period_ms == 24 * 60 * 60 * 1_000,
+                "absent default_renew_period_ms should leave the 24h default in place"
             );
 
             // (2) When the TOML sets it, the override wins.
@@ -1766,9 +1731,9 @@ default_renew_period_ms = 7200000
             let file: FileConfig = toml::from_str(toml).unwrap();
             let mut cfg = crate::config::BrokerConfig::default();
             file.apply_to(&mut cfg).unwrap();
-            assert_eq!(
-                cfg.delegation_token_default_renew_period_ms, 7_200_000,
-                "TOML default_renew_period_ms must override the default",
+            assert!(
+                cfg.delegation_token_default_renew_period_ms == 7_200_000,
+                "TOML default_renew_period_ms must override the default"
             );
         });
     }
@@ -1788,11 +1753,11 @@ secret_key = "toml-loses"
                 let mut cfg = crate::config::BrokerConfig::default();
                 file.apply_to(&mut cfg).unwrap();
 
-                assert_eq!(
+                assert!(
                     cfg.delegation_token_secret_key
                         .as_ref()
-                        .map(|s| s.as_bytes().to_vec()),
-                    Some(b"env-wins".to_vec()),
+                        .map(|s| s.as_bytes().to_vec())
+                        == Some(b"env-wins".to_vec())
                 );
             },
         );
@@ -1808,18 +1773,9 @@ secret_key = "toml-loses"
 
             assert!(cfg.delegation_token_secret_key.is_none());
             // Lifetime knobs stay at their defaults when no section is present.
-            assert_eq!(
-                cfg.delegation_token_max_lifetime_ms,
-                7 * 24 * 60 * 60 * 1_000
-            );
-            assert_eq!(
-                cfg.delegation_token_expiry_check_interval_ms,
-                60 * 60 * 1_000
-            );
-            assert_eq!(
-                cfg.delegation_token_default_renew_period_ms,
-                24 * 60 * 60 * 1_000
-            );
+            assert!(cfg.delegation_token_max_lifetime_ms == 7 * 24 * 60 * 60 * 1_000);
+            assert!(cfg.delegation_token_expiry_check_interval_ms == 60 * 60 * 1_000);
+            assert!(cfg.delegation_token_default_renew_period_ms == 24 * 60 * 60 * 1_000);
         });
     }
 
@@ -1834,7 +1790,7 @@ super_users = ["ANONYMOUS", "admin"]
 
         assert!(cfg.super_users.contains("ANONYMOUS"));
         assert!(cfg.super_users.contains("admin"));
-        assert_eq!(cfg.super_users.len(), 2);
+        assert!(cfg.super_users.len() == 2);
     }
 
     // `[authorization]` TOML section → `Arc<dyn Authorizer>`.
@@ -1880,10 +1836,7 @@ super_users = ["admin"]
             resource_name: "t",
             operation: AclOperation::Read,
         };
-        assert_eq!(
-            cfg.authorizer.authorize(&img, &req),
-            AuthorizationResult::Allow
-        );
+        assert!(cfg.authorizer.authorize(&img, &req) == AuthorizationResult::Allow);
 
         // Non-super-user with no matching ACL → Deny (proves we got
         // SimpleAcl, not AllowAll).
@@ -1895,9 +1848,8 @@ super_users = ["admin"]
             resource_name: "t",
             operation: AclOperation::Read,
         };
-        assert_eq!(
-            cfg.authorizer.authorize(&img, &req_alice),
-            AuthorizationResult::Deny,
+        assert!(
+            cfg.authorizer.authorize(&img, &req_alice) == AuthorizationResult::Deny,
             "type=simple must default-deny non-super-users with no matching ACL"
         );
     }
@@ -1943,9 +1895,8 @@ expire_after_ms = 60000
                 resource_name: "t",
                 operation: AclOperation::Read,
             };
-            assert_eq!(
-                cfg.authorizer.authorize(&img, &req),
-                AuthorizationResult::Allow,
+            assert!(
+                cfg.authorizer.authorize(&img, &req) == AuthorizationResult::Allow,
                 "OPA super-user bypass must short-circuit before any HTTP call"
             );
         });
@@ -1972,10 +1923,7 @@ expire_after_ms = 60000
             resource_name: "t",
             operation: AclOperation::Read,
         };
-        assert_eq!(
-            cfg.authorizer.authorize(&img, &req),
-            AuthorizationResult::Allow
-        );
+        assert!(cfg.authorizer.authorize(&img, &req) == AuthorizationResult::Allow);
     }
 
     #[test]
@@ -1987,7 +1935,7 @@ expire_after_ms = 60000
         let fc: FileConfig = toml::from_str(toml).expect("parse");
         let mut cfg = crate::config::BrokerConfig::default();
         fc.apply_to(&mut cfg).expect("apply");
-        assert_eq!(cfg.roles, vec![crate::config::NodeRole::Controller]);
+        assert!(cfg.roles == vec![crate::config::NodeRole::Controller]);
     }
 
     #[test]
@@ -1999,12 +1947,12 @@ expire_after_ms = 60000
         let fc: FileConfig = toml::from_str(toml).expect("parse");
         let mut cfg = crate::config::BrokerConfig::default();
         fc.apply_to(&mut cfg).expect("apply");
-        assert_eq!(
-            cfg.roles,
-            vec![
-                crate::config::NodeRole::Broker,
-                crate::config::NodeRole::Controller
-            ]
+        assert!(
+            cfg.roles
+                == vec![
+                    crate::config::NodeRole::Broker,
+                    crate::config::NodeRole::Controller
+                ]
         );
     }
 
@@ -2025,12 +1973,12 @@ expire_after_ms = 60000
         let fc: FileConfig = toml::from_str("").expect("parse");
         let mut cfg = crate::config::BrokerConfig::default();
         fc.apply_to(&mut cfg).expect("apply");
-        assert_eq!(
-            cfg.roles,
-            vec![
-                crate::config::NodeRole::Controller,
-                crate::config::NodeRole::Broker
-            ]
+        assert!(
+            cfg.roles
+                == vec![
+                    crate::config::NodeRole::Controller,
+                    crate::config::NodeRole::Broker
+                ]
         );
     }
 
@@ -2045,8 +1993,8 @@ replica_selector = "rack-aware"
         let cfg: FileConfig = toml::from_str(src).expect("parse");
         let mut broker = crate::config::BrokerConfig::default();
         cfg.apply_to(&mut broker).expect("apply");
-        assert_eq!(broker.rack.as_deref(), Some("az-1"));
-        assert_eq!(broker.replica_selector, ReplicaSelectorKind::RackAware);
+        assert!(broker.rack.as_deref() == Some("az-1"));
+        assert!(broker.replica_selector == ReplicaSelectorKind::RackAware);
     }
 
     #[test]
@@ -2075,19 +2023,16 @@ kdc = "tcp://kdc:88"
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).expect("apply [gssapi]");
         let g = cfg.gssapi.expect("gssapi config present");
-        assert_eq!(
-            g.keytab_path,
-            std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
-        );
-        assert_eq!(g.service_name, "kafka");
-        assert_eq!(g.principal_to_local_rules.len(), 2);
+        assert!(g.keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
+        assert!(g.service_name == "kafka");
+        assert!(g.principal_to_local_rules.len() == 2);
         // Second rule in the fixture is the bare DEFAULT rule.
         assert!(matches!(
             g.principal_to_local_rules[1],
             crabka_security::gssapi::name::Rule::Default
         ));
-        assert_eq!(g.realm.as_deref(), Some("EXAMPLE.COM"));
-        assert_eq!(g.kdc.as_deref(), Some("tcp://kdc:88"));
+        assert!(g.realm.as_deref() == Some("EXAMPLE.COM"));
+        assert!(g.kdc.as_deref() == Some("tcp://kdc:88"));
     }
 
     #[test]
@@ -2100,7 +2045,7 @@ principal_to_local_rules = ["DEFAULT"]
         let file: FileConfig = toml::from_str(src).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
-        assert_eq!(cfg.gssapi.unwrap().service_name, "kafka");
+        assert!(cfg.gssapi.unwrap().service_name == "kafka");
     }
 
     #[test]
@@ -2136,13 +2081,12 @@ kdc_url = "tcp://kdc:88"
                 service_name,
                 kdc_url,
             } => {
-                assert_eq!(
-                    keytab_path,
-                    std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
+                assert!(
+                    keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
                 );
-                assert_eq!(client_principal, "kafka@EXAMPLE.COM");
-                assert_eq!(service_name, "kafka");
-                assert_eq!(kdc_url, "tcp://kdc:88");
+                assert!(client_principal == "kafka@EXAMPLE.COM");
+                assert!(service_name == "kafka");
+                assert!(kdc_url == "tcp://kdc:88");
             }
             other => panic!("expected Gssapi, got {other:?}"),
         }
@@ -2173,7 +2117,7 @@ kdc_url = "tcp://kdc:88"
         file.apply_to(&mut cfg).unwrap();
         match cfg.inter_broker_credentials.unwrap() {
             crate::config::InterBrokerCredentials::Gssapi { service_name, .. } => {
-                assert_eq!(service_name, "kafka");
+                assert!(service_name == "kafka");
             }
             other => panic!("expected Gssapi, got {other:?}"),
         }

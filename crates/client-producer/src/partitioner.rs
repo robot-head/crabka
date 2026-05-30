@@ -102,13 +102,14 @@ fn murmur2(data: &[u8]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn key_hash_is_stable_across_calls() {
         let p = UniformStickyPartitioner::new();
         let a = p.pick("t", Some(b"my-key"), 12);
         let b = p.pick("t", Some(b"my-key"), 12);
-        assert_eq!(a, b);
+        assert!(a == b);
         assert!((0..12).contains(&a));
     }
 
@@ -118,8 +119,8 @@ mod tests {
         let a = p.pick("t", None, 4);
         let b = p.pick("t", None, 4);
         let c = p.pick("t", None, 4);
-        assert_eq!(a, b);
-        assert_eq!(b, c);
+        assert!(a == b);
+        assert!(b == c);
     }
 
     #[test]
@@ -128,8 +129,8 @@ mod tests {
         let a = p.pick("t", None, 4);
         p.rotate("t", 4);
         let b = p.pick("t", None, 4);
-        assert_ne!(a, b);
-        assert_eq!(b, (a + 1) % 4);
+        assert!(a != b);
+        assert!(b == (a + 1) % 4);
     }
 
     #[test]
@@ -138,6 +139,6 @@ mod tests {
         let _ = p.pick("a", None, 4);
         p.rotate("a", 4);
         // Topic "b"'s sticky is still 0.
-        assert_eq!(p.pick("b", None, 4), 0);
+        assert!(p.pick("b", None, 4) == 0);
     }
 }

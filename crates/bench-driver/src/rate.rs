@@ -35,6 +35,7 @@ impl Pacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[tokio::test(start_paused = true)]
     async fn pacer_spaces_ticks() {

@@ -187,12 +187,13 @@ pub(crate) fn decode_assignment(bytes: &[u8]) -> Vec<(String, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn subscription_round_trip() {
         let s = encode_subscription(&["t1".into(), "t2".into()], &[], -1, None);
         let decoded = decode_subscription(&s);
-        assert_eq!(decoded.topics, vec!["t1", "t2"]);
+        assert!(decoded.topics == vec!["t1", "t2"]);
     }
 
     #[test]
@@ -201,8 +202,8 @@ mod tests {
         let decoded = decode_subscription(&s);
         assert!(decoded.topics.is_empty());
         assert!(decoded.owned.is_empty());
-        assert_eq!(decoded.generation_id, -1);
-        assert_eq!(decoded.rack_id, None);
+        assert!(decoded.generation_id == -1);
+        assert!(decoded.rack_id == None);
     }
 
     #[test]
@@ -214,15 +215,15 @@ mod tests {
         got.sort();
         let mut want = owned.clone();
         want.sort();
-        assert_eq!(got, want);
+        assert!(got == want);
     }
 
     #[test]
     fn subscription_v3_generation_and_rack_round_trip() {
         let s = encode_subscription(&["t".into()], &[], 42, Some("rack-a"));
         let decoded = decode_subscription(&s);
-        assert_eq!(decoded.generation_id, 42);
-        assert_eq!(decoded.rack_id.as_deref(), Some("rack-a"));
+        assert!(decoded.generation_id == 42);
+        assert!(decoded.rack_id.as_deref() == Some("rack-a"));
     }
 
     #[test]
@@ -238,10 +239,10 @@ mod tests {
         buf.put_i32(0); // owned_partitions empty (v1)
         let payload = buf.freeze();
         let decoded = decode_subscription(&payload);
-        assert_eq!(decoded.topics, vec!["t1"]);
+        assert!(decoded.topics == vec!["t1"]);
         assert!(decoded.owned.is_empty());
-        assert_eq!(decoded.generation_id, -1);
-        assert_eq!(decoded.rack_id, None);
+        assert!(decoded.generation_id == -1);
+        assert!(decoded.rack_id == None);
     }
 
     #[test]
@@ -251,7 +252,7 @@ mod tests {
         assert!(decoded.contains(&("t".into(), 0)));
         assert!(decoded.contains(&("t".into(), 1)));
         assert!(decoded.contains(&("u".into(), 0)));
-        assert_eq!(decoded.len(), 3);
+        assert!(decoded.len() == 3);
     }
 
     #[test]

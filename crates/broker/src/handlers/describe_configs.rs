@@ -142,6 +142,7 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use std::collections::BTreeMap;
 
     use crabka_metadata::{BrokerConfigRecord, MetadataImage, MetadataRecord};
@@ -170,10 +171,10 @@ mod tests {
     fn broker_resource_all_keys_returned_when_no_filter() {
         let img = image_with_broker_config(1, "leader.replication.throttled.rate", "1024");
         let map = img.broker_config(1).cloned().unwrap_or_default();
-        assert_eq!(
+        assert!(
             map.get("leader.replication.throttled.rate")
-                .map(String::as_str),
-            Some("1024")
+                .map(String::as_str)
+                == Some("1024")
         );
     }
 
@@ -198,7 +199,7 @@ mod tests {
             .filter(|(k, _)| key_filter.iter().any(|f| f == k))
             .collect();
 
-        assert_eq!(filtered.len(), 1);
+        assert!(filtered.len() == 1);
         assert!(filtered.contains_key("leader.replication.throttled.rate"));
         assert!(!filtered.contains_key("follower.replication.throttled.rate"));
     }
@@ -213,6 +214,6 @@ mod tests {
 
     #[test]
     fn config_source_dynamic_broker_is_2() {
-        assert_eq!(super::CONFIG_SOURCE_DYNAMIC_BROKER, 2i8);
+        assert!(super::CONFIG_SOURCE_DYNAMIC_BROKER == 2i8);
     }
 }

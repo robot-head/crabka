@@ -64,6 +64,7 @@ pub fn build_marker_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn commit_marker_attribute_bits_set() {
@@ -76,15 +77,15 @@ mod tests {
     fn abort_marker_key_starts_with_version_zero_then_type_zero() {
         let b = build_marker_batch(1000, 0, 0, MarkerType::Abort);
         let key = b.records[0].key.as_ref().unwrap();
-        assert_eq!(key.len(), 4);
-        assert_eq!(&key[..2], &0i16.to_be_bytes());
-        assert_eq!(&key[2..], &0i16.to_be_bytes());
+        assert!(key.len() == 4);
+        assert!(&key[..2] == &0i16.to_be_bytes());
+        assert!(&key[2..] == &0i16.to_be_bytes());
     }
 
     #[test]
     fn commit_marker_key_type_is_one() {
         let b = build_marker_batch(1000, 0, 0, MarkerType::Commit);
         let key = b.records[0].key.as_ref().unwrap();
-        assert_eq!(&key[2..], &1i16.to_be_bytes());
+        assert!(&key[2..] == &1i16.to_be_bytes());
     }
 }

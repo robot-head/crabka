@@ -607,6 +607,7 @@ impl Segment {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::tempdir;
@@ -641,11 +642,11 @@ mod tests {
         // sample_batch sets per-record timestamp_delta = i, base_timestamp = ts_base.
         // Batch 1 records: (off0,ts100),(off1,ts101),(off2,ts102).
         // Batch 2 records: (off3,ts200),(off4,ts201).
-        assert_eq!(seg.offset_for_timestamp(100), Some((0, 100)));
-        assert_eq!(seg.offset_for_timestamp(101), Some((1, 101)));
-        assert_eq!(seg.offset_for_timestamp(150), Some((3, 200)));
-        assert_eq!(seg.offset_for_timestamp(201), Some((4, 201)));
-        assert_eq!(seg.offset_for_timestamp(202), None);
+        assert!(seg.offset_for_timestamp(100) == Some((0, 100)));
+        assert!(seg.offset_for_timestamp(101) == Some((1, 101)));
+        assert!(seg.offset_for_timestamp(150) == Some((3, 200)));
+        assert!(seg.offset_for_timestamp(201) == Some((4, 201)));
+        assert!(seg.offset_for_timestamp(202) == None);
         drop(dir);
     }
 
@@ -678,10 +679,10 @@ mod tests {
         // through every window before matching.
         let target = 1_000 + (n - 1);
         let got = seg.scan_from_floor_windowed(0, 1, |ts| ts >= target);
-        assert_eq!(got, Some((n - 1, target)));
+        assert!(got == Some((n - 1, target)));
         // No-match case must terminate (cursor passes last_offset) → None.
         let none = seg.scan_from_floor_windowed(0, 1, |ts| ts > 10_000);
-        assert_eq!(none, None);
+        assert!(none == None);
         drop(dir);
     }
 
@@ -693,12 +694,12 @@ mod tests {
         seg.append(&sample_batch(0, 3, 100), 0).unwrap();
         // Second batch: offsets 3,4 ts 200,201 — segment max becomes 201 @4.
         seg.append(&sample_batch(3, 2, 200), 0).unwrap();
-        assert_eq!(seg.offset_of_max_timestamp(), Some((4, 201)));
+        assert!(seg.offset_of_max_timestamp() == Some((4, 201)));
 
         // Empty segment → None.
         let dir2 = tempdir().unwrap();
         let empty = Segment::create(dir2.path(), 0).unwrap();
-        assert_eq!(empty.offset_of_max_timestamp(), None);
+        assert!(empty.offset_of_max_timestamp() == None);
         drop(dir);
         drop(dir2);
     }
@@ -724,7 +725,7 @@ mod tests {
             });
         }
         seg.append(&b, 0).unwrap();
-        assert_eq!(seg.offset_of_max_timestamp(), Some((0, 500)));
+        assert!(seg.offset_of_max_timestamp() == Some((0, 500)));
         drop(dir);
     }
 
@@ -736,11 +737,11 @@ mod tests {
         let b2 = sample_batch(3, 2, 2_000_000);
         seg.append(&b1, 4096).unwrap();
         seg.append(&b2, 4096).unwrap();
-        assert_eq!(seg.last_offset(), 4);
+        assert!(seg.last_offset() == 4);
         let read = seg.read(0, usize::MAX).unwrap();
-        assert_eq!(read.len(), 2);
-        assert_eq!(read[0].records.len(), 3);
-        assert_eq!(read[1].records.len(), 2);
+        assert!(read.len() == 2);
+        assert!(read[0].records.len() == 3);
+        assert!(read[1].records.len() == 2);
     }
 
     #[test]
@@ -751,8 +752,8 @@ mod tests {
         seg.append(&sample_batch(3, 2, 2_000_000), 4096).unwrap();
         let read = seg.read(4, usize::MAX).unwrap();
         // Offset 4 falls inside the second batch (offsets 3..=4).
-        assert_eq!(read.len(), 1);
-        assert_eq!(read[0].base_offset, 3);
+        assert!(read.len() == 1);
+        assert!(read[0].base_offset == 3);
     }
 
     #[test]
@@ -818,11 +819,10 @@ mod tests {
         }
         let wire = wire.freeze();
         let r = seg.read_raw(0, 3, 10 * 1024 * 1024).unwrap();
-        assert_eq!(r.start_offset, 0);
-        assert_eq!(r.last_offset, 2);
-        assert_eq!(
-            &r.bytes[..],
-            &wire[..],
+        assert!(r.start_offset == 0);
+        assert!(r.last_offset == 2);
+        assert!(
+            &r.bytes[..] == &wire[..],
             "raw bytes must equal the on-disk concatenation"
         );
         let mut cur: &[u8] = &r.bytes;
@@ -831,7 +831,7 @@ mod tests {
             crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
             n += 1;
         }
-        assert_eq!(n, 3);
+        assert!(n == 3);
         drop(dir);
     }
 
@@ -842,7 +842,7 @@ mod tests {
             seg.append(&test_batch_at(off), 0).unwrap();
         }
         let r = seg.read_raw(0, 2, 10 * 1024 * 1024).unwrap();
-        assert_eq!(r.last_offset, 1);
+        assert!(r.last_offset == 1);
         drop(dir);
     }
 
@@ -851,8 +851,8 @@ mod tests {
         let (dir, mut seg) = test_segment();
         seg.append(&test_batch_at(0), 0).unwrap();
         let r = seg.read_raw(0, 1, 1).unwrap();
-        assert_eq!(r.start_offset, 0);
-        assert_eq!(r.last_offset, 0);
+        assert!(r.start_offset == 0);
+        assert!(r.last_offset == 0);
         assert!(!r.bytes.is_empty());
         drop(dir);
     }

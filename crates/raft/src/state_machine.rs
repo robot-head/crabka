@@ -298,6 +298,7 @@ impl RaftSnapshotBuilder<TypeConfig> for Arc<CrabkaStateMachine> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{MetadataRecord, TopicRecord};
 
     #[test]
@@ -330,7 +331,7 @@ mod tests {
                 },
             )
             .await;
-        assert_eq!(resp.applied_index, 1);
+        assert!(resp.applied_index == 1);
         rx.changed().await.unwrap();
         assert!(rx.borrow().topic("t").is_some());
     }
@@ -360,7 +361,7 @@ mod tests {
         .await;
 
         let snap = sm.clone().build_snapshot().await.unwrap();
-        assert_eq!(snap.meta.last_log_id, Some(log_id));
+        assert!(snap.meta.last_log_id == Some(log_id));
 
         // end_offset = index + 1 = 6, epoch = leader term = 1.
         let checkpoint = dir
@@ -407,7 +408,7 @@ mod tests {
 
         let loaded = sm.clone().get_current_snapshot().await.unwrap();
         let loaded = loaded.expect("snapshot should be present");
-        assert_eq!(loaded.meta.last_log_id, Some(log_id));
+        assert!(loaded.meta.last_log_id == Some(log_id));
     }
 
     #[tokio::test]
@@ -449,6 +450,6 @@ mod tests {
 
         assert!(dst.current_image().topic("t").is_some());
         let (applied, _) = dst_mut.applied_state().await.unwrap();
-        assert_eq!(applied, Some(log_id));
+        assert!(applied == Some(log_id));
     }
 }

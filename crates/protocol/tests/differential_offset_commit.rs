@@ -1,3 +1,4 @@
+use assert2::assert;
 mod support;
 use support::oracle;
 
@@ -89,18 +90,17 @@ fn offset_commit_request_default_byte_equal_every_version() {
         let oracle_json = request_oracle_value(version);
         // api_key=8, is_request=true
         let java = o.encode(8, version, true, &oracle_json);
-        assert_eq!(
-            rust,
-            java,
+        assert!(
+            rust == java,
             "OffsetCommitRequest v{version} byte mismatch\n  rust: {}\n  java: {}",
             hex::encode(&rust),
-            hex::encode(&java),
+            hex::encode(&java)
         );
         // Also verify decode roundtrip
         let decoded: OffsetCommitRequest = rust_decode(&rust, version);
         let re_encoded = rust_encode(&decoded, version);
-        assert_eq!(
-            rust, re_encoded,
+        assert!(
+            rust == re_encoded,
             "OffsetCommitRequest v{version} roundtrip mismatch after decode"
         );
     }
@@ -116,18 +116,17 @@ fn offset_commit_response_default_byte_equal_every_version() {
         let oracle_json = response_oracle_value(version);
         // api_key=8, is_request=false
         let java = o.encode(8, version, false, &oracle_json);
-        assert_eq!(
-            rust,
-            java,
+        assert!(
+            rust == java,
             "OffsetCommitResponse v{version} byte mismatch\n  rust: {}\n  java: {}",
             hex::encode(&rust),
-            hex::encode(&java),
+            hex::encode(&java)
         );
         // Also verify decode roundtrip
         let decoded: OffsetCommitResponse = rust_decode(&rust, version);
         let re_encoded = rust_encode(&decoded, version);
-        assert_eq!(
-            rust, re_encoded,
+        assert!(
+            rust == re_encoded,
             "OffsetCommitResponse v{version} roundtrip mismatch after decode"
         );
     }

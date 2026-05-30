@@ -68,6 +68,7 @@ fn page<K: CustomResourceExt>() -> CrdPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     #[test]
     fn kafka_page_has_spec_fields() {
         let pages = crd_pages();
@@ -75,7 +76,7 @@ mod tests {
             .iter()
             .find(|p| p.slug == "kafka")
             .expect("kafka page");
-        assert_eq!(kafka.title, "Kafka");
+        assert!(kafka.title == "Kafka");
         assert!(
             kafka
                 .body
@@ -88,7 +89,7 @@ mod tests {
             "expected kafkaVersion field in kafka spec table:\n{}",
             kafka.body
         );
-        assert_eq!(pages.len(), 5);
+        assert!(pages.len() == 5);
         let slugs: Vec<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
         for e in [
             "kafka",

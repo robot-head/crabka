@@ -29,6 +29,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 
@@ -331,9 +332,9 @@ async fn create_topic_as_admin(addr: SocketAddr, name: &str) {
     let resp = drive_create_topics_as_plain(addr, "admin", b"admin-secret", req)
         .await
         .expect("CreateTopics as super-user must round-trip");
-    assert_eq!(resp.topics.len(), 1, "one topic in response");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1, "one topic in response");
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -413,17 +414,16 @@ async fn produce_blocked_by_opa_returns_topic_authorization_failed() {
 
     handle.shutdown().await;
 
-    assert_eq!(resp.responses.len(), 1, "one topic in response");
-    assert_eq!(
-        resp.responses[0].partition_responses.len(),
-        1,
-        "one partition row in response",
+    assert!(resp.responses.len() == 1, "one topic in response");
+    assert!(
+        resp.responses[0].partition_responses.len() == 1,
+        "one partition row in response"
     );
     let p = &resp.responses[0].partition_responses[0];
-    assert_eq!(
-        p.error_code, ERR_TOPIC_AUTHORIZATION_FAILED,
+    assert!(
+        p.error_code == ERR_TOPIC_AUTHORIZATION_FAILED,
         "OPA denied alice's Write on blocked-topic, expected \
-         TOPIC_AUTHORIZATION_FAILED (29), got {p:?}",
+         TOPIC_AUTHORIZATION_FAILED (29), got {p:?}"
     );
 }
 
@@ -456,16 +456,15 @@ async fn produce_allowed_by_opa_succeeds() {
 
     handle.shutdown().await;
 
-    assert_eq!(resp.responses.len(), 1, "one topic in response");
-    assert_eq!(
-        resp.responses[0].partition_responses.len(),
-        1,
-        "one partition row in response",
+    assert!(resp.responses.len() == 1, "one topic in response");
+    assert!(
+        resp.responses[0].partition_responses.len() == 1,
+        "one partition row in response"
     );
     let p = &resp.responses[0].partition_responses[0];
-    assert_eq!(
-        p.error_code, 0,
+    assert!(
+        p.error_code == 0,
         "OPA allowed alice's Write on permitted-topic, expected \
-         error_code=0, got {p:?}",
+         error_code=0, got {p:?}"
     );
 }

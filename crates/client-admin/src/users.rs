@@ -524,6 +524,7 @@ fn wire_to_operation(b: i8) -> Result<AclOperation, AdminError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn sample_entry() -> AclEntry {
         AclEntry {
@@ -545,24 +546,21 @@ mod tests {
             ResourceType::Cluster,
             ResourceType::TransactionalId,
         ] {
-            assert_eq!(
-                wire_to_resource_type(resource_type_to_wire(rt)).unwrap(),
-                rt
-            );
+            assert!(wire_to_resource_type(resource_type_to_wire(rt)).unwrap() == rt);
         }
     }
 
     #[test]
     fn pattern_type_round_trips() {
         for pt in [PatternType::Literal, PatternType::Prefixed] {
-            assert_eq!(wire_to_pattern_type(pattern_type_to_wire(pt)).unwrap(), pt);
+            assert!(wire_to_pattern_type(pattern_type_to_wire(pt)).unwrap() == pt);
         }
     }
 
     #[test]
     fn permission_round_trips() {
         for p in [PermissionType::Allow, PermissionType::Deny] {
-            assert_eq!(wire_to_permission(permission_to_wire(p)).unwrap(), p);
+            assert!(wire_to_permission(permission_to_wire(p)).unwrap() == p);
         }
     }
 
@@ -581,7 +579,7 @@ mod tests {
             AclOperation::AlterConfigs,
             AclOperation::IdempotentWrite,
         ] {
-            assert_eq!(wire_to_operation(operation_to_wire(op)).unwrap(), op);
+            assert!(wire_to_operation(operation_to_wire(op)).unwrap() == op);
         }
     }
 
@@ -605,23 +603,23 @@ mod tests {
     fn acl_to_creation_matches_discriminants() {
         let e = sample_entry();
         let c = acl_to_creation(&e);
-        assert_eq!(c.resource_type, 2);
-        assert_eq!(c.resource_name, "orders");
-        assert_eq!(c.resource_pattern_type, 3);
-        assert_eq!(c.principal, "User:alice");
-        assert_eq!(c.host, "*");
-        assert_eq!(c.operation, 3);
-        assert_eq!(c.permission_type, 3);
+        assert!(c.resource_type == 2);
+        assert!(c.resource_name == "orders");
+        assert!(c.resource_pattern_type == 3);
+        assert!(c.principal == "User:alice");
+        assert!(c.host == "*");
+        assert!(c.operation == 3);
+        assert!(c.permission_type == 3);
     }
 
     #[test]
     fn acl_filter_to_wire_uses_any_for_none_axes() {
         let f = AclEntryFilter::default();
         let w = acl_filter_to_wire(&f);
-        assert_eq!(w.resource_type_filter, WIRE_ANY);
-        assert_eq!(w.pattern_type_filter, WIRE_ANY);
-        assert_eq!(w.operation, WIRE_ANY);
-        assert_eq!(w.permission_type, WIRE_ANY);
+        assert!(w.resource_type_filter == WIRE_ANY);
+        assert!(w.pattern_type_filter == WIRE_ANY);
+        assert!(w.operation == WIRE_ANY);
+        assert!(w.permission_type == WIRE_ANY);
         assert!(w.resource_name_filter.is_none());
         assert!(w.principal_filter.is_none());
         assert!(w.host_filter.is_none());
@@ -639,13 +637,13 @@ mod tests {
             permission_type: Some(PermissionType::Allow),
         };
         let w = acl_filter_to_wire(&f);
-        assert_eq!(w.resource_type_filter, 2);
-        assert_eq!(w.resource_name_filter.as_deref(), Some("orders"));
-        assert_eq!(w.pattern_type_filter, 3);
-        assert_eq!(w.principal_filter.as_deref(), Some("User:alice"));
-        assert_eq!(w.host_filter.as_deref(), Some("10.0.0.0"));
-        assert_eq!(w.operation, 3);
-        assert_eq!(w.permission_type, 3);
+        assert!(w.resource_type_filter == 2);
+        assert!(w.resource_name_filter.as_deref() == Some("orders"));
+        assert!(w.pattern_type_filter == 3);
+        assert!(w.principal_filter.as_deref() == Some("User:alice"));
+        assert!(w.host_filter.as_deref() == Some("10.0.0.0"));
+        assert!(w.operation == 3);
+        assert!(w.permission_type == 3);
     }
 
     #[test]
@@ -657,16 +655,16 @@ mod tests {
             iterations: 4096,
         }];
         let req = build_alter_scram_request_sha512(&upserts, &[], &rng).unwrap();
-        assert_eq!(req.upsertions.len(), 1);
+        assert!(req.upsertions.len() == 1);
         let u = &req.upsertions[0];
-        assert_eq!(u.name, "alice");
-        assert_eq!(u.mechanism, SCRAM_SHA_512_WIRE);
-        assert_eq!(u.iterations, 4096);
-        assert_eq!(u.salt.len(), 16);
+        assert!(u.name == "alice");
+        assert!(u.mechanism == SCRAM_SHA_512_WIRE);
+        assert!(u.iterations == 4096);
+        assert!(u.salt.len() == 16);
         // SHA-512 output is 64 bytes — KIP-554 mandates the wire field
         // carries the PBKDF2 intermediate, not the raw password.
-        assert_eq!(u.salted_password.len(), 64);
-        assert_ne!(u.salted_password.as_ref(), b"hunter2");
+        assert!(u.salted_password.len() == 64);
+        assert!(u.salted_password.as_ref() != b"hunter2");
     }
 
     #[test]
@@ -676,9 +674,9 @@ mod tests {
             username: "alice".into(),
         }];
         let req = build_alter_scram_request_sha512(&[], &dels, &rng).unwrap();
-        assert_eq!(req.deletions.len(), 1);
-        assert_eq!(req.deletions[0].name, "alice");
-        assert_eq!(req.deletions[0].mechanism, SCRAM_SHA_512_WIRE);
+        assert!(req.deletions.len() == 1);
+        assert!(req.deletions[0].name == "alice");
+        assert!(req.deletions[0].mechanism == SCRAM_SHA_512_WIRE);
     }
 
     #[test]
@@ -697,7 +695,7 @@ mod tests {
             },
         ];
         let req = build_alter_scram_request_sha512(&upserts, &[], &rng).unwrap();
-        assert_ne!(req.upsertions[0].salt, req.upsertions[1].salt);
+        assert!(req.upsertions[0].salt != req.upsertions[1].salt);
     }
 
     #[test]
@@ -707,10 +705,10 @@ mod tests {
             ..Default::default()
         };
         let r = filter_to_describe_request(&f);
-        assert_eq!(r.principal_filter.as_deref(), Some("User:alice"));
-        assert_eq!(r.resource_type_filter, WIRE_ANY);
-        assert_eq!(r.pattern_type_filter, WIRE_ANY);
-        assert_eq!(r.operation, WIRE_ANY);
-        assert_eq!(r.permission_type, WIRE_ANY);
+        assert!(r.principal_filter.as_deref() == Some("User:alice"));
+        assert!(r.resource_type_filter == WIRE_ANY);
+        assert!(r.pattern_type_filter == WIRE_ANY);
+        assert!(r.operation == WIRE_ANY);
+        assert!(r.permission_type == WIRE_ANY);
     }
 }

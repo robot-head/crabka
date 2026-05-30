@@ -16,6 +16,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -114,8 +115,8 @@ async fn create_topic_with_compression(addr: SocketAddr, topic: &str, codec: &st
         .unwrap();
     let mut cur: &[u8] = &resp;
     let r = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert_eq!(
-        r.topics[0].error_code, 0,
+    assert!(
+        r.topics[0].error_code == 0,
         "CreateTopics must succeed for compression.type={codec}: {:?}",
         r.topics[0]
     );
@@ -180,7 +181,7 @@ async fn produce_gzip(addr: SocketAddr, topic: &str, topic_id: Uuid, value: &[u8
     let mut cur: &[u8] = &resp;
     let r = ProduceResponse::decode(&mut cur, VERSION).unwrap();
     let part = &r.responses[0].partition_responses[0];
-    assert_eq!(part.error_code, 0, "Produce must succeed: {part:?}");
+    assert!(part.error_code == 0, "Produce must succeed: {part:?}");
 }
 
 async fn fetch_first_batch(addr: SocketAddr, topic: &str, topic_id: Uuid) -> RecordBatch {
@@ -212,7 +213,7 @@ async fn fetch_first_batch(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Rec
     let mut cur: &[u8] = &resp;
     let r = FetchResponse::decode(&mut cur, VERSION).unwrap();
     let part = &r.responses[0].partitions[0];
-    assert_eq!(part.error_code, 0, "Fetch error: {}", part.error_code);
+    assert!(part.error_code == 0, "Fetch error: {}", part.error_code);
     part.records
         .as_ref()
         .and_then(|p| p.as_v2())
@@ -258,15 +259,13 @@ async fn topic_compression_lz4_recompresses_producer_gzip_batch() {
     produce_gzip(addr, TOPIC, topic_id, payload).await;
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;
-    assert_eq!(
-        served.attributes.compression(),
-        CompressionType::Lz4,
+    assert!(
+        served.attributes.compression() == CompressionType::Lz4,
         "broker must re-encode the gzip batch to lz4 before write"
     );
-    assert_eq!(served.records.len(), 1);
-    assert_eq!(
-        served.records[0].value.as_deref(),
-        Some(payload.as_slice()),
+    assert!(served.records.len() == 1);
+    assert!(
+        served.records[0].value.as_deref() == Some(payload.as_slice()),
         "record payload must survive the recompress round-trip"
     );
 
@@ -290,12 +289,11 @@ async fn topic_compression_producer_preserves_producer_gzip() {
     produce_gzip(addr, TOPIC, topic_id, payload).await;
 
     let served = fetch_first_batch(addr, TOPIC, topic_id).await;
-    assert_eq!(
-        served.attributes.compression(),
-        CompressionType::Gzip,
+    assert!(
+        served.attributes.compression() == CompressionType::Gzip,
         "compression.type=producer must preserve the producer's gzip flag"
     );
-    assert_eq!(served.records[0].value.as_deref(), Some(payload.as_slice()));
+    assert!(served.records[0].value.as_deref() == Some(payload.as_slice()));
 
     handle.shutdown().await;
 }

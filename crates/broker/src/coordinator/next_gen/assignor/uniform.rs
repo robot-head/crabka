@@ -109,6 +109,7 @@ fn eligible_subscribers_for_partition<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_protocol::primitives::uuid::Uuid;
 
     fn tid(b: u8) -> Uuid {
@@ -139,7 +140,7 @@ mod tests {
             ..Default::default()
         };
         let a = UniformAssignor.assign(&[member("m1", &[t])], &topics);
-        assert_eq!(a["m1"][&t], vec![0, 1, 2, 3]);
+        assert!(a["m1"][&t] == vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -150,8 +151,8 @@ mod tests {
             ..Default::default()
         };
         let a = UniformAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
-        assert_eq!(a["m1"][&t], vec![0, 2]);
-        assert_eq!(a["m2"][&t], vec![1, 3]);
+        assert!(a["m1"][&t] == vec![0, 2]);
+        assert!(a["m2"][&t] == vec![1, 3]);
     }
 
     #[test]
@@ -162,7 +163,7 @@ mod tests {
             ..Default::default()
         };
         let a = UniformAssignor.assign(&[member("m1", &[t]), member("m2", &[])], &topics);
-        assert_eq!(a["m1"][&t], vec![0, 1]);
+        assert!(a["m1"][&t] == vec![0, 1]);
         assert!(!a["m2"].contains_key(&t) || a["m2"][&t].is_empty());
     }
 
@@ -192,7 +193,7 @@ mod tests {
             &[member("m3", &[t]), member("m1", &[t]), member("m2", &[t])],
             &topics,
         );
-        assert_eq!(a1, a2);
+        assert!(a1 == a2);
     }
 
     #[test]
@@ -240,8 +241,8 @@ mod tests {
             ],
             &topics,
         );
-        assert_eq!(a["m1"][&t], vec![0], "m1 in us-east-1a takes partition 0");
-        assert_eq!(a["m2"][&t], vec![1], "m2 in us-east-1b takes partition 1");
+        assert!(a["m1"][&t] == vec![0], "m1 in us-east-1a takes partition 0");
+        assert!(a["m2"][&t] == vec![1], "m2 in us-east-1b takes partition 1");
     }
 
     #[test]
@@ -259,8 +260,8 @@ mod tests {
             &topics,
         );
         // 4 partitions / 2 members → 2 each, distributed evenly.
-        assert_eq!(a["m1"][&t].len(), 2);
-        assert_eq!(a["m2"][&t].len(), 2);
+        assert!(a["m1"][&t].len() == 2);
+        assert!(a["m2"][&t].len() == 2);
         // Union covers all 4 partitions exactly once.
         let mut all: Vec<i32> = a["m1"][&t]
             .iter()
@@ -268,7 +269,7 @@ mod tests {
             .copied()
             .collect();
         all.sort_unstable();
-        assert_eq!(all, vec![0, 1, 2, 3]);
+        assert!(all == vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -285,9 +286,8 @@ mod tests {
             ],
             &topics,
         );
-        assert_eq!(
-            a["m1"][&t].len() + a["m2"][&t].len(),
-            3,
+        assert!(
+            a["m1"][&t].len() + a["m2"][&t].len() == 3,
             "all partitions assigned"
         );
         assert!(
@@ -317,10 +317,12 @@ mod tests {
             ],
             &topics,
         );
-        assert_eq!(a["m1"][&t], vec![0], "m1 wins rack-collocated partition 0");
-        assert_eq!(
-            a["m2"][&t],
-            vec![1],
+        assert!(
+            a["m1"][&t] == vec![0],
+            "m1 wins rack-collocated partition 0"
+        );
+        assert!(
+            a["m2"][&t] == vec![1],
             "partition 1 has no rack data → load-balanced to m2 (m1 already has 1)"
         );
     }
@@ -342,8 +344,8 @@ mod tests {
             &topics,
         );
         // Same as `two_members_split_round_robin` above.
-        assert_eq!(a["m1"][&t], vec![0, 2]);
-        assert_eq!(a["m2"][&t], vec![1, 3]);
+        assert!(a["m1"][&t] == vec![0, 2]);
+        assert!(a["m2"][&t] == vec![1, 3]);
     }
 
     #[test]
@@ -353,7 +355,7 @@ mod tests {
         let t = tid(1);
         let topics = topics_with_racks(t, 4, vec![vec!["rack-a"]; 4]);
         let a = UniformAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
-        assert_eq!(a["m1"][&t], vec![0, 2]);
-        assert_eq!(a["m2"][&t], vec![1, 3]);
+        assert!(a["m1"][&t] == vec![0, 2]);
+        assert!(a["m2"][&t] == vec![1, 3]);
     }
 }

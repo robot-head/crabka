@@ -29,3 +29,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "crabka-protocol-codegen"
 path = "src/main.rs"
+
+[dev-dependencies]
+assert2 = { workspace = true }

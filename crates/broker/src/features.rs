@@ -50,20 +50,15 @@ pub(crate) fn metadata_version_blocks(finalized: Option<i16>, required_level: i1
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn metadata_version_is_supported() {
         let f = lookup(METADATA_VERSION).expect("metadata.version supported");
-        assert_eq!(
-            f.min_version,
-            crabka_metadata::metadata_version::METADATA_VERSION_MIN
-        );
-        assert_eq!(
-            f.max_version,
-            crabka_metadata::metadata_version::METADATA_VERSION_MAX
-        );
-        assert_eq!(f.min_version, 7);
-        assert_eq!(f.max_version, 25);
+        assert!(f.min_version == crabka_metadata::metadata_version::METADATA_VERSION_MIN);
+        assert!(f.max_version == crabka_metadata::metadata_version::METADATA_VERSION_MAX);
+        assert!(f.min_version == 7);
+        assert!(f.max_version == 25);
         assert!(lookup("not.a.feature").is_none());
     }
 

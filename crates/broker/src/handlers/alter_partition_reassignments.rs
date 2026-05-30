@@ -322,6 +322,7 @@ fn encode_response<R: Encode>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord, TopicRecord};
     use uuid::Uuid;
 
@@ -378,11 +379,11 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, Some(&[1, 4]), true)
             .expect("ok")
             .expect("Some");
-        assert_eq!(res.replicas, vec![1, 2, 3, 4]);
-        assert_eq!(res.adding_replicas, vec![4]);
-        assert_eq!(res.removing_replicas, vec![2, 3]);
-        assert_eq!(res.leader, 1);
-        assert_eq!(res.leader_epoch, 5); // unchanged on start
+        assert!(res.replicas == vec![1, 2, 3, 4]);
+        assert!(res.adding_replicas == vec![4]);
+        assert!(res.removing_replicas == vec![2, 3]);
+        assert!(res.leader == 1);
+        assert!(res.leader_epoch == 5); // unchanged on start
     }
 
     #[test]
@@ -394,16 +395,16 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, Some(&[5, 6]), true)
             .expect("ok")
             .expect("Some");
-        assert_eq!(res.replicas, vec![1, 4, 5, 6]);
-        assert_eq!(res.adding_replicas, vec![5, 6]);
-        assert_eq!(res.removing_replicas, vec![1, 4]);
+        assert!(res.replicas == vec![1, 4, 5, 6]);
+        assert!(res.adding_replicas == vec![5, 6]);
+        assert!(res.removing_replicas == vec![1, 4]);
     }
 
     #[test]
     fn rf_change_rejected_when_disabled() {
         let img = img_with(&[1, 2, 3], &[1, 2, 3], &[], &[], 1);
         let err = process_one_partition(&img, "foo", 0, Some(&[1, 2]), false).unwrap_err();
-        assert_eq!(err.0, INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.0 == INVALID_REPLICA_ASSIGNMENT);
     }
 
     #[test]
@@ -412,7 +413,7 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, Some(&[1, 2]), true)
             .expect("ok")
             .expect("Some");
-        assert_eq!(res.removing_replicas, vec![3]);
+        assert!(res.removing_replicas == vec![3]);
     }
 
     #[test]
@@ -424,17 +425,17 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, None, true)
             .expect("ok")
             .expect("Some");
-        assert_eq!(res.replicas, vec![1, 2, 3]);
-        assert_eq!(res.adding_replicas, Vec::<NodeId>::new());
-        assert_eq!(res.removing_replicas, Vec::<NodeId>::new());
-        assert_eq!(res.leader, 1); // reverted replicas ∩ isr = [1]
-        assert_eq!(res.leader_epoch, 6); // bumped
+        assert!(res.replicas == vec![1, 2, 3]);
+        assert!(res.adding_replicas == Vec::<NodeId>::new());
+        assert!(res.removing_replicas == Vec::<NodeId>::new());
+        assert!(res.leader == 1); // reverted replicas ∩ isr = [1]
+        assert!(res.leader_epoch == 6); // bumped
     }
 
     #[test]
     fn empty_target_rejected() {
         let img = img_with(&[1, 2, 3], &[1, 2, 3], &[], &[], 1);
         let err = process_one_partition(&img, "foo", 0, Some(&[]), true).unwrap_err();
-        assert_eq!(err.0, INVALID_REPLICA_ASSIGNMENT);
+        assert!(err.0 == INVALID_REPLICA_ASSIGNMENT);
     }
 }

@@ -182,21 +182,19 @@ pub fn permission_to_wire(pt: PermissionType) -> i8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn resource_type_concrete_rejects_any() {
-        assert_eq!(
-            resource_type_concrete(1),
-            Err(WireAclError::AnyRequiresFilter)
-        );
-        assert_eq!(resource_type_concrete(2), Ok(ResourceType::Topic));
+        assert!(resource_type_concrete(1) == Err(WireAclError::AnyRequiresFilter));
+        assert!(resource_type_concrete(2) == Ok(ResourceType::Topic));
     }
 
     #[test]
     fn pattern_type_filter_any_and_match_collapse_to_none() {
-        assert_eq!(pattern_type_filter(1), Ok(None));
-        assert_eq!(pattern_type_filter(2), Ok(None));
-        assert_eq!(pattern_type_filter(3), Ok(Some(PatternType::Literal)));
+        assert!(pattern_type_filter(1) == Ok(None));
+        assert!(pattern_type_filter(2) == Ok(None));
+        assert!(pattern_type_filter(3) == Ok(Some(PatternType::Literal)));
     }
 
     #[test]
@@ -208,7 +206,7 @@ mod tests {
             AclOperation::IdempotentWrite,
         ] {
             let b = operation_to_wire(op);
-            assert_eq!(operation_concrete(b).unwrap(), op);
+            assert!(operation_concrete(b).unwrap() == op);
         }
     }
 
@@ -221,14 +219,11 @@ mod tests {
         use crabka_metadata::AclEntry;
 
         // Concrete (CreateAcls).
-        assert_eq!(resource_type_concrete(6), Ok(ResourceType::DelegationToken));
+        assert!(resource_type_concrete(6) == Ok(ResourceType::DelegationToken));
         // Filter (Delete/DescribeAcls).
-        assert_eq!(
-            resource_type_filter(6),
-            Ok(Some(ResourceType::DelegationToken))
-        );
+        assert!(resource_type_filter(6) == Ok(Some(ResourceType::DelegationToken)));
         // Encoder.
-        assert_eq!(resource_type_to_wire(ResourceType::DelegationToken), 6);
+        assert!(resource_type_to_wire(ResourceType::DelegationToken) == 6);
 
         // Build a concrete AclEntry at the canonical (Describe, Allow)
         // shape KIP-48 token ACLs use; verify the wire bytes line up.
@@ -241,8 +236,8 @@ mod tests {
             operation: operation_concrete(8).unwrap(),
             permission_type: permission_concrete(3).unwrap(),
         };
-        assert_eq!(resource_type_to_wire(entry.resource_type), 6);
-        assert_eq!(entry.operation, AclOperation::Describe);
-        assert_eq!(entry.permission_type, PermissionType::Allow);
+        assert!(resource_type_to_wire(entry.resource_type) == 6);
+        assert!(entry.operation == AclOperation::Describe);
+        assert!(entry.permission_type == PermissionType::Allow);
     }
 }

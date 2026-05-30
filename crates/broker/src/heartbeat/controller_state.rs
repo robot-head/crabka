@@ -176,14 +176,15 @@ impl ControllerLivenessState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::time::Duration;
 
     #[tokio::test]
     async fn new_broker_starts_alive_after_first_heartbeat() {
         let liveness = ControllerLivenessState::new(Duration::from_secs(10));
         let transition = liveness.record_heartbeat(1).await;
-        assert_eq!(transition, None); // first heartbeat: not a revival
-        assert_eq!(liveness.state(1).await, Some(BrokerLivenessState::Alive));
+        assert!(transition == None); // first heartbeat: not a revival
+        assert!(liveness.state(1).await == Some(BrokerLivenessState::Alive));
     }
 
     #[tokio::test]
@@ -194,8 +195,8 @@ mod tests {
         // Spin until at least 1ns has elapsed (nearly instant on any OS).
         std::thread::sleep(Duration::from_millis(1));
         let transitions = liveness.tick().await;
-        assert_eq!(transitions, vec![LivenessTransition::AliveToDead(2)]);
-        assert_eq!(liveness.state(2).await, Some(BrokerLivenessState::Dead));
+        assert!(transitions == vec![LivenessTransition::AliveToDead(2)]);
+        assert!(liveness.state(2).await == Some(BrokerLivenessState::Dead));
     }
 
     #[tokio::test]
@@ -205,8 +206,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(1));
         let _ = liveness.tick().await; // broker 3 → Dead
         let transition = liveness.record_heartbeat(3).await;
-        assert_eq!(transition, Some(LivenessTransition::DeadToAlive(3)));
-        assert_eq!(liveness.state(3).await, Some(BrokerLivenessState::Alive));
+        assert!(transition == Some(LivenessTransition::DeadToAlive(3)));
+        assert!(liveness.state(3).await == Some(BrokerLivenessState::Alive));
     }
 
     #[tokio::test]
@@ -241,6 +242,6 @@ mod tests {
             transitions.is_empty(),
             "broker 4 should not expire with 60s timeout"
         );
-        assert_eq!(liveness.state(4).await, Some(BrokerLivenessState::Alive));
+        assert!(liveness.state(4).await == Some(BrokerLivenessState::Alive));
     }
 }

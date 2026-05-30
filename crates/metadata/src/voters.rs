@@ -99,6 +99,7 @@ impl VoterSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn sample(id: NodeId) -> Voter {
         Voter {
@@ -126,6 +127,6 @@ mod tests {
     #[test]
     fn ids_are_sorted() {
         let set = VoterSet::from_voters([sample(3), sample(1), sample(2)]);
-        assert_eq!(set.ids().into_iter().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert!(set.ids().into_iter().collect::<Vec<_>>() == vec![1, 2, 3]);
     }
 }

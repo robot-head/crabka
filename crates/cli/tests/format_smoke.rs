@@ -3,6 +3,7 @@
 //! surface + the bootstrap-write path survive end-to-end without booting
 //! a broker.
 
+use assert2::assert;
 use std::process::Command;
 
 #[test]
@@ -71,11 +72,10 @@ fn format_low_iterations_fails() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    assert_eq!(
-        out.status.code(),
-        Some(2),
+    assert!(
+        out.status.code() == Some(2),
         "expected exit code 2 (low iterations), got {:?}; stderr={}",
         out.status.code(),
-        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stderr)
     );
 }

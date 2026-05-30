@@ -113,6 +113,7 @@ fn path_of(data_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn round_trip_write_load() {
@@ -120,20 +121,17 @@ mod tests {
         let mut f = InFlightFile::new("p".into(), Phase::Submit, 42, 50_000_000);
         f.write(dir.path()).unwrap();
         let loaded = InFlightFile::load(dir.path()).unwrap().unwrap();
-        assert_eq!(loaded.proposal_id, "p");
-        assert_eq!(loaded.phase, Phase::Submit);
-        assert_eq!(loaded.started_at_ms, 42);
-        assert_eq!(loaded.target_terminal_status, None);
+        assert!(loaded.proposal_id == "p");
+        assert!(loaded.phase == Phase::Submit);
+        assert!(loaded.started_at_ms == 42);
+        assert!(loaded.target_terminal_status == None);
 
         f.phase = Phase::ClearThrottle;
         f.target_terminal_status = Some(ProposalStatus::Completed);
         f.write(dir.path()).unwrap();
         let loaded2 = InFlightFile::load(dir.path()).unwrap().unwrap();
-        assert_eq!(loaded2.phase, Phase::ClearThrottle);
-        assert_eq!(
-            loaded2.target_terminal_status,
-            Some(ProposalStatus::Completed)
-        );
+        assert!(loaded2.phase == Phase::ClearThrottle);
+        assert!(loaded2.target_terminal_status == Some(ProposalStatus::Completed));
     }
 
     #[test]

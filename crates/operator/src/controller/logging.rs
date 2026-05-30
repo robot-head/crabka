@@ -215,6 +215,7 @@ pub fn condition_for(outcome: &LoggingOutcome) -> KafkaCondition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn loggers(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -226,13 +227,13 @@ mod tests {
     #[test]
     fn compose_root_is_bare_level() {
         let f = compose_inline_filter(&loggers(&[("root", "info")])).unwrap();
-        assert_eq!(f, "info");
+        assert!(f == "info");
     }
 
     #[test]
     fn compose_target_is_target_equals_level() {
         let f = compose_inline_filter(&loggers(&[("crabka_broker", "debug")])).unwrap();
-        assert_eq!(f, "crabka_broker=debug");
+        assert!(f == "crabka_broker=debug");
     }
 
     #[test]
@@ -244,7 +245,7 @@ mod tests {
             ("crabka_broker", "debug"),
         ]))
         .unwrap();
-        assert_eq!(f, "crabka_broker=debug,crabka_raft=warn,info");
+        assert!(f == "crabka_broker=debug,crabka_raft=warn,info");
     }
 
     #[test]
@@ -257,71 +258,58 @@ mod tests {
             ("crabka_raft", "OFF"),
         ]))
         .unwrap();
-        assert_eq!(
-            f,
-            "crabka_broker=warn,crabka_log=error,crabka_raft=off,info"
-        );
+        assert!(f == "crabka_broker=warn,crabka_log=error,crabka_raft=off,info");
     }
 
     #[test]
     fn compose_root_is_case_insensitive() {
         let f = compose_inline_filter(&loggers(&[("ROOT", "debug")])).unwrap();
-        assert_eq!(f, "debug");
+        assert!(f == "debug");
     }
 
     #[test]
     fn compose_rejects_empty_map() {
-        assert_eq!(
-            compose_inline_filter(&BTreeMap::new()).unwrap_err(),
-            LoggingError::EmptyLoggers
-        );
+        assert!(compose_inline_filter(&BTreeMap::new()).unwrap_err() == LoggingError::EmptyLoggers);
     }
 
     #[test]
     fn compose_rejects_blank_logger_name() {
         let err = compose_inline_filter(&loggers(&[("  ", "info")])).unwrap_err();
-        assert_eq!(err, LoggingError::EmptyLoggerName);
+        assert!(err == LoggingError::EmptyLoggerName);
     }
 
     #[test]
     fn compose_rejects_invalid_level() {
         let err = compose_inline_filter(&loggers(&[("root", "verbose")])).unwrap_err();
-        assert_eq!(
-            err,
-            LoggingError::InvalidLevel {
+        assert!(
+            err == LoggingError::InvalidLevel {
                 logger: "root".into(),
                 level: "verbose".into()
             }
         );
-        assert_eq!(err.reason(), "InvalidLogLevel");
+        assert!(err.reason() == "InvalidLogLevel");
     }
 
     #[test]
     fn outcome_filter_accessor() {
-        assert_eq!(
-            LoggingOutcome::Resolved("info".into()).filter(),
-            Some("info")
-        );
-        assert_eq!(LoggingOutcome::Disabled.filter(), None);
-        assert_eq!(
-            LoggingOutcome::Invalid(LoggingError::EmptyLoggers).filter(),
-            None
-        );
+        assert!(LoggingOutcome::Resolved("info".into()).filter() == Some("info"));
+        assert!(LoggingOutcome::Disabled.filter() == None);
+        assert!(LoggingOutcome::Invalid(LoggingError::EmptyLoggers).filter() == None);
     }
 
     #[test]
     fn condition_disabled_is_false() {
         let c = condition_for(&LoggingOutcome::Disabled);
-        assert_eq!(c.type_, "LoggingReady");
-        assert_eq!(c.status, "False");
-        assert_eq!(c.reason, "Disabled");
+        assert!(c.type_ == "LoggingReady");
+        assert!(c.status == "False");
+        assert!(c.reason == "Disabled");
     }
 
     #[test]
     fn condition_resolved_is_true_and_echoes_filter() {
         let c = condition_for(&LoggingOutcome::Resolved("crabka_broker=debug,info".into()));
-        assert_eq!(c.status, "True");
-        assert_eq!(c.reason, "Available");
+        assert!(c.status == "True");
+        assert!(c.reason == "Available");
         assert!(c.message.contains("crabka_broker=debug,info"));
     }
 
@@ -332,8 +320,8 @@ mod tests {
                 name: "missing-cm".into(),
             },
         ));
-        assert_eq!(c.status, "False");
-        assert_eq!(c.reason, "LoggingConfigMapNotFound");
+        assert!(c.status == "False");
+        assert!(c.reason == "LoggingConfigMapNotFound");
         assert!(c.message.contains("missing-cm"));
     }
 }

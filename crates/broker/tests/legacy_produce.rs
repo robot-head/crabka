@@ -4,6 +4,7 @@
 
 #![allow(clippy::too_many_lines)]
 
+use assert2::assert;
 mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -129,8 +130,8 @@ async fn produce_v0_upconverts_and_is_readable_via_fetch() {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        cr.topics[0].error_code, 0,
+    assert!(
+        cr.topics[0].error_code == 0,
         "CreateTopics error: {}",
         cr.topics[0].error_code
     );
@@ -179,14 +180,13 @@ async fn produce_v0_upconverts_and_is_readable_via_fetch() {
     let mut cur: &[u8] = &resp_body;
     let produce_resp =
         LegacyProduceResponse::decode(&mut cur, 0).expect("decode ProduceResponse v0");
-    assert_eq!(
-        produce_resp.responses.len(),
-        1,
+    assert!(
+        produce_resp.responses.len() == 1,
         "expected 1 topic in response"
     );
     let part_resp = &produce_resp.responses[0].partition_responses[0];
-    assert_eq!(
-        part_resp.error_code, 0,
+    assert!(
+        part_resp.error_code == 0,
         "produce v0 error_code: {}",
         part_resp.error_code
     );
@@ -217,7 +217,11 @@ async fn produce_v0_upconverts_and_is_readable_via_fetch() {
         .expect("Fetch");
 
     let part = &fetch_resp.responses[0].partitions[0];
-    assert_eq!(part.error_code, 0, "fetch error_code: {}", part.error_code);
+    assert!(
+        part.error_code == 0,
+        "fetch error_code: {}",
+        part.error_code
+    );
 
     let batch = part
         .records
@@ -226,17 +230,18 @@ async fn produce_v0_upconverts_and_is_readable_via_fetch() {
         .and_then(<[_]>::first)
         .expect("v2 RecordBatch present after up-converted produce");
 
-    assert_eq!(batch.records.len(), 1, "expected 1 record in fetched batch");
+    assert!(
+        batch.records.len() == 1,
+        "expected 1 record in fetched batch"
+    );
     let rec = &batch.records[0];
-    assert_eq!(
-        rec.key.as_deref(),
-        Some(b"k".as_ref()),
+    assert!(
+        rec.key.as_deref() == Some(b"k".as_ref()),
         "key mismatch: {:?}",
         rec.key
     );
-    assert_eq!(
-        rec.value.as_deref(),
-        Some(b"v".as_ref()),
+    assert!(
+        rec.value.as_deref() == Some(b"v".as_ref()),
         "value mismatch: {:?}",
         rec.value
     );

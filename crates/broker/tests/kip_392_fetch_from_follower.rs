@@ -24,6 +24,7 @@
 #![allow(clippy::pedantic)]
 #![allow(clippy::manual_assert, clippy::cast_possible_truncation)]
 
+use assert2::assert;
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::OnceLock;
@@ -252,7 +253,7 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics t");
+    assert!(resp.topics[0].error_code == 0, "CreateTopics t");
     let topic_id = resp.topics[0].topic_id;
 
     wait_for_partition_on_all(&cluster, "t", 0).await;
@@ -264,13 +265,13 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
     wait_leader_and_isr(leader_handle, "t", 0, 1, &[1, 2]).await;
     let leader_id = leader_handle.partition_leader_for_test("t", 0).unwrap();
     let isr = leader_handle.partition_isr_for_test("t", 0).unwrap();
-    assert_eq!(leader_id, 1, "leader must be broker 1");
+    assert!(leader_id == 1, "leader must be broker 1");
     // Follower = the in-sync replica that isn't the leader.
     let follower_id = *isr
         .iter()
         .find(|&&r| r != leader_id)
         .expect("a non-leader ISR member");
-    assert_eq!(follower_id, 2, "follower (rack-b) must be broker 2");
+    assert!(follower_id == 2, "follower (rack-b) must be broker 2");
     let follower_node = i32::try_from(follower_id).unwrap();
 
     // Step 3: produce N records to the leader with acks=all so they commit.
@@ -297,8 +298,8 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         })
         .await
         .expect("Produce");
-    assert_eq!(
-        prod.responses[0].partition_responses[0].error_code, 0,
+    assert!(
+        prod.responses[0].partition_responses[0].error_code == 0,
         "Produce acks=all"
     );
 
@@ -332,9 +333,9 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         .await
         .expect("Fetch to leader (rack-b)");
     let part = &r_leader.responses[0].partitions[0];
-    assert_eq!(part.partition_index, 0);
-    assert_eq!(
-        part.preferred_read_replica, follower_node,
+    assert!(part.partition_index == 0);
+    assert!(
+        part.preferred_read_replica == follower_node,
         "leader should redirect a rack-b consumer to the rack-b follower (node {follower_node})"
     );
 
@@ -353,7 +354,7 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
             .await
             .expect("Fetch to follower (rack-b)");
         let p = &r.responses[0].partitions[0];
-        assert_eq!(p.error_code, 0, "follower fetch error_code");
+        assert!(p.error_code == 0, "follower fetch error_code");
         let count = p
             .records
             .as_ref()
@@ -367,7 +368,7 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
-    assert_eq!(got, N_RECORDS as usize, "follower returned all N records");
+    assert!(got == N_RECORDS as usize, "follower returned all N records");
 
     // Step 7: sanity — consumer Fetch to the LEADER with rack_id=rack-a
     // (same rack as the leader) yields no redirect.
@@ -376,8 +377,8 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         .await
         .expect("Fetch to leader (rack-a)");
     let part_same = &r_same.responses[0].partitions[0];
-    assert_eq!(
-        part_same.preferred_read_replica, -1,
+    assert!(
+        part_same.preferred_read_replica == -1,
         "same-rack consumer must read from the leader (no redirect)"
     );
 

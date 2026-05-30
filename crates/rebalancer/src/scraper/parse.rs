@@ -80,6 +80,7 @@ fn parse_line(line: &str) -> Option<ParsedSample> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn empty_input_returns_empty() {
@@ -91,10 +92,10 @@ mod tests {
         let txt = r#"crabka_broker_partition_bytes_in_total{topic="t",partition="0"} 1024
 "#;
         let out = parse(txt);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].metric, MetricKind::BytesIn);
-        assert_eq!(out[0].topic, "t");
-        assert_eq!(out[0].partition, 0);
+        assert!(out.len() == 1);
+        assert!(out[0].metric == MetricKind::BytesIn);
+        assert!(out[0].topic == "t");
+        assert!(out[0].partition == 0);
         assert!((out[0].value - 1024.0).abs() < 1e-9);
     }
 
@@ -103,9 +104,9 @@ mod tests {
         let txt = r#"crabka_broker_partition_disk_bytes{topic="t",partition="5"} 1234567
 "#;
         let out = parse(txt);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].metric, MetricKind::DiskBytes);
-        assert_eq!(out[0].partition, 5);
+        assert!(out.len() == 1);
+        assert!(out[0].metric == MetricKind::DiskBytes);
+        assert!(out[0].partition == 5);
         assert!((out[0].value - 1_234_567.0).abs() < 1e-3);
     }
 
@@ -120,10 +121,10 @@ crabka_broker_partition_bytes_out_total{topic="t",partition="0"} 2
 crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 42
 "#;
         let out = parse(txt);
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0].metric, MetricKind::BytesIn);
-        assert_eq!(out[1].metric, MetricKind::BytesOut);
-        assert_eq!(out[2].metric, MetricKind::CpuMicros);
+        assert!(out.len() == 3);
+        assert!(out[0].metric == MetricKind::BytesIn);
+        assert!(out[1].metric == MetricKind::BytesOut);
+        assert!(out[2].metric == MetricKind::CpuMicros);
     }
 
     #[test]
@@ -131,10 +132,10 @@ crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 42
         let txt = r#"crabka_broker_partition_cpu_micros_total{topic="t",partition="0"} 1024
 "#;
         let out = parse(txt);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].metric, MetricKind::CpuMicros);
-        assert_eq!(out[0].topic, "t");
-        assert_eq!(out[0].partition, 0);
+        assert!(out.len() == 1);
+        assert!(out[0].metric == MetricKind::CpuMicros);
+        assert!(out[0].topic == "t");
+        assert!(out[0].partition == 0);
         assert!((out[0].value - 1024.0).abs() < 1e-9);
     }
 

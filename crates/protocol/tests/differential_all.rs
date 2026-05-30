@@ -5,6 +5,7 @@
 //! All failures are collected and reported at the end so a single run reveals
 //! every divergence (not just the first).
 
+use assert2::assert;
 mod support;
 use serde_json::json;
 use support::oracle;

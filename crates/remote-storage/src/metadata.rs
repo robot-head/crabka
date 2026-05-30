@@ -364,6 +364,7 @@ pub struct RemotePartitionDeleteMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::collections::HashSet;
 
     fn tp() -> TopicIdPartition {
@@ -382,16 +383,16 @@ mod tests {
     fn topic_id_partition_identity_ignores_name() {
         let a = TopicIdPartition::new(Uuid::from_u128(7), "alpha", 3);
         let b = TopicIdPartition::new(Uuid::from_u128(7), "renamed", 3);
-        assert_eq!(a, b);
+        assert!(a == b);
         let set: HashSet<_> = [a, b].into_iter().collect();
-        assert_eq!(set.len(), 1, "same id+partition must collapse in a set");
+        assert!(set.len() == 1, "same id+partition must collapse in a set");
     }
 
     #[test]
     fn topic_id_partition_distinct_partitions_differ() {
         let a = TopicIdPartition::new(Uuid::from_u128(7), "alpha", 0);
         let b = TopicIdPartition::new(Uuid::from_u128(7), "alpha", 1);
-        assert_ne!(a, b);
+        assert!(a != b);
     }
 
     #[test]
@@ -475,16 +476,13 @@ mod tests {
             broker_id: 2,
         };
         let finished = started.with_update(&update).unwrap();
-        assert_eq!(finished.state(), RemoteLogSegmentState::CopySegmentFinished);
-        assert_eq!(finished.event_timestamp_ms(), 789);
-        assert_eq!(finished.broker_id(), 2);
-        assert_eq!(
-            finished.custom_metadata(),
-            Some(&CustomMetadata(vec![1, 2, 3]))
-        );
+        assert!(finished.state() == RemoteLogSegmentState::CopySegmentFinished);
+        assert!(finished.event_timestamp_ms() == 789);
+        assert!(finished.broker_id() == 2);
+        assert!(finished.custom_metadata() == Some(&CustomMetadata(vec![1, 2, 3])));
         // Untouched fields survive.
-        assert_eq!(finished.start_offset(), 0);
-        assert_eq!(finished.end_offset(), 10);
+        assert!(finished.start_offset() == 0);
+        assert!(finished.end_offset() == 10);
     }
 
     #[test]
@@ -510,7 +508,7 @@ mod tests {
             broker_id: 2,
         };
         let finished = started.with_update(&update).unwrap();
-        assert_eq!(finished.custom_metadata(), Some(&CustomMetadata(vec![9])));
+        assert!(finished.custom_metadata() == Some(&CustomMetadata(vec![9])));
     }
 
     #[test]

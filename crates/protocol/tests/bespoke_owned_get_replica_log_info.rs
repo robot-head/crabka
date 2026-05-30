@@ -4,6 +4,7 @@
 // generated min/max wrapper tests only exercise default (empty) messages, which
 // skip the nested-element encode/decode loops and the nullable-string path.
 
+use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::owned::get_replica_log_info_request::{
     GetReplicaLogInfoRequest, MAX_VERSION, MIN_VERSION, TopicPartitions,
@@ -70,9 +71,9 @@ fn owned_request_populated_roundtrip() {
         let req = populated_request();
         let mut buf = BytesMut::new();
         req.encode(&mut buf, v).unwrap();
-        assert_eq!(req.encoded_len(v), buf.len());
+        assert!(req.encoded_len(v) == buf.len());
         let mut cur = &buf[..];
-        assert_eq!(GetReplicaLogInfoRequest::decode(&mut cur, v).unwrap(), req);
+        assert!(GetReplicaLogInfoRequest::decode(&mut cur, v).unwrap() == req);
         assert!(cur.is_empty(), "decoder left trailing bytes");
     }
 }
@@ -83,19 +84,19 @@ fn owned_response_populated_roundtrip() {
     let v = 0;
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, v).unwrap();
-    assert_eq!(resp.encoded_len(v), buf.len());
+    assert!(resp.encoded_len(v) == buf.len());
     let mut cur = &buf[..];
     let decoded = GetReplicaLogInfoResponse::decode(&mut cur, v).unwrap();
-    assert_eq!(decoded, resp);
-    assert_eq!(
+    assert!(decoded == resp);
+    assert!(
         decoded.topic_partition_log_info_list[0]
             .partition_log_info
-            .len(),
-        2
+            .len()
+            == 2
     );
-    assert_eq!(
-        decoded.topic_partition_log_info_list[0].partition_log_info[1].error_message,
-        Some("not leader".to_string())
+    assert!(
+        decoded.topic_partition_log_info_list[0].partition_log_info[1].error_message
+            == Some("not leader".to_string())
     );
     assert!(cur.is_empty(), "decoder left trailing bytes");
 }

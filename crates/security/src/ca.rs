@@ -271,6 +271,7 @@ pub fn issue_user_cert(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::PemObject;
     use x509_parser::prelude::FromDer;
@@ -321,7 +322,7 @@ mod tests {
 
         let leaf_der = pem_to_der(&user.cert_pem);
         let (_, leaf) = X509Certificate::from_der(leaf_der.as_ref()).expect("parse leaf DER");
-        assert_eq!(leaf.subject().to_string(), "CN=alice");
+        assert!(leaf.subject().to_string() == "CN=alice");
 
         let ca_der = pem_to_der(&ca.cert_pem);
         let (_, ca_x509) = X509Certificate::from_der(ca_der.as_ref()).expect("parse CA DER");
@@ -337,7 +338,7 @@ mod tests {
 
         let der = pem_to_der(&user.cert_pem);
         let dn = crate::extract_principal_from_cert(der.as_ref()).expect("extract principal");
-        assert_eq!(dn, "CN=alice");
+        assert!(dn == "CN=alice");
     }
 
     #[test]
@@ -358,11 +359,11 @@ mod tests {
     fn each_generate_is_unique() {
         let a = generate_clients_ca("x", 365).expect("generate CA a");
         let b = generate_clients_ca("x", 365).expect("generate CA b");
-        assert_ne!(
-            a.cert_pem, b.cert_pem,
+        assert!(
+            a.cert_pem != b.cert_pem,
             "each CA must have unique serial/key"
         );
-        assert_ne!(a.key_pem, b.key_pem, "each CA must have a unique key");
+        assert!(a.key_pem != b.key_pem, "each CA must have a unique key");
     }
 
     #[test]
@@ -443,9 +444,8 @@ mod tests {
         let renewed_pem = renew_cluster_ca(&orig.key_pem, "c1-cluster-ca", 365).expect("renew");
 
         // Same public key (same SPKI) — the renewal reuses the key.
-        assert_eq!(
-            spki_der(&orig.cert_pem),
-            spki_der(&renewed_pem),
+        assert!(
+            spki_der(&orig.cert_pem) == spki_der(&renewed_pem),
             "renewed cert must carry the same public key"
         );
 
@@ -508,7 +508,7 @@ mod tests {
     fn renew_clients_ca_has_no_ou_cluster() {
         let orig = generate_clients_ca("c1-clients-ca", 30).expect("CA");
         let renewed_pem = renew_clients_ca(&orig.key_pem, "c1-clients-ca", 365).expect("renew");
-        assert_eq!(spki_der(&orig.cert_pem), spki_der(&renewed_pem));
+        assert!(spki_der(&orig.cert_pem) == spki_der(&renewed_pem));
         let der = pem_to_der(&renewed_pem);
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse");
         assert!(

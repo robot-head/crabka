@@ -232,6 +232,7 @@ pub fn encode_compressed_message_set<B: BufMut>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn sample_records_v1() -> Vec<ParsedRecord> {
         vec![
@@ -273,7 +274,7 @@ mod tests {
         encode_flat_message_set(recs.clone(), Magic::V0, &mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert_eq!(decoded, recs);
+        assert!(decoded == recs);
     }
 
     #[test]
@@ -283,7 +284,7 @@ mod tests {
         encode_flat_message_set(recs.clone(), Magic::V1, &mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert_eq!(decoded, recs);
+        assert!(decoded == recs);
     }
 
     #[test]
@@ -293,7 +294,7 @@ mod tests {
         encode_compressed_message_set(&recs, Magic::V1, CompressionType::Gzip, &mut buf).unwrap();
         let mut cur: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert_eq!(decoded, recs);
+        assert!(decoded == recs);
     }
 
     #[test]
@@ -303,7 +304,7 @@ mod tests {
         encode_compressed_message_set(&recs, Magic::V1, CompressionType::Snappy, &mut buf).unwrap();
         let mut cur: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert_eq!(decoded, recs);
+        assert!(decoded == recs);
     }
 
     #[test]
@@ -313,7 +314,7 @@ mod tests {
         encode_compressed_message_set(&recs, Magic::V0, CompressionType::Gzip, &mut buf).unwrap();
         let mut cur: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert_eq!(decoded, recs);
+        assert!(decoded == recs);
     }
 
     #[test]

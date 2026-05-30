@@ -122,6 +122,7 @@ fn encode_response<R: Encode>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn comp(entity_type: &str, match_type: i8, m: Option<&str>) -> ComponentData {
         ComponentData {

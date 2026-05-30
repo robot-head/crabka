@@ -14,6 +14,7 @@
 //! `reconcile_listener_auth.rs`) and that the rendered TOML actually
 //! lands in the broker-config ConfigMap.
 
+use assert2::assert;
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
@@ -159,8 +160,8 @@ fn assert_listeners_invalid_with_reason(
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert_eq!(valid["status"], "False", "body = {body}");
-    assert_eq!(valid["reason"], expected_reason, "body = {body}");
+    assert!(valid["status"] == "False", "body = {body}");
+    assert!(valid["reason"] == expected_reason, "body = {body}");
 
     // The ConfigMap PATCH must be absent on the validation-fail path.
     assert!(
@@ -385,8 +386,8 @@ async fn oauth_listener_with_http_jwks_uri_reconciles_but_emits_weak_auth_event(
         });
     let body: serde_json::Value =
         serde_json::from_slice(event_post.body()).expect("event body is JSON");
-    assert_eq!(body["reason"], "WeakAuth", "event body = {body}");
-    assert_eq!(body["type"], "Warning", "event body = {body}");
+    assert!(body["reason"] == "WeakAuth", "event body = {body}");
+    assert!(body["type"] == "Warning", "event body = {body}");
     let msg = body["message"]
         .as_str()
         .unwrap_or_else(|| panic!("event message missing; body = {body}"));
@@ -496,16 +497,15 @@ async fn two_oauth_listeners_with_identical_config_reconcile_clean() {
     let toml = extract_broker0_toml(&observed, "c10");
 
     // Exactly one [oauthbearer] block.
-    assert_eq!(
-        toml.matches("[oauthbearer]").count(),
-        1,
+    assert!(
+        toml.matches("[oauthbearer]").count() == 1,
         "expected exactly one [oauthbearer] block; TOML: {toml}"
     );
     // Both listeners advertise OAUTHBEARER.
-    assert_eq!(
+    assert!(
         toml.matches("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }")
-            .count(),
-        2,
+            .count()
+            == 2,
         "both listeners must advertise OAUTHBEARER; TOML: {toml}"
     );
 
@@ -522,7 +522,7 @@ async fn two_oauth_listeners_with_identical_config_reconcile_clean() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert_eq!(valid["status"], "True", "body = {body}");
+    assert!(valid["status"] == "True", "body = {body}");
 }
 
 // ── test 11: two oauth listeners differing only in enable_oauth_bearer ──────
@@ -554,16 +554,15 @@ async fn two_oauth_listeners_differing_only_in_enable_oauth_bearer_reconcile_cle
     let toml = extract_broker0_toml(&observed, "c11");
 
     // Single broker-global [oauthbearer] block.
-    assert_eq!(
-        toml.matches("[oauthbearer]").count(),
-        1,
+    assert!(
+        toml.matches("[oauthbearer]").count() == 1,
         "expected exactly one [oauthbearer] block; TOML: {toml}"
     );
     // Only the enable=true listener advertises the mechanism.
-    assert_eq!(
+    assert!(
         toml.matches("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }")
-            .count(),
-        1,
+            .count()
+            == 1,
         "only the enable=true listener must advertise OAUTHBEARER; TOML: {toml}"
     );
 
@@ -580,7 +579,7 @@ async fn two_oauth_listeners_differing_only_in_enable_oauth_bearer_reconcile_cle
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert_eq!(valid["status"], "True", "body = {body}");
+    assert!(valid["status"] == "True", "body = {body}");
 }
 
 // ── test 12: divergent oauth configs rejected with ConflictingOAuthConfig ───
@@ -755,9 +754,8 @@ async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_idp_tls
     let mgd_bytes = base64::engine::general_purpose::STANDARD
         .decode(mgd_b64)
         .expect("managed Secret ca.crt is base64");
-    assert_eq!(
-        mgd_bytes,
-        pem.to_vec(),
+    assert!(
+        mgd_bytes == pem.to_vec(),
         "managed Secret bundle must match source PEM bytes"
     );
 
@@ -781,7 +779,7 @@ async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_idp_tls
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert_eq!(valid["status"], "True", "body = {body}");
+    assert!(valid["status"] == "True", "body = {body}");
 }
 
 // ── test 15: divergent access_token_is_jwt rejected with ConflictingOAuthConfig

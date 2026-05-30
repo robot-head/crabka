@@ -20,6 +20,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -124,9 +125,9 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -351,7 +352,7 @@ async fn alter_then_complete_via_isr_catchup() {
     // Find which brokers are in `replicas` initially — choose target accordingly.
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
     let initial_replicas = pr.replicas.clone();
-    assert_eq!(initial_replicas.len(), 2);
+    assert!(initial_replicas.len() == 2);
     // Pick the third broker (not in initial_replicas) as the new replica.
     let new_replica: i32 = (1..=3)
         .find(|n| !initial_replicas.contains(&(*n as u64)))
@@ -363,9 +364,8 @@ async fn alter_then_complete_via_isr_catchup() {
     // Send alter to controller leader (whichever broker leads raft).
     let raft_addr = controller_leader_addr(&[&h1, &h2, &h3]).await;
     let resp = drive_alter_reassignments(raft_addr, vec![("foo", 0, Some(target.clone()))]).await;
-    assert_eq!(
-        resp[0].1,
-        vec![(0, 0)],
+    assert!(
+        resp[0].1 == vec![(0, 0)],
         "expected error_code=0; got {:?}",
         resp
     );
@@ -413,8 +413,8 @@ async fn alter_then_complete_via_isr_catchup() {
             let actual: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
             let expected: std::collections::HashSet<u64> =
                 target.iter().map(|n| *n as u64).collect();
-            assert_eq!(
-                actual, expected,
+            assert!(
+                actual == expected,
                 "replicas after completion should match target; pr={pr:?}"
             );
             // Clean up.
@@ -471,16 +471,14 @@ async fn list_in_flight_returns_pending_rows() {
         .iter()
         .find(|(n, _)| n == "foo")
         .expect("foo should appear in list");
-    assert_eq!(
-        foo.1.len(),
-        1,
+    assert!(
+        foo.1.len() == 1,
         "expected 1 partition in-flight; got {:?}",
         foo.1
     );
-    assert_eq!(foo.1[0].0, 0, "expected partition_index=0");
-    assert_eq!(
-        foo.1[0].2,
-        vec![new_replica],
+    assert!(foo.1[0].0 == 0, "expected partition_index=0");
+    assert!(
+        foo.1[0].2 == vec![new_replica],
         "expected adding_replicas=[new_replica]; got {:?}",
         foo.1[0].2
     );
@@ -627,9 +625,9 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -769,9 +767,8 @@ async fn non_super_user_denied() {
 
     handle.shutdown().await;
 
-    assert_eq!(
-        resp[0].1,
-        vec![(0, 31)],
+    assert!(
+        resp[0].1 == vec![(0, 31)],
         "expected CLUSTER_AUTHORIZATION_FAILED (31) for alice; got {resp:?}"
     );
 }
@@ -816,9 +813,8 @@ async fn cancel_via_null_replicas_reverts() {
 
     // Cancel: replicas = None.
     let resp = drive_alter_reassignments(raft_addr, vec![("foo", 0, None)]).await;
-    assert_eq!(
-        resp[0].1,
-        vec![(0, 0)],
+    assert!(
+        resp[0].1 == vec![(0, 0)],
         "cancel should succeed; got {:?}",
         resp
     );
@@ -830,8 +826,8 @@ async fn cancel_via_null_replicas_reverts() {
         if pr_after_cancel.adding_replicas.is_empty()
             && pr_after_cancel.removing_replicas.is_empty()
         {
-            assert_eq!(
-                pr_after_cancel.replicas, original_replicas,
+            assert!(
+                pr_after_cancel.replicas == original_replicas,
                 "replicas should revert to original after cancel; pr={pr_after_cancel:?}"
             );
             // Clean up.

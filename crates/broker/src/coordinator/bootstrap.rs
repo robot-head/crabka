@@ -301,6 +301,7 @@ fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_m
 mod tests {
     use super::*;
     use crate::config::BrokerConfig;
+    use assert2::assert;
     use crabka_raft::ControllerHandle;
     use std::sync::Arc;
     use std::time::{Duration, Instant};

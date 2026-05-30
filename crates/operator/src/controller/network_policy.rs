@@ -221,6 +221,7 @@ mod tests {
     use super::*;
     use crate::controller::common::BROKER_PORT;
     use crate::crd::{KafkaSpec, ListenerType, NetworkPolicySpec};
+    use assert2::assert;
 
     fn test_kafka() -> Kafka {
         let mut k = Kafka::new(
@@ -285,17 +286,11 @@ mod tests {
         let spec = np.spec.as_ref().unwrap();
         let inter = spec.ingress.as_ref().unwrap().first().unwrap();
         let from = inter.from.as_ref().unwrap();
-        assert_eq!(from.len(), 1);
+        assert!(from.len() == 1);
         let pod = from[0].pod_selector.as_ref().unwrap();
         let labels = pod.match_labels.as_ref().unwrap();
-        assert_eq!(
-            labels.get("app.kubernetes.io/name").map(String::as_str),
-            Some(APP_LABEL)
-        );
-        assert_eq!(
-            labels.get("app.kubernetes.io/instance").map(String::as_str),
-            Some("demo")
-        );
+        assert!(labels.get("app.kubernetes.io/name").map(String::as_str) == Some(APP_LABEL));
+        assert!(labels.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo"));
     }
 
     #[test]
@@ -325,7 +320,7 @@ mod tests {
                 })
             })
             .collect();
-        assert_eq!(operator_rules.len(), 2);
+        assert!(operator_rules.len() == 2);
         let ports: Vec<i32> = operator_rules
             .iter()
             .map(|r| match &r.ports.as_ref().unwrap()[0].port {
@@ -374,7 +369,7 @@ mod tests {
             "deny-all listener must not emit an allow-all (empty `from`) rule"
         );
         // Exactly two rules on 9092: inter-broker + operator-allow.
-        assert_eq!(rules_on_9092.len(), 2);
+        assert!(rules_on_9092.len() == 2);
     }
 
     #[test]
@@ -417,7 +412,7 @@ mod tests {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, true).unwrap();
         let rules_on_9404 = rules_targeting_port(&np, METRICS_PORT);
-        assert_eq!(rules_on_9404.len(), 1);
+        assert!(rules_on_9404.len() == 1);
         // Allow-all on metrics (empty `from`).
         assert!(
             rules_on_9404[0]
@@ -452,14 +447,8 @@ mod tests {
             .match_labels
             .as_ref()
             .unwrap();
-        assert_eq!(
-            sel.get("app.kubernetes.io/name").map(String::as_str),
-            Some(APP_LABEL)
-        );
-        assert_eq!(
-            sel.get("app.kubernetes.io/instance").map(String::as_str),
-            Some("demo")
-        );
+        assert!(sel.get("app.kubernetes.io/name").map(String::as_str) == Some(APP_LABEL));
+        assert!(sel.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo"));
     }
 
     #[test]
@@ -467,10 +456,7 @@ mod tests {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
         let spec = np.spec.as_ref().unwrap();
-        assert_eq!(
-            spec.policy_types.as_ref().unwrap(),
-            &vec!["Ingress".to_string()]
-        );
+        assert!(spec.policy_types.as_ref().unwrap() == &vec!["Ingress".to_string()]);
         assert!(spec.egress.is_none());
     }
 
@@ -478,8 +464,8 @@ mod tests {
     fn render_name_and_namespace() {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
-        assert_eq!(np.metadata.name.as_deref(), Some("demo-broker-policy"));
-        assert_eq!(np.metadata.namespace.as_deref(), Some("default"));
+        assert!(np.metadata.name.as_deref() == Some("demo-broker-policy"));
+        assert!(np.metadata.namespace.as_deref() == Some("default"));
     }
 
     #[test]
@@ -487,8 +473,8 @@ mod tests {
         let listeners = vec![internal_listener("PLAIN", 9092, None)];
         let np = render_network_policy(&test_kafka(), &listeners, 9092, false).unwrap();
         let refs = np.metadata.owner_references.as_ref().unwrap();
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].kind, "Kafka");
-        assert_eq!(refs[0].controller, Some(true));
+        assert!(refs.len() == 1);
+        assert!(refs[0].kind == "Kafka");
+        assert!(refs[0].controller == Some(true));
     }
 }

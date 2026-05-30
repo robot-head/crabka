@@ -70,6 +70,7 @@ pub fn new_registry() -> Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt;
@@ -94,7 +95,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -109,7 +110,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(resp.status() == StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -133,7 +134,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -148,7 +149,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.status() == StatusCode::OK);
         let ct = resp
             .headers()
             .get("content-type")

@@ -75,6 +75,7 @@ impl Rule for DiskPressure {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -191,8 +192,8 @@ mod tests {
             cfg: &cfg,
         };
         let hits = DiskPressure.evaluate(&ctx);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].key, AnomalyKey::Broker(1));
+        assert!(hits.len() == 1);
+        assert!(hits[0].key == AnomalyKey::Broker(1));
         assert!(matches!(hits[0].severity, AnomalySeverity::Warning));
     }
 
@@ -214,7 +215,7 @@ mod tests {
             cfg: &cfg,
         };
         let hits = DiskPressure.evaluate(&ctx);
-        assert_eq!(hits.len(), 1);
+        assert!(hits.len() == 1);
         assert!(matches!(hits[0].severity, AnomalySeverity::Critical));
     }
 

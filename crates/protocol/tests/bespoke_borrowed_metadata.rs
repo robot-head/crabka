@@ -1,6 +1,7 @@
 // Bespoke tests for borrowed Metadata wrappers. Relocated from hand-written
 // wrappers.
 
+use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::borrowed::metadata_request::{MAX_VERSION, MIN_VERSION, MetadataRequest};
 use crabka_protocol::borrowed::metadata_response::{
@@ -13,13 +14,13 @@ fn borrowed_metadata_request_min_version_none_topics_encodes_as_empty() {
     let req = MetadataRequest::default();
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MIN_VERSION).unwrap();
-    assert_eq!(req.encoded_len(MIN_VERSION), buf.len());
+    assert!(req.encoded_len(MIN_VERSION) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = MetadataRequest::decode_borrow(&mut cur, MIN_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
     // v0: None topics encodes as empty array; decoded will have Some([])
-    assert_eq!(decoded.topics.as_ref().map(Vec::len), Some(0));
+    assert!(decoded.topics.as_ref().map(Vec::len) == Some(0));
 }
 
 #[test]
@@ -33,12 +34,12 @@ fn borrowed_metadata_request_max_version_null_topics() {
     };
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MAX_VERSION).unwrap();
-    assert_eq!(req.encoded_len(MAX_VERSION), buf.len());
+    assert!(req.encoded_len(MAX_VERSION) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = MetadataRequest::decode_borrow(&mut cur, MAX_VERSION).unwrap();
     assert!(cur.is_empty());
-    assert_eq!(decoded.topics, req.topics);
+    assert!(decoded.topics == req.topics);
 }
 
 #[test]
@@ -46,12 +47,12 @@ fn borrowed_metadata_response_min_version_empty_brokers() {
     let resp = MetadataResponse::default();
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MIN).unwrap();
-    assert_eq!(resp.encoded_len(RESP_MIN), buf.len());
+    assert!(resp.encoded_len(RESP_MIN) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = MetadataResponse::decode_borrow(&mut cur, RESP_MIN).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert_eq!(decoded.brokers.len(), resp.brokers.len());
+    assert!(decoded.brokers.len() == resp.brokers.len());
 }
 
 #[test]
@@ -68,11 +69,11 @@ fn borrowed_metadata_response_max_version_empty_collections() {
     };
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MAX).unwrap();
-    assert_eq!(resp.encoded_len(RESP_MAX), buf.len());
+    assert!(resp.encoded_len(RESP_MAX) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = MetadataResponse::decode_borrow(&mut cur, RESP_MAX).unwrap();
     assert!(cur.is_empty());
-    assert_eq!(decoded.brokers.len(), resp.brokers.len());
-    assert_eq!(decoded.topics.len(), resp.topics.len());
+    assert!(decoded.brokers.len() == resp.brokers.len());
+    assert!(decoded.topics.len() == resp.topics.len());
 }

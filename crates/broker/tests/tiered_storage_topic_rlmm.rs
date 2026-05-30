@@ -25,6 +25,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic, clippy::manual_assert)]
 
+use assert2::assert;
 mod support;
 
 use std::time::{Duration, Instant};
@@ -206,8 +207,8 @@ async fn copy_then_fetch_round_trip(
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics failed: {:?}",
         resp.topics[0].error_message
     );
@@ -299,9 +300,8 @@ async fn copy_then_fetch_round_trip(
         tokio::time::sleep(Duration::from_millis(200)).await;
     };
 
-    assert_eq!(
-        value.as_deref(),
-        Some(b"test-record-0".as_slice()),
+    assert!(
+        value.as_deref() == Some(b"test-record-0".as_slice()),
         "offset 0 should read back the first produced record"
     );
 }

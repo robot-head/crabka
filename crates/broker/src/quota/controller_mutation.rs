@@ -51,6 +51,7 @@ pub fn consume_controller_mutation_quota(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
 
     fn img_with_quota(entity: Vec<(&str, Option<&str>)>, rate: f64) -> MetadataImage {
@@ -74,7 +75,7 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 0);
-        assert_eq!(delay, Duration::ZERO);
+        assert!(delay == Duration::ZERO);
     }
 
     #[test]
@@ -84,7 +85,7 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 10.0);
         let buckets = QuotaBuckets::new();
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 5);
-        assert_eq!(delay, Duration::ZERO);
+        assert!(delay == Duration::ZERO);
     }
 
     #[test]
@@ -94,6 +95,6 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 100);
-        assert_eq!(delay, Duration::from_secs(1));
+        assert!(delay == Duration::from_secs(1));
     }
 }

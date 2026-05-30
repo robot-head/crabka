@@ -105,6 +105,7 @@ fn err_response(code: i16) -> RenewDelegationTokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
     use std::collections::HashSet;
@@ -196,10 +197,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let controller = test_controller(dir.path().into()).await;
         let resp = handle(&req, &auth, None, 1_000, &*controller, &empty_super_users()).await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
         controller.cancel().await;
     }
 
@@ -236,7 +234,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         // expiry should be roughly now + 1h (within a small slop window).
         let slop = 60_000;
         let target = now_ms() + 3_600_000;
@@ -248,7 +246,7 @@ mod tests {
         // Persisted in image.
         let img = controller.current_image();
         let stored = img.delegation_token_by_id("tok-1").expect("present");
-        assert_eq!(stored.expiry_timestamp_ms, resp.expiry_timestamp_ms);
+        assert!(stored.expiry_timestamp_ms == resp.expiry_timestamp_ms);
         controller.cancel().await;
     }
 
@@ -285,7 +283,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         assert!(resp.expiry_timestamp_ms > now + 30_000);
         controller.cancel().await;
     }
@@ -309,7 +307,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, crate::codes::DELEGATION_TOKEN_NOT_FOUND);
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_NOT_FOUND);
         controller.cancel().await;
     }
 
@@ -346,10 +344,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH);
         controller.cancel().await;
     }
 
@@ -394,14 +389,14 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert_eq!(
-            resp.error_code, 0,
+        assert!(
+            resp.error_code == 0,
             "super-user must be able to renew any token regardless of owner/renewers"
         );
         // Persisted in image with the new expiry.
         let img = controller.current_image();
         let stored = img.delegation_token_by_id("tok-super").expect("present");
-        assert_eq!(stored.expiry_timestamp_ms, resp.expiry_timestamp_ms);
+        assert!(stored.expiry_timestamp_ms == resp.expiry_timestamp_ms);
         controller.cancel().await;
     }
 
@@ -444,10 +439,7 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH);
         controller.cancel().await;
     }
 }

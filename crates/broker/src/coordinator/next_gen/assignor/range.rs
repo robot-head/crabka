@@ -56,6 +56,7 @@ impl Assignor for RangeAssignor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_protocol::primitives::uuid::Uuid;
 
     fn tid(b: u8) -> Uuid {
@@ -77,8 +78,8 @@ mod tests {
             ..Default::default()
         };
         let a = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
-        assert_eq!(a["m1"][&t], vec![0, 1, 2]);
-        assert_eq!(a["m2"][&t], vec![3, 4, 5]);
+        assert!(a["m1"][&t] == vec![0, 1, 2]);
+        assert!(a["m2"][&t] == vec![3, 4, 5]);
     }
 
     #[test]
@@ -92,9 +93,9 @@ mod tests {
             &[member("m1", &[t]), member("m2", &[t]), member("m3", &[t])],
             &topics,
         );
-        assert_eq!(a["m1"][&t], vec![0, 1, 2]);
-        assert_eq!(a["m2"][&t], vec![3, 4]);
-        assert_eq!(a["m3"][&t], vec![5, 6]);
+        assert!(a["m1"][&t] == vec![0, 1, 2]);
+        assert!(a["m2"][&t] == vec![3, 4]);
+        assert!(a["m3"][&t] == vec![5, 6]);
     }
 
     #[test]
@@ -106,10 +107,10 @@ mod tests {
             ..Default::default()
         };
         let a = RangeAssignor.assign(&[member("m1", &[t1, t2]), member("m2", &[t1, t2])], &topics);
-        assert_eq!(a["m1"][&t1], vec![0, 1]);
-        assert_eq!(a["m1"][&t2], vec![0, 1]);
-        assert_eq!(a["m2"][&t1], vec![2, 3]);
-        assert_eq!(a["m2"][&t2], vec![2, 3]);
+        assert!(a["m1"][&t1] == vec![0, 1]);
+        assert!(a["m1"][&t2] == vec![0, 1]);
+        assert!(a["m2"][&t1] == vec![2, 3]);
+        assert!(a["m2"][&t2] == vec![2, 3]);
     }
 
     #[test]
@@ -123,8 +124,8 @@ mod tests {
             &[member("m1", &[t]), member("m2", &[t]), member("m3", &[t])],
             &topics,
         );
-        assert_eq!(a["m1"][&t], vec![0]);
-        assert_eq!(a["m2"][&t], vec![1]);
+        assert!(a["m1"][&t] == vec![0]);
+        assert!(a["m2"][&t] == vec![1]);
         assert!(!a["m3"].contains_key(&t) || a["m3"][&t].is_empty());
     }
 
@@ -136,7 +137,7 @@ mod tests {
             ..Default::default()
         };
         let a = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[])], &topics);
-        assert_eq!(a["m1"][&t], vec![0, 1, 2, 3]);
+        assert!(a["m1"][&t] == vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -148,6 +149,6 @@ mod tests {
         };
         let a1 = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
         let a2 = RangeAssignor.assign(&[member("m2", &[t]), member("m1", &[t])], &topics);
-        assert_eq!(a1, a2);
+        assert!(a1 == a2);
     }
 }

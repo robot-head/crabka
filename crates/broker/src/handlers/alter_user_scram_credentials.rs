@@ -263,11 +263,12 @@ fn err_result(name: String, code: i16, msg: &str) -> AlterUserScramCredentialsRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn wire_to_mech_maps_both_scram_variants() {
-        assert_eq!(wire_to_mech(1), Some(SaslMechanism::ScramSha256));
-        assert_eq!(wire_to_mech(2), Some(SaslMechanism::ScramSha512));
+        assert!(wire_to_mech(1) == Some(SaslMechanism::ScramSha256));
+        assert!(wire_to_mech(2) == Some(SaslMechanism::ScramSha512));
         assert!(wire_to_mech(0).is_none());
         assert!(wire_to_mech(99).is_none());
     }
@@ -275,15 +276,15 @@ mod tests {
     #[test]
     fn err_result_carries_code_and_message() {
         let r = err_result("alice".into(), codes::UNACCEPTABLE_CREDENTIAL, "bad");
-        assert_eq!(r.user, "alice");
-        assert_eq!(r.error_code, codes::UNACCEPTABLE_CREDENTIAL);
-        assert_eq!(r.error_message.as_deref(), Some("bad"));
+        assert!(r.user == "alice");
+        assert!(r.error_code == codes::UNACCEPTABLE_CREDENTIAL);
+        assert!(r.error_message.as_deref() == Some("bad"));
     }
 
     #[test]
     fn ok_result_has_zero_error_code() {
         let r = ok_result("alice".into());
-        assert_eq!(r.error_code, 0);
+        assert!(r.error_code == 0);
         assert!(r.error_message.is_none());
     }
 

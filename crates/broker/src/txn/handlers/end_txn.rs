@@ -509,6 +509,7 @@ fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
 
     // ── Phase-3 re-validation: validate_complete_reacquire ──────────────────
@@ -525,15 +526,14 @@ mod tests {
     fn proceeds_when_unchanged() {
         // Entry is exactly as Phase 1 left it: same pid/epoch, still in Prepare.
         let e = entry(7, 3, TxnState::PrepareCommit);
-        assert_eq!(
+        assert!(
             validate_complete_reacquire(
                 &e,
                 7,
                 3,
                 TxnState::PrepareCommit,
                 TxnState::CompleteCommit
-            ),
-            ReacquireDecision::Proceed
+            ) == ReacquireDecision::Proceed
         );
     }
 
@@ -542,30 +542,28 @@ mod tests {
         // A concurrent InitProducerId bumped the epoch during the marker
         // fan-out. We must NOT overwrite with the stale epoch / Complete state.
         let e = entry(7, 4, TxnState::PrepareCommit);
-        assert_eq!(
+        assert!(
             validate_complete_reacquire(
                 &e,
                 7,
                 3,
                 TxnState::PrepareCommit,
                 TxnState::CompleteCommit
-            ),
-            ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
+            ) == ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
         );
     }
 
     #[test]
     fn fenced_when_pid_changed() {
         let e = entry(8, 3, TxnState::PrepareCommit);
-        assert_eq!(
+        assert!(
             validate_complete_reacquire(
                 &e,
                 7,
                 3,
                 TxnState::PrepareCommit,
                 TxnState::CompleteCommit
-            ),
-            ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
+            ) == ReacquireDecision::Reject(codes::INVALID_PRODUCER_EPOCH)
         );
     }
 
@@ -574,15 +572,14 @@ mod tests {
         // Another caller (or an EndTxn retry that lost the race) already drove
         // this exact transition. Report success, do not re-write.
         let e = entry(7, 3, TxnState::CompleteCommit);
-        assert_eq!(
+        assert!(
             validate_complete_reacquire(
                 &e,
                 7,
                 3,
                 TxnState::PrepareCommit,
                 TxnState::CompleteCommit
-            ),
-            ReacquireDecision::AlreadyComplete
+            ) == ReacquireDecision::AlreadyComplete
         );
     }
 
@@ -592,15 +589,14 @@ mod tests {
         // reuse, or some other interleave). Our marker fan-out no longer
         // reflects the live transaction; refuse to finalise.
         let e = entry(7, 3, TxnState::Ongoing);
-        assert_eq!(
+        assert!(
             validate_complete_reacquire(
                 &e,
                 7,
                 3,
                 TxnState::PrepareCommit,
                 TxnState::CompleteCommit
-            ),
-            ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
+            ) == ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
         );
     }
 
@@ -609,15 +605,14 @@ mod tests {
         // We prepared a Commit, but the entry is now in PrepareAbort — a
         // different finalisation kind raced us. Refuse to write CompleteCommit.
         let e = entry(7, 3, TxnState::PrepareAbort);
-        assert_eq!(
+        assert!(
             validate_complete_reacquire(
                 &e,
                 7,
                 3,
                 TxnState::PrepareCommit,
                 TxnState::CompleteCommit
-            ),
-            ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
+            ) == ReacquireDecision::Reject(codes::INVALID_TXN_STATE)
         );
     }
 
@@ -625,26 +620,24 @@ mod tests {
     fn abort_path_proceeds_and_is_idempotent() {
         // Mirror the abort branch: prepare=PrepareAbort, complete=CompleteAbort.
         let prep = entry(7, 3, TxnState::PrepareAbort);
-        assert_eq!(
+        assert!(
             validate_complete_reacquire(
                 &prep,
                 7,
                 3,
                 TxnState::PrepareAbort,
                 TxnState::CompleteAbort
-            ),
-            ReacquireDecision::Proceed
+            ) == ReacquireDecision::Proceed
         );
         let done = entry(7, 3, TxnState::CompleteAbort);
-        assert_eq!(
+        assert!(
             validate_complete_reacquire(
                 &done,
                 7,
                 3,
                 TxnState::PrepareAbort,
                 TxnState::CompleteAbort
-            ),
-            ReacquireDecision::AlreadyComplete
+            ) == ReacquireDecision::AlreadyComplete
         );
     }
 

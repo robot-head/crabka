@@ -8,6 +8,7 @@
 //! reconciler wiring.
 #![allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 
+use assert2::assert;
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -257,13 +258,12 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         .expect("cluster-ca-cert PATCH");
     let body: Value = serde_json::from_slice(cert_patch.body()).expect("cert PATCH JSON");
     let bundle_b64 = body["data"]["ca.crt"].as_str().expect("ca.crt data");
-    assert_eq!(
-        count_cert_blocks(bundle_b64),
-        2,
+    assert!(
+        count_cert_blocks(bundle_b64) == 2,
         "renewal must leave the old cert in the bundle until it expires; body = {body}"
     );
-    assert_eq!(
-        body["metadata"]["annotations"]["crabka.io/ca-cert-generation"], "1",
+    assert!(
+        body["metadata"]["annotations"]["crabka.io/ca-cert-generation"] == "1",
         "cert generation must bump on renewal; body = {body}"
     );
 
@@ -287,10 +287,10 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    assert_eq!(rot["status"], "True", "body = {sbody}");
-    assert_eq!(rot["reason"], "RenewingCert", "body = {sbody}");
+    assert!(rot["status"] == "True", "body = {sbody}");
+    assert!(rot["reason"] == "RenewingCert", "body = {sbody}");
 
-    assert_eq!(state.remaining_rules(), 0, "all rules consumed");
+    assert!(state.remaining_rules() == 0, "all rules consumed");
 }
 
 // ---------------------------------------------------------------------------
@@ -400,13 +400,12 @@ async fn force_replace_key_starts_staged_rotation() {
         })
         .expect("cluster-ca-cert PATCH");
     let cbody: Value = serde_json::from_slice(cert_patch.body()).expect("cert PATCH JSON");
-    assert_eq!(
-        count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")),
-        2,
+    assert!(
+        count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")) == 2,
         "trust bundle must grow to old+new; body = {cbody}"
     );
-    assert_eq!(
-        cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"], "key-replace-trust",
+    assert!(
+        cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"] == "key-replace-trust",
         "phase must be key-replace-trust; body = {cbody}"
     );
 
@@ -436,8 +435,8 @@ async fn force_replace_key_starts_staged_rotation() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    assert_eq!(rot["status"], "True", "body = {sbody}");
-    assert_eq!(rot["reason"], "DistributingTrust", "body = {sbody}");
+    assert!(rot["status"] == "True", "body = {sbody}");
+    assert!(rot["reason"] == "DistributingTrust", "body = {sbody}");
 
-    assert_eq!(state.remaining_rules(), 0, "all rules consumed");
+    assert!(state.remaining_rules() == 0, "all rules consumed");
 }

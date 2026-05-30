@@ -7,6 +7,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::metadata_request::MetadataRequest;
@@ -24,8 +25,8 @@ async fn unregister_known_broker_drops_it_from_metadata() {
         .send(MetadataRequest::default())
         .await
         .expect("Metadata (before unregister)");
-    assert_eq!(resp.brokers.len(), 1);
-    assert_eq!(resp.brokers[0].node_id, 1);
+    assert!(resp.brokers.len() == 1);
+    assert!(resp.brokers[0].node_id == 1);
 
     let r = p
         .client
@@ -35,7 +36,7 @@ async fn unregister_known_broker_drops_it_from_metadata() {
         })
         .await
         .expect("UnregisterBroker");
-    assert_eq!(r.error_code, 0, "{r:?}");
+    assert!(r.error_code == 0, "{r:?}");
     assert!(r.error_message.is_none() || r.error_message.as_deref() == Some(""));
 
     // The Raft commit may race the Metadata response; poll briefly.
@@ -70,7 +71,7 @@ async fn unregister_unknown_broker_returns_invalid_request() {
         })
         .await
         .expect("UnregisterBroker");
-    assert_eq!(r.error_code, 42, "expected INVALID_REQUEST (42): {r:?}");
+    assert!(r.error_code == 42, "expected INVALID_REQUEST (42): {r:?}");
     assert!(
         r.error_message
             .as_deref()
@@ -93,7 +94,7 @@ async fn unregister_negative_broker_id_rejected() {
         })
         .await
         .expect("UnregisterBroker");
-    assert_eq!(r.error_code, 42, "expected INVALID_REQUEST (42): {r:?}");
+    assert!(r.error_code == 42, "expected INVALID_REQUEST (42): {r:?}");
     assert!(
         r.error_message
             .as_deref()
@@ -117,7 +118,7 @@ async fn unregister_is_idempotent_on_repeat_call() {
         })
         .await
         .expect("UnregisterBroker 1");
-    assert_eq!(r1.error_code, 0, "{r1:?}");
+    assert!(r1.error_code == 0, "{r1:?}");
 
     // Wait for the unregister to commit.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -149,7 +150,7 @@ async fn unregister_is_idempotent_on_repeat_call() {
         })
         .await
         .expect("UnregisterBroker 2");
-    assert_eq!(r2.error_code, 42, "{r2:?}");
+    assert!(r2.error_code == 42, "{r2:?}");
 
     p.broker.shutdown().await;
 }

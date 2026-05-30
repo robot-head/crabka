@@ -1,6 +1,7 @@
 // Bespoke tests for the owned OffsetCommit wrappers. Relocated from
 // hand-written wrappers.
 
+use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::owned::offset_commit_request::{
     MAX_VERSION, MIN_VERSION, OffsetCommitRequest,
@@ -15,12 +16,12 @@ fn owned_offset_commit_request_min_version_group_id_preserved() {
     let req = OffsetCommitRequest::default();
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MIN_VERSION).unwrap();
-    assert_eq!(req.encoded_len(MIN_VERSION), buf.len());
+    assert!(req.encoded_len(MIN_VERSION) == buf.len());
     let mut cur = &buf[..];
     let decoded = OffsetCommitRequest::decode(&mut cur, MIN_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert_eq!(decoded.group_id, req.group_id);
-    assert_eq!(decoded.topics.len(), 0);
+    assert!(decoded.group_id == req.group_id);
+    assert!(decoded.topics.len() == 0);
 }
 
 #[test]
@@ -36,12 +37,9 @@ fn owned_offset_commit_request_max_version_roundtrips() {
     };
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MAX_VERSION).unwrap();
-    assert_eq!(req.encoded_len(MAX_VERSION), buf.len());
+    assert!(req.encoded_len(MAX_VERSION) == buf.len());
     let mut cur = &buf[..];
-    assert_eq!(
-        OffsetCommitRequest::decode(&mut cur, MAX_VERSION).unwrap(),
-        req
-    );
+    assert!(OffsetCommitRequest::decode(&mut cur, MAX_VERSION).unwrap() == req);
     assert!(cur.is_empty());
 }
 
@@ -50,11 +48,11 @@ fn owned_offset_commit_response_min_version_empty_topics() {
     let resp = OffsetCommitResponse::default();
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MIN).unwrap();
-    assert_eq!(resp.encoded_len(RESP_MIN), buf.len());
+    assert!(resp.encoded_len(RESP_MIN) == buf.len());
     let mut cur = &buf[..];
     let decoded = OffsetCommitResponse::decode(&mut cur, RESP_MIN).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert_eq!(decoded.topics.len(), 0);
+    assert!(decoded.topics.len() == 0);
 }
 
 #[test]
@@ -66,11 +64,8 @@ fn owned_offset_commit_response_max_version_roundtrips() {
     };
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MAX).unwrap();
-    assert_eq!(resp.encoded_len(RESP_MAX), buf.len());
+    assert!(resp.encoded_len(RESP_MAX) == buf.len());
     let mut cur = &buf[..];
-    assert_eq!(
-        OffsetCommitResponse::decode(&mut cur, RESP_MAX).unwrap(),
-        resp
-    );
+    assert!(OffsetCommitResponse::decode(&mut cur, RESP_MAX).unwrap() == resp);
     assert!(cur.is_empty());
 }

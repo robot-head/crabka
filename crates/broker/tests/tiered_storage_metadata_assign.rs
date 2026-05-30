@@ -14,6 +14,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic, clippy::manual_assert)]
 
+use assert2::assert;
 mod support;
 
 use std::time::{Duration, Instant};
@@ -91,7 +92,7 @@ async fn subscribe_subset_from_nonzero_offset_yields_exact_records() {
         let next = tokio::time::timeout(Duration::from_millis(500), stream.next()).await;
         match next {
             Ok(Some(r)) => {
-                assert_ne!(r.partition, 2, "partition 2 was not assigned");
+                assert!(r.partition != 2, "partition 2 was not assigned");
                 got.push((r.partition, r.offset, r.payload.to_vec()));
             }
             Ok(None) => break,
@@ -103,9 +104,8 @@ async fn subscribe_subset_from_nonzero_offset_yields_exact_records() {
         );
     }
     got.sort();
-    assert_eq!(
-        got,
-        vec![
+    assert!(
+        got == vec![
             (0, 1, b"b".to_vec()),
             (0, 2, b"c".to_vec()),
             (1, 0, b"x".to_vec()),
@@ -115,7 +115,7 @@ async fn subscribe_subset_from_nonzero_offset_yields_exact_records() {
 
     // Brief grace: ensure no stray partition-2 record sneaks in.
     if let Ok(Some(extra)) = tokio::time::timeout(Duration::from_millis(500), stream.next()).await {
-        assert_ne!(extra.partition, 2, "partition 2 leaked: {extra:?}");
+        assert!(extra.partition != 2, "partition 2 leaked: {extra:?}");
     }
 
     log.shutdown().await;

@@ -18,6 +18,7 @@
 
 #![allow(dead_code)]
 
+use assert2::assert;
 use std::net::SocketAddr;
 use std::time::Duration;
 

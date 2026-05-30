@@ -343,6 +343,7 @@ fn encode(version: i16, resp: &OffsetDeleteResponse) -> Result<Bytes, BrokerErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::BufMut;
     use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
     use crabka_protocol::owned::offset_delete_request::{
@@ -367,7 +368,7 @@ mod tests {
     fn decode_subscription_extracts_topic_names() {
         let bytes = encode_subscription(&["foo", "bar"]);
         let got = decode_subscribed_topics(&bytes);
-        assert_eq!(got, vec!["foo".to_string(), "bar".to_string()]);
+        assert!(got == vec!["foo".to_string(), "bar".to_string()]);
     }
 
     #[test]
@@ -421,12 +422,12 @@ mod tests {
     fn whole_error_stamps_top_level_and_each_partition() {
         let req = req_with_topics(&[("t1", &[0, 1]), ("t2", &[5])]);
         let resp = whole_error(&req, codes::GROUP_AUTHORIZATION_FAILED);
-        assert_eq!(resp.error_code, codes::GROUP_AUTHORIZATION_FAILED);
-        assert_eq!(resp.topics.len(), 2);
-        assert_eq!(resp.topics[0].partitions.len(), 2);
+        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(resp.topics.len() == 2);
+        assert!(resp.topics[0].partitions.len() == 2);
         for t in &resp.topics {
             for p in &t.partitions {
-                assert_eq!(p.error_code, codes::GROUP_AUTHORIZATION_FAILED);
+                assert!(p.error_code == codes::GROUP_AUTHORIZATION_FAILED);
             }
         }
     }
@@ -435,7 +436,7 @@ mod tests {
     fn whole_error_with_empty_request_returns_empty_topics_list() {
         let req = req_with_topics(&[]);
         let resp = whole_error(&req, codes::GROUP_ID_NOT_FOUND);
-        assert_eq!(resp.error_code, codes::GROUP_ID_NOT_FOUND);
+        assert!(resp.error_code == codes::GROUP_ID_NOT_FOUND);
         assert!(resp.topics.is_empty());
     }
 
@@ -469,30 +470,20 @@ mod tests {
             ],
         )]);
         let resp = rewrite_success_as(rows, codes::UNKNOWN_SERVER_ERROR);
-        assert_eq!(resp.error_code, codes::NONE);
-        assert_eq!(
-            resp.topics[0].partitions[0].error_code,
-            codes::UNKNOWN_SERVER_ERROR
-        );
-        assert_eq!(
-            resp.topics[0].partitions[1].error_code,
-            codes::TOPIC_AUTHORIZATION_FAILED,
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.topics[0].partitions[0].error_code == codes::UNKNOWN_SERVER_ERROR);
+        assert!(
+            resp.topics[0].partitions[1].error_code == codes::TOPIC_AUTHORIZATION_FAILED,
             "denied row stays denied"
         );
-        assert_eq!(
-            resp.topics[0].partitions[2].error_code,
-            codes::UNKNOWN_SERVER_ERROR
-        );
+        assert!(resp.topics[0].partitions[2].error_code == codes::UNKNOWN_SERVER_ERROR);
     }
 
     #[test]
     fn rewrite_success_as_noop_when_no_none_rows() {
         let rows = resp_topics(&[("t", &[(0, codes::GROUP_SUBSCRIBED_TO_TOPIC)])]);
         let resp = rewrite_success_as(rows, codes::UNKNOWN_SERVER_ERROR);
-        assert_eq!(
-            resp.topics[0].partitions[0].error_code,
-            codes::GROUP_SUBSCRIBED_TO_TOPIC
-        );
+        assert!(resp.topics[0].partitions[0].error_code == codes::GROUP_SUBSCRIBED_TO_TOPIC);
     }
 
     // ── build_response_rows ──────────────────────────────────────────
@@ -511,7 +502,7 @@ mod tests {
         assert!(tombs.is_empty(), "no tombstones when denied");
         assert!(to_remove.is_empty());
         for p in &out[0].partitions {
-            assert_eq!(p.error_code, codes::TOPIC_AUTHORIZATION_FAILED);
+            assert!(p.error_code == codes::TOPIC_AUTHORIZATION_FAILED);
         }
     }
 
@@ -528,10 +519,7 @@ mod tests {
         let (out, tombs, _) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
         assert!(tombs.is_empty(), "subscribed topic → no tombstone");
-        assert_eq!(
-            out[0].partitions[0].error_code,
-            codes::GROUP_SUBSCRIBED_TO_TOPIC
-        );
+        assert!(out[0].partitions[0].error_code == codes::GROUP_SUBSCRIBED_TO_TOPIC);
     }
 
     #[test]
@@ -546,10 +534,7 @@ mod tests {
         let (out, tombs, _) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
         assert!(tombs.is_empty());
-        assert_eq!(
-            out[0].partitions[0].error_code,
-            codes::UNKNOWN_TOPIC_OR_PARTITION
-        );
+        assert!(out[0].partitions[0].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
     }
 
     #[test]
@@ -564,17 +549,11 @@ mod tests {
         let (out, tombs, to_remove) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
         // p=0 succeeds; p=99 and p=-1 each fail with UNKNOWN_TOPIC_OR_PARTITION.
-        assert_eq!(out[0].partitions[0].error_code, codes::NONE);
-        assert_eq!(
-            out[0].partitions[1].error_code,
-            codes::UNKNOWN_TOPIC_OR_PARTITION
-        );
-        assert_eq!(
-            out[0].partitions[2].error_code,
-            codes::UNKNOWN_TOPIC_OR_PARTITION
-        );
-        assert_eq!(tombs.len(), 1, "only p=0 queued");
-        assert_eq!(to_remove, vec![("t1".to_string(), 0)]);
+        assert!(out[0].partitions[0].error_code == codes::NONE);
+        assert!(out[0].partitions[1].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        assert!(out[0].partitions[2].error_code == codes::UNKNOWN_TOPIC_OR_PARTITION);
+        assert!(tombs.len() == 1, "only p=0 queued");
+        assert!(to_remove == vec![("t1".to_string(), 0)]);
     }
 
     #[test]
@@ -590,27 +569,27 @@ mod tests {
 
         let (out, tombs, to_remove) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
-        assert_eq!(tombs.len(), 3, "3 partitions × 1 tombstone each");
+        assert!(tombs.len() == 3, "3 partitions × 1 tombstone each");
         // Offset deltas increase monotonically across the whole batch.
-        assert_eq!(tombs[0].offset_delta, 0);
-        assert_eq!(tombs[1].offset_delta, 1);
-        assert_eq!(tombs[2].offset_delta, 2);
+        assert!(tombs[0].offset_delta == 0);
+        assert!(tombs[1].offset_delta == 1);
+        assert!(tombs[2].offset_delta == 2);
         // Tombstones carry null values.
         assert!(tombs[0].value.is_none());
         assert!(tombs[1].value.is_none());
         assert!(tombs[2].value.is_none());
         for t in &out {
             for p in &t.partitions {
-                assert_eq!(p.error_code, codes::NONE);
+                assert!(p.error_code == codes::NONE);
             }
         }
-        assert_eq!(
-            to_remove,
-            vec![
-                ("t1".to_string(), 0),
-                ("t1".to_string(), 2),
-                ("t2".to_string(), 7),
-            ]
+        assert!(
+            to_remove
+                == vec![
+                    ("t1".to_string(), 0),
+                    ("t1".to_string(), 2),
+                    ("t2".to_string(), 7),
+                ]
         );
     }
 
@@ -627,9 +606,6 @@ mod tests {
         let (out, tombs, _) =
             build_response_rows("g", &req.topics, &decisions, &subscribed, &counts);
         assert!(tombs.is_empty());
-        assert_eq!(
-            out[0].partitions[0].error_code,
-            codes::TOPIC_AUTHORIZATION_FAILED
-        );
+        assert!(out[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
     }
 }

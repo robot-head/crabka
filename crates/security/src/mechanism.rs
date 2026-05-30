@@ -53,6 +53,7 @@ impl SaslMechanism {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn wire_name_round_trip() {
@@ -62,15 +63,15 @@ mod tests {
             SaslMechanism::ScramSha512,
             SaslMechanism::OAuthBearer,
         ] {
-            assert_eq!(SaslMechanism::from_wire(m.wire_name()), Some(m));
+            assert!(SaslMechanism::from_wire(m.wire_name()) == Some(m));
         }
     }
 
     #[test]
     fn from_wire_unknown_returns_none() {
-        assert_eq!(SaslMechanism::from_wire("SCRAM-SHA-128"), None);
-        assert_eq!(SaslMechanism::from_wire("OAUTH"), None);
-        assert_eq!(SaslMechanism::from_wire(""), None);
+        assert!(SaslMechanism::from_wire("SCRAM-SHA-128") == None);
+        assert!(SaslMechanism::from_wire("OAUTH") == None);
+        assert!(SaslMechanism::from_wire("") == None);
     }
 
     /// Wire-exactness guard: only the canonical Kafka mechanism strings
@@ -79,31 +80,25 @@ mod tests {
     /// SASL handshake's accepted mechanism set.
     #[test]
     fn from_wire_rejects_variant_names_and_casing() {
-        assert_eq!(SaslMechanism::from_wire("Plain"), None);
-        assert_eq!(SaslMechanism::from_wire("plain"), None);
-        assert_eq!(SaslMechanism::from_wire("ScramSha256"), None);
-        assert_eq!(SaslMechanism::from_wire("scram-sha-256"), None);
-        assert_eq!(SaslMechanism::from_wire("OAuthBearer"), None);
+        assert!(SaslMechanism::from_wire("Plain") == None);
+        assert!(SaslMechanism::from_wire("plain") == None);
+        assert!(SaslMechanism::from_wire("ScramSha256") == None);
+        assert!(SaslMechanism::from_wire("scram-sha-256") == None);
+        assert!(SaslMechanism::from_wire("OAuthBearer") == None);
     }
 
     #[test]
     fn oauthbearer_wire_round_trip() {
-        assert_eq!(
-            SaslMechanism::from_wire("OAUTHBEARER"),
-            Some(SaslMechanism::OAuthBearer)
-        );
-        assert_eq!(SaslMechanism::OAuthBearer.wire_name(), "OAUTHBEARER");
+        assert!(SaslMechanism::from_wire("OAUTHBEARER") == Some(SaslMechanism::OAuthBearer));
+        assert!(SaslMechanism::OAuthBearer.wire_name() == "OAUTHBEARER");
         assert!(!SaslMechanism::OAuthBearer.is_scram());
     }
 
     #[test]
     fn gssapi_mechanism_roundtrips_wire_name() {
         use std::str::FromStr;
-        assert_eq!(
-            SaslMechanism::from_str("GSSAPI").unwrap(),
-            SaslMechanism::Gssapi
-        );
-        assert_eq!(SaslMechanism::Gssapi.wire_name(), "GSSAPI");
+        assert!(SaslMechanism::from_str("GSSAPI").unwrap() == SaslMechanism::Gssapi);
+        assert!(SaslMechanism::Gssapi.wire_name() == "GSSAPI");
     }
 
     #[test]

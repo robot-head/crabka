@@ -103,6 +103,7 @@ pub trait Goal: Send + Sync {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use assert2::assert;
 
     /// Minimal goal that returns a fixed movement list. Used by
     /// `optimizer::tests` to exercise the optimizer without depending
@@ -129,6 +130,6 @@ pub mod tests {
     #[test]
     fn priority_ordering_hard_before_soft() {
         assert!(matches!(GoalPriority::Hard, GoalPriority::Hard));
-        assert_ne!(GoalPriority::Hard, GoalPriority::Soft);
+        assert!(GoalPriority::Hard != GoalPriority::Soft);
     }
 }

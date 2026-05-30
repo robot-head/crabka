@@ -3,6 +3,7 @@
 //! the bare-name principal `User:<metadata.name>` but for whom the
 //! operator creates no Secret and issues no cert.
 
+use assert2::assert;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -226,14 +227,14 @@ async fn tls_external_user_reconciles_acls_under_bare_name_principal() {
             _ => None,
         })
         .expect("CreateAcls must have been issued");
-    assert_eq!(create.len(), 2, "Read+Describe fan out: {create:?}");
+    assert!(create.len() == 2, "Read+Describe fan out: {create:?}");
     for e in &create {
-        assert_eq!(
-            e.principal, "User:alice",
-            "tls-external must use bare-name principal, got: {e:?}",
+        assert!(
+            e.principal == "User:alice",
+            "tls-external must use bare-name principal, got: {e:?}"
         );
-        assert_eq!(e.resource_type, ResourceType::Topic);
-        assert_eq!(e.resource_name, "orders");
+        assert!(e.resource_type == ResourceType::Topic);
+        assert!(e.resource_name == "orders");
     }
 }
 
@@ -276,9 +277,9 @@ async fn tls_external_user_reconciles_quotas_under_bare_name_principal() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert_eq!(
-        username, USER,
-        "tls-external quotas must be keyed by bare name, got `{username}`",
+    assert!(
+        username == USER,
+        "tls-external quotas must be keyed by bare name, got `{username}`"
     );
     assert!(
         ops.iter().any(|op| matches!(
@@ -318,16 +319,16 @@ async fn tls_external_user_status_reports_external_true_and_tls_principal_and_no
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
     let s = &body["status"];
-    assert_eq!(s["conditions"][0]["status"], "True");
-    assert_eq!(s["conditions"][0]["reason"], "Ready");
-    assert_eq!(s["external"], true, "external must be true: {body}");
-    assert_eq!(
-        s["tlsPrincipal"], "User:alice",
-        "tlsPrincipal must pin the bare-name principal: {body}",
+    assert!(s["conditions"][0]["status"] == "True");
+    assert!(s["conditions"][0]["reason"] == "Ready");
+    assert!(s["external"] == true, "external must be true: {body}");
+    assert!(
+        s["tlsPrincipal"] == "User:alice",
+        "tlsPrincipal must pin the bare-name principal: {body}"
     );
-    assert_eq!(s["secret"], serde_json::Value::Null, "no Secret: {body}");
-    assert_eq!(s["scramSha512"], false, "no SCRAM: {body}");
-    assert_eq!(s["tls"], false, "no operator-issued TLS cert: {body}");
+    assert!(s["secret"] == serde_json::Value::Null, "no Secret: {body}");
+    assert!(s["scramSha512"] == false, "no SCRAM: {body}");
+    assert!(s["tls"] == false, "no operator-issued TLS cert: {body}");
 }
 
 /// 5. A minimal `tls-external` user (no authorization, no quotas)
@@ -385,9 +386,9 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert_eq!(body["status"]["conditions"][0]["status"], "True");
-    assert_eq!(body["status"]["conditions"][0]["reason"], "Ready");
-    assert_eq!(body["status"]["external"], true);
+    assert!(body["status"]["conditions"][0]["status"] == "True");
+    assert!(body["status"]["conditions"][0]["reason"] == "Ready");
+    assert!(body["status"]["external"] == true);
 }
 
 /// 6. Finalizer cleanup for a `tls-external` user must not call
@@ -437,10 +438,9 @@ async fn tls_external_user_finalizer_does_not_call_alter_user_scram_credentials(
         })
         .expect("DeleteAcls must have been issued during finalizer");
     assert!(!filters.is_empty(), "at least one filter expected");
-    assert_eq!(
-        filters[0].principal.as_deref(),
-        Some("User:alice"),
-        "tls-external finalizer must filter ACLs by `User:<name>`: {filters:?}",
+    assert!(
+        filters[0].principal.as_deref() == Some("User:alice"),
+        "tls-external finalizer must filter ACLs by `User:<name>`: {filters:?}"
     );
 
     // The kube observation log must show the finalizer-removal PATCH on

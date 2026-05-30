@@ -146,6 +146,7 @@ impl From<RecordsError> for LegacyRecordsError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
 
@@ -194,13 +195,13 @@ mod tests {
         let v2 = v2_batch(CompressionType::None);
         let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
         let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert_eq!(round.base_offset, 1000);
-        assert_eq!(round.records.len(), 3);
+        assert!(round.base_offset == 1000);
+        assert!(round.records.len() == 3);
         for (i, r) in round.records.iter().enumerate() {
-            assert_eq!(r.offset_delta, i as i32);
-            assert_eq!(r.key, v2.records[i].key);
-            assert_eq!(r.value, v2.records[i].value);
-            assert_eq!(r.timestamp_delta, v2.records[i].timestamp_delta);
+            assert!(r.offset_delta == i as i32);
+            assert!(r.key == v2.records[i].key);
+            assert!(r.value == v2.records[i].value);
+            assert!(r.timestamp_delta == v2.records[i].timestamp_delta);
             assert!(r.headers.is_empty(), "headers dropped in down-conversion");
         }
     }
@@ -210,10 +211,10 @@ mod tests {
         let v2 = v2_batch(CompressionType::None);
         let legacy_bytes = v2_to_legacy(&v2, Magic::V0).unwrap();
         let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert_eq!(round.records.len(), 3);
+        assert!(round.records.len() == 3);
         // v0 has no timestamps, so all deltas collapse to 0.
         for r in &round.records {
-            assert_eq!(r.timestamp_delta, 0);
+            assert!(r.timestamp_delta == 0);
         }
     }
 
@@ -222,13 +223,13 @@ mod tests {
         let v2 = v2_batch(CompressionType::Gzip);
         let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
         let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert_eq!(round.base_offset, 1000);
+        assert!(round.base_offset == 1000);
         let offsets: Vec<_> = round
             .records
             .iter()
             .map(|r| 1000i64 + i64::from(r.offset_delta))
             .collect();
-        assert_eq!(offsets, vec![1000, 1001, 1002]);
+        assert!(offsets == vec![1000, 1001, 1002]);
     }
 
     #[test]
@@ -236,9 +237,9 @@ mod tests {
         let v2 = v2_batch(CompressionType::Snappy);
         let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
         let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert_eq!(round.records.len(), 3);
-        assert_eq!(round.records[2].value, Some(Bytes::from_static(b"3")));
-        assert_eq!(round.records[2].key, None);
+        assert!(round.records.len() == 3);
+        assert!(round.records[2].value == Some(Bytes::from_static(b"3")));
+        assert!(round.records[2].key == None);
     }
 
     #[test]
@@ -272,6 +273,6 @@ mod tests {
         let mut cur: &[u8] = &legacy_bytes;
         let recs = decode_message_set(&mut cur, legacy_bytes.len()).unwrap();
         // No structural representation of headers in v0/v1.
-        assert_eq!(recs.len(), 3);
+        assert!(recs.len() == 3);
     }
 }

@@ -109,6 +109,7 @@ mod tests {
     use super::*;
     use crate::coordinator::next_gen::group_state::MemberState;
     use crate::coordinator::next_gen::persistence::MemberAssignmentState;
+    use assert2::assert;
     use std::time::{Duration, Instant};
 
     fn fresh_member(id: &str, topic: &str) -> MemberState {
@@ -152,8 +153,8 @@ mod tests {
         g.add_or_update_member(fresh_member("m1", "t"));
         let (inp, t) = input("t", 4);
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        assert_eq!(outcome, ReconcileOutcome::Recomputed);
-        assert_eq!(g.target.per_member["m1"][&t], vec![0, 1, 2, 3]);
+        assert!(outcome == ReconcileOutcome::Recomputed);
+        assert!(g.target.per_member["m1"][&t] == vec![0, 1, 2, 3]);
         assert!(!g.dirty);
     }
 
@@ -162,10 +163,7 @@ mod tests {
         let mut g = GroupState::new("g");
         g.dirty = false;
         let (inp, _) = input("t", 4);
-        assert_eq!(
-            reconcile_if_dirty(&mut g, &inp, &UniformAssignor),
-            ReconcileOutcome::NoChange
-        );
+        assert!(reconcile_if_dirty(&mut g, &inp, &UniformAssignor) == ReconcileOutcome::NoChange);
     }
 
     #[test]
@@ -176,8 +174,8 @@ mod tests {
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let epoch1 = g.group_epoch;
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        assert_eq!(outcome, ReconcileOutcome::NoChange);
-        assert_eq!(g.group_epoch, epoch1);
+        assert!(outcome == ReconcileOutcome::NoChange);
+        assert!(g.group_epoch == epoch1);
     }
 
     #[test]
@@ -190,7 +188,7 @@ mod tests {
         let (inp2, _) = input("t", 4);
         g.dirty = true;
         let outcome = reconcile_if_dirty(&mut g, &inp2, &UniformAssignor);
-        assert_eq!(outcome, ReconcileOutcome::Recomputed);
+        assert!(outcome == ReconcileOutcome::Recomputed);
         assert!(g.group_epoch > epoch_before);
     }
 
@@ -310,9 +308,8 @@ mod tests {
         let inp = input_with_topics(&[("a", 1), ("b", 1), ("c", 1)]);
         reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
         let assigned: HashSet<Uuid> = g.target.per_member["m1"].keys().copied().collect();
-        assert_eq!(
-            assigned.len(),
-            3,
+        assert!(
+            assigned.len() == 3,
             "empty regex matches every topic; got {assigned:?}"
         );
     }
@@ -331,7 +328,7 @@ mod tests {
         g.add_or_update_member(member_with_regex("m1", &[], Some("^b")));
         assert!(g.dirty, "regex change must mark group dirty");
         let outcome = reconcile_if_dirty(&mut g, &inp, &UniformAssignor);
-        assert_eq!(outcome, ReconcileOutcome::Recomputed);
+        assert!(outcome == ReconcileOutcome::Recomputed);
         assert!(g.group_epoch > epoch_before);
     }
 

@@ -268,6 +268,7 @@ fn row_throughput(
 mod tests {
     use super::*;
     use crate::scenario::{Acks, Compression, LoadMode, ModeTag, Scenario, Throughput, Topology};
+    use assert2::assert;
     use tempfile::tempdir;
 
     fn fake_run(stack: Stack, msgs: u64) -> RunOutput {

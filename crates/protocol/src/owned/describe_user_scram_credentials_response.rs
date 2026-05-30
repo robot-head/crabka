@@ -26,19 +26,20 @@ include!(concat!(
 mod tests {
     use super::*;
     use crate::{Decode, Encode};
+    use assert2::assert;
     use bytes::BytesMut;
 
     fn roundtrip(msg: &DescribeUserScramCredentialsResponse, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
-        assert_eq!(msg.encoded_len(v), buf.len());
+        assert!(msg.encoded_len(v) == buf.len());
         let bytes = buf.freeze();
         let mut cur = &bytes[..];
         let decoded = DescribeUserScramCredentialsResponse::decode(&mut cur, v).unwrap();
         assert!(cur.is_empty());
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert_eq!(&reencoded[..], &bytes[..]);
+        assert!(&reencoded[..] == &bytes[..]);
         // Exercise the JVM-oracle default-JSON builder for this version.
         let _ = default_json(v);
     }

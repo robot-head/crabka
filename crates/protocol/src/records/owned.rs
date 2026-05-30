@@ -282,6 +282,7 @@ fn decode_record_header<B: Buf>(buf: &mut B) -> Result<RecordHeader, String> {
 #[cfg(test)]
 mod record_tests {
     use super::*;
+    use assert2::assert;
     use bytes::BytesMut;
 
     fn fixture_minimal_record() -> Record {
@@ -333,11 +334,11 @@ mod record_tests {
                 let r = $fixture();
                 let mut buf = BytesMut::new();
                 r.encode(&mut buf).unwrap();
-                assert_eq!(buf.len(), r.encoded_len(), "predicted len mismatch");
+                assert!(buf.len() == r.encoded_len(), "predicted len mismatch");
 
                 let mut cur: &[u8] = &buf[..];
                 let decoded = Record::decode(&mut cur).unwrap();
-                assert_eq!(decoded, r);
+                assert!(decoded == r);
                 assert!(cur.is_empty(), "trailing bytes after decode");
             }
         };
@@ -540,6 +541,7 @@ impl RecordBatch {
 #[cfg(test)]
 mod batch_tests {
     use super::*;
+    use assert2::assert;
     use crabka_compression::CompressionType;
 
     fn fixture_empty_batch() -> RecordBatch {
@@ -607,11 +609,11 @@ mod batch_tests {
 
                 let mut buf = BytesMut::new();
                 b.encode(&mut buf).unwrap();
-                assert_eq!(buf.len(), b.encoded_len());
+                assert!(buf.len() == b.encoded_len());
 
                 let mut cur: &[u8] = &buf[..];
                 let decoded = RecordBatch::decode(&mut cur).unwrap();
-                assert_eq!(decoded, b);
+                assert!(decoded == b);
                 assert!(cur.is_empty());
             }
         };
@@ -664,7 +666,7 @@ mod batch_tests {
                 b.encode(&mut buf).unwrap();
                 let mut cur: &[u8] = &buf[..];
                 let decoded = RecordBatch::decode(&mut cur).unwrap();
-                assert_eq!(decoded, b);
+                assert!(decoded == b);
                 assert!(cur.is_empty());
             }
         };

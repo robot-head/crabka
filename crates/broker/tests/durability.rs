@@ -6,6 +6,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
@@ -94,8 +95,8 @@ async fn create_topic(broker: &BrokerHandle, bootstrap: &str, name: &str, rf: i1
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics failed: {resp:?}"
     );
     // CreateTopics ack means the controller's quorum committed the
@@ -160,7 +161,7 @@ async fn acks_one_returns_quickly_on_rf1_broker() {
         .await
         .expect("ack=1 success");
     let elapsed = start.elapsed();
-    assert_eq!(offset, 0);
+    assert!(offset == 0);
     assert!(
         elapsed < Duration::from_secs(1),
         "acks=1 should return promptly; took {elapsed:?}"
@@ -177,7 +178,7 @@ async fn acks_all_returns_quickly_on_rf1_broker() {
         .await
         .expect("ack=-1 success");
     let elapsed = start.elapsed();
-    assert_eq!(offset, 0);
+    assert!(offset == 0);
     assert!(
         elapsed < Duration::from_secs(1),
         "acks=-1 on rf=1 should return promptly; took {elapsed:?}"
@@ -193,7 +194,7 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
     let offset = produce_acks(&bootstrap, "clamp", &["x", "y", "z"], 1, 5_000)
         .await
         .expect("produce ok");
-    assert_eq!(offset, 0);
+    assert!(offset == 0);
 
     let client = Client::builder()
         .bootstrap(bootstrap.clone())
@@ -223,8 +224,8 @@ async fn consumer_clamps_at_hw_when_followers_lag() {
         .await
         .expect("Fetch");
     let pd = &resp.responses[0].partitions[0];
-    assert_eq!(pd.error_code, 0);
-    assert_eq!(pd.high_watermark, 3, "HW should equal LEO for rf=1");
+    assert!(pd.error_code == 0);
+    assert!(pd.high_watermark == 3, "HW should equal LEO for rf=1");
 
     broker.shutdown().await;
 }
@@ -276,7 +277,7 @@ async fn read_committed_under_rf1_unchanged() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert_eq!(seen, vec!["p", "q", "r"]);
+    assert!(seen == vec!["p", "q", "r"]);
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -302,7 +303,7 @@ async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
         .await
         .expect("acks=-1 success after shrink");
     let elapsed = start.elapsed();
-    assert_eq!(offset, 0);
+    assert!(offset == 0);
     assert!(
         elapsed >= Duration::from_millis(1_500),
         "expected to wait for ISR shrink (~2s); took {elapsed:?}"

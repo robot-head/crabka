@@ -5,6 +5,7 @@
 //!
 //! Run: `cargo test -p crabka-protocol-codegen --test borrowed_quote_parity`
 
+use assert2::assert;
 use std::path::PathBuf;
 
 use crabka_protocol_codegen::emit::{borrowed, borrowed_quote};

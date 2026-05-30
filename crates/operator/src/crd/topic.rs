@@ -74,14 +74,15 @@ pub struct KafkaTopicStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaTopic::crd();
-        assert_eq!(crd.spec.group, "crabka.io");
-        assert_eq!(crd.spec.names.kind, "KafkaTopic");
-        assert_eq!(crd.spec.names.plural, "kafkatopics");
+        assert!(crd.spec.group == "crabka.io");
+        assert!(crd.spec.names.kind == "KafkaTopic");
+        assert!(crd.spec.names.plural == "kafkatopics");
         assert!(
             crd.spec
                 .names
@@ -90,8 +91,8 @@ mod tests {
                 .is_some_and(|v| v.contains(&"kt".to_string())),
             "expected shortname `kt`",
         );
-        assert_eq!(crd.spec.versions.len(), 1);
-        assert_eq!(crd.spec.versions[0].name, "v1alpha1");
+        assert!(crd.spec.versions.len() == 1);
+        assert!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -114,7 +115,7 @@ mod tests {
         assert!(json.contains("\"partitions\":3"), "got: {json}");
         assert!(json.contains("\"preserveTopic\":true"), "got: {json}");
         let back: KafkaTopic = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.spec, kt.spec);
+        assert!(back.spec == kt.spec);
     }
 
     #[test]
@@ -153,8 +154,8 @@ mod tests {
     fn minimum_required_spec_parses() {
         let json = r#"{"partitions":1,"replicas":1}"#;
         let spec: KafkaTopicSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.partitions, 1);
-        assert_eq!(spec.replicas, 1);
+        assert!(spec.partitions == 1);
+        assert!(spec.replicas == 1);
         assert!(spec.topic_name.is_none());
         assert!(spec.config.is_none());
         assert!(!spec.preserve_topic);

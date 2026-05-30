@@ -112,6 +112,7 @@ impl TxnIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use tempfile::TempDir;
 
     #[test]
@@ -119,7 +120,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("00.txnindex");
         let idx = TxnIndex::open(path).unwrap();
-        assert_eq!(idx.entries(), &[]);
+        assert!(idx.entries() == &[]);
     }
 
     #[test]
@@ -141,20 +142,20 @@ mod tests {
         .unwrap();
 
         let idx2 = TxnIndex::open(path).unwrap();
-        assert_eq!(
-            idx2.entries(),
-            &[
-                AbortedTxn {
-                    start_offset: 5,
-                    last_offset: 7,
-                    producer_id: 1000
-                },
-                AbortedTxn {
-                    start_offset: 10,
-                    last_offset: 12,
-                    producer_id: 1000
-                },
-            ]
+        assert!(
+            idx2.entries()
+                == &[
+                    AbortedTxn {
+                        start_offset: 5,
+                        last_offset: 7,
+                        producer_id: 1000
+                    },
+                    AbortedTxn {
+                        start_offset: 10,
+                        last_offset: 12,
+                        producer_id: 1000
+                    },
+                ]
         );
     }
 
@@ -177,9 +178,9 @@ mod tests {
         .unwrap();
 
         let in_3_to_12: Vec<_> = idx.aborted_in_range(3, 12).collect();
-        assert_eq!(in_3_to_12.len(), 2);
+        assert!(in_3_to_12.len() == 2);
 
         let in_5_to_9: Vec<_> = idx.aborted_in_range(5, 9).collect();
-        assert_eq!(in_5_to_9.len(), 0);
+        assert!(in_5_to_9.len() == 0);
     }
 }

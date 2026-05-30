@@ -148,6 +148,7 @@ mod tests {
     use crate::model::BrokerView;
     use crate::scraper::parse::ParsedSample;
     use crate::scraper::{MetricKind, UsageStore, WindowConfig};
+    use assert2::assert;
     use std::sync::Arc;
     use std::time::Duration;
 

@@ -118,6 +118,7 @@ fn decode_fetch_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_protocol::owned::fetch_response::{
         FetchResponse, FetchableTopicResponse, PartitionData,
     };
@@ -167,11 +168,11 @@ mod tests {
             ..Default::default()
         };
         let got = decode_fetch_response(&resp, 0).unwrap();
-        assert_eq!(got.len(), 2);
-        assert_eq!(got[0].offset, 5);
-        assert_eq!(got[0].value.as_deref(), Some(b"a".as_ref()));
-        assert_eq!(got[1].offset, 6);
-        assert_eq!(got[1].value.as_deref(), Some(b"b".as_ref()));
+        assert!(got.len() == 2);
+        assert!(got[0].offset == 5);
+        assert!(got[0].value.as_deref() == Some(b"a".as_ref()));
+        assert!(got[1].offset == 6);
+        assert!(got[1].value.as_deref() == Some(b"b".as_ref()));
     }
 
     #[test]

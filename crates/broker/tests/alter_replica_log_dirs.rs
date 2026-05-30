@@ -14,6 +14,7 @@
 //!   3. invalid target / missing replica return the right Kafka
 //!      error codes.
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -96,7 +97,7 @@ async fn create_topic(addr: SocketAddr, topic: &str, partitions: i32) {
     let resp_bytes = round_trip(&mut stream, 19, VERSION, &body).await.unwrap();
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics must succeed");
+    assert!(resp.topics[0].error_code == 0, "CreateTopics must succeed");
 }
 
 async fn alter_replica_log_dirs(
@@ -246,12 +247,16 @@ async fn alter_replica_log_dirs_moves_partitions_to_target_dir() {
         .iter()
         .filter(|t| t.topic_name == "t")
         .collect();
-    assert_eq!(topic_results.len(), 1, "topic must be present in response");
+    assert!(
+        topic_results.len() == 1,
+        "topic must be present in response"
+    );
     for p in &topic_results[0].partitions {
-        assert_eq!(
-            p.error_code, 0,
+        assert!(
+            p.error_code == 0,
             "partition {} ack must be NONE, got {}",
-            p.partition_index, p.error_code
+            p.partition_index,
+            p.error_code
         );
     }
 
@@ -263,8 +268,8 @@ async fn alter_replica_log_dirs_moves_partitions_to_target_dir() {
     } else {
         extra.path()
     };
-    assert_eq!(count_topic_dirs(target_dir, "t"), 2);
-    assert_eq!(count_topic_dirs(source_dir, "t"), 0);
+    assert!(count_topic_dirs(target_dir, "t") == 2);
+    assert!(count_topic_dirs(source_dir, "t") == 0);
     // No future dirs should remain anywhere.
     for d in [primary.path(), extra.path()] {
         for entry in std::fs::read_dir(d).unwrap().flatten() {
@@ -285,7 +290,7 @@ async fn alter_replica_log_dirs_moves_partitions_to_target_dir() {
         .iter()
         .find(|t| t.topic_name == "t")
         .expect("response includes t");
-    assert_eq!(topic2.partitions[0].error_code, 0);
+    assert!(topic2.partitions[0].error_code == 0);
 
     handle.shutdown().await;
 }
@@ -304,7 +309,7 @@ async fn alter_replica_log_dirs_rejects_unknown_target() {
         .find(|t| t.topic_name == "t")
         .expect("topic in response");
     // 57 == LOG_DIR_NOT_FOUND
-    assert_eq!(topic.partitions[0].error_code, 57);
+    assert!(topic.partitions[0].error_code == 57);
 
     handle.shutdown().await;
 }
@@ -322,7 +327,7 @@ async fn alter_replica_log_dirs_rejects_unknown_replica() {
         .find(|t| t.topic_name == "missing")
         .expect("topic in response");
     // 11 == REPLICA_NOT_AVAILABLE
-    assert_eq!(topic.partitions[0].error_code, 11);
+    assert!(topic.partitions[0].error_code == 11);
 
     handle.shutdown().await;
 }
@@ -357,13 +362,14 @@ async fn alter_replica_log_dirs_denied_without_cluster_alter() {
         .iter()
         .find(|t| t.topic_name == "t")
         .expect("topic in response");
-    assert_eq!(topic.partitions.len(), 2);
+    assert!(topic.partitions.len() == 2);
     for p in &topic.partitions {
         // 31 == CLUSTER_AUTHORIZATION_FAILED
-        assert_eq!(
-            p.error_code, 31,
+        assert!(
+            p.error_code == 31,
             "partition {} must be denied, got {}",
-            p.partition_index, p.error_code
+            p.partition_index,
+            p.error_code
         );
     }
 
@@ -420,7 +426,7 @@ async fn alter_replica_log_dirs_preserves_records_across_move() {
         .iter()
         .find(|t| t.topic_name == "t")
         .expect("topic");
-    assert_eq!(topic.partitions[0].error_code, 0);
+    assert!(topic.partitions[0].error_code == 0);
     wait_for_move_complete(addr, target_dir, "t", &[0]).await;
 
     let mut consumer = Consumer::builder()
@@ -448,7 +454,7 @@ async fn alter_replica_log_dirs_preserves_records_across_move() {
     consumed.sort();
     let mut expected: Vec<String> = (0..50).map(|i| format!("v{i}")).collect();
     expected.sort();
-    assert_eq!(consumed, expected, "all records survived the move");
+    assert!(consumed == expected, "all records survived the move");
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
@@ -530,8 +536,8 @@ async fn startup_resumes_move_for_existing_partition() {
     // Wait for the resumed move to converge: partition lives in
     // target dir with no remaining future entries.
     wait_for_move_complete(addr, target_dir, "t", &[0]).await;
-    assert_eq!(count_topic_dirs(target_dir, "t"), 1);
-    assert_eq!(count_topic_dirs(current_dir, "t"), 0);
+    assert!(count_topic_dirs(target_dir, "t") == 1);
+    assert!(count_topic_dirs(current_dir, "t") == 0);
     assert!(!future_path.exists(), "future dir must be renamed away");
 
     handle.shutdown().await;

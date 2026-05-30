@@ -115,6 +115,7 @@ fn write_owned_tests(out: &mut String, type_name: &str) {
         out,
         "#[cfg(test)]
 mod tests {{
+    use assert2::assert;
     use super::*;
     use crate::{{Decode, Encode}};
     use bytes::BytesMut;
@@ -122,14 +123,14 @@ mod tests {{
     fn roundtrip(msg: &{type_name}, v: i16) {{
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
-        assert_eq!(msg.encoded_len(v), buf.len());
+        assert!(msg.encoded_len(v) == buf.len());
         let bytes = buf.freeze();
         let mut cur = &bytes[..];
         let decoded = {type_name}::decode(&mut cur, v).unwrap();
         assert!(cur.is_empty());
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert_eq!(&reencoded[..], &bytes[..]);
+        assert!(&reencoded[..] == &bytes[..]);
         // Exercise the JVM-oracle default-JSON builder for this version.
         let _ = default_json(v);
     }}
@@ -160,6 +161,7 @@ fn write_borrowed_tests(out: &mut String, type_name: &str) {
         out,
         "#[cfg(test)]
 mod tests {{
+    use assert2::assert;
     use super::*;
     use crate::{{DecodeBorrow, Encode}};
     use bytes::BytesMut;
@@ -168,16 +170,16 @@ mod tests {{
         let mut cur: &[u8] = msg_bytes;
         let decoded = {type_name}::decode_borrow(&mut cur, v).unwrap();
         assert!(cur.is_empty());
-        assert_eq!(decoded.encoded_len(v), msg_bytes.len());
+        assert!(decoded.encoded_len(v) == msg_bytes.len());
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert_eq!(&reencoded[..], &msg_bytes[..]);
+        assert!(&reencoded[..] == &msg_bytes[..]);
         // Exercise the zero-copy -> owned conversion, then confirm the owned
         // value still encodes to the same bytes.
         let owned = decoded.to_owned();
         let mut owned_buf = BytesMut::new();
         owned.encode(&mut owned_buf, v).unwrap();
-        assert_eq!(&owned_buf[..], &msg_bytes[..]);
+        assert!(&owned_buf[..] == &msg_bytes[..]);
     }}
 
     #[test]

@@ -49,6 +49,7 @@ pub fn emit(
 mod tests {
     use super::*;
     use crate::ir::{MessageSpec, MessageType, VersionRange};
+    use assert2::assert;
 
     fn make_spec(name: &str, min: i16, max: i16, ty: MessageType) -> MessageSpec {
         MessageSpec {

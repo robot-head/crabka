@@ -5,6 +5,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -41,7 +42,7 @@ async fn cooperative_three_member_partial_revocation() {
     let m1 = build_cooperative_consumer(&bootstrap, "coop-grp-1", "m1", "coop6").await;
     // Let m1's initial sync land and rebalance settle.
     wait_for_assignment_count(&m1, 6, Duration::from_secs(15)).await;
-    assert_eq!(m1.assignment().await.len(), 6, "m1 alone owns all 6");
+    assert!(m1.assignment().await.len() == 6, "m1 alone owns all 6");
 
     // m2 joins — triggers a rebalance. Phase-1 keeps m1's sticky retained
     // partitions and lands m2 with 0; phase-2 places the freed half onto m2.
@@ -97,11 +98,11 @@ async fn cooperative_three_member_partial_revocation() {
         tokio::time::sleep(Duration::from_millis(250)).await;
     };
     for (t, _) in &union {
-        assert_eq!(t, "coop6", "all owned partitions are from coop6");
+        assert!(t == "coop6", "all owned partitions are from coop6");
     }
     let mut partitions: Vec<i32> = union.into_iter().map(|(_, p)| p).collect();
     partitions.sort_unstable();
-    assert_eq!(partitions, vec![0, 1, 2, 3, 4, 5]);
+    assert!(partitions == vec![0, 1, 2, 3, 4, 5]);
 
     m1.close().await.unwrap();
     m2.close().await.unwrap();
@@ -155,7 +156,7 @@ async fn cooperative_transparent_to_poll() {
                 .insert((r.partition, r.offset));
         }
     }
-    assert_eq!(values_seen.len(), 4, "m1 received all 4 first-wave msgs");
+    assert!(values_seen.len() == 4, "m1 received all 4 first-wave msgs");
 
     // Second wave: produce 4 more messages.
     for p in 0..4i32 {
@@ -181,9 +182,8 @@ async fn cooperative_transparent_to_poll() {
                 .insert((r.partition, r.offset));
         }
     }
-    assert_eq!(
-        m1_second_wave.len(),
-        4,
+    assert!(
+        m1_second_wave.len() == 4,
         "m1 consumed all 4 second-wave msgs"
     );
 
@@ -256,9 +256,8 @@ async fn cooperative_transparent_to_poll() {
     }
 
     // No message loss: m1 delivered the whole second wave.
-    assert_eq!(
-        m1_second_wave.len(),
-        4,
+    assert!(
+        m1_second_wave.len() == 4,
         "all 4 second-wave messages delivered by m1 (m1={m1_second_wave:?})"
     );
     // No re-delivery: each second-wave value appears in at most one consumer.
@@ -291,10 +290,13 @@ async fn cooperative_single_member_steady_state() {
     let mut consumer = build_cooperative_consumer(&bootstrap, "only-grp", "m1", "cooponly").await;
     wait_for_assignment_count(&consumer, 3, Duration::from_secs(15)).await;
     let asn = consumer.assignment().await;
-    assert_eq!(asn.len(), 3, "single member owns all 3 partitions: {asn:?}");
+    assert!(
+        asn.len() == 3,
+        "single member owns all 3 partitions: {asn:?}"
+    );
     let mut parts: Vec<i32> = asn.iter().map(|(_, p)| *p).collect();
     parts.sort_unstable();
-    assert_eq!(parts, vec![0, 1, 2]);
+    assert!(parts == vec![0, 1, 2]);
 
     for p in 0..3i32 {
         produce_to_partition(&producer, "cooponly", p, &[&format!("v{p}")]).await;
@@ -308,7 +310,7 @@ async fn cooperative_single_member_steady_state() {
             seen.insert(value_string(r.value.as_ref()));
         }
     }
-    assert_eq!(seen.len(), 3, "received all 3 messages: {seen:?}");
+    assert!(seen.len() == 3, "received all 3 messages: {seen:?}");
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -370,7 +372,7 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
+    assert!(cr.topics[0].error_code == 0, "create_topic failed: {cr:?}");
 }
 
 /// Produce records to a specific partition index. Mirrors `integration.rs::produce`

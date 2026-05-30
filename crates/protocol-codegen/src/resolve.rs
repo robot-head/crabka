@@ -161,6 +161,7 @@ pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>
 mod tests {
     use super::*;
     use crate::ir;
+    use assert2::assert;
     use std::path::PathBuf;
 
     fn load(name: &str) -> MessageSpec {

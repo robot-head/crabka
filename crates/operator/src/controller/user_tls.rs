@@ -188,10 +188,11 @@ fn user_owner_ref(obj: &KafkaUser) -> Result<OwnerReference, ReconcileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn tls_principal_format() {
-        assert_eq!(tls_principal("alice"), "User:CN=alice");
+        assert!(tls_principal("alice") == "User:CN=alice");
     }
 
     #[test]
@@ -259,7 +260,7 @@ mod tests {
             data: Some(data),
             ..Default::default()
         };
-        assert_eq!(read_pem_key(&s, "ca.key").as_deref(), Some("abc"));
+        assert!(read_pem_key(&s, "ca.key").as_deref() == Some("abc"));
     }
 
     #[test]
@@ -305,7 +306,7 @@ mod tests {
     fn format_rfc3339_round_trips() {
         let t = OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("unix ts");
         let s = format_rfc3339(t).expect("formats");
-        assert_eq!(s, "2023-11-14T22:13:20Z");
+        assert!(s == "2023-11-14T22:13:20Z");
     }
 
     fn dummy_ku() -> KafkaUser {
@@ -335,38 +336,20 @@ mod tests {
         };
         let secret = render_user_cert_secret(&ku, &user_cert, "CA-CERT").expect("renders");
 
-        assert_eq!(secret.metadata.name.as_deref(), Some("alice"));
-        assert_eq!(secret.metadata.namespace.as_deref(), Some("ns"));
+        assert!(secret.metadata.name.as_deref() == Some("alice"));
+        assert!(secret.metadata.namespace.as_deref() == Some("ns"));
         let labels = secret.metadata.labels.as_ref().expect("labels");
-        assert_eq!(
-            labels.get("crabka.io/auth").map(String::as_str),
-            Some("tls")
-        );
-        assert_eq!(
-            labels.get("crabka.io/user").map(String::as_str),
-            Some("alice")
-        );
-        assert_eq!(
-            labels.get("crabka.io/cluster").map(String::as_str),
-            Some("demo")
-        );
+        assert!(labels.get("crabka.io/auth").map(String::as_str) == Some("tls"));
+        assert!(labels.get("crabka.io/user").map(String::as_str) == Some("alice"));
+        assert!(labels.get("crabka.io/cluster").map(String::as_str) == Some("demo"));
         let owners = secret.metadata.owner_references.as_ref().expect("owner");
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].kind, "KafkaUser");
-        assert_eq!(owners[0].uid, "user-uid");
+        assert!(owners.len() == 1);
+        assert!(owners[0].kind == "KafkaUser");
+        assert!(owners[0].uid == "user-uid");
         let data = secret.data.as_ref().expect("data");
-        assert_eq!(
-            data.get("user.crt").map(|bs| bs.0.as_slice()),
-            Some(b"CERT".as_slice())
-        );
-        assert_eq!(
-            data.get("user.key").map(|bs| bs.0.as_slice()),
-            Some(b"KEY".as_slice())
-        );
-        assert_eq!(
-            data.get("ca.crt").map(|bs| bs.0.as_slice()),
-            Some(b"CA-CERT".as_slice())
-        );
+        assert!(data.get("user.crt").map(|bs| bs.0.as_slice()) == Some(b"CERT".as_slice()));
+        assert!(data.get("user.key").map(|bs| bs.0.as_slice()) == Some(b"KEY".as_slice()));
+        assert!(data.get("ca.crt").map(|bs| bs.0.as_slice()) == Some(b"CA-CERT".as_slice()));
     }
 
     #[test]
@@ -397,10 +380,10 @@ mod tests {
     fn user_owner_ref_carries_block_owner_deletion() {
         let ku = dummy_ku();
         let owner = user_owner_ref(&ku).expect("owner ref");
-        assert_eq!(owner.kind, "KafkaUser");
-        assert_eq!(owner.name, "alice");
-        assert_eq!(owner.uid, "user-uid");
-        assert_eq!(owner.controller, Some(true));
-        assert_eq!(owner.block_owner_deletion, Some(true));
+        assert!(owner.kind == "KafkaUser");
+        assert!(owner.name == "alice");
+        assert!(owner.uid == "user-uid");
+        assert!(owner.controller == Some(true));
+        assert!(owner.block_owner_deletion == Some(true));
     }
 }
