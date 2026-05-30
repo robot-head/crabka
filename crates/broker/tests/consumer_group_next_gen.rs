@@ -174,7 +174,7 @@ async fn kill_switch_returns_group_id_not_found() {
     let dir = tempfile::TempDir::new().unwrap();
     let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
     config.next_gen_consumer_group.rebalance_protocols =
-        vec![crabka_broker::coordinator::next_gen::config::RebalanceProtocol::Classic];
+        vec![crabka_broker::coordinator::unified::config::RebalanceProtocol::Classic];
     let broker = Broker::start(config).await.unwrap();
     let bootstrap = broker.listen_addr().to_string();
     let client = Arc::new(

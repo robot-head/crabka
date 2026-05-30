@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_protocol::ProtocolError;
 use crabka_protocol::primitives::uuid::Uuid;
 
-use crate::coordinator::persistence::{
+use crate::coordinator::unified::persistence::{
     get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes, put_nullable_string,
     put_string,
 };
@@ -104,6 +104,7 @@ pub struct GroupMetadataValue {
 
 impl GroupMetadataValue {
     #[must_use]
+    #[allow(clippy::trivially_copy_pass_by_ref)] // wire-encode API mirrors the other *Value::encode signatures
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -187,6 +188,7 @@ pub struct TargetAssignmentMetadataValue {
 
 impl TargetAssignmentMetadataValue {
     #[must_use]
+    #[allow(clippy::trivially_copy_pass_by_ref)] // wire-encode API mirrors the other *Value::encode signatures
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);

@@ -187,10 +187,10 @@ async fn apply_record(
 
 fn apply_next_gen_record(
     group_manager: &GroupManager,
-    key: crate::coordinator::next_gen::persistence::NextGenKey,
+    key: crate::coordinator::unified::persistence_next_gen::NextGenKey,
     value_bytes: &bytes::Bytes,
 ) -> Result<(), BrokerError> {
-    use crate::coordinator::next_gen::persistence as ng;
+    use crate::coordinator::unified::persistence_next_gen as ng;
     let Some(ng_coord) = group_manager.next_gen().cloned() else {
         return Ok(());
     };

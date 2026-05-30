@@ -6,8 +6,10 @@
 
 pub(crate) mod bootstrap;
 pub(crate) mod group;
-pub mod next_gen;
-pub(crate) mod persistence;
+pub mod unified;
+pub(crate) mod persistence {
+    pub(crate) use crate::coordinator::unified::persistence::*;
+}
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -78,7 +80,7 @@ pub(crate) struct GroupManager {
     /// Held so the ticker is reaped when `GroupManager` drops.
     _ticker: JoinHandle<()>,
     /// KIP-848 next-gen coordinator; set once after construction.
-    pub(crate) next_gen: std::sync::OnceLock<std::sync::Arc<next_gen::NextGenCoordinator>>,
+    pub(crate) next_gen: std::sync::OnceLock<std::sync::Arc<unified::GroupCoordinator>>,
 }
 
 impl GroupManager {
@@ -94,11 +96,11 @@ impl GroupManager {
         }
     }
 
-    pub fn next_gen(&self) -> Option<&std::sync::Arc<next_gen::NextGenCoordinator>> {
+    pub fn next_gen(&self) -> Option<&std::sync::Arc<unified::GroupCoordinator>> {
         self.next_gen.get()
     }
 
-    pub fn set_next_gen(&self, ng: std::sync::Arc<next_gen::NextGenCoordinator>) {
+    pub fn set_next_gen(&self, ng: std::sync::Arc<unified::GroupCoordinator>) {
         let _ = self.next_gen.set(ng);
     }
 

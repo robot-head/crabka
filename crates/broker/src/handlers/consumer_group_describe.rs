@@ -13,8 +13,8 @@ use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::next_gen::GroupType;
-use crate::coordinator::next_gen::group_actor::GroupActorMessage;
+use crate::coordinator::unified::GroupType;
+use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
 pub(crate) fn handle(

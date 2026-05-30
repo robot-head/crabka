@@ -63,7 +63,7 @@ pub(crate) async fn handle(
     let is_next_gen = broker.group_manager.next_gen().is_some_and(|ng| {
         matches!(
             ng.group_type(&req.group_id),
-            Some(crate::coordinator::next_gen::GroupType::NextGen)
+            Some(crate::coordinator::unified::GroupType::NextGen)
         )
     });
 
@@ -81,7 +81,7 @@ pub(crate) async fn handle(
         let _ = ng_handle
             .tx
             .send(
-                crate::coordinator::next_gen::group_actor::GroupActorMessage::OffsetValidate {
+                crate::coordinator::unified::actor::GroupActorMessage::OffsetValidate {
                     member_id: req.member_id.clone(),
                     member_epoch: req.generation_id_or_member_epoch,
                     reply: tx,

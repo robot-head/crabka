@@ -29,7 +29,7 @@ pub enum Key {
     /// Just `group_id` — value carries the whole `GroupMetadataValue`.
     GroupMetadata { group_id: String },
     /// KIP-848 next-gen consumer group record types (versions 3, 5–8).
-    NextGen(crate::coordinator::next_gen::persistence::NextGenKey),
+    NextGen(crate::coordinator::unified::persistence_next_gen::NextGenKey),
 }
 
 pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
@@ -55,7 +55,7 @@ pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
             Ok(Key::GroupMetadata { group_id })
         }
         3 | 5 | 6 | 7 | 8 => Ok(Key::NextGen(
-            crate::coordinator::next_gen::persistence::parse_key(version, buf)?,
+            crate::coordinator::unified::persistence_next_gen::parse_key(version, buf)?,
         )),
         _ => Err(BrokerError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("unknown __consumer_offsets key version"),

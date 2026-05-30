@@ -1,11 +1,17 @@
-//! KIP-848 next-gen consumer group protocol coordinator.
-
+//! Unified group-coordinator subsystem (KIP-848 64d-B). Shared infra and
+//! persistence for both the classic and next-gen group protocols.
+//!
+//! [`GroupCoordinator`] is the single owner of the next-gen consumer-group
+//! machinery: it spawns per-group actors, tracks each group's locked type,
+//! and replays persisted state during bootstrap.
+pub mod actor;
 pub mod assignor;
 pub mod config;
-pub mod group_actor;
-pub mod group_state;
+pub(crate) mod consumer_state;
+pub(crate) mod group;
 pub mod offsets_log;
-pub mod persistence;
+pub(crate) mod persistence;
+pub mod persistence_next_gen;
 pub mod reconciler;
 
 use std::sync::Arc;
@@ -13,8 +19,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
+use actor::{GroupActorHandle, GroupActorMessage, MetadataProvider};
 use config::NextGenConfig;
-use group_actor::{GroupActorHandle, GroupActorMessage, MetadataProvider};
 use offsets_log::OffsetsLog;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +30,7 @@ pub enum GroupType {
 }
 
 #[derive(Debug)]
-pub struct NextGenCoordinator {
+pub struct GroupCoordinator {
     pub config: Arc<NextGenConfig>,
     pub metadata: Arc<dyn MetadataProvider>,
     pub offsets_log: Arc<dyn OffsetsLog>,
@@ -39,7 +45,7 @@ pub struct NextGenCoordinator {
     pub seeds_cache: Arc<DashMap<String, GroupSeed>>,
 }
 
-impl NextGenCoordinator {
+impl GroupCoordinator {
     pub fn new(
         config: NextGenConfig,
         metadata: Arc<dyn MetadataProvider>,
@@ -133,8 +139,12 @@ impl NextGenCoordinator {
     }
 }
 
-impl NextGenCoordinator {
-    pub fn replay_group_metadata(&self, group_id: &str, v: persistence::GroupMetadataValue) {
+impl GroupCoordinator {
+    pub fn replay_group_metadata(
+        &self,
+        group_id: &str,
+        v: persistence_next_gen::GroupMetadataValue,
+    ) {
         {
             let mut seed = self.seeds.entry(group_id.into()).or_default();
             seed.group_epoch = v.epoch;
@@ -146,7 +156,7 @@ impl NextGenCoordinator {
         &self,
         group_id: &str,
         member_id: &str,
-        v: persistence::MemberMetadataValue,
+        v: persistence_next_gen::MemberMetadataValue,
     ) {
         {
             let mut seed = self.seeds.entry(group_id.into()).or_default();
@@ -158,7 +168,7 @@ impl NextGenCoordinator {
     pub fn replay_target_assignment_metadata(
         &self,
         group_id: &str,
-        v: persistence::TargetAssignmentMetadataValue,
+        v: persistence_next_gen::TargetAssignmentMetadataValue,
     ) {
         {
             let mut seed = self.seeds.entry(group_id.into()).or_default();
@@ -171,7 +181,7 @@ impl NextGenCoordinator {
         &self,
         group_id: &str,
         member_id: &str,
-        v: persistence::TargetAssignmentMemberValue,
+        v: persistence_next_gen::TargetAssignmentMemberValue,
     ) {
         {
             let mut seed = self.seeds.entry(group_id.into()).or_default();
@@ -184,7 +194,7 @@ impl NextGenCoordinator {
         &self,
         group_id: &str,
         member_id: &str,
-        v: persistence::CurrentMemberAssignmentValue,
+        v: persistence_next_gen::CurrentMemberAssignmentValue,
     ) {
         {
             let mut seed = self.seeds.entry(group_id.into()).or_default();
@@ -197,8 +207,8 @@ impl NextGenCoordinator {
     /// Apply a tombstone for a next-gen key. Removes the corresponding
     /// entry from both `seeds` and `seeds_cache`. Used by bootstrap replay
     /// to honor records with `value = None`.
-    pub fn replay_next_gen_tombstone(&self, key: &persistence::NextGenKey) {
-        use persistence::NextGenKey as K;
+    pub fn replay_next_gen_tombstone(&self, key: &persistence_next_gen::NextGenKey) {
+        use persistence_next_gen::NextGenKey as K;
         let group_id = match key {
             K::GroupMetadata { group_id }
             | K::MemberMetadata { group_id, .. }
@@ -238,9 +248,7 @@ impl NextGenCoordinator {
         for gid in group_ids {
             if let Some((_, seed)) = self.seeds.remove(&gid) {
                 let handle = self.get_or_create(&gid);
-                let _ = handle
-                    .tx
-                    .try_send(group_actor::GroupActorMessage::Seed(seed));
+                let _ = handle.tx.try_send(actor::GroupActorMessage::Seed(seed));
             }
         }
     }
@@ -297,15 +305,15 @@ impl MetadataProvider for ImageMetadataProvider {
 }
 
 /// Hydration seed passed from the bootstrap replayer into a freshly-spawned
-/// [`group_actor::GroupActorHandle`]. All fields come directly from records
+/// [`actor::GroupActorHandle`]. All fields come directly from records
 /// decoded out of `__consumer_offsets`.
 #[derive(Debug, Default, Clone)]
 pub struct GroupSeed {
     pub group_epoch: i32,
     pub target_epoch: i32,
-    pub members: std::collections::HashMap<String, persistence::MemberMetadataValue>,
+    pub members: std::collections::HashMap<String, persistence_next_gen::MemberMetadataValue>,
     pub target_per_member:
-        std::collections::HashMap<String, persistence::TargetAssignmentMemberValue>,
+        std::collections::HashMap<String, persistence_next_gen::TargetAssignmentMemberValue>,
     pub current_per_member:
-        std::collections::HashMap<String, persistence::CurrentMemberAssignmentValue>,
+        std::collections::HashMap<String, persistence_next_gen::CurrentMemberAssignmentValue>,
 }
