@@ -635,6 +635,7 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             assigned_partitions: HashMap::new(),
             partitions_pending_revocation: HashMap::new(),
             last_seen: Instant::now(),
+            classic: None,
         });
     }
     for (mid, cur) in seed.current_per_member {
@@ -880,6 +881,7 @@ fn build_member(
         assigned_partitions: HashMap::new(),
         partitions_pending_revocation: HashMap::new(),
         last_seen: now,
+        classic: None,
     }
 }
 
