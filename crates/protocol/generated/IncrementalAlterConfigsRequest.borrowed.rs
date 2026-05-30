@@ -5,14 +5,13 @@ use bytes::BufMut;
 use crate::primitives::fixed::{get_bool, get_i8, put_bool, put_i8};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 44;
@@ -21,43 +20,50 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 1;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct IncrementalAlterConfigsRequest<'a> {
     pub resources: Vec<AlterConfigsResource<'a>>,
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for IncrementalAlterConfigsRequest<'a> {
-    fn default() -> Self {
-        Self {
-            resources: Vec::new(),
-            validate_only: false,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> IncrementalAlterConfigsRequest<'a> {
-    pub fn to_owned(&self) -> crate::owned::incremental_alter_configs_request::IncrementalAlterConfigsRequest {
+impl IncrementalAlterConfigsRequest<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::incremental_alter_configs_request::IncrementalAlterConfigsRequest {
         crate::owned::incremental_alter_configs_request::IncrementalAlterConfigsRequest {
-            resources: (self.resources).iter().map(|it| it.to_owned()).collect(),
+            resources: (self.resources)
+                .iter()
+                .map(AlterConfigsResource::to_owned)
+                .collect(),
             validate_only: (self.validate_only),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for IncrementalAlterConfigsRequest<'a> {
+impl Encode for IncrementalAlterConfigsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.resources).len(), flex); for it in &self.resources { it.encode(buf, version)?; } } }
-        if version >= 0 { put_bool(buf, self.validate_only) }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.resources).len(), flex);
+                for it in &self.resources {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            put_bool(buf, self.validate_only);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -67,8 +73,20 @@ impl<'a> Encode for IncrementalAlterConfigsRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.resources).len(), flex); let body: usize = (self.resources).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.resources).len(), flex);
+                let body: usize = (self.resources)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -76,72 +94,92 @@ impl<'a> Encode for IncrementalAlterConfigsRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for IncrementalAlterConfigsRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.resources = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(AlterConfigsResource::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.validate_only = get_bool(buf)?; }
+        if version >= 0 {
+            out.resources = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(AlterConfigsResource::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.validate_only = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> IncrementalAlterConfigsRequest<'a> {
+impl IncrementalAlterConfigsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.resources = vec![AlterConfigsResource::populated(version)]; }
-        if version >= 0 { m.validate_only = true; }
+        if version >= 0 {
+            m.resources = vec![AlterConfigsResource::populated(version)];
+        }
+        if version >= 0 {
+            m.validate_only = true;
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterConfigsResource<'a> {
     pub resource_type: i8,
     pub resource_name: &'a str,
     pub configs: Vec<AlterableConfig<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for AlterConfigsResource<'a> {
-    fn default() -> Self {
-        Self {
-            resource_type: 0i8,
-            resource_name: "",
-            configs: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> AlterConfigsResource<'a> {
-    pub fn to_owned(&self) -> crate::owned::incremental_alter_configs_request::AlterConfigsResource {
+impl AlterConfigsResource<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::incremental_alter_configs_request::AlterConfigsResource {
         crate::owned::incremental_alter_configs_request::AlterConfigsResource {
             resource_type: (self.resource_type),
             resource_name: (self.resource_name).to_string(),
-            configs: (self.configs).iter().map(|it| it.to_owned()).collect(),
+            configs: (self.configs)
+                .iter()
+                .map(AlterableConfig::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for AlterConfigsResource<'a> {
+impl Encode for AlterConfigsResource<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { put_i8(buf, self.resource_type) }
-        if version >= 0 { if flex { put_compact_string(buf, self.resource_name) } else { put_string(buf, self.resource_name) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.configs).len(), flex); for it in &self.configs { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i8(buf, self.resource_type);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.resource_name);
+            } else {
+                put_string(buf, self.resource_name);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.configs).len(), flex);
+                for it in &self.configs {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -151,9 +189,27 @@ impl<'a> Encode for AlterConfigsResource<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += if flex { compact_string_len(self.resource_name) } else { string_len(self.resource_name) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.configs).len(), flex); let body: usize = (self.configs).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.resource_name)
+            } else {
+                string_len(self.resource_name)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.configs).len(), flex);
+                let body: usize = (self.configs)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -161,71 +217,90 @@ impl<'a> Encode for AlterConfigsResource<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for AlterConfigsResource<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.resource_type = get_i8(buf)?; }
-        if version >= 0 { out.resource_name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.configs = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(AlterableConfig::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.resource_type = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.resource_name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.configs = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(AlterableConfig::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> AlterConfigsResource<'a> {
+impl AlterConfigsResource<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.resource_type = 1i8; }
-        if version >= 0 { m.resource_name = "x"; }
-        if version >= 0 { m.configs = vec![AlterableConfig::populated(version)]; }
+        if version >= 0 {
+            m.resource_type = 1i8;
+        }
+        if version >= 0 {
+            m.resource_name = "x";
+        }
+        if version >= 0 {
+            m.configs = vec![AlterableConfig::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AlterableConfig<'a> {
     pub name: &'a str,
     pub config_operation: i8,
     pub value: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for AlterableConfig<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            config_operation: 0i8,
-            value: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> AlterableConfig<'a> {
+impl AlterableConfig<'_> {
     pub fn to_owned(&self) -> crate::owned::incremental_alter_configs_request::AlterableConfig {
         crate::owned::incremental_alter_configs_request::AlterableConfig {
             name: (self.name).to_string(),
             config_operation: (self.config_operation),
-            value: (self.value).map(|s| s.to_string()),
+            value: (self.value).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for AlterableConfig<'a> {
+impl Encode for AlterableConfig<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 0 { put_i8(buf, self.config_operation) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.value) } else { put_nullable_string(buf, self.value) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.name);
+            } else {
+                put_string(buf, self.name);
+            }
+        }
+        if version >= 0 {
+            put_i8(buf, self.config_operation);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.value);
+            } else {
+                put_nullable_string(buf, self.value);
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -235,9 +310,23 @@ impl<'a> Encode for AlterableConfig<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.value) } else { nullable_string_len(self.value) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.value)
+            } else {
+                nullable_string_len(self.value)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -245,31 +334,47 @@ impl<'a> Encode for AlterableConfig<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for AlterableConfig<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.config_operation = get_i8(buf)?; }
-        if version >= 0 { out.value = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.config_operation = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.value = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> AlterableConfig<'a> {
+impl AlterableConfig<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x"; }
-        if version >= 0 { m.config_operation = 1i8; }
-        if version >= 0 { m.value = Some("x"); }
+        if version >= 0 {
+            m.name = "x";
+        }
+        if version >= 0 {
+            m.config_operation = 1i8;
+        }
+        if version >= 0 {
+            m.value = Some("x");
+        }
         m
     }
 }

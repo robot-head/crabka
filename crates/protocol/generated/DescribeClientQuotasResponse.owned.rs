@@ -6,10 +6,9 @@ use crate::primitives::fixed::{get_f64, get_i16, get_i32, put_f64, put_i16, put_
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
     get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 48;
@@ -18,7 +17,9 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 1;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DescribeClientQuotasResponse {
@@ -28,17 +29,39 @@ pub struct DescribeClientQuotasResponse {
     pub entries: Option<Vec<EntryData>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for DescribeClientQuotasResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message.as_deref()) } else { put_nullable_string(buf, self.error_message.as_deref()) } }
-        if version >= 0 { { let len = (self.entries).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.entries { for it in v { it.encode(buf, version)?; } } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
+        if version >= 0 {
+            {
+                let len = (self.entries).as_ref().map(Vec::len);
+                crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                if let Some(v) = &self.entries {
+                    for it in v {
+                        it.encode(buf, version)?;
+                    }
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -48,10 +71,31 @@ impl Encode for DescribeClientQuotasResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message.as_deref()) } else { nullable_string_len(self.error_message.as_deref()) }; }
-        if version >= 0 { n += { let opt: Option<&Vec<_>> = (self.entries).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message.as_deref())
+            } else {
+                nullable_string_len(self.error_message.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += {
+                let opt: Option<&Vec<_>> = (self.entries).as_ref();
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize =
+                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -59,52 +103,95 @@ impl Encode for DescribeClientQuotasResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for DescribeClientQuotasResponse {
+impl Decode<'_> for DescribeClientQuotasResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.entries = { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(EntryData::decode(buf, version)?); } Some(v) } } }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.entries = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(EntryData::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DescribeClientQuotasResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x".to_string()); }
-        if version >= 0 { m.entries = Some(vec![EntryData::populated(version)]); }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.entries = Some(vec![EntryData::populated(version)]);
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntryData {
     pub entity: Vec<EntityData>,
     pub values: Vec<ValueData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for EntryData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.entity).len(), flex); for it in &self.entity { it.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.values).len(), flex); for it in &self.values { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.entity).len(), flex);
+                for it in &self.entity {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.values).len(), flex);
+                for it in &self.values {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -114,8 +201,22 @@ impl Encode for EntryData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.entity).len(), flex); let body: usize = (self.entity).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.values).len(), flex); let body: usize = (self.values).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.entity).len(), flex);
+                let body: usize = (self.entity).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.values).len(), flex);
+                let body: usize = (self.values).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -123,45 +224,73 @@ impl Encode for EntryData {
         n
     }
 }
-
-impl<'de> Decode<'de> for EntryData {
+impl Decode<'_> for EntryData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.entity = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(EntityData::decode(buf, version)?); } v }; }
-        if version >= 0 { out.values = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(ValueData::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.entity = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(EntityData::decode(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.values = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(ValueData::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl EntryData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.entity = vec![EntityData::populated(version)]; }
-        if version >= 0 { m.values = vec![ValueData::populated(version)]; }
+        if version >= 0 {
+            m.entity = vec![EntityData::populated(version)];
+        }
+        if version >= 0 {
+            m.values = vec![ValueData::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EntityData {
     pub entity_type: String,
     pub entity_name: Option<String>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for EntityData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { if flex { put_compact_string(buf, &self.entity_type) } else { put_string(buf, &self.entity_type) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.entity_name.as_deref()) } else { put_nullable_string(buf, self.entity_name.as_deref()) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.entity_type);
+            } else {
+                put_string(buf, &self.entity_type);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.entity_name.as_deref());
+            } else {
+                put_nullable_string(buf, self.entity_name.as_deref());
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -171,8 +300,20 @@ impl Encode for EntityData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.entity_type) } else { string_len(&self.entity_type) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.entity_name.as_deref()) } else { nullable_string_len(self.entity_name.as_deref()) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.entity_type)
+            } else {
+                string_len(&self.entity_type)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.entity_name.as_deref())
+            } else {
+                nullable_string_len(self.entity_name.as_deref())
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -180,45 +321,63 @@ impl Encode for EntityData {
         n
     }
 }
-
-impl<'de> Decode<'de> for EntityData {
+impl Decode<'_> for EntityData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.entity_type = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.entity_name = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
+        if version >= 0 {
+            out.entity_type = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.entity_name = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl EntityData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.entity_type = "x".to_string(); }
-        if version >= 0 { m.entity_name = Some("x".to_string()); }
+        if version >= 0 {
+            m.entity_type = "x".to_string();
+        }
+        if version >= 0 {
+            m.entity_name = Some("x".to_string());
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ValueData {
     pub key: String,
     pub value: f64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for ValueData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { if flex { put_compact_string(buf, &self.key) } else { put_string(buf, &self.key) } }
-        if version >= 0 { put_f64(buf, self.value) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.key);
+            } else {
+                put_string(buf, &self.key);
+            }
+        }
+        if version >= 0 {
+            put_f64(buf, self.value);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -228,8 +387,16 @@ impl Encode for ValueData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.key) } else { string_len(&self.key) }; }
-        if version >= 0 { n += 8; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.key)
+            } else {
+                string_len(&self.key)
+            };
+        }
+        if version >= 0 {
+            n += 8;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -237,29 +404,37 @@ impl Encode for ValueData {
         n
     }
 }
-
-impl<'de> Decode<'de> for ValueData {
+impl Decode<'_> for ValueData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.key = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.value = get_f64(buf)?; }
+        if version >= 0 {
+            out.key = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.value = get_f64(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ValueData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.key = "x".to_string(); }
-        if version >= 0 { m.value = 1.0f64; }
+        if version >= 0 {
+            m.key = "x".to_string();
+        }
+        if version >= 0 {
+            m.value = 1.0f64;
+        }
         m
     }
 }

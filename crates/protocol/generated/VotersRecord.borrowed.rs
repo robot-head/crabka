@@ -6,53 +6,52 @@ use crate::primitives::fixed::{get_i16, get_i32, get_u16, put_i16, put_i32, put_
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct VotersRecord<'a> {
     pub version: i16,
     pub voters: Vec<Voter<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for VotersRecord<'a> {
-    fn default() -> Self {
-        Self {
-            version: 0i16,
-            voters: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> VotersRecord<'a> {
+impl VotersRecord<'_> {
     pub fn to_owned(&self) -> crate::owned::voters_record::VotersRecord {
         crate::owned::voters_record::VotersRecord {
             version: (self.version),
-            voters: (self.voters).iter().map(|it| it.to_owned()).collect(),
+            voters: (self.voters).iter().map(Voter::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for VotersRecord<'a> {
+impl Encode for VotersRecord<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("VotersRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "VotersRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i16(buf, self.version) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.voters).len(), flex); for it in &self.voters { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i16(buf, self.version);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.voters).len(), flex);
+                for it in &self.voters {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -62,8 +61,17 @@ impl<'a> Encode for VotersRecord<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.voters).len(), flex); let body: usize = (self.voters).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.voters).len(), flex);
+                let body: usize = (self.voters).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -71,37 +79,49 @@ impl<'a> Encode for VotersRecord<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for VotersRecord<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("VotersRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "VotersRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.version = get_i16(buf)?; }
-        if version >= 0 { out.voters = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(Voter::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.version = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.voters = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(Voter::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> VotersRecord<'a> {
+impl VotersRecord<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.version = 1i16; }
-        if version >= 0 { m.voters = vec![Voter::populated(version)]; }
+        if version >= 0 {
+            m.version = 1i16;
+        }
+        if version >= 0 {
+            m.voters = vec![Voter::populated(version)];
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Voter<'a> {
     pub voter_id: i32,
     pub voter_directory_id: crate::primitives::uuid::Uuid,
@@ -109,38 +129,37 @@ pub struct Voter<'a> {
     pub k_raft_version_feature: KRaftVersionFeature,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for Voter<'a> {
-    fn default() -> Self {
-        Self {
-            voter_id: 0i32,
-            voter_directory_id: Default::default(),
-            endpoints: Vec::new(),
-            k_raft_version_feature: Default::default(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> Voter<'a> {
+impl Voter<'_> {
     pub fn to_owned(&self) -> crate::owned::voters_record::Voter {
         crate::owned::voters_record::Voter {
             voter_id: (self.voter_id),
             voter_directory_id: (self.voter_directory_id),
-            endpoints: (self.endpoints).iter().map(|it| it.to_owned()).collect(),
+            endpoints: (self.endpoints).iter().map(Endpoint::to_owned).collect(),
             k_raft_version_feature: (self.k_raft_version_feature).to_owned(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for Voter<'a> {
+impl Encode for Voter<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.voter_id) }
-        if version >= 0 { crate::primitives::uuid::put_uuid(buf, self.voter_directory_id) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.endpoints).len(), flex); for it in &self.endpoints { it.encode(buf, version)?; } } }
-        if version >= 0 { self.k_raft_version_feature.encode(buf, version)? }
+        if version >= 0 {
+            put_i32(buf, self.voter_id);
+        }
+        if version >= 0 {
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.endpoints).len(), flex);
+                for it in &self.endpoints {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            self.k_raft_version_feature.encode(buf, version)?;
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -150,10 +169,26 @@ impl<'a> Encode for Voter<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 16; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.endpoints).len(), flex); let body: usize = (self.endpoints).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += self.k_raft_version_feature.encoded_len(version); }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.endpoints).len(), flex);
+                let body: usize = (self.endpoints)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += self.k_raft_version_feature.encoded_len(version);
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -161,57 +196,63 @@ impl<'a> Encode for Voter<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for Voter<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.voter_id = get_i32(buf)?; }
-        if version >= 0 { out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.endpoints = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(Endpoint::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.k_raft_version_feature = KRaftVersionFeature::decode_borrow(buf, version)?; }
+        if version >= 0 {
+            out.voter_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.endpoints = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(Endpoint::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.k_raft_version_feature = KRaftVersionFeature::decode_borrow(buf, version)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> Voter<'a> {
+impl Voter<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.voter_id = 1i32; }
-        if version >= 0 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.endpoints = vec![Endpoint::populated(version)]; }
-        if version >= 0 { m.k_raft_version_feature = KRaftVersionFeature::populated(version); }
+        if version >= 0 {
+            m.voter_id = 1i32;
+        }
+        if version >= 0 {
+            m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.endpoints = vec![Endpoint::populated(version)];
+        }
+        if version >= 0 {
+            m.k_raft_version_feature = KRaftVersionFeature::populated(version);
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Endpoint<'a> {
     pub name: &'a str,
     pub host: &'a str,
     pub port: u16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for Endpoint<'a> {
-    fn default() -> Self {
-        Self {
-            name: "",
-            host: "",
-            port: 0u16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> Endpoint<'a> {
+impl Endpoint<'_> {
     pub fn to_owned(&self) -> crate::owned::voters_record::Endpoint {
         crate::owned::voters_record::Endpoint {
             name: (self.name).to_string(),
@@ -221,13 +262,26 @@ impl<'a> Endpoint<'a> {
         }
     }
 }
-
-impl<'a> Encode for Endpoint<'a> {
+impl Encode for Endpoint<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.host) } else { put_string(buf, self.host) } }
-        if version >= 0 { put_u16(buf, self.port) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.name);
+            } else {
+                put_string(buf, self.name);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.host);
+            } else {
+                put_string(buf, self.host);
+            }
+        }
+        if version >= 0 {
+            put_u16(buf, self.port);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -237,9 +291,23 @@ impl<'a> Encode for Endpoint<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.host) } else { string_len(self.host) }; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.host)
+            } else {
+                string_len(self.host)
+            };
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -247,52 +315,56 @@ impl<'a> Encode for Endpoint<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for Endpoint<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.host = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.port = get_u16(buf)?; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.port = get_u16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> Endpoint<'a> {
+impl Endpoint<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x"; }
-        if version >= 0 { m.host = "x"; }
-        if version >= 0 { m.port = 1u16; }
+        if version >= 0 {
+            m.name = "x";
+        }
+        if version >= 0 {
+            m.host = "x";
+        }
+        if version >= 0 {
+            m.port = 1u16;
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KRaftVersionFeature {
     pub min_supported_version: i16,
     pub max_supported_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for KRaftVersionFeature {
-    fn default() -> Self {
-        Self {
-            min_supported_version: 0i16,
-            max_supported_version: 0i16,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl KRaftVersionFeature {
     pub fn to_owned(&self) -> crate::owned::voters_record::KRaftVersionFeature {
         crate::owned::voters_record::KRaftVersionFeature {
@@ -302,12 +374,15 @@ impl KRaftVersionFeature {
         }
     }
 }
-
 impl Encode for KRaftVersionFeature {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i16(buf, self.min_supported_version) }
-        if version >= 0 { put_i16(buf, self.max_supported_version) }
+        if version >= 0 {
+            put_i16(buf, self.min_supported_version);
+        }
+        if version >= 0 {
+            put_i16(buf, self.max_supported_version);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -317,8 +392,12 @@ impl Encode for KRaftVersionFeature {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -326,29 +405,33 @@ impl Encode for KRaftVersionFeature {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for KRaftVersionFeature {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.min_supported_version = get_i16(buf)?; }
-        if version >= 0 { out.max_supported_version = get_i16(buf)?; }
+        if version >= 0 {
+            out.min_supported_version = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.max_supported_version = get_i16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl KRaftVersionFeature {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.min_supported_version = 1i16; }
-        if version >= 0 { m.max_supported_version = 1i16; }
+        if version >= 0 {
+            m.min_supported_version = 1i16;
+        }
+        if version >= 0 {
+            m.max_supported_version = 1i16;
+        }
         m
     }
 }

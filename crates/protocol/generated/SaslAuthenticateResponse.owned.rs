@@ -4,13 +4,14 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i16, get_i64, put_i16, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    bytes_len, compact_bytes_len, get_bytes_owned, get_compact_bytes_owned, put_bytes,
+    put_compact_bytes,
 };
-use crate::primitives::string_bytes::{bytes_len, compact_bytes_len, get_bytes_owned, get_compact_bytes_owned, put_bytes, put_compact_bytes};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes::{
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
+};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 36;
@@ -19,7 +20,9 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SaslAuthenticateResponse {
@@ -29,17 +32,35 @@ pub struct SaslAuthenticateResponse {
     pub session_lifetime_ms: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for SaslAuthenticateResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message.as_deref()) } else { put_nullable_string(buf, self.error_message.as_deref()) } }
-        if version >= 0 { if flex { put_compact_bytes(buf, &self.auth_bytes) } else { put_bytes(buf, &self.auth_bytes) } }
-        if version >= 1 { put_i64(buf, self.session_lifetime_ms) }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_bytes(buf, &self.auth_bytes);
+            } else {
+                put_bytes(buf, &self.auth_bytes);
+            }
+        }
+        if version >= 1 {
+            put_i64(buf, self.session_lifetime_ms);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -49,10 +70,26 @@ impl Encode for SaslAuthenticateResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message.as_deref()) } else { nullable_string_len(self.error_message.as_deref()) }; }
-        if version >= 0 { n += if flex { compact_bytes_len(&self.auth_bytes) } else { bytes_len(&self.auth_bytes) }; }
-        if version >= 1 { n += 8; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message.as_deref())
+            } else {
+                nullable_string_len(self.error_message.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_bytes_len(&self.auth_bytes)
+            } else {
+                bytes_len(&self.auth_bytes)
+            };
+        }
+        if version >= 1 {
+            n += 8;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -60,36 +97,59 @@ impl Encode for SaslAuthenticateResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for SaslAuthenticateResponse {
+impl Decode<'_> for SaslAuthenticateResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.auth_bytes = if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }; }
-        if version >= 1 { out.session_lifetime_ms = get_i64(buf)?; }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.auth_bytes = if flex {
+                get_compact_bytes_owned(buf)?
+            } else {
+                get_bytes_owned(buf)?
+            };
+        }
+        if version >= 1 {
+            out.session_lifetime_ms = get_i64(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl SaslAuthenticateResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x".to_string()); }
-        if version >= 0 { m.auth_bytes = ::bytes::Bytes::from_static(b"x"); }
-        if version >= 1 { m.session_lifetime_ms = 1i64; }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.auth_bytes = ::bytes::Bytes::from_static(b"x");
+        }
+        if version >= 1 {
+            m.session_lifetime_ms = 1i64;
+        }
         m
     }
 }
@@ -102,7 +162,10 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
-    obj.insert("authBytes".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "authBytes".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     if version >= 1 {
         obj.insert("sessionLifetimeMs".to_string(), ::serde_json::json!(0));
     }

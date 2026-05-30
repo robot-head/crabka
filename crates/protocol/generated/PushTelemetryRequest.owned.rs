@@ -2,9 +2,12 @@
 
 use bytes::{Buf, BufMut};
 
-use crate::primitives::fixed::{get_bool, get_i32, get_i8, put_bool, put_i32, put_i8};
-use crate::primitives::string_bytes::{bytes_len, compact_bytes_len, get_bytes_owned, get_compact_bytes_owned, put_bytes, put_compact_bytes};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::fixed::{get_bool, get_i8, get_i32, put_bool, put_i8, put_i32};
+use crate::primitives::string_bytes::{
+    bytes_len, compact_bytes_len, get_bytes_owned, get_compact_bytes_owned, put_bytes,
+    put_compact_bytes,
+};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 72;
@@ -13,7 +16,9 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PushTelemetryRequest {
@@ -24,18 +29,34 @@ pub struct PushTelemetryRequest {
     pub metrics: ::bytes::Bytes,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for PushTelemetryRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { crate::primitives::uuid::put_uuid(buf, self.client_instance_id) }
-        if version >= 0 { put_i32(buf, self.subscription_id) }
-        if version >= 0 { put_bool(buf, self.terminating) }
-        if version >= 0 { put_i8(buf, self.compression_type) }
-        if version >= 0 { if flex { put_compact_bytes(buf, &self.metrics) } else { put_bytes(buf, &self.metrics) } }
+        if version >= 0 {
+            crate::primitives::uuid::put_uuid(buf, self.client_instance_id);
+        }
+        if version >= 0 {
+            put_i32(buf, self.subscription_id);
+        }
+        if version >= 0 {
+            put_bool(buf, self.terminating);
+        }
+        if version >= 0 {
+            put_i8(buf, self.compression_type);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_bytes(buf, &self.metrics);
+            } else {
+                put_bytes(buf, &self.metrics);
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -45,11 +66,25 @@ impl Encode for PushTelemetryRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 16; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += if flex { compact_bytes_len(&self.metrics) } else { bytes_len(&self.metrics) }; }
+        if version >= 0 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_bytes_len(&self.metrics)
+            } else {
+                bytes_len(&self.metrics)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -57,38 +92,61 @@ impl Encode for PushTelemetryRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for PushTelemetryRequest {
+impl Decode<'_> for PushTelemetryRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.client_instance_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.subscription_id = get_i32(buf)?; }
-        if version >= 0 { out.terminating = get_bool(buf)?; }
-        if version >= 0 { out.compression_type = get_i8(buf)?; }
-        if version >= 0 { out.metrics = if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }; }
+        if version >= 0 {
+            out.client_instance_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.subscription_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.terminating = get_bool(buf)?;
+        }
+        if version >= 0 {
+            out.compression_type = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.metrics = if flex {
+                get_compact_bytes_owned(buf)?
+            } else {
+                get_bytes_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl PushTelemetryRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.client_instance_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.subscription_id = 1i32; }
-        if version >= 0 { m.terminating = true; }
-        if version >= 0 { m.compression_type = 1i8; }
-        if version >= 0 { m.metrics = ::bytes::Bytes::from_static(b"x"); }
+        if version >= 0 {
+            m.client_instance_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.subscription_id = 1i32;
+        }
+        if version >= 0 {
+            m.terminating = true;
+        }
+        if version >= 0 {
+            m.compression_type = 1i8;
+        }
+        if version >= 0 {
+            m.metrics = ::bytes::Bytes::from_static(b"x");
+        }
         m
     }
 }
@@ -99,11 +157,17 @@ impl PushTelemetryRequest {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("clientInstanceId".to_string(), ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()));
+    obj.insert(
+        "clientInstanceId".to_string(),
+        ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()),
+    );
     obj.insert("subscriptionId".to_string(), ::serde_json::json!(0));
     obj.insert("terminating".to_string(), ::serde_json::Value::Bool(false));
     obj.insert("compressionType".to_string(), ::serde_json::json!(0));
-    obj.insert("metrics".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "metrics".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     ::serde_json::Value::Object(obj)
 }
 

@@ -1456,8 +1456,11 @@ dependencies = [
 name = "crabka-protocol-codegen"
 version = "0.1.2"
 dependencies = [
+ "proc-macro2",
+ "quote",
  "serde",
  "serde_json",
+ "syn 2.0.117",
  "thiserror 2.0.18",
 ]
 

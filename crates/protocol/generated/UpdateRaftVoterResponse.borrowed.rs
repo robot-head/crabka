@@ -6,10 +6,10 @@ use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{
+    WriteTaggedFields, encode_to_bytes, read_tagged_fields, tagged_fields_len,
 };
-use crate::tagged_fields::{encode_to_bytes, read_tagged_fields, tagged_fields_len, WriteTaggedFields};
 use crate::{Decode, DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 82;
@@ -18,27 +18,17 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UpdateRaftVoterResponse {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub current_leader: crate::owned::update_raft_voter_response::CurrentLeader,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for UpdateRaftVoterResponse {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            current_leader: Default::default(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl UpdateRaftVoterResponse {
     pub fn to_owned(&self) -> crate::owned::update_raft_voter_response::UpdateRaftVoterResponse {
         crate::owned::update_raft_voter_response::UpdateRaftVoterResponse {
@@ -49,19 +39,28 @@ impl UpdateRaftVoterResponse {
         }
     }
 }
-
 impl Encode for UpdateRaftVoterResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
         if flex {
             let mut tagged = WriteTaggedFields::new();
             if !(crate::codegen_helpers::is_default(&self.current_leader)) {
-                let payload = encode_to_bytes(self.current_leader.encoded_len(version), |b| { self.current_leader.encode(b, version)?; Ok(()) });
+                let payload = encode_to_bytes(self.current_leader.encoded_len(version), |b| {
+                    self.current_leader.encode(b, version)?;
+                    Ok(())
+                });
                 tagged.add(0, payload);
             }
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -71,8 +70,12 @@ impl Encode for UpdateRaftVoterResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
             if !(crate::codegen_helpers::is_default(&self.current_leader)) {
@@ -83,43 +86,59 @@ impl Encode for UpdateRaftVoterResponse {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for UpdateRaftVoterResponse {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
         if flex {
-            // Pre-declare typed slots for known tagged fields.
             let mut tag_current_leader = None;
-            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| {
-                match tag {
-                0 => { tag_current_leader = Some({ let b: &mut &[u8] = payload; crate::owned::update_raft_voter_response::CurrentLeader::decode(b, version)? }); Ok(true) }
-                    _ => Ok(false),
+            out.unknown_tagged_fields = read_tagged_fields(buf, |tag, payload| match tag {
+                0 => {
+                    tag_current_leader = Some({
+                        let b: &mut &[u8] = payload;
+                        crate::owned::update_raft_voter_response::CurrentLeader::decode(b, version)?
+                    });
+                    Ok(true)
                 }
+                _ => Ok(false),
             })?;
-            if let Some(v) = tag_current_leader { out.current_leader = v; }
+            if let Some(v) = tag_current_leader {
+                out.current_leader = v;
+            }
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl UpdateRaftVoterResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.current_leader = crate::owned::update_raft_voter_response::CurrentLeader::populated(version); }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.current_leader =
+                crate::owned::update_raft_voter_response::CurrentLeader::populated(version);
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CurrentLeader<'a> {
     pub leader_id: i32,
@@ -128,8 +147,7 @@ pub struct CurrentLeader<'a> {
     pub port: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for CurrentLeader<'a> {
+impl Default for CurrentLeader<'_> {
     fn default() -> Self {
         Self {
             leader_id: -1i32,
@@ -140,8 +158,7 @@ impl<'a> Default for CurrentLeader<'a> {
         }
     }
 }
-
-impl<'a> CurrentLeader<'a> {
+impl CurrentLeader<'_> {
     pub fn to_owned(&self) -> crate::owned::update_raft_voter_response::CurrentLeader {
         crate::owned::update_raft_voter_response::CurrentLeader {
             leader_id: (self.leader_id),
@@ -152,14 +169,25 @@ impl<'a> CurrentLeader<'a> {
         }
     }
 }
-
-impl<'a> Encode for CurrentLeader<'a> {
+impl Encode for CurrentLeader<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.leader_id) }
-        if version >= 0 { put_i32(buf, self.leader_epoch) }
-        if version >= 0 { if flex { put_compact_string(buf, self.host) } else { put_string(buf, self.host) } }
-        if version >= 0 { put_i32(buf, self.port) }
+        if version >= 0 {
+            put_i32(buf, self.leader_id);
+        }
+        if version >= 0 {
+            put_i32(buf, self.leader_epoch);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.host);
+            } else {
+                put_string(buf, self.host);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.port);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -169,10 +197,22 @@ impl<'a> Encode for CurrentLeader<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_string_len(self.host) } else { string_len(self.host) }; }
-        if version >= 0 { n += 4; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.host)
+            } else {
+                string_len(self.host)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -180,33 +220,49 @@ impl<'a> Encode for CurrentLeader<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for CurrentLeader<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.leader_id = get_i32(buf)?; }
-        if version >= 0 { out.leader_epoch = get_i32(buf)?; }
-        if version >= 0 { out.host = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.port = get_i32(buf)?; }
+        if version >= 0 {
+            out.leader_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.leader_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.port = get_i32(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> CurrentLeader<'a> {
+impl CurrentLeader<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.leader_id = 1i32; }
-        if version >= 0 { m.leader_epoch = 1i32; }
-        if version >= 0 { m.host = "x"; }
-        if version >= 0 { m.port = 1i32; }
+        if version >= 0 {
+            m.leader_id = 1i32;
+        }
+        if version >= 0 {
+            m.leader_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.host = "x";
+        }
+        if version >= 0 {
+            m.port = 1i32;
+        }
         m
     }
 }

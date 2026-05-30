@@ -3,14 +3,16 @@
 use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i16, put_i16};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KRaftVersionRecord {
@@ -18,15 +20,20 @@ pub struct KRaftVersionRecord {
     pub k_raft_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for KRaftVersionRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("KRaftVersionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "KRaftVersionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i16(buf, self.version) }
-        if version >= 0 { put_i16(buf, self.k_raft_version) }
+        if version >= 0 {
+            put_i16(buf, self.version);
+        }
+        if version >= 0 {
+            put_i16(buf, self.k_raft_version);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -36,8 +43,12 @@ impl Encode for KRaftVersionRecord {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -45,32 +56,38 @@ impl Encode for KRaftVersionRecord {
         n
     }
 }
-
-impl<'de> Decode<'de> for KRaftVersionRecord {
+impl Decode<'_> for KRaftVersionRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("KRaftVersionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "KRaftVersionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.version = get_i16(buf)?; }
-        if version >= 0 { out.k_raft_version = get_i16(buf)?; }
+        if version >= 0 {
+            out.version = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.k_raft_version = get_i16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl KRaftVersionRecord {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.version = 1i16; }
-        if version >= 0 { m.k_raft_version = 1i16; }
+        if version >= 0 {
+            m.version = 1i16;
+        }
+        if version >= 0 {
+            m.k_raft_version = 1i16;
+        }
         m
     }
 }

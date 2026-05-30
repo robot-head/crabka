@@ -4,10 +4,10 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i32, get_i64, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -21,9 +21,19 @@ pub struct TaskOffset {
 impl Encode for TaskOffset {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, &self.subtopology_id) } else { put_string(buf, &self.subtopology_id) } }
-        if version >= 0 { put_i32(buf, self.partition) }
-        if version >= 0 { put_i64(buf, self.offset) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.subtopology_id);
+            } else {
+                put_string(buf, &self.subtopology_id);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.partition);
+        }
+        if version >= 0 {
+            put_i64(buf, self.offset);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -33,9 +43,19 @@ impl Encode for TaskOffset {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.subtopology_id) } else { string_len(&self.subtopology_id) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 8; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.subtopology_id)
+            } else {
+                string_len(&self.subtopology_id)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 8;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -44,17 +64,25 @@ impl Encode for TaskOffset {
     }
 }
 
-impl<'de> Decode<'de> for TaskOffset {
+impl Decode<'_> for TaskOffset {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.subtopology_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.partition = get_i32(buf)?; }
-        if version >= 0 { out.offset = get_i64(buf)?; }
+        if version >= 0 {
+            out.subtopology_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.partition = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.offset = get_i64(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
@@ -65,9 +93,15 @@ impl TaskOffset {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.subtopology_id = "x".to_string(); }
-        if version >= 0 { m.partition = 1i32; }
-        if version >= 0 { m.offset = 1i64; }
+        if version >= 0 {
+            m.subtopology_id = "x".to_string();
+        }
+        if version >= 0 {
+            m.partition = 1i32;
+        }
+        if version >= 0 {
+            m.offset = 1i64;
+        }
         m
     }
 }

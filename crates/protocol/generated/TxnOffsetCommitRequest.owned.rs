@@ -6,10 +6,9 @@ use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
     get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 28;
@@ -18,7 +17,9 @@ pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 3;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxnOffsetCommitRequest {
@@ -32,7 +33,6 @@ pub struct TxnOffsetCommitRequest {
     pub topics: Vec<TxnOffsetCommitRequestTopic>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for TxnOffsetCommitRequest {
     fn default() -> Self {
         Self {
@@ -41,28 +41,67 @@ impl Default for TxnOffsetCommitRequest {
             producer_id: 0i64,
             producer_epoch: 0i16,
             generation_id: -1i32,
-            member_id: "".to_string(),
+            member_id: String::new(),
             group_instance_id: None,
             topics: Vec::new(),
             unknown_tagged_fields: Default::default(),
         }
     }
 }
-
 impl Encode for TxnOffsetCommitRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_string(buf, &self.transactional_id) } else { put_string(buf, &self.transactional_id) } }
-        if version >= 0 { if flex { put_compact_string(buf, &self.group_id) } else { put_string(buf, &self.group_id) } }
-        if version >= 0 { put_i64(buf, self.producer_id) }
-        if version >= 0 { put_i16(buf, self.producer_epoch) }
-        if version >= 3 { put_i32(buf, self.generation_id) }
-        if version >= 3 { if flex { put_compact_string(buf, &self.member_id) } else { put_string(buf, &self.member_id) } }
-        if version >= 3 { if flex { put_compact_nullable_string(buf, self.group_instance_id.as_deref()) } else { put_nullable_string(buf, self.group_instance_id.as_deref()) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topics).len(), flex); for it in &self.topics { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.transactional_id);
+            } else {
+                put_string(buf, &self.transactional_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.group_id);
+            } else {
+                put_string(buf, &self.group_id);
+            }
+        }
+        if version >= 0 {
+            put_i64(buf, self.producer_id);
+        }
+        if version >= 0 {
+            put_i16(buf, self.producer_epoch);
+        }
+        if version >= 3 {
+            put_i32(buf, self.generation_id);
+        }
+        if version >= 3 {
+            if flex {
+                put_compact_string(buf, &self.member_id);
+            } else {
+                put_string(buf, &self.member_id);
+            }
+        }
+        if version >= 3 {
+            if flex {
+                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
+            } else {
+                put_nullable_string(buf, self.group_instance_id.as_deref());
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
+                for it in &self.topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -72,14 +111,51 @@ impl Encode for TxnOffsetCommitRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.transactional_id) } else { string_len(&self.transactional_id) }; }
-        if version >= 0 { n += if flex { compact_string_len(&self.group_id) } else { string_len(&self.group_id) }; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 2; }
-        if version >= 3 { n += 4; }
-        if version >= 3 { n += if flex { compact_string_len(&self.member_id) } else { string_len(&self.member_id) }; }
-        if version >= 3 { n += if flex { compact_nullable_string_len(self.group_instance_id.as_deref()) } else { nullable_string_len(self.group_instance_id.as_deref()) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex); let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.transactional_id)
+            } else {
+                string_len(&self.transactional_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.group_id)
+            } else {
+                string_len(&self.group_id)
+            };
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 3 {
+            n += 4;
+        }
+        if version >= 3 {
+            n += if flex {
+                compact_string_len(&self.member_id)
+            } else {
+                string_len(&self.member_id)
+            };
+        }
+        if version >= 3 {
+            n += if flex {
+                compact_nullable_string_len(self.group_instance_id.as_deref())
+            } else {
+                nullable_string_len(self.group_instance_id.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -87,60 +163,125 @@ impl Encode for TxnOffsetCommitRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for TxnOffsetCommitRequest {
+impl Decode<'_> for TxnOffsetCommitRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.transactional_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.group_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.producer_id = get_i64(buf)?; }
-        if version >= 0 { out.producer_epoch = get_i16(buf)?; }
-        if version >= 3 { out.generation_id = get_i32(buf)?; }
-        if version >= 3 { out.member_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 3 { out.group_instance_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(TxnOffsetCommitRequestTopic::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.transactional_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.producer_id = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.producer_epoch = get_i16(buf)?;
+        }
+        if version >= 3 {
+            out.generation_id = get_i32(buf)?;
+        }
+        if version >= 3 {
+            out.member_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 3 {
+            out.group_instance_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(TxnOffsetCommitRequestTopic::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl TxnOffsetCommitRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.transactional_id = "x".to_string(); }
-        if version >= 0 { m.group_id = "x".to_string(); }
-        if version >= 0 { m.producer_id = 1i64; }
-        if version >= 0 { m.producer_epoch = 1i16; }
-        if version >= 3 { m.generation_id = 1i32; }
-        if version >= 3 { m.member_id = "x".to_string(); }
-        if version >= 3 { m.group_instance_id = Some("x".to_string()); }
-        if version >= 0 { m.topics = vec![TxnOffsetCommitRequestTopic::populated(version)]; }
+        if version >= 0 {
+            m.transactional_id = "x".to_string();
+        }
+        if version >= 0 {
+            m.group_id = "x".to_string();
+        }
+        if version >= 0 {
+            m.producer_id = 1i64;
+        }
+        if version >= 0 {
+            m.producer_epoch = 1i16;
+        }
+        if version >= 3 {
+            m.generation_id = 1i32;
+        }
+        if version >= 3 {
+            m.member_id = "x".to_string();
+        }
+        if version >= 3 {
+            m.group_instance_id = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.topics = vec![TxnOffsetCommitRequestTopic::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TxnOffsetCommitRequestTopic {
     pub name: String,
     pub partitions: Vec<TxnOffsetCommitRequestPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for TxnOffsetCommitRequestTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
-        if version >= 0 { if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.name);
+            } else {
+                put_string(buf, &self.name);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -150,8 +291,24 @@ impl Encode for TxnOffsetCommitRequestTopic {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 3;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.name)
+            } else {
+                string_len(&self.name)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -159,33 +316,47 @@ impl Encode for TxnOffsetCommitRequestTopic {
         n
     }
 }
-
-impl<'de> Decode<'de> for TxnOffsetCommitRequestTopic {
+impl Decode<'_> for TxnOffsetCommitRequestTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(TxnOffsetCommitRequestPartition::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(TxnOffsetCommitRequestPartition::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl TxnOffsetCommitRequestTopic {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x".to_string(); }
-        if version >= 0 { m.partitions = vec![TxnOffsetCommitRequestPartition::populated(version)]; }
+        if version >= 0 {
+            m.name = "x".to_string();
+        }
+        if version >= 0 {
+            m.partitions = vec![TxnOffsetCommitRequestPartition::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TxnOffsetCommitRequestPartition {
     pub partition_index: i32,
@@ -194,7 +365,6 @@ pub struct TxnOffsetCommitRequestPartition {
     pub committed_metadata: Option<String>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for TxnOffsetCommitRequestPartition {
     fn default() -> Self {
         Self {
@@ -206,14 +376,25 @@ impl Default for TxnOffsetCommitRequestPartition {
         }
     }
 }
-
 impl Encode for TxnOffsetCommitRequestPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
-        if version >= 0 { put_i32(buf, self.partition_index) }
-        if version >= 0 { put_i64(buf, self.committed_offset) }
-        if version >= 2 { put_i32(buf, self.committed_leader_epoch) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.committed_metadata.as_deref()) } else { put_nullable_string(buf, self.committed_metadata.as_deref()) } }
+        if version >= 0 {
+            put_i32(buf, self.partition_index);
+        }
+        if version >= 0 {
+            put_i64(buf, self.committed_offset);
+        }
+        if version >= 2 {
+            put_i32(buf, self.committed_leader_epoch);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.committed_metadata.as_deref());
+            } else {
+                put_nullable_string(buf, self.committed_metadata.as_deref());
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -223,10 +404,22 @@ impl Encode for TxnOffsetCommitRequestPartition {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 3;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 8; }
-        if version >= 2 { n += 4; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.committed_metadata.as_deref()) } else { nullable_string_len(self.committed_metadata.as_deref()) }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 2 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.committed_metadata.as_deref())
+            } else {
+                nullable_string_len(self.committed_metadata.as_deref())
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -234,33 +427,49 @@ impl Encode for TxnOffsetCommitRequestPartition {
         n
     }
 }
-
-impl<'de> Decode<'de> for TxnOffsetCommitRequestPartition {
+impl Decode<'_> for TxnOffsetCommitRequestPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 3;
         let mut out = Self::default();
-        if version >= 0 { out.partition_index = get_i32(buf)?; }
-        if version >= 0 { out.committed_offset = get_i64(buf)?; }
-        if version >= 2 { out.committed_leader_epoch = get_i32(buf)?; }
-        if version >= 0 { out.committed_metadata = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.committed_offset = get_i64(buf)?;
+        }
+        if version >= 2 {
+            out.committed_leader_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.committed_metadata = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl TxnOffsetCommitRequestPartition {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.partition_index = 1i32; }
-        if version >= 0 { m.committed_offset = 1i64; }
-        if version >= 2 { m.committed_leader_epoch = 1i32; }
-        if version >= 0 { m.committed_metadata = Some("x".to_string()); }
+        if version >= 0 {
+            m.partition_index = 1i32;
+        }
+        if version >= 0 {
+            m.committed_offset = 1i64;
+        }
+        if version >= 2 {
+            m.committed_leader_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.committed_metadata = Some("x".to_string());
+        }
         m
     }
 }
@@ -271,15 +480,24 @@ impl TxnOffsetCommitRequestPartition {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("transactionalId".to_string(), ::serde_json::Value::String(String::new()));
-    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "transactionalId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
+    obj.insert(
+        "groupId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     obj.insert("producerId".to_string(), ::serde_json::json!(0));
     obj.insert("producerEpoch".to_string(), ::serde_json::json!(0));
     if version >= 3 {
         obj.insert("generationId".to_string(), ::serde_json::json!(-1));
     }
     if version >= 3 {
-        obj.insert("memberId".to_string(), ::serde_json::Value::String("".to_string()));
+        obj.insert(
+            "memberId".to_string(),
+            ::serde_json::Value::String(String::new()),
+        );
     }
     if version >= 3 {
         obj.insert("groupInstanceId".to_string(), ::serde_json::Value::Null);

@@ -2,12 +2,14 @@
 
 use bytes::{Buf, BufMut};
 
-use crate::primitives::fixed::{get_bool, get_i16, get_i32, get_i64, put_bool, put_i16, put_i32, put_i64};
-use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+use crate::primitives::fixed::{
+    get_bool, get_i16, get_i32, get_i64, put_bool, put_i16, put_i32, put_i64,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes::{
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
+};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 35;
@@ -16,7 +18,9 @@ pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeLogDirsResponse {
@@ -25,16 +29,29 @@ pub struct DescribeLogDirsResponse {
     pub results: Vec<DescribeLogDirsResult>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for DescribeLogDirsResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 3 { put_i16(buf, self.error_code) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.results).len(), flex); for it in &self.results { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 3 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.results).len(), flex);
+                for it in &self.results {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -44,9 +61,23 @@ impl Encode for DescribeLogDirsResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 3 { n += 2; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.results).len(), flex); let body: usize = (self.results).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 3 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.results).len(), flex);
+                let body: usize = (self.results)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -54,38 +85,55 @@ impl Encode for DescribeLogDirsResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for DescribeLogDirsResponse {
+impl Decode<'_> for DescribeLogDirsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 3 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.results = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DescribeLogDirsResult::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 3 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.results = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribeLogDirsResult::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DescribeLogDirsResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 3 { m.error_code = 1i16; }
-        if version >= 0 { m.results = vec![DescribeLogDirsResult::populated(version)]; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 3 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.results = vec![DescribeLogDirsResult::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeLogDirsResult {
     pub error_code: i16,
@@ -96,7 +144,6 @@ pub struct DescribeLogDirsResult {
     pub is_cordoned: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for DescribeLogDirsResult {
     fn default() -> Self {
         Self {
@@ -110,16 +157,36 @@ impl Default for DescribeLogDirsResult {
         }
     }
 }
-
 impl Encode for DescribeLogDirsResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.log_dir) } else { put_string(buf, &self.log_dir) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topics).len(), flex); for it in &self.topics { it.encode(buf, version)?; } } }
-        if version >= 4 { put_i64(buf, self.total_bytes) }
-        if version >= 4 { put_i64(buf, self.usable_bytes) }
-        if version >= 5 { put_bool(buf, self.is_cordoned) }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.log_dir);
+            } else {
+                put_string(buf, &self.log_dir);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
+                for it in &self.topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 4 {
+            put_i64(buf, self.total_bytes);
+        }
+        if version >= 4 {
+            put_i64(buf, self.usable_bytes);
+        }
+        if version >= 5 {
+            put_bool(buf, self.is_cordoned);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -129,12 +196,33 @@ impl Encode for DescribeLogDirsResult {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_string_len(&self.log_dir) } else { string_len(&self.log_dir) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex); let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 4 { n += 8; }
-        if version >= 4 { n += 8; }
-        if version >= 5 { n += 1; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.log_dir)
+            } else {
+                string_len(&self.log_dir)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
+        if version >= 4 {
+            n += 8;
+        }
+        if version >= 4 {
+            n += 8;
+        }
+        if version >= 5 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -142,53 +230,95 @@ impl Encode for DescribeLogDirsResult {
         n
     }
 }
-
-impl<'de> Decode<'de> for DescribeLogDirsResult {
+impl Decode<'_> for DescribeLogDirsResult {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.log_dir = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DescribeLogDirsTopic::decode(buf, version)?); } v }; }
-        if version >= 4 { out.total_bytes = get_i64(buf)?; }
-        if version >= 4 { out.usable_bytes = get_i64(buf)?; }
-        if version >= 5 { out.is_cordoned = get_bool(buf)?; }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.log_dir = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribeLogDirsTopic::decode(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 4 {
+            out.total_bytes = get_i64(buf)?;
+        }
+        if version >= 4 {
+            out.usable_bytes = get_i64(buf)?;
+        }
+        if version >= 5 {
+            out.is_cordoned = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DescribeLogDirsResult {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.log_dir = "x".to_string(); }
-        if version >= 0 { m.topics = vec![DescribeLogDirsTopic::populated(version)]; }
-        if version >= 4 { m.total_bytes = 1i64; }
-        if version >= 4 { m.usable_bytes = 1i64; }
-        if version >= 5 { m.is_cordoned = true; }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.log_dir = "x".to_string();
+        }
+        if version >= 0 {
+            m.topics = vec![DescribeLogDirsTopic::populated(version)];
+        }
+        if version >= 4 {
+            m.total_bytes = 1i64;
+        }
+        if version >= 4 {
+            m.usable_bytes = 1i64;
+        }
+        if version >= 5 {
+            m.is_cordoned = true;
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeLogDirsTopic {
     pub name: String,
     pub partitions: Vec<DescribeLogDirsPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for DescribeLogDirsTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.name);
+            } else {
+                put_string(buf, &self.name);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -198,8 +328,24 @@ impl Encode for DescribeLogDirsTopic {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.name)
+            } else {
+                string_len(&self.name)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -207,33 +353,47 @@ impl Encode for DescribeLogDirsTopic {
         n
     }
 }
-
-impl<'de> Decode<'de> for DescribeLogDirsTopic {
+impl Decode<'_> for DescribeLogDirsTopic {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DescribeLogDirsPartition::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribeLogDirsPartition::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DescribeLogDirsTopic {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x".to_string(); }
-        if version >= 0 { m.partitions = vec![DescribeLogDirsPartition::populated(version)]; }
+        if version >= 0 {
+            m.name = "x".to_string();
+        }
+        if version >= 0 {
+            m.partitions = vec![DescribeLogDirsPartition::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeLogDirsPartition {
     pub partition_index: i32,
@@ -242,14 +402,21 @@ pub struct DescribeLogDirsPartition {
     pub is_future_key: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for DescribeLogDirsPartition {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { put_i32(buf, self.partition_index) }
-        if version >= 0 { put_i64(buf, self.partition_size) }
-        if version >= 0 { put_i64(buf, self.offset_lag) }
-        if version >= 0 { put_bool(buf, self.is_future_key) }
+        if version >= 0 {
+            put_i32(buf, self.partition_index);
+        }
+        if version >= 0 {
+            put_i64(buf, self.partition_size);
+        }
+        if version >= 0 {
+            put_i64(buf, self.offset_lag);
+        }
+        if version >= 0 {
+            put_bool(buf, self.is_future_key);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -259,10 +426,18 @@ impl Encode for DescribeLogDirsPartition {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -270,33 +445,45 @@ impl Encode for DescribeLogDirsPartition {
         n
     }
 }
-
-impl<'de> Decode<'de> for DescribeLogDirsPartition {
+impl Decode<'_> for DescribeLogDirsPartition {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.partition_index = get_i32(buf)?; }
-        if version >= 0 { out.partition_size = get_i64(buf)?; }
-        if version >= 0 { out.offset_lag = get_i64(buf)?; }
-        if version >= 0 { out.is_future_key = get_bool(buf)?; }
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.partition_size = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.offset_lag = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.is_future_key = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DescribeLogDirsPartition {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.partition_index = 1i32; }
-        if version >= 0 { m.partition_size = 1i64; }
-        if version >= 0 { m.offset_lag = 1i64; }
-        if version >= 0 { m.is_future_key = true; }
+        if version >= 0 {
+            m.partition_index = 1i32;
+        }
+        if version >= 0 {
+            m.partition_size = 1i64;
+        }
+        if version >= 0 {
+            m.offset_lag = 1i64;
+        }
+        if version >= 0 {
+            m.is_future_key = true;
+        }
         m
     }
 }

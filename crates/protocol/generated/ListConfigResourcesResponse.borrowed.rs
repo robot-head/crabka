@@ -2,14 +2,12 @@
 
 use bytes::BufMut;
 
-use crate::primitives::fixed::{get_i16, get_i32, get_i8, put_i16, put_i32, put_i8};
+use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i8, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 74;
@@ -18,47 +16,55 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListConfigResourcesResponse<'a> {
     pub throttle_time_ms: i32,
     pub error_code: i16,
     pub config_resources: Vec<ConfigResource<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for ListConfigResourcesResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            error_code: 0i16,
-            config_resources: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> ListConfigResourcesResponse<'a> {
-    pub fn to_owned(&self) -> crate::owned::list_config_resources_response::ListConfigResourcesResponse {
+impl ListConfigResourcesResponse<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::list_config_resources_response::ListConfigResourcesResponse {
         crate::owned::list_config_resources_response::ListConfigResourcesResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
-            config_resources: (self.config_resources).iter().map(|it| it.to_owned()).collect(),
+            config_resources: (self.config_resources)
+                .iter()
+                .map(ConfigResource::to_owned)
+                .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for ListConfigResourcesResponse<'a> {
+impl Encode for ListConfigResourcesResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.config_resources).len(), flex); for it in &self.config_resources { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.config_resources).len(), flex);
+                for it in &self.config_resources {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -68,9 +74,25 @@ impl<'a> Encode for ListConfigResourcesResponse<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.config_resources).len(), flex); let body: usize = (self.config_resources).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.config_resources).len(),
+                    flex,
+                );
+                let body: usize = (self.config_resources)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -78,46 +100,62 @@ impl<'a> Encode for ListConfigResourcesResponse<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ListConfigResourcesResponse<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.config_resources = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(ConfigResource::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.config_resources = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(ConfigResource::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> ListConfigResourcesResponse<'a> {
+impl ListConfigResourcesResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.config_resources = vec![ConfigResource::populated(version)]; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.config_resources = vec![ConfigResource::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigResource<'a> {
     pub resource_name: &'a str,
     pub resource_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for ConfigResource<'a> {
+impl Default for ConfigResource<'_> {
     fn default() -> Self {
         Self {
             resource_name: "",
@@ -126,8 +164,7 @@ impl<'a> Default for ConfigResource<'a> {
         }
     }
 }
-
-impl<'a> ConfigResource<'a> {
+impl ConfigResource<'_> {
     pub fn to_owned(&self) -> crate::owned::list_config_resources_response::ConfigResource {
         crate::owned::list_config_resources_response::ConfigResource {
             resource_name: (self.resource_name).to_string(),
@@ -136,12 +173,19 @@ impl<'a> ConfigResource<'a> {
         }
     }
 }
-
-impl<'a> Encode for ConfigResource<'a> {
+impl Encode for ConfigResource<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, self.resource_name) } else { put_string(buf, self.resource_name) } }
-        if version >= 1 { put_i8(buf, self.resource_type) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.resource_name);
+            } else {
+                put_string(buf, self.resource_name);
+            }
+        }
+        if version >= 1 {
+            put_i8(buf, self.resource_type);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -151,8 +195,16 @@ impl<'a> Encode for ConfigResource<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.resource_name) } else { string_len(self.resource_name) }; }
-        if version >= 1 { n += 1; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.resource_name)
+            } else {
+                string_len(self.resource_name)
+            };
+        }
+        if version >= 1 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -160,29 +212,37 @@ impl<'a> Encode for ConfigResource<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ConfigResource<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.resource_name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 1 { out.resource_type = get_i8(buf)?; }
+        if version >= 0 {
+            out.resource_name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 1 {
+            out.resource_type = get_i8(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> ConfigResource<'a> {
+impl ConfigResource<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.resource_name = "x"; }
-        if version >= 1 { m.resource_type = 1i8; }
+        if version >= 0 {
+            m.resource_name = "x";
+        }
+        if version >= 1 {
+            m.resource_type = 1i8;
+        }
         m
     }
 }

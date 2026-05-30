@@ -3,7 +3,7 @@
 use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i8, put_i8};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 74;
@@ -12,39 +12,42 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ListConfigResourcesRequest {
     pub resource_types: Vec<i8>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl Default for ListConfigResourcesRequest {
-    fn default() -> Self {
-        Self {
-            resource_types: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
 impl ListConfigResourcesRequest {
-    pub fn to_owned(&self) -> crate::owned::list_config_resources_request::ListConfigResourcesRequest {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::list_config_resources_request::ListConfigResourcesRequest {
         crate::owned::list_config_resources_request::ListConfigResourcesRequest {
             resource_types: (self.resource_types).clone(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
 impl Encode for ListConfigResourcesRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 1 { { crate::primitives::array::put_array_len(buf, (self.resource_types).len(), flex); for it in &self.resource_types { put_i8(buf, *it); } } }
+        if version >= 1 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.resource_types).len(), flex);
+                for it in &self.resource_types {
+                    put_i8(buf, *it);
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -54,7 +57,16 @@ impl Encode for ListConfigResourcesRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 1 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.resource_types).len(), flex); let body: usize = (self.resource_types).iter().map(|_| 1).sum(); prefix + body }; }
+        if version >= 1 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.resource_types).len(),
+                    flex,
+                );
+                let body: usize = (self.resource_types).iter().map(|_| 1).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -62,30 +74,40 @@ impl Encode for ListConfigResourcesRequest {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ListConfigResourcesRequest {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 1 { out.resource_types = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i8(buf)?); } v }; }
+        if version >= 1 {
+            out.resource_types = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i8(buf)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ListConfigResourcesRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 1 { m.resource_types = vec![1i8]; }
+        if version >= 1 {
+            m.resource_types = vec![1i8];
+        }
         m
     }
 }

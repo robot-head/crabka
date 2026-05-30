@@ -3,7 +3,7 @@
 use bytes::BufMut;
 
 use crate::primitives::fixed::{get_bool, get_i8, put_bool, put_i8};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 60;
@@ -12,7 +12,9 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeClusterRequest {
@@ -21,7 +23,6 @@ pub struct DescribeClusterRequest {
     pub include_fenced_brokers: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for DescribeClusterRequest {
     fn default() -> Self {
         Self {
@@ -32,7 +33,6 @@ impl Default for DescribeClusterRequest {
         }
     }
 }
-
 impl DescribeClusterRequest {
     pub fn to_owned(&self) -> crate::owned::describe_cluster_request::DescribeClusterRequest {
         crate::owned::describe_cluster_request::DescribeClusterRequest {
@@ -43,16 +43,24 @@ impl DescribeClusterRequest {
         }
     }
 }
-
 impl Encode for DescribeClusterRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_bool(buf, self.include_cluster_authorized_operations) }
-        if version >= 1 { put_i8(buf, self.endpoint_type) }
-        if version >= 2 { put_bool(buf, self.include_fenced_brokers) }
+        if version >= 0 {
+            put_bool(buf, self.include_cluster_authorized_operations);
+        }
+        if version >= 1 {
+            put_i8(buf, self.endpoint_type);
+        }
+        if version >= 2 {
+            put_bool(buf, self.include_fenced_brokers);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -62,9 +70,15 @@ impl Encode for DescribeClusterRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 1; }
-        if version >= 1 { n += 1; }
-        if version >= 2 { n += 1; }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 1 {
+            n += 1;
+        }
+        if version >= 2 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -72,34 +86,45 @@ impl Encode for DescribeClusterRequest {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DescribeClusterRequest {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.include_cluster_authorized_operations = get_bool(buf)?; }
-        if version >= 1 { out.endpoint_type = get_i8(buf)?; }
-        if version >= 2 { out.include_fenced_brokers = get_bool(buf)?; }
+        if version >= 0 {
+            out.include_cluster_authorized_operations = get_bool(buf)?;
+        }
+        if version >= 1 {
+            out.endpoint_type = get_i8(buf)?;
+        }
+        if version >= 2 {
+            out.include_fenced_brokers = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DescribeClusterRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.include_cluster_authorized_operations = true; }
-        if version >= 1 { m.endpoint_type = 1i8; }
-        if version >= 2 { m.include_fenced_brokers = true; }
+        if version >= 0 {
+            m.include_cluster_authorized_operations = true;
+        }
+        if version >= 1 {
+            m.endpoint_type = 1i8;
+        }
+        if version >= 2 {
+            m.include_fenced_brokers = true;
+        }
         m
     }
 }

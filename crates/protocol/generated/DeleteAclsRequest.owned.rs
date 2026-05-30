@@ -4,12 +4,10 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i8, put_i8};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 31;
@@ -18,21 +16,32 @@ pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeleteAclsRequest {
     pub filters: Vec<DeleteAclsFilter>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for DeleteAclsRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.filters).len(), flex); for it in &self.filters { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.filters).len(), flex);
+                for it in &self.filters {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -42,7 +51,17 @@ impl Encode for DeleteAclsRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.filters).len(), flex); let body: usize = (self.filters).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.filters).len(), flex);
+                let body: usize = (self.filters)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -50,34 +69,43 @@ impl Encode for DeleteAclsRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for DeleteAclsRequest {
+impl Decode<'_> for DeleteAclsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.filters = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DeleteAclsFilter::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.filters = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DeleteAclsFilter::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DeleteAclsRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.filters = vec![DeleteAclsFilter::populated(version)]; }
+        if version >= 0 {
+            m.filters = vec![DeleteAclsFilter::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteAclsFilter {
     pub resource_type_filter: i8,
@@ -89,7 +117,6 @@ pub struct DeleteAclsFilter {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for DeleteAclsFilter {
     fn default() -> Self {
         Self {
@@ -104,17 +131,42 @@ impl Default for DeleteAclsFilter {
         }
     }
 }
-
 impl Encode for DeleteAclsFilter {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { put_i8(buf, self.resource_type_filter) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.resource_name_filter.as_deref()) } else { put_nullable_string(buf, self.resource_name_filter.as_deref()) } }
-        if version >= 1 { put_i8(buf, self.pattern_type_filter) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.principal_filter.as_deref()) } else { put_nullable_string(buf, self.principal_filter.as_deref()) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.host_filter.as_deref()) } else { put_nullable_string(buf, self.host_filter.as_deref()) } }
-        if version >= 0 { put_i8(buf, self.operation) }
-        if version >= 0 { put_i8(buf, self.permission_type) }
+        if version >= 0 {
+            put_i8(buf, self.resource_type_filter);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.resource_name_filter.as_deref());
+            } else {
+                put_nullable_string(buf, self.resource_name_filter.as_deref());
+            }
+        }
+        if version >= 1 {
+            put_i8(buf, self.pattern_type_filter);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.principal_filter.as_deref());
+            } else {
+                put_nullable_string(buf, self.principal_filter.as_deref());
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.host_filter.as_deref());
+            } else {
+                put_nullable_string(buf, self.host_filter.as_deref());
+            }
+        }
+        if version >= 0 {
+            put_i8(buf, self.operation);
+        }
+        if version >= 0 {
+            put_i8(buf, self.permission_type);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -124,13 +176,39 @@ impl Encode for DeleteAclsFilter {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.resource_name_filter.as_deref()) } else { nullable_string_len(self.resource_name_filter.as_deref()) }; }
-        if version >= 1 { n += 1; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.principal_filter.as_deref()) } else { nullable_string_len(self.principal_filter.as_deref()) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.host_filter.as_deref()) } else { nullable_string_len(self.host_filter.as_deref()) }; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.resource_name_filter.as_deref())
+            } else {
+                nullable_string_len(self.resource_name_filter.as_deref())
+            };
+        }
+        if version >= 1 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.principal_filter.as_deref())
+            } else {
+                nullable_string_len(self.principal_filter.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.host_filter.as_deref())
+            } else {
+                nullable_string_len(self.host_filter.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -138,39 +216,75 @@ impl Encode for DeleteAclsFilter {
         n
     }
 }
-
-impl<'de> Decode<'de> for DeleteAclsFilter {
+impl Decode<'_> for DeleteAclsFilter {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.resource_type_filter = get_i8(buf)?; }
-        if version >= 0 { out.resource_name_filter = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 1 { out.pattern_type_filter = get_i8(buf)?; }
-        if version >= 0 { out.principal_filter = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.host_filter = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.operation = get_i8(buf)?; }
-        if version >= 0 { out.permission_type = get_i8(buf)?; }
+        if version >= 0 {
+            out.resource_type_filter = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.resource_name_filter = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 1 {
+            out.pattern_type_filter = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.principal_filter = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.host_filter = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.operation = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.permission_type = get_i8(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DeleteAclsFilter {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.resource_type_filter = 1i8; }
-        if version >= 0 { m.resource_name_filter = Some("x".to_string()); }
-        if version >= 1 { m.pattern_type_filter = 1i8; }
-        if version >= 0 { m.principal_filter = Some("x".to_string()); }
-        if version >= 0 { m.host_filter = Some("x".to_string()); }
-        if version >= 0 { m.operation = 1i8; }
-        if version >= 0 { m.permission_type = 1i8; }
+        if version >= 0 {
+            m.resource_type_filter = 1i8;
+        }
+        if version >= 0 {
+            m.resource_name_filter = Some("x".to_string());
+        }
+        if version >= 1 {
+            m.pattern_type_filter = 1i8;
+        }
+        if version >= 0 {
+            m.principal_filter = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.host_filter = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.operation = 1i8;
+        }
+        if version >= 0 {
+            m.permission_type = 1i8;
+        }
         m
     }
 }

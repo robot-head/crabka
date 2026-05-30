@@ -23,40 +23,31 @@ impl Flavor {
     }
 }
 
-/// The standard clippy-suppress header that all generated wrapper files receive.
-/// This is the union of lints that the generated `.rs` bodies (via `include!`)
-/// are known to fire, mirroring the hand-written wrappers' `#![allow]` lists.
+/// The clippy-suppress header that all generated wrapper files receive.
+///
+/// Only lints with **no** machine-applicable fix are listed — intentional
+/// narrowing casts, the `#[must_use]` / `Default` style suggestions, and the
+/// always-true version comparisons the schema version ranges produce (e.g.
+/// `version >= 0`). Everything else (`semicolon_if_nothing_returned`,
+/// `manual_range_contains`, `redundant_closure_for_method_calls`, `unused_*`, …)
+/// is auto-corrected by the `cargo clippy --fix` pass in `tools/regenerate.sh`,
+/// so it does not need an allow here.
 #[must_use]
 pub fn allow_header() -> &'static str {
     concat!(
         "#![allow(\n",
         "    clippy::absurd_extreme_comparisons,\n",
-        "    clippy::double_comparisons,\n",
-        "    clippy::elidable_lifetime_names,\n",
-        "    clippy::manual_string_new,\n",
-        "    clippy::must_use_candidate,\n",
-        "    clippy::unnecessary_wraps,\n",
-        "    clippy::cast_sign_loss,\n",
         "    clippy::cast_possible_truncation,\n",
         "    clippy::cast_possible_wrap,\n",
+        "    clippy::cast_sign_loss,\n",
         "    clippy::default_trait_access,\n",
-        "    clippy::derivable_impls,\n",
-        "    clippy::collapsible_if,\n",
-        "    clippy::too_many_lines,\n",
-        "    clippy::field_reassign_with_default,\n",
-        "    unused_mut,\n",
+        "    clippy::must_use_candidate,\n",
         "    clippy::new_without_default,\n",
-        "    clippy::unreadable_literal,\n",
-        "    clippy::redundant_closure_for_method_calls,\n",
         "    clippy::nonminimal_bool,\n",
-        "    clippy::bool_comparison,\n",
-        "    clippy::map_unwrap_or,\n",
-        "    clippy::option_as_ref_deref,\n",
-        "    clippy::manual_range_contains,\n",
-        "    clippy::borrow_deref_ref,\n",
-        "    clippy::explicit_auto_deref,\n",
-        "    clippy::unnecessary_semicolon,\n",
-        "    unused_imports,\n",
+        "    clippy::too_many_lines,\n",
+        "    clippy::unnecessary_wraps,\n",
+        "    clippy::unreadable_literal,\n",
+        "    unused_mut,\n",
         "    unused_variables\n",
         ")]",
     )

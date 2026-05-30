@@ -2,17 +2,16 @@
 
 use bytes::BufMut;
 
-use crate::primitives::fixed::{get_i16, get_i32, get_i8, put_i16, put_i32, put_i8};
+use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i8, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 69;
@@ -21,43 +20,47 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ConsumerGroupDescribeResponse<'a> {
     pub throttle_time_ms: i32,
     pub groups: Vec<DescribedGroup<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for ConsumerGroupDescribeResponse<'a> {
-    fn default() -> Self {
-        Self {
-            throttle_time_ms: 0i32,
-            groups: Vec::new(),
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> ConsumerGroupDescribeResponse<'a> {
-    pub fn to_owned(&self) -> crate::owned::consumer_group_describe_response::ConsumerGroupDescribeResponse {
+impl ConsumerGroupDescribeResponse<'_> {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::consumer_group_describe_response::ConsumerGroupDescribeResponse {
         crate::owned::consumer_group_describe_response::ConsumerGroupDescribeResponse {
             throttle_time_ms: (self.throttle_time_ms),
-            groups: (self.groups).iter().map(|it| it.to_owned()).collect(),
+            groups: (self.groups).iter().map(DescribedGroup::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for ConsumerGroupDescribeResponse<'a> {
+impl Encode for ConsumerGroupDescribeResponse<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.groups).len(), flex); for it in &self.groups { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.groups).len(), flex);
+                for it in &self.groups {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -67,8 +70,17 @@ impl<'a> Encode for ConsumerGroupDescribeResponse<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.groups).len(), flex); let body: usize = (self.groups).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.groups).len(), flex);
+                let body: usize = (self.groups).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -76,36 +88,49 @@ impl<'a> Encode for ConsumerGroupDescribeResponse<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for ConsumerGroupDescribeResponse<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.groups = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DescribedGroup::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.groups = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribedGroup::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> ConsumerGroupDescribeResponse<'a> {
+impl ConsumerGroupDescribeResponse<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.groups = vec![DescribedGroup::populated(version)]; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.groups = vec![DescribedGroup::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribedGroup<'a> {
     pub error_code: i16,
@@ -119,8 +144,7 @@ pub struct DescribedGroup<'a> {
     pub authorized_operations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for DescribedGroup<'a> {
+impl Default for DescribedGroup<'_> {
     fn default() -> Self {
         Self {
             error_code: 0i16,
@@ -136,36 +160,73 @@ impl<'a> Default for DescribedGroup<'a> {
         }
     }
 }
-
-impl<'a> DescribedGroup<'a> {
+impl DescribedGroup<'_> {
     pub fn to_owned(&self) -> crate::owned::consumer_group_describe_response::DescribedGroup {
         crate::owned::consumer_group_describe_response::DescribedGroup {
             error_code: (self.error_code),
-            error_message: (self.error_message).map(|s| s.to_string()),
+            error_message: (self.error_message).map(std::string::ToString::to_string),
             group_id: (self.group_id).to_string(),
             group_state: (self.group_state).to_string(),
             group_epoch: (self.group_epoch),
             assignment_epoch: (self.assignment_epoch),
             assignor_name: (self.assignor_name).to_string(),
-            members: (self.members).iter().map(|it| it.to_owned()).collect(),
+            members: (self.members).iter().map(Member::to_owned).collect(),
             authorized_operations: (self.authorized_operations),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for DescribedGroup<'a> {
+impl Encode for DescribedGroup<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message) } else { put_nullable_string(buf, self.error_message) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.group_id) } else { put_string(buf, self.group_id) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.group_state) } else { put_string(buf, self.group_state) } }
-        if version >= 0 { put_i32(buf, self.group_epoch) }
-        if version >= 0 { put_i32(buf, self.assignment_epoch) }
-        if version >= 0 { if flex { put_compact_string(buf, self.assignor_name) } else { put_string(buf, self.assignor_name) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.members).len(), flex); for it in &self.members { it.encode(buf, version)?; } } }
-        if version >= 0 { put_i32(buf, self.authorized_operations) }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message);
+            } else {
+                put_nullable_string(buf, self.error_message);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.group_id);
+            } else {
+                put_string(buf, self.group_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.group_state);
+            } else {
+                put_string(buf, self.group_state);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.group_epoch);
+        }
+        if version >= 0 {
+            put_i32(buf, self.assignment_epoch);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.assignor_name);
+            } else {
+                put_string(buf, self.assignor_name);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.members).len(), flex);
+                for it in &self.members {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.authorized_operations);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -175,15 +236,57 @@ impl<'a> Encode for DescribedGroup<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message) } else { nullable_string_len(self.error_message) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.group_id) } else { string_len(self.group_id) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.group_state) } else { string_len(self.group_state) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_string_len(self.assignor_name) } else { string_len(self.assignor_name) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.members).len(), flex); let body: usize = (self.members).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += 4; }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message)
+            } else {
+                nullable_string_len(self.error_message)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.group_id)
+            } else {
+                string_len(self.group_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.group_state)
+            } else {
+                string_len(self.group_state)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.assignor_name)
+            } else {
+                string_len(self.assignor_name)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.members).len(), flex);
+                let body: usize = (self.members)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -191,47 +294,101 @@ impl<'a> Encode for DescribedGroup<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DescribedGroup<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.group_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.group_state = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.group_epoch = get_i32(buf)?; }
-        if version >= 0 { out.assignment_epoch = get_i32(buf)?; }
-        if version >= 0 { out.assignor_name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.members = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(Member::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.authorized_operations = get_i32(buf)?; }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.group_state = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.group_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.assignment_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.assignor_name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.members = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(Member::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.authorized_operations = get_i32(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> DescribedGroup<'a> {
+impl DescribedGroup<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x"); }
-        if version >= 0 { m.group_id = "x"; }
-        if version >= 0 { m.group_state = "x"; }
-        if version >= 0 { m.group_epoch = 1i32; }
-        if version >= 0 { m.assignment_epoch = 1i32; }
-        if version >= 0 { m.assignor_name = "x"; }
-        if version >= 0 { m.members = vec![Member::populated(version)]; }
-        if version >= 0 { m.authorized_operations = 1i32; }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x");
+        }
+        if version >= 0 {
+            m.group_id = "x";
+        }
+        if version >= 0 {
+            m.group_state = "x";
+        }
+        if version >= 0 {
+            m.group_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.assignment_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.assignor_name = "x";
+        }
+        if version >= 0 {
+            m.members = vec![Member::populated(version)];
+        }
+        if version >= 0 {
+            m.authorized_operations = 1i32;
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member<'a> {
     pub member_id: &'a str,
@@ -247,8 +404,7 @@ pub struct Member<'a> {
     pub member_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for Member<'a> {
+impl Default for Member<'_> {
     fn default() -> Self {
         Self {
             member_id: "",
@@ -266,18 +422,21 @@ impl<'a> Default for Member<'a> {
         }
     }
 }
-
-impl<'a> Member<'a> {
+impl Member<'_> {
     pub fn to_owned(&self) -> crate::owned::consumer_group_describe_response::Member {
         crate::owned::consumer_group_describe_response::Member {
             member_id: (self.member_id).to_string(),
-            instance_id: (self.instance_id).map(|s| s.to_string()),
-            rack_id: (self.rack_id).map(|s| s.to_string()),
+            instance_id: (self.instance_id).map(std::string::ToString::to_string),
+            rack_id: (self.rack_id).map(std::string::ToString::to_string),
             member_epoch: (self.member_epoch),
             client_id: (self.client_id).to_string(),
             client_host: (self.client_host).to_string(),
-            subscribed_topic_names: (self.subscribed_topic_names).iter().map(|s| s.to_string()).collect(),
-            subscribed_topic_regex: (self.subscribed_topic_regex).map(|s| s.to_string()),
+            subscribed_topic_names: (self.subscribed_topic_names)
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            subscribed_topic_regex: (self.subscribed_topic_regex)
+                .map(std::string::ToString::to_string),
             assignment: (self.assignment).to_owned(),
             target_assignment: (self.target_assignment).to_owned(),
             member_type: (self.member_type),
@@ -285,21 +444,79 @@ impl<'a> Member<'a> {
         }
     }
 }
-
-impl<'a> Encode for Member<'a> {
+impl Encode for Member<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, self.member_id) } else { put_string(buf, self.member_id) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.instance_id) } else { put_nullable_string(buf, self.instance_id) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.rack_id) } else { put_nullable_string(buf, self.rack_id) } }
-        if version >= 0 { put_i32(buf, self.member_epoch) }
-        if version >= 0 { if flex { put_compact_string(buf, self.client_id) } else { put_string(buf, self.client_id) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.client_host) } else { put_string(buf, self.client_host) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.subscribed_topic_names).len(), flex); for it in &self.subscribed_topic_names { if flex { put_compact_string(buf, *it) } else { put_string(buf, *it) }; } } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.subscribed_topic_regex) } else { put_nullable_string(buf, self.subscribed_topic_regex) } }
-        if version >= 0 { self.assignment.encode(buf, version)? }
-        if version >= 0 { self.target_assignment.encode(buf, version)? }
-        if version >= 1 { put_i8(buf, self.member_type) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.member_id);
+            } else {
+                put_string(buf, self.member_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.instance_id);
+            } else {
+                put_nullable_string(buf, self.instance_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.rack_id);
+            } else {
+                put_nullable_string(buf, self.rack_id);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.member_epoch);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.client_id);
+            } else {
+                put_string(buf, self.client_id);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.client_host);
+            } else {
+                put_string(buf, self.client_host);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(
+                    buf,
+                    (self.subscribed_topic_names).len(),
+                    flex,
+                );
+                for it in &self.subscribed_topic_names {
+                    if flex {
+                        put_compact_string(buf, it);
+                    } else {
+                        put_string(buf, it);
+                    }
+                }
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.subscribed_topic_regex);
+            } else {
+                put_nullable_string(buf, self.subscribed_topic_regex);
+            }
+        }
+        if version >= 0 {
+            self.assignment.encode(buf, version)?;
+        }
+        if version >= 0 {
+            self.target_assignment.encode(buf, version)?;
+        }
+        if version >= 1 {
+            put_i8(buf, self.member_type);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -309,17 +526,79 @@ impl<'a> Encode for Member<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.member_id) } else { string_len(self.member_id) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.instance_id) } else { nullable_string_len(self.instance_id) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.rack_id) } else { nullable_string_len(self.rack_id) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_string_len(self.client_id) } else { string_len(self.client_id) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.client_host) } else { string_len(self.client_host) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.subscribed_topic_names).len(), flex); let body: usize = (self.subscribed_topic_names).iter().map(|it| if flex { compact_string_len(*it) } else { string_len(*it) }).sum(); prefix + body }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.subscribed_topic_regex) } else { nullable_string_len(self.subscribed_topic_regex) }; }
-        if version >= 0 { n += self.assignment.encoded_len(version); }
-        if version >= 0 { n += self.target_assignment.encoded_len(version); }
-        if version >= 1 { n += 1; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.member_id)
+            } else {
+                string_len(self.member_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.instance_id)
+            } else {
+                nullable_string_len(self.instance_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.rack_id)
+            } else {
+                nullable_string_len(self.rack_id)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.client_id)
+            } else {
+                string_len(self.client_id)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.client_host)
+            } else {
+                string_len(self.client_host)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.subscribed_topic_names).len(),
+                    flex,
+                );
+                let body: usize = (self.subscribed_topic_names)
+                    .iter()
+                    .map(|it| {
+                        if flex {
+                            compact_string_len(it)
+                        } else {
+                            string_len(it)
+                        }
+                    })
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.subscribed_topic_regex)
+            } else {
+                nullable_string_len(self.subscribed_topic_regex)
+            };
+        }
+        if version >= 0 {
+            n += self.assignment.encoded_len(version);
+        }
+        if version >= 0 {
+            n += self.target_assignment.encoded_len(version);
+        }
+        if version >= 1 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -327,47 +606,123 @@ impl<'a> Encode for Member<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for Member<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.member_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.instance_id = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.rack_id = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.member_epoch = get_i32(buf)?; }
-        if version >= 0 { out.client_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.client_host = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.subscribed_topic_names = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }); } v }; }
-        if version >= 0 { out.subscribed_topic_regex = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.assignment = super::common::assignment::Assignment::decode_borrow(buf, version)?; }
-        if version >= 0 { out.target_assignment = super::common::assignment::Assignment::decode_borrow(buf, version)?; }
-        if version >= 1 { out.member_type = get_i8(buf)?; }
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.instance_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.rack_id = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.member_epoch = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.client_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.client_host = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.subscribed_topic_names = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(if flex {
+                        get_compact_string_borrowed(buf)?
+                    } else {
+                        get_string_borrowed(buf)?
+                    });
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.subscribed_topic_regex = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.assignment = super::common::assignment::Assignment::decode_borrow(buf, version)?;
+        }
+        if version >= 0 {
+            out.target_assignment =
+                super::common::assignment::Assignment::decode_borrow(buf, version)?;
+        }
+        if version >= 1 {
+            out.member_type = get_i8(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> Member<'a> {
+impl Member<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.member_id = "x"; }
-        if version >= 0 { m.instance_id = Some("x"); }
-        if version >= 0 { m.rack_id = Some("x"); }
-        if version >= 0 { m.member_epoch = 1i32; }
-        if version >= 0 { m.client_id = "x"; }
-        if version >= 0 { m.client_host = "x"; }
-        if version >= 0 { m.subscribed_topic_names = vec!["x"]; }
-        if version >= 0 { m.subscribed_topic_regex = Some("x"); }
-        if version >= 0 { m.assignment = super::common::assignment::Assignment::populated(version); }
-        if version >= 0 { m.target_assignment = super::common::assignment::Assignment::populated(version); }
-        if version >= 1 { m.member_type = 1i8; }
+        if version >= 0 {
+            m.member_id = "x";
+        }
+        if version >= 0 {
+            m.instance_id = Some("x");
+        }
+        if version >= 0 {
+            m.rack_id = Some("x");
+        }
+        if version >= 0 {
+            m.member_epoch = 1i32;
+        }
+        if version >= 0 {
+            m.client_id = "x";
+        }
+        if version >= 0 {
+            m.client_host = "x";
+        }
+        if version >= 0 {
+            m.subscribed_topic_names = vec!["x"];
+        }
+        if version >= 0 {
+            m.subscribed_topic_regex = Some("x");
+        }
+        if version >= 0 {
+            m.assignment = super::common::assignment::Assignment::populated(version);
+        }
+        if version >= 0 {
+            m.target_assignment = super::common::assignment::Assignment::populated(version);
+        }
+        if version >= 1 {
+            m.member_type = 1i8;
+        }
         m
     }
 }

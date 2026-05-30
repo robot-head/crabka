@@ -13,617 +13,3662 @@ pub struct Case {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum Kind { Request, Response, RequestHeader, ResponseHeader }
+pub enum Kind {
+    Request,
+    Response,
+    RequestHeader,
+    ResponseHeader,
+}
 
 pub const CASES: &[Case] = &[
-    Case { name: "AddOffsetsToTxnRequest", api_key: 25, version: 0, kind: Kind::Request },
-    Case { name: "AddOffsetsToTxnRequest", api_key: 25, version: 1, kind: Kind::Request },
-    Case { name: "AddOffsetsToTxnRequest", api_key: 25, version: 2, kind: Kind::Request },
-    Case { name: "AddOffsetsToTxnRequest", api_key: 25, version: 3, kind: Kind::Request },
-    Case { name: "AddOffsetsToTxnRequest", api_key: 25, version: 4, kind: Kind::Request },
-    Case { name: "AddOffsetsToTxnResponse", api_key: 25, version: 0, kind: Kind::Response },
-    Case { name: "AddOffsetsToTxnResponse", api_key: 25, version: 1, kind: Kind::Response },
-    Case { name: "AddOffsetsToTxnResponse", api_key: 25, version: 2, kind: Kind::Response },
-    Case { name: "AddOffsetsToTxnResponse", api_key: 25, version: 3, kind: Kind::Response },
-    Case { name: "AddOffsetsToTxnResponse", api_key: 25, version: 4, kind: Kind::Response },
-    Case { name: "AddPartitionsToTxnRequest", api_key: 24, version: 0, kind: Kind::Request },
-    Case { name: "AddPartitionsToTxnRequest", api_key: 24, version: 1, kind: Kind::Request },
-    Case { name: "AddPartitionsToTxnRequest", api_key: 24, version: 2, kind: Kind::Request },
-    Case { name: "AddPartitionsToTxnRequest", api_key: 24, version: 3, kind: Kind::Request },
-    Case { name: "AddPartitionsToTxnRequest", api_key: 24, version: 4, kind: Kind::Request },
-    Case { name: "AddPartitionsToTxnRequest", api_key: 24, version: 5, kind: Kind::Request },
-    Case { name: "AddPartitionsToTxnResponse", api_key: 24, version: 0, kind: Kind::Response },
-    Case { name: "AddPartitionsToTxnResponse", api_key: 24, version: 1, kind: Kind::Response },
-    Case { name: "AddPartitionsToTxnResponse", api_key: 24, version: 2, kind: Kind::Response },
-    Case { name: "AddPartitionsToTxnResponse", api_key: 24, version: 3, kind: Kind::Response },
-    Case { name: "AddPartitionsToTxnResponse", api_key: 24, version: 4, kind: Kind::Response },
-    Case { name: "AddPartitionsToTxnResponse", api_key: 24, version: 5, kind: Kind::Response },
-    Case { name: "AddRaftVoterRequest", api_key: 80, version: 0, kind: Kind::Request },
-    Case { name: "AddRaftVoterRequest", api_key: 80, version: 1, kind: Kind::Request },
-    Case { name: "AddRaftVoterResponse", api_key: 80, version: 0, kind: Kind::Response },
-    Case { name: "AddRaftVoterResponse", api_key: 80, version: 1, kind: Kind::Response },
-    Case { name: "AllocateProducerIdsRequest", api_key: 67, version: 0, kind: Kind::Request },
-    Case { name: "AllocateProducerIdsResponse", api_key: 67, version: 0, kind: Kind::Response },
-    Case { name: "AlterClientQuotasRequest", api_key: 49, version: 0, kind: Kind::Request },
-    Case { name: "AlterClientQuotasRequest", api_key: 49, version: 1, kind: Kind::Request },
-    Case { name: "AlterClientQuotasResponse", api_key: 49, version: 0, kind: Kind::Response },
-    Case { name: "AlterClientQuotasResponse", api_key: 49, version: 1, kind: Kind::Response },
-    Case { name: "AlterConfigsRequest", api_key: 33, version: 0, kind: Kind::Request },
-    Case { name: "AlterConfigsRequest", api_key: 33, version: 1, kind: Kind::Request },
-    Case { name: "AlterConfigsRequest", api_key: 33, version: 2, kind: Kind::Request },
-    Case { name: "AlterConfigsResponse", api_key: 33, version: 0, kind: Kind::Response },
-    Case { name: "AlterConfigsResponse", api_key: 33, version: 1, kind: Kind::Response },
-    Case { name: "AlterConfigsResponse", api_key: 33, version: 2, kind: Kind::Response },
-    Case { name: "AlterPartitionReassignmentsRequest", api_key: 45, version: 0, kind: Kind::Request },
-    Case { name: "AlterPartitionReassignmentsRequest", api_key: 45, version: 1, kind: Kind::Request },
-    Case { name: "AlterPartitionReassignmentsResponse", api_key: 45, version: 0, kind: Kind::Response },
-    Case { name: "AlterPartitionReassignmentsResponse", api_key: 45, version: 1, kind: Kind::Response },
-    Case { name: "AlterPartitionRequest", api_key: 56, version: 2, kind: Kind::Request },
-    Case { name: "AlterPartitionRequest", api_key: 56, version: 3, kind: Kind::Request },
-    Case { name: "AlterPartitionResponse", api_key: 56, version: 2, kind: Kind::Response },
-    Case { name: "AlterPartitionResponse", api_key: 56, version: 3, kind: Kind::Response },
-    Case { name: "AlterReplicaLogDirsRequest", api_key: 34, version: 1, kind: Kind::Request },
-    Case { name: "AlterReplicaLogDirsRequest", api_key: 34, version: 2, kind: Kind::Request },
-    Case { name: "AlterReplicaLogDirsResponse", api_key: 34, version: 1, kind: Kind::Response },
-    Case { name: "AlterReplicaLogDirsResponse", api_key: 34, version: 2, kind: Kind::Response },
-    Case { name: "AlterShareGroupOffsetsRequest", api_key: 91, version: 0, kind: Kind::Request },
-    Case { name: "AlterShareGroupOffsetsResponse", api_key: 91, version: 0, kind: Kind::Response },
-    Case { name: "AlterUserScramCredentialsRequest", api_key: 51, version: 0, kind: Kind::Request },
-    Case { name: "AlterUserScramCredentialsResponse", api_key: 51, version: 0, kind: Kind::Response },
-    Case { name: "ApiVersionsRequest", api_key: 18, version: 0, kind: Kind::Request },
-    Case { name: "ApiVersionsRequest", api_key: 18, version: 1, kind: Kind::Request },
-    Case { name: "ApiVersionsRequest", api_key: 18, version: 2, kind: Kind::Request },
-    Case { name: "ApiVersionsRequest", api_key: 18, version: 3, kind: Kind::Request },
-    Case { name: "ApiVersionsRequest", api_key: 18, version: 4, kind: Kind::Request },
-    Case { name: "ApiVersionsResponse", api_key: 18, version: 0, kind: Kind::Response },
-    Case { name: "ApiVersionsResponse", api_key: 18, version: 1, kind: Kind::Response },
-    Case { name: "ApiVersionsResponse", api_key: 18, version: 2, kind: Kind::Response },
-    Case { name: "ApiVersionsResponse", api_key: 18, version: 3, kind: Kind::Response },
-    Case { name: "ApiVersionsResponse", api_key: 18, version: 4, kind: Kind::Response },
-    Case { name: "AssignReplicasToDirsRequest", api_key: 73, version: 0, kind: Kind::Request },
-    Case { name: "AssignReplicasToDirsResponse", api_key: 73, version: 0, kind: Kind::Response },
-    Case { name: "BeginQuorumEpochRequest", api_key: 53, version: 0, kind: Kind::Request },
-    Case { name: "BeginQuorumEpochRequest", api_key: 53, version: 1, kind: Kind::Request },
-    Case { name: "BeginQuorumEpochResponse", api_key: 53, version: 0, kind: Kind::Response },
-    Case { name: "BeginQuorumEpochResponse", api_key: 53, version: 1, kind: Kind::Response },
-    Case { name: "BrokerHeartbeatRequest", api_key: 63, version: 0, kind: Kind::Request },
-    Case { name: "BrokerHeartbeatRequest", api_key: 63, version: 1, kind: Kind::Request },
-    Case { name: "BrokerHeartbeatRequest", api_key: 63, version: 2, kind: Kind::Request },
-    Case { name: "BrokerHeartbeatResponse", api_key: 63, version: 0, kind: Kind::Response },
-    Case { name: "BrokerHeartbeatResponse", api_key: 63, version: 1, kind: Kind::Response },
-    Case { name: "BrokerHeartbeatResponse", api_key: 63, version: 2, kind: Kind::Response },
-    Case { name: "BrokerRegistrationRequest", api_key: 62, version: 0, kind: Kind::Request },
-    Case { name: "BrokerRegistrationRequest", api_key: 62, version: 1, kind: Kind::Request },
-    Case { name: "BrokerRegistrationRequest", api_key: 62, version: 2, kind: Kind::Request },
-    Case { name: "BrokerRegistrationRequest", api_key: 62, version: 3, kind: Kind::Request },
-    Case { name: "BrokerRegistrationRequest", api_key: 62, version: 4, kind: Kind::Request },
-    Case { name: "BrokerRegistrationResponse", api_key: 62, version: 0, kind: Kind::Response },
-    Case { name: "BrokerRegistrationResponse", api_key: 62, version: 1, kind: Kind::Response },
-    Case { name: "BrokerRegistrationResponse", api_key: 62, version: 2, kind: Kind::Response },
-    Case { name: "BrokerRegistrationResponse", api_key: 62, version: 3, kind: Kind::Response },
-    Case { name: "BrokerRegistrationResponse", api_key: 62, version: 4, kind: Kind::Response },
-    Case { name: "ConsumerGroupDescribeRequest", api_key: 69, version: 0, kind: Kind::Request },
-    Case { name: "ConsumerGroupDescribeRequest", api_key: 69, version: 1, kind: Kind::Request },
-    Case { name: "ConsumerGroupDescribeResponse", api_key: 69, version: 0, kind: Kind::Response },
-    Case { name: "ConsumerGroupDescribeResponse", api_key: 69, version: 1, kind: Kind::Response },
-    Case { name: "ConsumerGroupHeartbeatRequest", api_key: 68, version: 0, kind: Kind::Request },
-    Case { name: "ConsumerGroupHeartbeatRequest", api_key: 68, version: 1, kind: Kind::Request },
-    Case { name: "ConsumerGroupHeartbeatResponse", api_key: 68, version: 0, kind: Kind::Response },
-    Case { name: "ConsumerGroupHeartbeatResponse", api_key: 68, version: 1, kind: Kind::Response },
-    Case { name: "ControllerRegistrationRequest", api_key: 70, version: 0, kind: Kind::Request },
-    Case { name: "ControllerRegistrationResponse", api_key: 70, version: 0, kind: Kind::Response },
-    Case { name: "CreateAclsRequest", api_key: 30, version: 1, kind: Kind::Request },
-    Case { name: "CreateAclsRequest", api_key: 30, version: 2, kind: Kind::Request },
-    Case { name: "CreateAclsRequest", api_key: 30, version: 3, kind: Kind::Request },
-    Case { name: "CreateAclsResponse", api_key: 30, version: 1, kind: Kind::Response },
-    Case { name: "CreateAclsResponse", api_key: 30, version: 2, kind: Kind::Response },
-    Case { name: "CreateAclsResponse", api_key: 30, version: 3, kind: Kind::Response },
-    Case { name: "CreateDelegationTokenRequest", api_key: 38, version: 1, kind: Kind::Request },
-    Case { name: "CreateDelegationTokenRequest", api_key: 38, version: 2, kind: Kind::Request },
-    Case { name: "CreateDelegationTokenRequest", api_key: 38, version: 3, kind: Kind::Request },
-    Case { name: "CreateDelegationTokenResponse", api_key: 38, version: 1, kind: Kind::Response },
-    Case { name: "CreateDelegationTokenResponse", api_key: 38, version: 2, kind: Kind::Response },
-    Case { name: "CreateDelegationTokenResponse", api_key: 38, version: 3, kind: Kind::Response },
-    Case { name: "CreatePartitionsRequest", api_key: 37, version: 0, kind: Kind::Request },
-    Case { name: "CreatePartitionsRequest", api_key: 37, version: 1, kind: Kind::Request },
-    Case { name: "CreatePartitionsRequest", api_key: 37, version: 2, kind: Kind::Request },
-    Case { name: "CreatePartitionsRequest", api_key: 37, version: 3, kind: Kind::Request },
-    Case { name: "CreatePartitionsResponse", api_key: 37, version: 0, kind: Kind::Response },
-    Case { name: "CreatePartitionsResponse", api_key: 37, version: 1, kind: Kind::Response },
-    Case { name: "CreatePartitionsResponse", api_key: 37, version: 2, kind: Kind::Response },
-    Case { name: "CreatePartitionsResponse", api_key: 37, version: 3, kind: Kind::Response },
-    Case { name: "CreateTopicsRequest", api_key: 19, version: 2, kind: Kind::Request },
-    Case { name: "CreateTopicsRequest", api_key: 19, version: 3, kind: Kind::Request },
-    Case { name: "CreateTopicsRequest", api_key: 19, version: 4, kind: Kind::Request },
-    Case { name: "CreateTopicsRequest", api_key: 19, version: 5, kind: Kind::Request },
-    Case { name: "CreateTopicsRequest", api_key: 19, version: 6, kind: Kind::Request },
-    Case { name: "CreateTopicsRequest", api_key: 19, version: 7, kind: Kind::Request },
-    Case { name: "CreateTopicsResponse", api_key: 19, version: 2, kind: Kind::Response },
-    Case { name: "CreateTopicsResponse", api_key: 19, version: 3, kind: Kind::Response },
-    Case { name: "CreateTopicsResponse", api_key: 19, version: 4, kind: Kind::Response },
-    Case { name: "CreateTopicsResponse", api_key: 19, version: 5, kind: Kind::Response },
-    Case { name: "CreateTopicsResponse", api_key: 19, version: 6, kind: Kind::Response },
-    Case { name: "CreateTopicsResponse", api_key: 19, version: 7, kind: Kind::Response },
-    Case { name: "DeleteAclsRequest", api_key: 31, version: 1, kind: Kind::Request },
-    Case { name: "DeleteAclsRequest", api_key: 31, version: 2, kind: Kind::Request },
-    Case { name: "DeleteAclsRequest", api_key: 31, version: 3, kind: Kind::Request },
-    Case { name: "DeleteAclsResponse", api_key: 31, version: 1, kind: Kind::Response },
-    Case { name: "DeleteAclsResponse", api_key: 31, version: 2, kind: Kind::Response },
-    Case { name: "DeleteAclsResponse", api_key: 31, version: 3, kind: Kind::Response },
-    Case { name: "DeleteGroupsRequest", api_key: 42, version: 0, kind: Kind::Request },
-    Case { name: "DeleteGroupsRequest", api_key: 42, version: 1, kind: Kind::Request },
-    Case { name: "DeleteGroupsRequest", api_key: 42, version: 2, kind: Kind::Request },
-    Case { name: "DeleteGroupsResponse", api_key: 42, version: 0, kind: Kind::Response },
-    Case { name: "DeleteGroupsResponse", api_key: 42, version: 1, kind: Kind::Response },
-    Case { name: "DeleteGroupsResponse", api_key: 42, version: 2, kind: Kind::Response },
-    Case { name: "DeleteRecordsRequest", api_key: 21, version: 0, kind: Kind::Request },
-    Case { name: "DeleteRecordsRequest", api_key: 21, version: 1, kind: Kind::Request },
-    Case { name: "DeleteRecordsRequest", api_key: 21, version: 2, kind: Kind::Request },
-    Case { name: "DeleteRecordsResponse", api_key: 21, version: 0, kind: Kind::Response },
-    Case { name: "DeleteRecordsResponse", api_key: 21, version: 1, kind: Kind::Response },
-    Case { name: "DeleteRecordsResponse", api_key: 21, version: 2, kind: Kind::Response },
-    Case { name: "DeleteShareGroupOffsetsRequest", api_key: 92, version: 0, kind: Kind::Request },
-    Case { name: "DeleteShareGroupOffsetsResponse", api_key: 92, version: 0, kind: Kind::Response },
-    Case { name: "DeleteShareGroupStateRequest", api_key: 86, version: 0, kind: Kind::Request },
-    Case { name: "DeleteShareGroupStateResponse", api_key: 86, version: 0, kind: Kind::Response },
-    Case { name: "DeleteTopicsRequest", api_key: 20, version: 1, kind: Kind::Request },
-    Case { name: "DeleteTopicsRequest", api_key: 20, version: 2, kind: Kind::Request },
-    Case { name: "DeleteTopicsRequest", api_key: 20, version: 3, kind: Kind::Request },
-    Case { name: "DeleteTopicsRequest", api_key: 20, version: 4, kind: Kind::Request },
-    Case { name: "DeleteTopicsRequest", api_key: 20, version: 5, kind: Kind::Request },
-    Case { name: "DeleteTopicsRequest", api_key: 20, version: 6, kind: Kind::Request },
-    Case { name: "DeleteTopicsResponse", api_key: 20, version: 1, kind: Kind::Response },
-    Case { name: "DeleteTopicsResponse", api_key: 20, version: 2, kind: Kind::Response },
-    Case { name: "DeleteTopicsResponse", api_key: 20, version: 3, kind: Kind::Response },
-    Case { name: "DeleteTopicsResponse", api_key: 20, version: 4, kind: Kind::Response },
-    Case { name: "DeleteTopicsResponse", api_key: 20, version: 5, kind: Kind::Response },
-    Case { name: "DeleteTopicsResponse", api_key: 20, version: 6, kind: Kind::Response },
-    Case { name: "DescribeAclsRequest", api_key: 29, version: 1, kind: Kind::Request },
-    Case { name: "DescribeAclsRequest", api_key: 29, version: 2, kind: Kind::Request },
-    Case { name: "DescribeAclsRequest", api_key: 29, version: 3, kind: Kind::Request },
-    Case { name: "DescribeAclsResponse", api_key: 29, version: 1, kind: Kind::Response },
-    Case { name: "DescribeAclsResponse", api_key: 29, version: 2, kind: Kind::Response },
-    Case { name: "DescribeAclsResponse", api_key: 29, version: 3, kind: Kind::Response },
-    Case { name: "DescribeClientQuotasRequest", api_key: 48, version: 0, kind: Kind::Request },
-    Case { name: "DescribeClientQuotasRequest", api_key: 48, version: 1, kind: Kind::Request },
-    Case { name: "DescribeClientQuotasResponse", api_key: 48, version: 0, kind: Kind::Response },
-    Case { name: "DescribeClientQuotasResponse", api_key: 48, version: 1, kind: Kind::Response },
-    Case { name: "DescribeClusterRequest", api_key: 60, version: 0, kind: Kind::Request },
-    Case { name: "DescribeClusterRequest", api_key: 60, version: 1, kind: Kind::Request },
-    Case { name: "DescribeClusterRequest", api_key: 60, version: 2, kind: Kind::Request },
-    Case { name: "DescribeClusterResponse", api_key: 60, version: 0, kind: Kind::Response },
-    Case { name: "DescribeClusterResponse", api_key: 60, version: 1, kind: Kind::Response },
-    Case { name: "DescribeClusterResponse", api_key: 60, version: 2, kind: Kind::Response },
-    Case { name: "DescribeConfigsRequest", api_key: 32, version: 1, kind: Kind::Request },
-    Case { name: "DescribeConfigsRequest", api_key: 32, version: 2, kind: Kind::Request },
-    Case { name: "DescribeConfigsRequest", api_key: 32, version: 3, kind: Kind::Request },
-    Case { name: "DescribeConfigsRequest", api_key: 32, version: 4, kind: Kind::Request },
-    Case { name: "DescribeConfigsResponse", api_key: 32, version: 1, kind: Kind::Response },
-    Case { name: "DescribeConfigsResponse", api_key: 32, version: 2, kind: Kind::Response },
-    Case { name: "DescribeConfigsResponse", api_key: 32, version: 3, kind: Kind::Response },
-    Case { name: "DescribeConfigsResponse", api_key: 32, version: 4, kind: Kind::Response },
-    Case { name: "DescribeDelegationTokenRequest", api_key: 41, version: 1, kind: Kind::Request },
-    Case { name: "DescribeDelegationTokenRequest", api_key: 41, version: 2, kind: Kind::Request },
-    Case { name: "DescribeDelegationTokenRequest", api_key: 41, version: 3, kind: Kind::Request },
-    Case { name: "DescribeDelegationTokenResponse", api_key: 41, version: 1, kind: Kind::Response },
-    Case { name: "DescribeDelegationTokenResponse", api_key: 41, version: 2, kind: Kind::Response },
-    Case { name: "DescribeDelegationTokenResponse", api_key: 41, version: 3, kind: Kind::Response },
-    Case { name: "DescribeGroupsRequest", api_key: 15, version: 0, kind: Kind::Request },
-    Case { name: "DescribeGroupsRequest", api_key: 15, version: 1, kind: Kind::Request },
-    Case { name: "DescribeGroupsRequest", api_key: 15, version: 2, kind: Kind::Request },
-    Case { name: "DescribeGroupsRequest", api_key: 15, version: 3, kind: Kind::Request },
-    Case { name: "DescribeGroupsRequest", api_key: 15, version: 4, kind: Kind::Request },
-    Case { name: "DescribeGroupsRequest", api_key: 15, version: 5, kind: Kind::Request },
-    Case { name: "DescribeGroupsRequest", api_key: 15, version: 6, kind: Kind::Request },
-    Case { name: "DescribeGroupsResponse", api_key: 15, version: 0, kind: Kind::Response },
-    Case { name: "DescribeGroupsResponse", api_key: 15, version: 1, kind: Kind::Response },
-    Case { name: "DescribeGroupsResponse", api_key: 15, version: 2, kind: Kind::Response },
-    Case { name: "DescribeGroupsResponse", api_key: 15, version: 3, kind: Kind::Response },
-    Case { name: "DescribeGroupsResponse", api_key: 15, version: 4, kind: Kind::Response },
-    Case { name: "DescribeGroupsResponse", api_key: 15, version: 5, kind: Kind::Response },
-    Case { name: "DescribeGroupsResponse", api_key: 15, version: 6, kind: Kind::Response },
-    Case { name: "DescribeLogDirsRequest", api_key: 35, version: 1, kind: Kind::Request },
-    Case { name: "DescribeLogDirsRequest", api_key: 35, version: 2, kind: Kind::Request },
-    Case { name: "DescribeLogDirsRequest", api_key: 35, version: 3, kind: Kind::Request },
-    Case { name: "DescribeLogDirsRequest", api_key: 35, version: 4, kind: Kind::Request },
-    Case { name: "DescribeLogDirsRequest", api_key: 35, version: 5, kind: Kind::Request },
-    Case { name: "DescribeLogDirsResponse", api_key: 35, version: 1, kind: Kind::Response },
-    Case { name: "DescribeLogDirsResponse", api_key: 35, version: 2, kind: Kind::Response },
-    Case { name: "DescribeLogDirsResponse", api_key: 35, version: 3, kind: Kind::Response },
-    Case { name: "DescribeLogDirsResponse", api_key: 35, version: 4, kind: Kind::Response },
-    Case { name: "DescribeLogDirsResponse", api_key: 35, version: 5, kind: Kind::Response },
-    Case { name: "DescribeProducersRequest", api_key: 61, version: 0, kind: Kind::Request },
-    Case { name: "DescribeProducersResponse", api_key: 61, version: 0, kind: Kind::Response },
-    Case { name: "DescribeQuorumRequest", api_key: 55, version: 0, kind: Kind::Request },
-    Case { name: "DescribeQuorumRequest", api_key: 55, version: 1, kind: Kind::Request },
-    Case { name: "DescribeQuorumRequest", api_key: 55, version: 2, kind: Kind::Request },
-    Case { name: "DescribeQuorumResponse", api_key: 55, version: 0, kind: Kind::Response },
-    Case { name: "DescribeQuorumResponse", api_key: 55, version: 1, kind: Kind::Response },
-    Case { name: "DescribeQuorumResponse", api_key: 55, version: 2, kind: Kind::Response },
-    Case { name: "DescribeShareGroupOffsetsRequest", api_key: 90, version: 0, kind: Kind::Request },
-    Case { name: "DescribeShareGroupOffsetsRequest", api_key: 90, version: 1, kind: Kind::Request },
-    Case { name: "DescribeShareGroupOffsetsResponse", api_key: 90, version: 0, kind: Kind::Response },
-    Case { name: "DescribeShareGroupOffsetsResponse", api_key: 90, version: 1, kind: Kind::Response },
-    Case { name: "DescribeTopicPartitionsRequest", api_key: 75, version: 0, kind: Kind::Request },
-    Case { name: "DescribeTopicPartitionsResponse", api_key: 75, version: 0, kind: Kind::Response },
-    Case { name: "DescribeTransactionsRequest", api_key: 65, version: 0, kind: Kind::Request },
-    Case { name: "DescribeTransactionsResponse", api_key: 65, version: 0, kind: Kind::Response },
-    Case { name: "DescribeUserScramCredentialsRequest", api_key: 50, version: 0, kind: Kind::Request },
-    Case { name: "DescribeUserScramCredentialsResponse", api_key: 50, version: 0, kind: Kind::Response },
-    Case { name: "ElectLeadersRequest", api_key: 43, version: 0, kind: Kind::Request },
-    Case { name: "ElectLeadersRequest", api_key: 43, version: 1, kind: Kind::Request },
-    Case { name: "ElectLeadersRequest", api_key: 43, version: 2, kind: Kind::Request },
-    Case { name: "ElectLeadersResponse", api_key: 43, version: 0, kind: Kind::Response },
-    Case { name: "ElectLeadersResponse", api_key: 43, version: 1, kind: Kind::Response },
-    Case { name: "ElectLeadersResponse", api_key: 43, version: 2, kind: Kind::Response },
-    Case { name: "EndQuorumEpochRequest", api_key: 54, version: 0, kind: Kind::Request },
-    Case { name: "EndQuorumEpochRequest", api_key: 54, version: 1, kind: Kind::Request },
-    Case { name: "EndQuorumEpochResponse", api_key: 54, version: 0, kind: Kind::Response },
-    Case { name: "EndQuorumEpochResponse", api_key: 54, version: 1, kind: Kind::Response },
-    Case { name: "EndTxnRequest", api_key: 26, version: 0, kind: Kind::Request },
-    Case { name: "EndTxnRequest", api_key: 26, version: 1, kind: Kind::Request },
-    Case { name: "EndTxnRequest", api_key: 26, version: 2, kind: Kind::Request },
-    Case { name: "EndTxnRequest", api_key: 26, version: 3, kind: Kind::Request },
-    Case { name: "EndTxnRequest", api_key: 26, version: 4, kind: Kind::Request },
-    Case { name: "EndTxnRequest", api_key: 26, version: 5, kind: Kind::Request },
-    Case { name: "EndTxnResponse", api_key: 26, version: 0, kind: Kind::Response },
-    Case { name: "EndTxnResponse", api_key: 26, version: 1, kind: Kind::Response },
-    Case { name: "EndTxnResponse", api_key: 26, version: 2, kind: Kind::Response },
-    Case { name: "EndTxnResponse", api_key: 26, version: 3, kind: Kind::Response },
-    Case { name: "EndTxnResponse", api_key: 26, version: 4, kind: Kind::Response },
-    Case { name: "EndTxnResponse", api_key: 26, version: 5, kind: Kind::Response },
-    Case { name: "EnvelopeRequest", api_key: 58, version: 0, kind: Kind::Request },
-    Case { name: "EnvelopeResponse", api_key: 58, version: 0, kind: Kind::Response },
-    Case { name: "ExpireDelegationTokenRequest", api_key: 40, version: 1, kind: Kind::Request },
-    Case { name: "ExpireDelegationTokenRequest", api_key: 40, version: 2, kind: Kind::Request },
-    Case { name: "ExpireDelegationTokenResponse", api_key: 40, version: 1, kind: Kind::Response },
-    Case { name: "ExpireDelegationTokenResponse", api_key: 40, version: 2, kind: Kind::Response },
-    Case { name: "FetchRequest", api_key: 1, version: 4, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 5, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 6, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 7, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 8, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 9, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 10, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 11, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 12, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 13, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 14, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 15, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 16, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 17, kind: Kind::Request },
-    Case { name: "FetchRequest", api_key: 1, version: 18, kind: Kind::Request },
-    Case { name: "FetchResponse", api_key: 1, version: 4, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 5, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 6, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 7, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 8, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 9, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 10, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 11, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 12, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 13, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 14, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 15, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 16, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 17, kind: Kind::Response },
-    Case { name: "FetchResponse", api_key: 1, version: 18, kind: Kind::Response },
-    Case { name: "FetchSnapshotRequest", api_key: 59, version: 0, kind: Kind::Request },
-    Case { name: "FetchSnapshotRequest", api_key: 59, version: 1, kind: Kind::Request },
-    Case { name: "FetchSnapshotResponse", api_key: 59, version: 0, kind: Kind::Response },
-    Case { name: "FetchSnapshotResponse", api_key: 59, version: 1, kind: Kind::Response },
-    Case { name: "FindCoordinatorRequest", api_key: 10, version: 0, kind: Kind::Request },
-    Case { name: "FindCoordinatorRequest", api_key: 10, version: 1, kind: Kind::Request },
-    Case { name: "FindCoordinatorRequest", api_key: 10, version: 2, kind: Kind::Request },
-    Case { name: "FindCoordinatorRequest", api_key: 10, version: 3, kind: Kind::Request },
-    Case { name: "FindCoordinatorRequest", api_key: 10, version: 4, kind: Kind::Request },
-    Case { name: "FindCoordinatorRequest", api_key: 10, version: 5, kind: Kind::Request },
-    Case { name: "FindCoordinatorRequest", api_key: 10, version: 6, kind: Kind::Request },
-    Case { name: "FindCoordinatorResponse", api_key: 10, version: 0, kind: Kind::Response },
-    Case { name: "FindCoordinatorResponse", api_key: 10, version: 1, kind: Kind::Response },
-    Case { name: "FindCoordinatorResponse", api_key: 10, version: 2, kind: Kind::Response },
-    Case { name: "FindCoordinatorResponse", api_key: 10, version: 3, kind: Kind::Response },
-    Case { name: "FindCoordinatorResponse", api_key: 10, version: 4, kind: Kind::Response },
-    Case { name: "FindCoordinatorResponse", api_key: 10, version: 5, kind: Kind::Response },
-    Case { name: "FindCoordinatorResponse", api_key: 10, version: 6, kind: Kind::Response },
-    Case { name: "GetTelemetrySubscriptionsRequest", api_key: 71, version: 0, kind: Kind::Request },
-    Case { name: "GetTelemetrySubscriptionsResponse", api_key: 71, version: 0, kind: Kind::Response },
-    Case { name: "HeartbeatRequest", api_key: 12, version: 0, kind: Kind::Request },
-    Case { name: "HeartbeatRequest", api_key: 12, version: 1, kind: Kind::Request },
-    Case { name: "HeartbeatRequest", api_key: 12, version: 2, kind: Kind::Request },
-    Case { name: "HeartbeatRequest", api_key: 12, version: 3, kind: Kind::Request },
-    Case { name: "HeartbeatRequest", api_key: 12, version: 4, kind: Kind::Request },
-    Case { name: "HeartbeatResponse", api_key: 12, version: 0, kind: Kind::Response },
-    Case { name: "HeartbeatResponse", api_key: 12, version: 1, kind: Kind::Response },
-    Case { name: "HeartbeatResponse", api_key: 12, version: 2, kind: Kind::Response },
-    Case { name: "HeartbeatResponse", api_key: 12, version: 3, kind: Kind::Response },
-    Case { name: "HeartbeatResponse", api_key: 12, version: 4, kind: Kind::Response },
-    Case { name: "IncrementalAlterConfigsRequest", api_key: 44, version: 0, kind: Kind::Request },
-    Case { name: "IncrementalAlterConfigsRequest", api_key: 44, version: 1, kind: Kind::Request },
-    Case { name: "IncrementalAlterConfigsResponse", api_key: 44, version: 0, kind: Kind::Response },
-    Case { name: "IncrementalAlterConfigsResponse", api_key: 44, version: 1, kind: Kind::Response },
-    Case { name: "InitProducerIdRequest", api_key: 22, version: 0, kind: Kind::Request },
-    Case { name: "InitProducerIdRequest", api_key: 22, version: 1, kind: Kind::Request },
-    Case { name: "InitProducerIdRequest", api_key: 22, version: 2, kind: Kind::Request },
-    Case { name: "InitProducerIdRequest", api_key: 22, version: 3, kind: Kind::Request },
-    Case { name: "InitProducerIdRequest", api_key: 22, version: 4, kind: Kind::Request },
-    Case { name: "InitProducerIdRequest", api_key: 22, version: 5, kind: Kind::Request },
-    Case { name: "InitProducerIdRequest", api_key: 22, version: 6, kind: Kind::Request },
-    Case { name: "InitProducerIdResponse", api_key: 22, version: 0, kind: Kind::Response },
-    Case { name: "InitProducerIdResponse", api_key: 22, version: 1, kind: Kind::Response },
-    Case { name: "InitProducerIdResponse", api_key: 22, version: 2, kind: Kind::Response },
-    Case { name: "InitProducerIdResponse", api_key: 22, version: 3, kind: Kind::Response },
-    Case { name: "InitProducerIdResponse", api_key: 22, version: 4, kind: Kind::Response },
-    Case { name: "InitProducerIdResponse", api_key: 22, version: 5, kind: Kind::Response },
-    Case { name: "InitProducerIdResponse", api_key: 22, version: 6, kind: Kind::Response },
-    Case { name: "InitializeShareGroupStateRequest", api_key: 83, version: 0, kind: Kind::Request },
-    Case { name: "InitializeShareGroupStateResponse", api_key: 83, version: 0, kind: Kind::Response },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 0, kind: Kind::Request },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 1, kind: Kind::Request },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 2, kind: Kind::Request },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 3, kind: Kind::Request },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 4, kind: Kind::Request },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 5, kind: Kind::Request },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 6, kind: Kind::Request },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 7, kind: Kind::Request },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 8, kind: Kind::Request },
-    Case { name: "JoinGroupRequest", api_key: 11, version: 9, kind: Kind::Request },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 0, kind: Kind::Response },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 1, kind: Kind::Response },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 2, kind: Kind::Response },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 3, kind: Kind::Response },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 4, kind: Kind::Response },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 5, kind: Kind::Response },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 6, kind: Kind::Response },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 7, kind: Kind::Response },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 8, kind: Kind::Response },
-    Case { name: "JoinGroupResponse", api_key: 11, version: 9, kind: Kind::Response },
-    Case { name: "LeaveGroupRequest", api_key: 13, version: 0, kind: Kind::Request },
-    Case { name: "LeaveGroupRequest", api_key: 13, version: 1, kind: Kind::Request },
-    Case { name: "LeaveGroupRequest", api_key: 13, version: 2, kind: Kind::Request },
-    Case { name: "LeaveGroupRequest", api_key: 13, version: 3, kind: Kind::Request },
-    Case { name: "LeaveGroupRequest", api_key: 13, version: 4, kind: Kind::Request },
-    Case { name: "LeaveGroupRequest", api_key: 13, version: 5, kind: Kind::Request },
-    Case { name: "LeaveGroupResponse", api_key: 13, version: 0, kind: Kind::Response },
-    Case { name: "LeaveGroupResponse", api_key: 13, version: 1, kind: Kind::Response },
-    Case { name: "LeaveGroupResponse", api_key: 13, version: 2, kind: Kind::Response },
-    Case { name: "LeaveGroupResponse", api_key: 13, version: 3, kind: Kind::Response },
-    Case { name: "LeaveGroupResponse", api_key: 13, version: 4, kind: Kind::Response },
-    Case { name: "LeaveGroupResponse", api_key: 13, version: 5, kind: Kind::Response },
-    Case { name: "ListConfigResourcesRequest", api_key: 74, version: 0, kind: Kind::Request },
-    Case { name: "ListConfigResourcesRequest", api_key: 74, version: 1, kind: Kind::Request },
-    Case { name: "ListConfigResourcesResponse", api_key: 74, version: 0, kind: Kind::Response },
-    Case { name: "ListConfigResourcesResponse", api_key: 74, version: 1, kind: Kind::Response },
-    Case { name: "ListGroupsRequest", api_key: 16, version: 0, kind: Kind::Request },
-    Case { name: "ListGroupsRequest", api_key: 16, version: 1, kind: Kind::Request },
-    Case { name: "ListGroupsRequest", api_key: 16, version: 2, kind: Kind::Request },
-    Case { name: "ListGroupsRequest", api_key: 16, version: 3, kind: Kind::Request },
-    Case { name: "ListGroupsRequest", api_key: 16, version: 4, kind: Kind::Request },
-    Case { name: "ListGroupsRequest", api_key: 16, version: 5, kind: Kind::Request },
-    Case { name: "ListGroupsResponse", api_key: 16, version: 0, kind: Kind::Response },
-    Case { name: "ListGroupsResponse", api_key: 16, version: 1, kind: Kind::Response },
-    Case { name: "ListGroupsResponse", api_key: 16, version: 2, kind: Kind::Response },
-    Case { name: "ListGroupsResponse", api_key: 16, version: 3, kind: Kind::Response },
-    Case { name: "ListGroupsResponse", api_key: 16, version: 4, kind: Kind::Response },
-    Case { name: "ListGroupsResponse", api_key: 16, version: 5, kind: Kind::Response },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 1, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 2, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 3, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 4, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 5, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 6, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 7, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 8, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 9, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 10, kind: Kind::Request },
-    Case { name: "ListOffsetsRequest", api_key: 2, version: 11, kind: Kind::Request },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 1, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 2, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 3, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 4, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 5, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 6, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 7, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 8, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 9, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 10, kind: Kind::Response },
-    Case { name: "ListOffsetsResponse", api_key: 2, version: 11, kind: Kind::Response },
-    Case { name: "ListPartitionReassignmentsRequest", api_key: 46, version: 0, kind: Kind::Request },
-    Case { name: "ListPartitionReassignmentsResponse", api_key: 46, version: 0, kind: Kind::Response },
-    Case { name: "ListTransactionsRequest", api_key: 66, version: 0, kind: Kind::Request },
-    Case { name: "ListTransactionsRequest", api_key: 66, version: 1, kind: Kind::Request },
-    Case { name: "ListTransactionsRequest", api_key: 66, version: 2, kind: Kind::Request },
-    Case { name: "ListTransactionsResponse", api_key: 66, version: 0, kind: Kind::Response },
-    Case { name: "ListTransactionsResponse", api_key: 66, version: 1, kind: Kind::Response },
-    Case { name: "ListTransactionsResponse", api_key: 66, version: 2, kind: Kind::Response },
-    Case { name: "MetadataRequest", api_key: 3, version: 0, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 1, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 2, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 3, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 4, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 5, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 6, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 7, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 8, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 9, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 10, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 11, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 12, kind: Kind::Request },
-    Case { name: "MetadataRequest", api_key: 3, version: 13, kind: Kind::Request },
-    Case { name: "MetadataResponse", api_key: 3, version: 0, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 1, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 2, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 3, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 4, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 5, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 6, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 7, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 8, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 9, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 10, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 11, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 12, kind: Kind::Response },
-    Case { name: "MetadataResponse", api_key: 3, version: 13, kind: Kind::Response },
-    Case { name: "OffsetCommitRequest", api_key: 8, version: 2, kind: Kind::Request },
-    Case { name: "OffsetCommitRequest", api_key: 8, version: 3, kind: Kind::Request },
-    Case { name: "OffsetCommitRequest", api_key: 8, version: 4, kind: Kind::Request },
-    Case { name: "OffsetCommitRequest", api_key: 8, version: 5, kind: Kind::Request },
-    Case { name: "OffsetCommitRequest", api_key: 8, version: 6, kind: Kind::Request },
-    Case { name: "OffsetCommitRequest", api_key: 8, version: 7, kind: Kind::Request },
-    Case { name: "OffsetCommitRequest", api_key: 8, version: 8, kind: Kind::Request },
-    Case { name: "OffsetCommitRequest", api_key: 8, version: 9, kind: Kind::Request },
-    Case { name: "OffsetCommitRequest", api_key: 8, version: 10, kind: Kind::Request },
-    Case { name: "OffsetCommitResponse", api_key: 8, version: 2, kind: Kind::Response },
-    Case { name: "OffsetCommitResponse", api_key: 8, version: 3, kind: Kind::Response },
-    Case { name: "OffsetCommitResponse", api_key: 8, version: 4, kind: Kind::Response },
-    Case { name: "OffsetCommitResponse", api_key: 8, version: 5, kind: Kind::Response },
-    Case { name: "OffsetCommitResponse", api_key: 8, version: 6, kind: Kind::Response },
-    Case { name: "OffsetCommitResponse", api_key: 8, version: 7, kind: Kind::Response },
-    Case { name: "OffsetCommitResponse", api_key: 8, version: 8, kind: Kind::Response },
-    Case { name: "OffsetCommitResponse", api_key: 8, version: 9, kind: Kind::Response },
-    Case { name: "OffsetCommitResponse", api_key: 8, version: 10, kind: Kind::Response },
-    Case { name: "OffsetDeleteRequest", api_key: 47, version: 0, kind: Kind::Request },
-    Case { name: "OffsetDeleteResponse", api_key: 47, version: 0, kind: Kind::Response },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 1, kind: Kind::Request },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 2, kind: Kind::Request },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 3, kind: Kind::Request },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 4, kind: Kind::Request },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 5, kind: Kind::Request },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 6, kind: Kind::Request },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 7, kind: Kind::Request },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 8, kind: Kind::Request },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 9, kind: Kind::Request },
-    Case { name: "OffsetFetchRequest", api_key: 9, version: 10, kind: Kind::Request },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 1, kind: Kind::Response },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 2, kind: Kind::Response },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 3, kind: Kind::Response },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 4, kind: Kind::Response },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 5, kind: Kind::Response },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 6, kind: Kind::Response },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 7, kind: Kind::Response },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 8, kind: Kind::Response },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 9, kind: Kind::Response },
-    Case { name: "OffsetFetchResponse", api_key: 9, version: 10, kind: Kind::Response },
-    Case { name: "OffsetForLeaderEpochRequest", api_key: 23, version: 2, kind: Kind::Request },
-    Case { name: "OffsetForLeaderEpochRequest", api_key: 23, version: 3, kind: Kind::Request },
-    Case { name: "OffsetForLeaderEpochRequest", api_key: 23, version: 4, kind: Kind::Request },
-    Case { name: "OffsetForLeaderEpochResponse", api_key: 23, version: 2, kind: Kind::Response },
-    Case { name: "OffsetForLeaderEpochResponse", api_key: 23, version: 3, kind: Kind::Response },
-    Case { name: "OffsetForLeaderEpochResponse", api_key: 23, version: 4, kind: Kind::Response },
-    Case { name: "ProduceRequest", api_key: 0, version: 3, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 4, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 5, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 6, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 7, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 8, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 9, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 10, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 11, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 12, kind: Kind::Request },
-    Case { name: "ProduceRequest", api_key: 0, version: 13, kind: Kind::Request },
-    Case { name: "ProduceResponse", api_key: 0, version: 3, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 4, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 5, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 6, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 7, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 8, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 9, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 10, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 11, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 12, kind: Kind::Response },
-    Case { name: "ProduceResponse", api_key: 0, version: 13, kind: Kind::Response },
-    Case { name: "PushTelemetryRequest", api_key: 72, version: 0, kind: Kind::Request },
-    Case { name: "PushTelemetryResponse", api_key: 72, version: 0, kind: Kind::Response },
-    Case { name: "ReadShareGroupStateRequest", api_key: 84, version: 0, kind: Kind::Request },
-    Case { name: "ReadShareGroupStateResponse", api_key: 84, version: 0, kind: Kind::Response },
-    Case { name: "ReadShareGroupStateSummaryRequest", api_key: 87, version: 0, kind: Kind::Request },
-    Case { name: "ReadShareGroupStateSummaryRequest", api_key: 87, version: 1, kind: Kind::Request },
-    Case { name: "ReadShareGroupStateSummaryResponse", api_key: 87, version: 0, kind: Kind::Response },
-    Case { name: "ReadShareGroupStateSummaryResponse", api_key: 87, version: 1, kind: Kind::Response },
-    Case { name: "RemoveRaftVoterRequest", api_key: 81, version: 0, kind: Kind::Request },
-    Case { name: "RemoveRaftVoterResponse", api_key: 81, version: 0, kind: Kind::Response },
-    Case { name: "RenewDelegationTokenRequest", api_key: 39, version: 1, kind: Kind::Request },
-    Case { name: "RenewDelegationTokenRequest", api_key: 39, version: 2, kind: Kind::Request },
-    Case { name: "RenewDelegationTokenResponse", api_key: 39, version: 1, kind: Kind::Response },
-    Case { name: "RenewDelegationTokenResponse", api_key: 39, version: 2, kind: Kind::Response },
-    Case { name: "RequestHeader", api_key: 0, version: 1, kind: Kind::RequestHeader },
-    Case { name: "RequestHeader", api_key: 0, version: 2, kind: Kind::RequestHeader },
-    Case { name: "ResponseHeader", api_key: 0, version: 0, kind: Kind::ResponseHeader },
-    Case { name: "ResponseHeader", api_key: 0, version: 1, kind: Kind::ResponseHeader },
-    Case { name: "SaslAuthenticateRequest", api_key: 36, version: 0, kind: Kind::Request },
-    Case { name: "SaslAuthenticateRequest", api_key: 36, version: 1, kind: Kind::Request },
-    Case { name: "SaslAuthenticateRequest", api_key: 36, version: 2, kind: Kind::Request },
-    Case { name: "SaslAuthenticateResponse", api_key: 36, version: 0, kind: Kind::Response },
-    Case { name: "SaslAuthenticateResponse", api_key: 36, version: 1, kind: Kind::Response },
-    Case { name: "SaslAuthenticateResponse", api_key: 36, version: 2, kind: Kind::Response },
-    Case { name: "SaslHandshakeRequest", api_key: 17, version: 0, kind: Kind::Request },
-    Case { name: "SaslHandshakeRequest", api_key: 17, version: 1, kind: Kind::Request },
-    Case { name: "SaslHandshakeResponse", api_key: 17, version: 0, kind: Kind::Response },
-    Case { name: "SaslHandshakeResponse", api_key: 17, version: 1, kind: Kind::Response },
-    Case { name: "ShareAcknowledgeRequest", api_key: 79, version: 1, kind: Kind::Request },
-    Case { name: "ShareAcknowledgeRequest", api_key: 79, version: 2, kind: Kind::Request },
-    Case { name: "ShareAcknowledgeResponse", api_key: 79, version: 1, kind: Kind::Response },
-    Case { name: "ShareAcknowledgeResponse", api_key: 79, version: 2, kind: Kind::Response },
-    Case { name: "ShareFetchRequest", api_key: 78, version: 1, kind: Kind::Request },
-    Case { name: "ShareFetchRequest", api_key: 78, version: 2, kind: Kind::Request },
-    Case { name: "ShareFetchResponse", api_key: 78, version: 1, kind: Kind::Response },
-    Case { name: "ShareFetchResponse", api_key: 78, version: 2, kind: Kind::Response },
-    Case { name: "ShareGroupDescribeRequest", api_key: 77, version: 1, kind: Kind::Request },
-    Case { name: "ShareGroupDescribeResponse", api_key: 77, version: 1, kind: Kind::Response },
-    Case { name: "ShareGroupHeartbeatRequest", api_key: 76, version: 1, kind: Kind::Request },
-    Case { name: "ShareGroupHeartbeatResponse", api_key: 76, version: 1, kind: Kind::Response },
-    Case { name: "StreamsGroupDescribeRequest", api_key: 89, version: 0, kind: Kind::Request },
-    Case { name: "StreamsGroupDescribeResponse", api_key: 89, version: 0, kind: Kind::Response },
-    Case { name: "StreamsGroupHeartbeatRequest", api_key: 88, version: 0, kind: Kind::Request },
-    Case { name: "StreamsGroupHeartbeatResponse", api_key: 88, version: 0, kind: Kind::Response },
-    Case { name: "SyncGroupRequest", api_key: 14, version: 0, kind: Kind::Request },
-    Case { name: "SyncGroupRequest", api_key: 14, version: 1, kind: Kind::Request },
-    Case { name: "SyncGroupRequest", api_key: 14, version: 2, kind: Kind::Request },
-    Case { name: "SyncGroupRequest", api_key: 14, version: 3, kind: Kind::Request },
-    Case { name: "SyncGroupRequest", api_key: 14, version: 4, kind: Kind::Request },
-    Case { name: "SyncGroupRequest", api_key: 14, version: 5, kind: Kind::Request },
-    Case { name: "SyncGroupResponse", api_key: 14, version: 0, kind: Kind::Response },
-    Case { name: "SyncGroupResponse", api_key: 14, version: 1, kind: Kind::Response },
-    Case { name: "SyncGroupResponse", api_key: 14, version: 2, kind: Kind::Response },
-    Case { name: "SyncGroupResponse", api_key: 14, version: 3, kind: Kind::Response },
-    Case { name: "SyncGroupResponse", api_key: 14, version: 4, kind: Kind::Response },
-    Case { name: "SyncGroupResponse", api_key: 14, version: 5, kind: Kind::Response },
-    Case { name: "TxnOffsetCommitRequest", api_key: 28, version: 0, kind: Kind::Request },
-    Case { name: "TxnOffsetCommitRequest", api_key: 28, version: 1, kind: Kind::Request },
-    Case { name: "TxnOffsetCommitRequest", api_key: 28, version: 2, kind: Kind::Request },
-    Case { name: "TxnOffsetCommitRequest", api_key: 28, version: 3, kind: Kind::Request },
-    Case { name: "TxnOffsetCommitRequest", api_key: 28, version: 4, kind: Kind::Request },
-    Case { name: "TxnOffsetCommitRequest", api_key: 28, version: 5, kind: Kind::Request },
-    Case { name: "TxnOffsetCommitResponse", api_key: 28, version: 0, kind: Kind::Response },
-    Case { name: "TxnOffsetCommitResponse", api_key: 28, version: 1, kind: Kind::Response },
-    Case { name: "TxnOffsetCommitResponse", api_key: 28, version: 2, kind: Kind::Response },
-    Case { name: "TxnOffsetCommitResponse", api_key: 28, version: 3, kind: Kind::Response },
-    Case { name: "TxnOffsetCommitResponse", api_key: 28, version: 4, kind: Kind::Response },
-    Case { name: "TxnOffsetCommitResponse", api_key: 28, version: 5, kind: Kind::Response },
-    Case { name: "UnregisterBrokerRequest", api_key: 64, version: 0, kind: Kind::Request },
-    Case { name: "UnregisterBrokerResponse", api_key: 64, version: 0, kind: Kind::Response },
-    Case { name: "UpdateFeaturesRequest", api_key: 57, version: 0, kind: Kind::Request },
-    Case { name: "UpdateFeaturesRequest", api_key: 57, version: 1, kind: Kind::Request },
-    Case { name: "UpdateFeaturesRequest", api_key: 57, version: 2, kind: Kind::Request },
-    Case { name: "UpdateFeaturesResponse", api_key: 57, version: 0, kind: Kind::Response },
-    Case { name: "UpdateFeaturesResponse", api_key: 57, version: 1, kind: Kind::Response },
-    Case { name: "UpdateFeaturesResponse", api_key: 57, version: 2, kind: Kind::Response },
-    Case { name: "UpdateRaftVoterRequest", api_key: 82, version: 0, kind: Kind::Request },
-    Case { name: "UpdateRaftVoterResponse", api_key: 82, version: 0, kind: Kind::Response },
-    Case { name: "VoteRequest", api_key: 52, version: 0, kind: Kind::Request },
-    Case { name: "VoteRequest", api_key: 52, version: 1, kind: Kind::Request },
-    Case { name: "VoteRequest", api_key: 52, version: 2, kind: Kind::Request },
-    Case { name: "VoteResponse", api_key: 52, version: 0, kind: Kind::Response },
-    Case { name: "VoteResponse", api_key: 52, version: 1, kind: Kind::Response },
-    Case { name: "VoteResponse", api_key: 52, version: 2, kind: Kind::Response },
-    Case { name: "WriteShareGroupStateRequest", api_key: 85, version: 0, kind: Kind::Request },
-    Case { name: "WriteShareGroupStateRequest", api_key: 85, version: 1, kind: Kind::Request },
-    Case { name: "WriteShareGroupStateResponse", api_key: 85, version: 0, kind: Kind::Response },
-    Case { name: "WriteShareGroupStateResponse", api_key: 85, version: 1, kind: Kind::Response },
-    Case { name: "WriteTxnMarkersRequest", api_key: 27, version: 1, kind: Kind::Request },
-    Case { name: "WriteTxnMarkersRequest", api_key: 27, version: 2, kind: Kind::Request },
-    Case { name: "WriteTxnMarkersResponse", api_key: 27, version: 1, kind: Kind::Response },
-    Case { name: "WriteTxnMarkersResponse", api_key: 27, version: 2, kind: Kind::Response },
+    Case {
+        name: "AddOffsetsToTxnRequest",
+        api_key: 25,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddOffsetsToTxnRequest",
+        api_key: 25,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddOffsetsToTxnRequest",
+        api_key: 25,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddOffsetsToTxnRequest",
+        api_key: 25,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddOffsetsToTxnRequest",
+        api_key: 25,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddOffsetsToTxnResponse",
+        api_key: 25,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddOffsetsToTxnResponse",
+        api_key: 25,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddOffsetsToTxnResponse",
+        api_key: 25,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddOffsetsToTxnResponse",
+        api_key: 25,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddOffsetsToTxnResponse",
+        api_key: 25,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddPartitionsToTxnRequest",
+        api_key: 24,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddPartitionsToTxnRequest",
+        api_key: 24,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddPartitionsToTxnRequest",
+        api_key: 24,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddPartitionsToTxnRequest",
+        api_key: 24,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddPartitionsToTxnRequest",
+        api_key: 24,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddPartitionsToTxnRequest",
+        api_key: 24,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddPartitionsToTxnResponse",
+        api_key: 24,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddPartitionsToTxnResponse",
+        api_key: 24,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddPartitionsToTxnResponse",
+        api_key: 24,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddPartitionsToTxnResponse",
+        api_key: 24,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddPartitionsToTxnResponse",
+        api_key: 24,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddPartitionsToTxnResponse",
+        api_key: 24,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddRaftVoterRequest",
+        api_key: 80,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddRaftVoterRequest",
+        api_key: 80,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AddRaftVoterResponse",
+        api_key: 80,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AddRaftVoterResponse",
+        api_key: 80,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AllocateProducerIdsRequest",
+        api_key: 67,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AllocateProducerIdsResponse",
+        api_key: 67,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterClientQuotasRequest",
+        api_key: 49,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterClientQuotasRequest",
+        api_key: 49,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterClientQuotasResponse",
+        api_key: 49,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterClientQuotasResponse",
+        api_key: 49,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterConfigsRequest",
+        api_key: 33,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterConfigsRequest",
+        api_key: 33,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterConfigsRequest",
+        api_key: 33,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterConfigsResponse",
+        api_key: 33,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterConfigsResponse",
+        api_key: 33,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterConfigsResponse",
+        api_key: 33,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterPartitionReassignmentsRequest",
+        api_key: 45,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterPartitionReassignmentsRequest",
+        api_key: 45,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterPartitionReassignmentsResponse",
+        api_key: 45,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterPartitionReassignmentsResponse",
+        api_key: 45,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterPartitionRequest",
+        api_key: 56,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterPartitionRequest",
+        api_key: 56,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterPartitionResponse",
+        api_key: 56,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterPartitionResponse",
+        api_key: 56,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterReplicaLogDirsRequest",
+        api_key: 34,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterReplicaLogDirsRequest",
+        api_key: 34,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterReplicaLogDirsResponse",
+        api_key: 34,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterReplicaLogDirsResponse",
+        api_key: 34,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterShareGroupOffsetsRequest",
+        api_key: 91,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterShareGroupOffsetsResponse",
+        api_key: 91,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AlterUserScramCredentialsRequest",
+        api_key: 51,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AlterUserScramCredentialsResponse",
+        api_key: 51,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ApiVersionsRequest",
+        api_key: 18,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ApiVersionsRequest",
+        api_key: 18,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ApiVersionsRequest",
+        api_key: 18,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ApiVersionsRequest",
+        api_key: 18,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ApiVersionsRequest",
+        api_key: 18,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ApiVersionsResponse",
+        api_key: 18,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ApiVersionsResponse",
+        api_key: 18,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ApiVersionsResponse",
+        api_key: 18,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ApiVersionsResponse",
+        api_key: 18,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ApiVersionsResponse",
+        api_key: 18,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "AssignReplicasToDirsRequest",
+        api_key: 73,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "AssignReplicasToDirsResponse",
+        api_key: 73,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BeginQuorumEpochRequest",
+        api_key: 53,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BeginQuorumEpochRequest",
+        api_key: 53,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BeginQuorumEpochResponse",
+        api_key: 53,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BeginQuorumEpochResponse",
+        api_key: 53,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BrokerHeartbeatRequest",
+        api_key: 63,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BrokerHeartbeatRequest",
+        api_key: 63,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BrokerHeartbeatRequest",
+        api_key: 63,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BrokerHeartbeatResponse",
+        api_key: 63,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BrokerHeartbeatResponse",
+        api_key: 63,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BrokerHeartbeatResponse",
+        api_key: 63,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BrokerRegistrationRequest",
+        api_key: 62,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BrokerRegistrationRequest",
+        api_key: 62,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BrokerRegistrationRequest",
+        api_key: 62,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BrokerRegistrationRequest",
+        api_key: 62,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BrokerRegistrationRequest",
+        api_key: 62,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "BrokerRegistrationResponse",
+        api_key: 62,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BrokerRegistrationResponse",
+        api_key: 62,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BrokerRegistrationResponse",
+        api_key: 62,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BrokerRegistrationResponse",
+        api_key: 62,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "BrokerRegistrationResponse",
+        api_key: 62,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ConsumerGroupDescribeRequest",
+        api_key: 69,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ConsumerGroupDescribeRequest",
+        api_key: 69,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ConsumerGroupDescribeResponse",
+        api_key: 69,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ConsumerGroupDescribeResponse",
+        api_key: 69,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ConsumerGroupHeartbeatRequest",
+        api_key: 68,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ConsumerGroupHeartbeatRequest",
+        api_key: 68,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ConsumerGroupHeartbeatResponse",
+        api_key: 68,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ConsumerGroupHeartbeatResponse",
+        api_key: 68,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ControllerRegistrationRequest",
+        api_key: 70,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ControllerRegistrationResponse",
+        api_key: 70,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateAclsRequest",
+        api_key: 30,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateAclsRequest",
+        api_key: 30,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateAclsRequest",
+        api_key: 30,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateAclsResponse",
+        api_key: 30,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateAclsResponse",
+        api_key: 30,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateAclsResponse",
+        api_key: 30,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateDelegationTokenRequest",
+        api_key: 38,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateDelegationTokenRequest",
+        api_key: 38,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateDelegationTokenRequest",
+        api_key: 38,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateDelegationTokenResponse",
+        api_key: 38,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateDelegationTokenResponse",
+        api_key: 38,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateDelegationTokenResponse",
+        api_key: 38,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreatePartitionsRequest",
+        api_key: 37,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreatePartitionsRequest",
+        api_key: 37,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreatePartitionsRequest",
+        api_key: 37,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreatePartitionsRequest",
+        api_key: 37,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreatePartitionsResponse",
+        api_key: 37,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreatePartitionsResponse",
+        api_key: 37,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreatePartitionsResponse",
+        api_key: 37,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreatePartitionsResponse",
+        api_key: 37,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateTopicsRequest",
+        api_key: 19,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateTopicsRequest",
+        api_key: 19,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateTopicsRequest",
+        api_key: 19,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateTopicsRequest",
+        api_key: 19,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateTopicsRequest",
+        api_key: 19,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateTopicsRequest",
+        api_key: 19,
+        version: 7,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "CreateTopicsResponse",
+        api_key: 19,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateTopicsResponse",
+        api_key: 19,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateTopicsResponse",
+        api_key: 19,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateTopicsResponse",
+        api_key: 19,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateTopicsResponse",
+        api_key: 19,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "CreateTopicsResponse",
+        api_key: 19,
+        version: 7,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteAclsRequest",
+        api_key: 31,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteAclsRequest",
+        api_key: 31,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteAclsRequest",
+        api_key: 31,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteAclsResponse",
+        api_key: 31,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteAclsResponse",
+        api_key: 31,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteAclsResponse",
+        api_key: 31,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteGroupsRequest",
+        api_key: 42,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteGroupsRequest",
+        api_key: 42,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteGroupsRequest",
+        api_key: 42,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteGroupsResponse",
+        api_key: 42,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteGroupsResponse",
+        api_key: 42,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteGroupsResponse",
+        api_key: 42,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteRecordsRequest",
+        api_key: 21,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteRecordsRequest",
+        api_key: 21,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteRecordsRequest",
+        api_key: 21,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteRecordsResponse",
+        api_key: 21,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteRecordsResponse",
+        api_key: 21,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteRecordsResponse",
+        api_key: 21,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteShareGroupOffsetsRequest",
+        api_key: 92,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteShareGroupOffsetsResponse",
+        api_key: 92,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteShareGroupStateRequest",
+        api_key: 86,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteShareGroupStateResponse",
+        api_key: 86,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteTopicsRequest",
+        api_key: 20,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteTopicsRequest",
+        api_key: 20,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteTopicsRequest",
+        api_key: 20,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteTopicsRequest",
+        api_key: 20,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteTopicsRequest",
+        api_key: 20,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteTopicsRequest",
+        api_key: 20,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DeleteTopicsResponse",
+        api_key: 20,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteTopicsResponse",
+        api_key: 20,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteTopicsResponse",
+        api_key: 20,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteTopicsResponse",
+        api_key: 20,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteTopicsResponse",
+        api_key: 20,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DeleteTopicsResponse",
+        api_key: 20,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeAclsRequest",
+        api_key: 29,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeAclsRequest",
+        api_key: 29,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeAclsRequest",
+        api_key: 29,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeAclsResponse",
+        api_key: 29,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeAclsResponse",
+        api_key: 29,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeAclsResponse",
+        api_key: 29,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeClientQuotasRequest",
+        api_key: 48,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeClientQuotasRequest",
+        api_key: 48,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeClientQuotasResponse",
+        api_key: 48,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeClientQuotasResponse",
+        api_key: 48,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeClusterRequest",
+        api_key: 60,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeClusterRequest",
+        api_key: 60,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeClusterRequest",
+        api_key: 60,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeClusterResponse",
+        api_key: 60,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeClusterResponse",
+        api_key: 60,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeClusterResponse",
+        api_key: 60,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeConfigsRequest",
+        api_key: 32,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeConfigsRequest",
+        api_key: 32,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeConfigsRequest",
+        api_key: 32,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeConfigsRequest",
+        api_key: 32,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeConfigsResponse",
+        api_key: 32,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeConfigsResponse",
+        api_key: 32,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeConfigsResponse",
+        api_key: 32,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeConfigsResponse",
+        api_key: 32,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeDelegationTokenRequest",
+        api_key: 41,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeDelegationTokenRequest",
+        api_key: 41,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeDelegationTokenRequest",
+        api_key: 41,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeDelegationTokenResponse",
+        api_key: 41,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeDelegationTokenResponse",
+        api_key: 41,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeDelegationTokenResponse",
+        api_key: 41,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeGroupsRequest",
+        api_key: 15,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeGroupsRequest",
+        api_key: 15,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeGroupsRequest",
+        api_key: 15,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeGroupsRequest",
+        api_key: 15,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeGroupsRequest",
+        api_key: 15,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeGroupsRequest",
+        api_key: 15,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeGroupsRequest",
+        api_key: 15,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeGroupsResponse",
+        api_key: 15,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeGroupsResponse",
+        api_key: 15,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeGroupsResponse",
+        api_key: 15,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeGroupsResponse",
+        api_key: 15,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeGroupsResponse",
+        api_key: 15,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeGroupsResponse",
+        api_key: 15,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeGroupsResponse",
+        api_key: 15,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeLogDirsRequest",
+        api_key: 35,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeLogDirsRequest",
+        api_key: 35,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeLogDirsRequest",
+        api_key: 35,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeLogDirsRequest",
+        api_key: 35,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeLogDirsRequest",
+        api_key: 35,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeLogDirsResponse",
+        api_key: 35,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeLogDirsResponse",
+        api_key: 35,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeLogDirsResponse",
+        api_key: 35,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeLogDirsResponse",
+        api_key: 35,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeLogDirsResponse",
+        api_key: 35,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeProducersRequest",
+        api_key: 61,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeProducersResponse",
+        api_key: 61,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeQuorumRequest",
+        api_key: 55,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeQuorumRequest",
+        api_key: 55,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeQuorumRequest",
+        api_key: 55,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeQuorumResponse",
+        api_key: 55,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeQuorumResponse",
+        api_key: 55,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeQuorumResponse",
+        api_key: 55,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeShareGroupOffsetsRequest",
+        api_key: 90,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeShareGroupOffsetsRequest",
+        api_key: 90,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeShareGroupOffsetsResponse",
+        api_key: 90,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeShareGroupOffsetsResponse",
+        api_key: 90,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeTopicPartitionsRequest",
+        api_key: 75,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeTopicPartitionsResponse",
+        api_key: 75,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeTransactionsRequest",
+        api_key: 65,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeTransactionsResponse",
+        api_key: 65,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "DescribeUserScramCredentialsRequest",
+        api_key: 50,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "DescribeUserScramCredentialsResponse",
+        api_key: 50,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ElectLeadersRequest",
+        api_key: 43,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ElectLeadersRequest",
+        api_key: 43,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ElectLeadersRequest",
+        api_key: 43,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ElectLeadersResponse",
+        api_key: 43,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ElectLeadersResponse",
+        api_key: 43,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ElectLeadersResponse",
+        api_key: 43,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "EndQuorumEpochRequest",
+        api_key: 54,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "EndQuorumEpochRequest",
+        api_key: 54,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "EndQuorumEpochResponse",
+        api_key: 54,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "EndQuorumEpochResponse",
+        api_key: 54,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "EndTxnRequest",
+        api_key: 26,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "EndTxnRequest",
+        api_key: 26,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "EndTxnRequest",
+        api_key: 26,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "EndTxnRequest",
+        api_key: 26,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "EndTxnRequest",
+        api_key: 26,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "EndTxnRequest",
+        api_key: 26,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "EndTxnResponse",
+        api_key: 26,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "EndTxnResponse",
+        api_key: 26,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "EndTxnResponse",
+        api_key: 26,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "EndTxnResponse",
+        api_key: 26,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "EndTxnResponse",
+        api_key: 26,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "EndTxnResponse",
+        api_key: 26,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "EnvelopeRequest",
+        api_key: 58,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "EnvelopeResponse",
+        api_key: 58,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ExpireDelegationTokenRequest",
+        api_key: 40,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ExpireDelegationTokenRequest",
+        api_key: 40,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ExpireDelegationTokenResponse",
+        api_key: 40,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ExpireDelegationTokenResponse",
+        api_key: 40,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 7,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 8,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 9,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 10,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 11,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 12,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 13,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 14,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 15,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 16,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 17,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchRequest",
+        api_key: 1,
+        version: 18,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 7,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 8,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 9,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 10,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 11,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 12,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 13,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 14,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 15,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 16,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 17,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchResponse",
+        api_key: 1,
+        version: 18,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchSnapshotRequest",
+        api_key: 59,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchSnapshotRequest",
+        api_key: 59,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FetchSnapshotResponse",
+        api_key: 59,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FetchSnapshotResponse",
+        api_key: 59,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FindCoordinatorRequest",
+        api_key: 10,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FindCoordinatorRequest",
+        api_key: 10,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FindCoordinatorRequest",
+        api_key: 10,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FindCoordinatorRequest",
+        api_key: 10,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FindCoordinatorRequest",
+        api_key: 10,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FindCoordinatorRequest",
+        api_key: 10,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FindCoordinatorRequest",
+        api_key: 10,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "FindCoordinatorResponse",
+        api_key: 10,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FindCoordinatorResponse",
+        api_key: 10,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FindCoordinatorResponse",
+        api_key: 10,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FindCoordinatorResponse",
+        api_key: 10,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FindCoordinatorResponse",
+        api_key: 10,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FindCoordinatorResponse",
+        api_key: 10,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "FindCoordinatorResponse",
+        api_key: 10,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "GetTelemetrySubscriptionsRequest",
+        api_key: 71,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "GetTelemetrySubscriptionsResponse",
+        api_key: 71,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "HeartbeatRequest",
+        api_key: 12,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "HeartbeatRequest",
+        api_key: 12,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "HeartbeatRequest",
+        api_key: 12,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "HeartbeatRequest",
+        api_key: 12,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "HeartbeatRequest",
+        api_key: 12,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "HeartbeatResponse",
+        api_key: 12,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "HeartbeatResponse",
+        api_key: 12,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "HeartbeatResponse",
+        api_key: 12,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "HeartbeatResponse",
+        api_key: 12,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "HeartbeatResponse",
+        api_key: 12,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "IncrementalAlterConfigsRequest",
+        api_key: 44,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "IncrementalAlterConfigsRequest",
+        api_key: 44,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "IncrementalAlterConfigsResponse",
+        api_key: 44,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "IncrementalAlterConfigsResponse",
+        api_key: 44,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "InitProducerIdRequest",
+        api_key: 22,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "InitProducerIdRequest",
+        api_key: 22,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "InitProducerIdRequest",
+        api_key: 22,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "InitProducerIdRequest",
+        api_key: 22,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "InitProducerIdRequest",
+        api_key: 22,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "InitProducerIdRequest",
+        api_key: 22,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "InitProducerIdRequest",
+        api_key: 22,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "InitProducerIdResponse",
+        api_key: 22,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "InitProducerIdResponse",
+        api_key: 22,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "InitProducerIdResponse",
+        api_key: 22,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "InitProducerIdResponse",
+        api_key: 22,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "InitProducerIdResponse",
+        api_key: 22,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "InitProducerIdResponse",
+        api_key: 22,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "InitProducerIdResponse",
+        api_key: 22,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "InitializeShareGroupStateRequest",
+        api_key: 83,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "InitializeShareGroupStateResponse",
+        api_key: 83,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 7,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 8,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupRequest",
+        api_key: 11,
+        version: 9,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 7,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 8,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "JoinGroupResponse",
+        api_key: 11,
+        version: 9,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "LeaveGroupRequest",
+        api_key: 13,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "LeaveGroupRequest",
+        api_key: 13,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "LeaveGroupRequest",
+        api_key: 13,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "LeaveGroupRequest",
+        api_key: 13,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "LeaveGroupRequest",
+        api_key: 13,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "LeaveGroupRequest",
+        api_key: 13,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "LeaveGroupResponse",
+        api_key: 13,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "LeaveGroupResponse",
+        api_key: 13,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "LeaveGroupResponse",
+        api_key: 13,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "LeaveGroupResponse",
+        api_key: 13,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "LeaveGroupResponse",
+        api_key: 13,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "LeaveGroupResponse",
+        api_key: 13,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListConfigResourcesRequest",
+        api_key: 74,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListConfigResourcesRequest",
+        api_key: 74,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListConfigResourcesResponse",
+        api_key: 74,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListConfigResourcesResponse",
+        api_key: 74,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListGroupsRequest",
+        api_key: 16,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListGroupsRequest",
+        api_key: 16,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListGroupsRequest",
+        api_key: 16,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListGroupsRequest",
+        api_key: 16,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListGroupsRequest",
+        api_key: 16,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListGroupsRequest",
+        api_key: 16,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListGroupsResponse",
+        api_key: 16,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListGroupsResponse",
+        api_key: 16,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListGroupsResponse",
+        api_key: 16,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListGroupsResponse",
+        api_key: 16,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListGroupsResponse",
+        api_key: 16,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListGroupsResponse",
+        api_key: 16,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 7,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 8,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 9,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 10,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsRequest",
+        api_key: 2,
+        version: 11,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 7,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 8,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 9,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 10,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListOffsetsResponse",
+        api_key: 2,
+        version: 11,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListPartitionReassignmentsRequest",
+        api_key: 46,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListPartitionReassignmentsResponse",
+        api_key: 46,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListTransactionsRequest",
+        api_key: 66,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListTransactionsRequest",
+        api_key: 66,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListTransactionsRequest",
+        api_key: 66,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ListTransactionsResponse",
+        api_key: 66,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListTransactionsResponse",
+        api_key: 66,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ListTransactionsResponse",
+        api_key: 66,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 7,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 8,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 9,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 10,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 11,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 12,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataRequest",
+        api_key: 3,
+        version: 13,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 7,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 8,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 9,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 10,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 11,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 12,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "MetadataResponse",
+        api_key: 3,
+        version: 13,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetCommitRequest",
+        api_key: 8,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetCommitRequest",
+        api_key: 8,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetCommitRequest",
+        api_key: 8,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetCommitRequest",
+        api_key: 8,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetCommitRequest",
+        api_key: 8,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetCommitRequest",
+        api_key: 8,
+        version: 7,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetCommitRequest",
+        api_key: 8,
+        version: 8,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetCommitRequest",
+        api_key: 8,
+        version: 9,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetCommitRequest",
+        api_key: 8,
+        version: 10,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetCommitResponse",
+        api_key: 8,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetCommitResponse",
+        api_key: 8,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetCommitResponse",
+        api_key: 8,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetCommitResponse",
+        api_key: 8,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetCommitResponse",
+        api_key: 8,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetCommitResponse",
+        api_key: 8,
+        version: 7,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetCommitResponse",
+        api_key: 8,
+        version: 8,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetCommitResponse",
+        api_key: 8,
+        version: 9,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetCommitResponse",
+        api_key: 8,
+        version: 10,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetDeleteRequest",
+        api_key: 47,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetDeleteResponse",
+        api_key: 47,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 7,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 8,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 9,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchRequest",
+        api_key: 9,
+        version: 10,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 7,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 8,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 9,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetFetchResponse",
+        api_key: 9,
+        version: 10,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetForLeaderEpochRequest",
+        api_key: 23,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetForLeaderEpochRequest",
+        api_key: 23,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetForLeaderEpochRequest",
+        api_key: 23,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "OffsetForLeaderEpochResponse",
+        api_key: 23,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetForLeaderEpochResponse",
+        api_key: 23,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "OffsetForLeaderEpochResponse",
+        api_key: 23,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 6,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 7,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 8,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 9,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 10,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 11,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 12,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceRequest",
+        api_key: 0,
+        version: 13,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 6,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 7,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 8,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 9,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 10,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 11,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 12,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ProduceResponse",
+        api_key: 0,
+        version: 13,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "PushTelemetryRequest",
+        api_key: 72,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "PushTelemetryResponse",
+        api_key: 72,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ReadShareGroupStateRequest",
+        api_key: 84,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ReadShareGroupStateResponse",
+        api_key: 84,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ReadShareGroupStateSummaryRequest",
+        api_key: 87,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ReadShareGroupStateSummaryRequest",
+        api_key: 87,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ReadShareGroupStateSummaryResponse",
+        api_key: 87,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ReadShareGroupStateSummaryResponse",
+        api_key: 87,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "RemoveRaftVoterRequest",
+        api_key: 81,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "RemoveRaftVoterResponse",
+        api_key: 81,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "RenewDelegationTokenRequest",
+        api_key: 39,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "RenewDelegationTokenRequest",
+        api_key: 39,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "RenewDelegationTokenResponse",
+        api_key: 39,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "RenewDelegationTokenResponse",
+        api_key: 39,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "RequestHeader",
+        api_key: 0,
+        version: 1,
+        kind: Kind::RequestHeader,
+    },
+    Case {
+        name: "RequestHeader",
+        api_key: 0,
+        version: 2,
+        kind: Kind::RequestHeader,
+    },
+    Case {
+        name: "ResponseHeader",
+        api_key: 0,
+        version: 0,
+        kind: Kind::ResponseHeader,
+    },
+    Case {
+        name: "ResponseHeader",
+        api_key: 0,
+        version: 1,
+        kind: Kind::ResponseHeader,
+    },
+    Case {
+        name: "SaslAuthenticateRequest",
+        api_key: 36,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SaslAuthenticateRequest",
+        api_key: 36,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SaslAuthenticateRequest",
+        api_key: 36,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SaslAuthenticateResponse",
+        api_key: 36,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SaslAuthenticateResponse",
+        api_key: 36,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SaslAuthenticateResponse",
+        api_key: 36,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SaslHandshakeRequest",
+        api_key: 17,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SaslHandshakeRequest",
+        api_key: 17,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SaslHandshakeResponse",
+        api_key: 17,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SaslHandshakeResponse",
+        api_key: 17,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ShareAcknowledgeRequest",
+        api_key: 79,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ShareAcknowledgeRequest",
+        api_key: 79,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ShareAcknowledgeResponse",
+        api_key: 79,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ShareAcknowledgeResponse",
+        api_key: 79,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ShareFetchRequest",
+        api_key: 78,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ShareFetchRequest",
+        api_key: 78,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ShareFetchResponse",
+        api_key: 78,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ShareFetchResponse",
+        api_key: 78,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ShareGroupDescribeRequest",
+        api_key: 77,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ShareGroupDescribeResponse",
+        api_key: 77,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "ShareGroupHeartbeatRequest",
+        api_key: 76,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "ShareGroupHeartbeatResponse",
+        api_key: 76,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "StreamsGroupDescribeRequest",
+        api_key: 89,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "StreamsGroupDescribeResponse",
+        api_key: 89,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "StreamsGroupHeartbeatRequest",
+        api_key: 88,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "StreamsGroupHeartbeatResponse",
+        api_key: 88,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SyncGroupRequest",
+        api_key: 14,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SyncGroupRequest",
+        api_key: 14,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SyncGroupRequest",
+        api_key: 14,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SyncGroupRequest",
+        api_key: 14,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SyncGroupRequest",
+        api_key: 14,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SyncGroupRequest",
+        api_key: 14,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "SyncGroupResponse",
+        api_key: 14,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SyncGroupResponse",
+        api_key: 14,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SyncGroupResponse",
+        api_key: 14,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SyncGroupResponse",
+        api_key: 14,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SyncGroupResponse",
+        api_key: 14,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "SyncGroupResponse",
+        api_key: 14,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "TxnOffsetCommitRequest",
+        api_key: 28,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "TxnOffsetCommitRequest",
+        api_key: 28,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "TxnOffsetCommitRequest",
+        api_key: 28,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "TxnOffsetCommitRequest",
+        api_key: 28,
+        version: 3,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "TxnOffsetCommitRequest",
+        api_key: 28,
+        version: 4,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "TxnOffsetCommitRequest",
+        api_key: 28,
+        version: 5,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "TxnOffsetCommitResponse",
+        api_key: 28,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "TxnOffsetCommitResponse",
+        api_key: 28,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "TxnOffsetCommitResponse",
+        api_key: 28,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "TxnOffsetCommitResponse",
+        api_key: 28,
+        version: 3,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "TxnOffsetCommitResponse",
+        api_key: 28,
+        version: 4,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "TxnOffsetCommitResponse",
+        api_key: 28,
+        version: 5,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "UnregisterBrokerRequest",
+        api_key: 64,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "UnregisterBrokerResponse",
+        api_key: 64,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "UpdateFeaturesRequest",
+        api_key: 57,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "UpdateFeaturesRequest",
+        api_key: 57,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "UpdateFeaturesRequest",
+        api_key: 57,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "UpdateFeaturesResponse",
+        api_key: 57,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "UpdateFeaturesResponse",
+        api_key: 57,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "UpdateFeaturesResponse",
+        api_key: 57,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "UpdateRaftVoterRequest",
+        api_key: 82,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "UpdateRaftVoterResponse",
+        api_key: 82,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "VoteRequest",
+        api_key: 52,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "VoteRequest",
+        api_key: 52,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "VoteRequest",
+        api_key: 52,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "VoteResponse",
+        api_key: 52,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "VoteResponse",
+        api_key: 52,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "VoteResponse",
+        api_key: 52,
+        version: 2,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "WriteShareGroupStateRequest",
+        api_key: 85,
+        version: 0,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "WriteShareGroupStateRequest",
+        api_key: 85,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "WriteShareGroupStateResponse",
+        api_key: 85,
+        version: 0,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "WriteShareGroupStateResponse",
+        api_key: 85,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "WriteTxnMarkersRequest",
+        api_key: 27,
+        version: 1,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "WriteTxnMarkersRequest",
+        api_key: 27,
+        version: 2,
+        kind: Kind::Request,
+    },
+    Case {
+        name: "WriteTxnMarkersResponse",
+        api_key: 27,
+        version: 1,
+        kind: Kind::Response,
+    },
+    Case {
+        name: "WriteTxnMarkersResponse",
+        api_key: 27,
+        version: 2,
+        kind: Kind::Response,
+    },
 ];
 
 #[must_use]
@@ -631,7 +3676,9 @@ pub const CASES: &[Case] = &[
 pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
     match name {
         "AddOffsetsToTxnRequest" => {
-            let msg = crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest::default();
+            let msg =
+                crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -655,13 +3702,15 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "AddRaftVoterRequest" => {
-            let msg = crabka_protocol::owned::add_raft_voter_request::AddRaftVoterRequest::default();
+            let msg =
+                crabka_protocol::owned::add_raft_voter_request::AddRaftVoterRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "AddRaftVoterResponse" => {
-            let msg = crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse::default();
+            let msg =
+                crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -697,7 +3746,8 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "AlterConfigsResponse" => {
-            let msg = crabka_protocol::owned::alter_configs_response::AlterConfigsResponse::default();
+            let msg =
+                crabka_protocol::owned::alter_configs_response::AlterConfigsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -715,13 +3765,15 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "AlterPartitionRequest" => {
-            let msg = crabka_protocol::owned::alter_partition_request::AlterPartitionRequest::default();
+            let msg =
+                crabka_protocol::owned::alter_partition_request::AlterPartitionRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "AlterPartitionResponse" => {
-            let msg = crabka_protocol::owned::alter_partition_response::AlterPartitionResponse::default();
+            let msg =
+                crabka_protocol::owned::alter_partition_response::AlterPartitionResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -799,13 +3851,16 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "BrokerHeartbeatRequest" => {
-            let msg = crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest::default();
+            let msg =
+                crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "BrokerHeartbeatResponse" => {
-            let msg = crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse::default();
+            let msg =
+                crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -883,7 +3938,9 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "CreatePartitionsRequest" => {
-            let msg = crabka_protocol::owned::create_partitions_request::CreatePartitionsRequest::default();
+            let msg =
+                crabka_protocol::owned::create_partitions_request::CreatePartitionsRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -901,7 +3958,8 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "CreateTopicsResponse" => {
-            let msg = crabka_protocol::owned::create_topics_response::CreateTopicsResponse::default();
+            let msg =
+                crabka_protocol::owned::create_topics_response::CreateTopicsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -925,19 +3983,22 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "DeleteGroupsResponse" => {
-            let msg = crabka_protocol::owned::delete_groups_response::DeleteGroupsResponse::default();
+            let msg =
+                crabka_protocol::owned::delete_groups_response::DeleteGroupsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DeleteRecordsRequest" => {
-            let msg = crabka_protocol::owned::delete_records_request::DeleteRecordsRequest::default();
+            let msg =
+                crabka_protocol::owned::delete_records_request::DeleteRecordsRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DeleteRecordsResponse" => {
-            let msg = crabka_protocol::owned::delete_records_response::DeleteRecordsResponse::default();
+            let msg =
+                crabka_protocol::owned::delete_records_response::DeleteRecordsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -973,7 +4034,8 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "DeleteTopicsResponse" => {
-            let msg = crabka_protocol::owned::delete_topics_response::DeleteTopicsResponse::default();
+            let msg =
+                crabka_protocol::owned::delete_topics_response::DeleteTopicsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -985,7 +4047,8 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "DescribeAclsResponse" => {
-            let msg = crabka_protocol::owned::describe_acls_response::DescribeAclsResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_acls_response::DescribeAclsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1003,25 +4066,31 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "DescribeClusterRequest" => {
-            let msg = crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeClusterResponse" => {
-            let msg = crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeConfigsRequest" => {
-            let msg = crabka_protocol::owned::describe_configs_request::DescribeConfigsRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_configs_request::DescribeConfigsRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeConfigsResponse" => {
-            let msg = crabka_protocol::owned::describe_configs_response::DescribeConfigsResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_configs_response::DescribeConfigsResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1039,19 +4108,23 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "DescribeGroupsRequest" => {
-            let msg = crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeGroupsResponse" => {
-            let msg = crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeLogDirsRequest" => {
-            let msg = crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1075,13 +4148,15 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "DescribeQuorumRequest" => {
-            let msg = crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeQuorumResponse" => {
-            let msg = crabka_protocol::owned::describe_quorum_response::DescribeQuorumResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_quorum_response::DescribeQuorumResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1141,19 +4216,23 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "ElectLeadersResponse" => {
-            let msg = crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse::default();
+            let msg =
+                crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "EndQuorumEpochRequest" => {
-            let msg = crabka_protocol::owned::end_quorum_epoch_request::EndQuorumEpochRequest::default();
+            let msg =
+                crabka_protocol::owned::end_quorum_epoch_request::EndQuorumEpochRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "EndQuorumEpochResponse" => {
-            let msg = crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse::default();
+            let msg =
+                crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1207,25 +4286,30 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "FetchSnapshotRequest" => {
-            let msg = crabka_protocol::owned::fetch_snapshot_request::FetchSnapshotRequest::default();
+            let msg =
+                crabka_protocol::owned::fetch_snapshot_request::FetchSnapshotRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "FetchSnapshotResponse" => {
-            let msg = crabka_protocol::owned::fetch_snapshot_response::FetchSnapshotResponse::default();
+            let msg =
+                crabka_protocol::owned::fetch_snapshot_response::FetchSnapshotResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "FindCoordinatorRequest" => {
-            let msg = crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest::default();
+            let msg =
+                crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "FindCoordinatorResponse" => {
-            let msg = crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse::default();
+            let msg =
+                crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1267,13 +4351,16 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "InitProducerIdRequest" => {
-            let msg = crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest::default();
+            let msg =
+                crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "InitProducerIdResponse" => {
-            let msg = crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse::default();
+            let msg =
+                crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1363,7 +4450,9 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "ListTransactionsRequest" => {
-            let msg = crabka_protocol::owned::list_transactions_request::ListTransactionsRequest::default();
+            let msg =
+                crabka_protocol::owned::list_transactions_request::ListTransactionsRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1393,7 +4482,8 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "OffsetCommitResponse" => {
-            let msg = crabka_protocol::owned::offset_commit_response::OffsetCommitResponse::default();
+            let msg =
+                crabka_protocol::owned::offset_commit_response::OffsetCommitResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1405,7 +4495,8 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "OffsetDeleteResponse" => {
-            let msg = crabka_protocol::owned::offset_delete_response::OffsetDeleteResponse::default();
+            let msg =
+                crabka_protocol::owned::offset_delete_response::OffsetDeleteResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1447,13 +4538,15 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "PushTelemetryRequest" => {
-            let msg = crabka_protocol::owned::push_telemetry_request::PushTelemetryRequest::default();
+            let msg =
+                crabka_protocol::owned::push_telemetry_request::PushTelemetryRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "PushTelemetryResponse" => {
-            let msg = crabka_protocol::owned::push_telemetry_response::PushTelemetryResponse::default();
+            let msg =
+                crabka_protocol::owned::push_telemetry_response::PushTelemetryResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1483,7 +4576,9 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "RemoveRaftVoterRequest" => {
-            let msg = crabka_protocol::owned::remove_raft_voter_request::RemoveRaftVoterRequest::default();
+            let msg =
+                crabka_protocol::owned::remove_raft_voter_request::RemoveRaftVoterRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1519,7 +4614,9 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "SaslAuthenticateRequest" => {
-            let msg = crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest::default();
+            let msg =
+                crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1531,19 +4628,23 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "SaslHandshakeRequest" => {
-            let msg = crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::default();
+            let msg =
+                crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "SaslHandshakeResponse" => {
-            let msg = crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse::default();
+            let msg =
+                crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "ShareAcknowledgeRequest" => {
-            let msg = crabka_protocol::owned::share_acknowledge_request::ShareAcknowledgeRequest::default();
+            let msg =
+                crabka_protocol::owned::share_acknowledge_request::ShareAcknowledgeRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1627,7 +4728,9 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "TxnOffsetCommitRequest" => {
-            let msg = crabka_protocol::owned::txn_offset_commit_request::TxnOffsetCommitRequest::default();
+            let msg =
+                crabka_protocol::owned::txn_offset_commit_request::TxnOffsetCommitRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1639,7 +4742,9 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "UnregisterBrokerRequest" => {
-            let msg = crabka_protocol::owned::unregister_broker_request::UnregisterBrokerRequest::default();
+            let msg =
+                crabka_protocol::owned::unregister_broker_request::UnregisterBrokerRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1651,19 +4756,23 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "UpdateFeaturesRequest" => {
-            let msg = crabka_protocol::owned::update_features_request::UpdateFeaturesRequest::default();
+            let msg =
+                crabka_protocol::owned::update_features_request::UpdateFeaturesRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "UpdateFeaturesResponse" => {
-            let msg = crabka_protocol::owned::update_features_response::UpdateFeaturesResponse::default();
+            let msg =
+                crabka_protocol::owned::update_features_response::UpdateFeaturesResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "UpdateRaftVoterRequest" => {
-            let msg = crabka_protocol::owned::update_raft_voter_request::UpdateRaftVoterRequest::default();
+            let msg =
+                crabka_protocol::owned::update_raft_voter_request::UpdateRaftVoterRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1699,7 +4808,9 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             buf.to_vec()
         }
         "WriteTxnMarkersRequest" => {
-            let msg = crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest::default();
+            let msg =
+                crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -1718,186 +4829,480 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
 #[allow(clippy::too_many_lines)]
 pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {
     match name {
-        "AddOffsetsToTxnRequest" => crabka_protocol::owned::add_offsets_to_txn_request::default_json(version),
-        "AddOffsetsToTxnResponse" => crabka_protocol::owned::add_offsets_to_txn_response::default_json(version),
-        "AddPartitionsToTxnRequest" => crabka_protocol::owned::add_partitions_to_txn_request::default_json(version),
-        "AddPartitionsToTxnResponse" => crabka_protocol::owned::add_partitions_to_txn_response::default_json(version),
-        "AddRaftVoterRequest" => crabka_protocol::owned::add_raft_voter_request::default_json(version),
-        "AddRaftVoterResponse" => crabka_protocol::owned::add_raft_voter_response::default_json(version),
-        "AllocateProducerIdsRequest" => crabka_protocol::owned::allocate_producer_ids_request::default_json(version),
-        "AllocateProducerIdsResponse" => crabka_protocol::owned::allocate_producer_ids_response::default_json(version),
-        "AlterClientQuotasRequest" => crabka_protocol::owned::alter_client_quotas_request::default_json(version),
-        "AlterClientQuotasResponse" => crabka_protocol::owned::alter_client_quotas_response::default_json(version),
-        "AlterConfigsRequest" => crabka_protocol::owned::alter_configs_request::default_json(version),
-        "AlterConfigsResponse" => crabka_protocol::owned::alter_configs_response::default_json(version),
-        "AlterPartitionReassignmentsRequest" => crabka_protocol::owned::alter_partition_reassignments_request::default_json(version),
-        "AlterPartitionReassignmentsResponse" => crabka_protocol::owned::alter_partition_reassignments_response::default_json(version),
-        "AlterPartitionRequest" => crabka_protocol::owned::alter_partition_request::default_json(version),
-        "AlterPartitionResponse" => crabka_protocol::owned::alter_partition_response::default_json(version),
-        "AlterReplicaLogDirsRequest" => crabka_protocol::owned::alter_replica_log_dirs_request::default_json(version),
-        "AlterReplicaLogDirsResponse" => crabka_protocol::owned::alter_replica_log_dirs_response::default_json(version),
-        "AlterShareGroupOffsetsRequest" => crabka_protocol::owned::alter_share_group_offsets_request::default_json(version),
-        "AlterShareGroupOffsetsResponse" => crabka_protocol::owned::alter_share_group_offsets_response::default_json(version),
-        "AlterUserScramCredentialsRequest" => crabka_protocol::owned::alter_user_scram_credentials_request::default_json(version),
-        "AlterUserScramCredentialsResponse" => crabka_protocol::owned::alter_user_scram_credentials_response::default_json(version),
+        "AddOffsetsToTxnRequest" => {
+            crabka_protocol::owned::add_offsets_to_txn_request::default_json(version)
+        }
+        "AddOffsetsToTxnResponse" => {
+            crabka_protocol::owned::add_offsets_to_txn_response::default_json(version)
+        }
+        "AddPartitionsToTxnRequest" => {
+            crabka_protocol::owned::add_partitions_to_txn_request::default_json(version)
+        }
+        "AddPartitionsToTxnResponse" => {
+            crabka_protocol::owned::add_partitions_to_txn_response::default_json(version)
+        }
+        "AddRaftVoterRequest" => {
+            crabka_protocol::owned::add_raft_voter_request::default_json(version)
+        }
+        "AddRaftVoterResponse" => {
+            crabka_protocol::owned::add_raft_voter_response::default_json(version)
+        }
+        "AllocateProducerIdsRequest" => {
+            crabka_protocol::owned::allocate_producer_ids_request::default_json(version)
+        }
+        "AllocateProducerIdsResponse" => {
+            crabka_protocol::owned::allocate_producer_ids_response::default_json(version)
+        }
+        "AlterClientQuotasRequest" => {
+            crabka_protocol::owned::alter_client_quotas_request::default_json(version)
+        }
+        "AlterClientQuotasResponse" => {
+            crabka_protocol::owned::alter_client_quotas_response::default_json(version)
+        }
+        "AlterConfigsRequest" => {
+            crabka_protocol::owned::alter_configs_request::default_json(version)
+        }
+        "AlterConfigsResponse" => {
+            crabka_protocol::owned::alter_configs_response::default_json(version)
+        }
+        "AlterPartitionReassignmentsRequest" => {
+            crabka_protocol::owned::alter_partition_reassignments_request::default_json(version)
+        }
+        "AlterPartitionReassignmentsResponse" => {
+            crabka_protocol::owned::alter_partition_reassignments_response::default_json(version)
+        }
+        "AlterPartitionRequest" => {
+            crabka_protocol::owned::alter_partition_request::default_json(version)
+        }
+        "AlterPartitionResponse" => {
+            crabka_protocol::owned::alter_partition_response::default_json(version)
+        }
+        "AlterReplicaLogDirsRequest" => {
+            crabka_protocol::owned::alter_replica_log_dirs_request::default_json(version)
+        }
+        "AlterReplicaLogDirsResponse" => {
+            crabka_protocol::owned::alter_replica_log_dirs_response::default_json(version)
+        }
+        "AlterShareGroupOffsetsRequest" => {
+            crabka_protocol::owned::alter_share_group_offsets_request::default_json(version)
+        }
+        "AlterShareGroupOffsetsResponse" => {
+            crabka_protocol::owned::alter_share_group_offsets_response::default_json(version)
+        }
+        "AlterUserScramCredentialsRequest" => {
+            crabka_protocol::owned::alter_user_scram_credentials_request::default_json(version)
+        }
+        "AlterUserScramCredentialsResponse" => {
+            crabka_protocol::owned::alter_user_scram_credentials_response::default_json(version)
+        }
         "ApiVersionsRequest" => crabka_protocol::owned::api_versions_request::default_json(version),
-        "ApiVersionsResponse" => crabka_protocol::owned::api_versions_response::default_json(version),
-        "AssignReplicasToDirsRequest" => crabka_protocol::owned::assign_replicas_to_dirs_request::default_json(version),
-        "AssignReplicasToDirsResponse" => crabka_protocol::owned::assign_replicas_to_dirs_response::default_json(version),
-        "BeginQuorumEpochRequest" => crabka_protocol::owned::begin_quorum_epoch_request::default_json(version),
-        "BeginQuorumEpochResponse" => crabka_protocol::owned::begin_quorum_epoch_response::default_json(version),
-        "BrokerHeartbeatRequest" => crabka_protocol::owned::broker_heartbeat_request::default_json(version),
-        "BrokerHeartbeatResponse" => crabka_protocol::owned::broker_heartbeat_response::default_json(version),
-        "BrokerRegistrationRequest" => crabka_protocol::owned::broker_registration_request::default_json(version),
-        "BrokerRegistrationResponse" => crabka_protocol::owned::broker_registration_response::default_json(version),
-        "ConsumerGroupDescribeRequest" => crabka_protocol::owned::consumer_group_describe_request::default_json(version),
-        "ConsumerGroupDescribeResponse" => crabka_protocol::owned::consumer_group_describe_response::default_json(version),
-        "ConsumerGroupHeartbeatRequest" => crabka_protocol::owned::consumer_group_heartbeat_request::default_json(version),
-        "ConsumerGroupHeartbeatResponse" => crabka_protocol::owned::consumer_group_heartbeat_response::default_json(version),
-        "ControllerRegistrationRequest" => crabka_protocol::owned::controller_registration_request::default_json(version),
-        "ControllerRegistrationResponse" => crabka_protocol::owned::controller_registration_response::default_json(version),
+        "ApiVersionsResponse" => {
+            crabka_protocol::owned::api_versions_response::default_json(version)
+        }
+        "AssignReplicasToDirsRequest" => {
+            crabka_protocol::owned::assign_replicas_to_dirs_request::default_json(version)
+        }
+        "AssignReplicasToDirsResponse" => {
+            crabka_protocol::owned::assign_replicas_to_dirs_response::default_json(version)
+        }
+        "BeginQuorumEpochRequest" => {
+            crabka_protocol::owned::begin_quorum_epoch_request::default_json(version)
+        }
+        "BeginQuorumEpochResponse" => {
+            crabka_protocol::owned::begin_quorum_epoch_response::default_json(version)
+        }
+        "BrokerHeartbeatRequest" => {
+            crabka_protocol::owned::broker_heartbeat_request::default_json(version)
+        }
+        "BrokerHeartbeatResponse" => {
+            crabka_protocol::owned::broker_heartbeat_response::default_json(version)
+        }
+        "BrokerRegistrationRequest" => {
+            crabka_protocol::owned::broker_registration_request::default_json(version)
+        }
+        "BrokerRegistrationResponse" => {
+            crabka_protocol::owned::broker_registration_response::default_json(version)
+        }
+        "ConsumerGroupDescribeRequest" => {
+            crabka_protocol::owned::consumer_group_describe_request::default_json(version)
+        }
+        "ConsumerGroupDescribeResponse" => {
+            crabka_protocol::owned::consumer_group_describe_response::default_json(version)
+        }
+        "ConsumerGroupHeartbeatRequest" => {
+            crabka_protocol::owned::consumer_group_heartbeat_request::default_json(version)
+        }
+        "ConsumerGroupHeartbeatResponse" => {
+            crabka_protocol::owned::consumer_group_heartbeat_response::default_json(version)
+        }
+        "ControllerRegistrationRequest" => {
+            crabka_protocol::owned::controller_registration_request::default_json(version)
+        }
+        "ControllerRegistrationResponse" => {
+            crabka_protocol::owned::controller_registration_response::default_json(version)
+        }
         "CreateAclsRequest" => crabka_protocol::owned::create_acls_request::default_json(version),
         "CreateAclsResponse" => crabka_protocol::owned::create_acls_response::default_json(version),
-        "CreateDelegationTokenRequest" => crabka_protocol::owned::create_delegation_token_request::default_json(version),
-        "CreateDelegationTokenResponse" => crabka_protocol::owned::create_delegation_token_response::default_json(version),
-        "CreatePartitionsRequest" => crabka_protocol::owned::create_partitions_request::default_json(version),
-        "CreatePartitionsResponse" => crabka_protocol::owned::create_partitions_response::default_json(version),
-        "CreateTopicsRequest" => crabka_protocol::owned::create_topics_request::default_json(version),
-        "CreateTopicsResponse" => crabka_protocol::owned::create_topics_response::default_json(version),
+        "CreateDelegationTokenRequest" => {
+            crabka_protocol::owned::create_delegation_token_request::default_json(version)
+        }
+        "CreateDelegationTokenResponse" => {
+            crabka_protocol::owned::create_delegation_token_response::default_json(version)
+        }
+        "CreatePartitionsRequest" => {
+            crabka_protocol::owned::create_partitions_request::default_json(version)
+        }
+        "CreatePartitionsResponse" => {
+            crabka_protocol::owned::create_partitions_response::default_json(version)
+        }
+        "CreateTopicsRequest" => {
+            crabka_protocol::owned::create_topics_request::default_json(version)
+        }
+        "CreateTopicsResponse" => {
+            crabka_protocol::owned::create_topics_response::default_json(version)
+        }
         "DeleteAclsRequest" => crabka_protocol::owned::delete_acls_request::default_json(version),
         "DeleteAclsResponse" => crabka_protocol::owned::delete_acls_response::default_json(version),
-        "DeleteGroupsRequest" => crabka_protocol::owned::delete_groups_request::default_json(version),
-        "DeleteGroupsResponse" => crabka_protocol::owned::delete_groups_response::default_json(version),
-        "DeleteRecordsRequest" => crabka_protocol::owned::delete_records_request::default_json(version),
-        "DeleteRecordsResponse" => crabka_protocol::owned::delete_records_response::default_json(version),
-        "DeleteShareGroupOffsetsRequest" => crabka_protocol::owned::delete_share_group_offsets_request::default_json(version),
-        "DeleteShareGroupOffsetsResponse" => crabka_protocol::owned::delete_share_group_offsets_response::default_json(version),
-        "DeleteShareGroupStateRequest" => crabka_protocol::owned::delete_share_group_state_request::default_json(version),
-        "DeleteShareGroupStateResponse" => crabka_protocol::owned::delete_share_group_state_response::default_json(version),
-        "DeleteTopicsRequest" => crabka_protocol::owned::delete_topics_request::default_json(version),
-        "DeleteTopicsResponse" => crabka_protocol::owned::delete_topics_response::default_json(version),
-        "DescribeAclsRequest" => crabka_protocol::owned::describe_acls_request::default_json(version),
-        "DescribeAclsResponse" => crabka_protocol::owned::describe_acls_response::default_json(version),
-        "DescribeClientQuotasRequest" => crabka_protocol::owned::describe_client_quotas_request::default_json(version),
-        "DescribeClientQuotasResponse" => crabka_protocol::owned::describe_client_quotas_response::default_json(version),
-        "DescribeClusterRequest" => crabka_protocol::owned::describe_cluster_request::default_json(version),
-        "DescribeClusterResponse" => crabka_protocol::owned::describe_cluster_response::default_json(version),
-        "DescribeConfigsRequest" => crabka_protocol::owned::describe_configs_request::default_json(version),
-        "DescribeConfigsResponse" => crabka_protocol::owned::describe_configs_response::default_json(version),
-        "DescribeDelegationTokenRequest" => crabka_protocol::owned::describe_delegation_token_request::default_json(version),
-        "DescribeDelegationTokenResponse" => crabka_protocol::owned::describe_delegation_token_response::default_json(version),
-        "DescribeGroupsRequest" => crabka_protocol::owned::describe_groups_request::default_json(version),
-        "DescribeGroupsResponse" => crabka_protocol::owned::describe_groups_response::default_json(version),
-        "DescribeLogDirsRequest" => crabka_protocol::owned::describe_log_dirs_request::default_json(version),
-        "DescribeLogDirsResponse" => crabka_protocol::owned::describe_log_dirs_response::default_json(version),
-        "DescribeProducersRequest" => crabka_protocol::owned::describe_producers_request::default_json(version),
-        "DescribeProducersResponse" => crabka_protocol::owned::describe_producers_response::default_json(version),
-        "DescribeQuorumRequest" => crabka_protocol::owned::describe_quorum_request::default_json(version),
-        "DescribeQuorumResponse" => crabka_protocol::owned::describe_quorum_response::default_json(version),
-        "DescribeShareGroupOffsetsRequest" => crabka_protocol::owned::describe_share_group_offsets_request::default_json(version),
-        "DescribeShareGroupOffsetsResponse" => crabka_protocol::owned::describe_share_group_offsets_response::default_json(version),
-        "DescribeTopicPartitionsRequest" => crabka_protocol::owned::describe_topic_partitions_request::default_json(version),
-        "DescribeTopicPartitionsResponse" => crabka_protocol::owned::describe_topic_partitions_response::default_json(version),
-        "DescribeTransactionsRequest" => crabka_protocol::owned::describe_transactions_request::default_json(version),
-        "DescribeTransactionsResponse" => crabka_protocol::owned::describe_transactions_response::default_json(version),
-        "DescribeUserScramCredentialsRequest" => crabka_protocol::owned::describe_user_scram_credentials_request::default_json(version),
-        "DescribeUserScramCredentialsResponse" => crabka_protocol::owned::describe_user_scram_credentials_response::default_json(version),
-        "ElectLeadersRequest" => crabka_protocol::owned::elect_leaders_request::default_json(version),
-        "ElectLeadersResponse" => crabka_protocol::owned::elect_leaders_response::default_json(version),
-        "EndQuorumEpochRequest" => crabka_protocol::owned::end_quorum_epoch_request::default_json(version),
-        "EndQuorumEpochResponse" => crabka_protocol::owned::end_quorum_epoch_response::default_json(version),
+        "DeleteGroupsRequest" => {
+            crabka_protocol::owned::delete_groups_request::default_json(version)
+        }
+        "DeleteGroupsResponse" => {
+            crabka_protocol::owned::delete_groups_response::default_json(version)
+        }
+        "DeleteRecordsRequest" => {
+            crabka_protocol::owned::delete_records_request::default_json(version)
+        }
+        "DeleteRecordsResponse" => {
+            crabka_protocol::owned::delete_records_response::default_json(version)
+        }
+        "DeleteShareGroupOffsetsRequest" => {
+            crabka_protocol::owned::delete_share_group_offsets_request::default_json(version)
+        }
+        "DeleteShareGroupOffsetsResponse" => {
+            crabka_protocol::owned::delete_share_group_offsets_response::default_json(version)
+        }
+        "DeleteShareGroupStateRequest" => {
+            crabka_protocol::owned::delete_share_group_state_request::default_json(version)
+        }
+        "DeleteShareGroupStateResponse" => {
+            crabka_protocol::owned::delete_share_group_state_response::default_json(version)
+        }
+        "DeleteTopicsRequest" => {
+            crabka_protocol::owned::delete_topics_request::default_json(version)
+        }
+        "DeleteTopicsResponse" => {
+            crabka_protocol::owned::delete_topics_response::default_json(version)
+        }
+        "DescribeAclsRequest" => {
+            crabka_protocol::owned::describe_acls_request::default_json(version)
+        }
+        "DescribeAclsResponse" => {
+            crabka_protocol::owned::describe_acls_response::default_json(version)
+        }
+        "DescribeClientQuotasRequest" => {
+            crabka_protocol::owned::describe_client_quotas_request::default_json(version)
+        }
+        "DescribeClientQuotasResponse" => {
+            crabka_protocol::owned::describe_client_quotas_response::default_json(version)
+        }
+        "DescribeClusterRequest" => {
+            crabka_protocol::owned::describe_cluster_request::default_json(version)
+        }
+        "DescribeClusterResponse" => {
+            crabka_protocol::owned::describe_cluster_response::default_json(version)
+        }
+        "DescribeConfigsRequest" => {
+            crabka_protocol::owned::describe_configs_request::default_json(version)
+        }
+        "DescribeConfigsResponse" => {
+            crabka_protocol::owned::describe_configs_response::default_json(version)
+        }
+        "DescribeDelegationTokenRequest" => {
+            crabka_protocol::owned::describe_delegation_token_request::default_json(version)
+        }
+        "DescribeDelegationTokenResponse" => {
+            crabka_protocol::owned::describe_delegation_token_response::default_json(version)
+        }
+        "DescribeGroupsRequest" => {
+            crabka_protocol::owned::describe_groups_request::default_json(version)
+        }
+        "DescribeGroupsResponse" => {
+            crabka_protocol::owned::describe_groups_response::default_json(version)
+        }
+        "DescribeLogDirsRequest" => {
+            crabka_protocol::owned::describe_log_dirs_request::default_json(version)
+        }
+        "DescribeLogDirsResponse" => {
+            crabka_protocol::owned::describe_log_dirs_response::default_json(version)
+        }
+        "DescribeProducersRequest" => {
+            crabka_protocol::owned::describe_producers_request::default_json(version)
+        }
+        "DescribeProducersResponse" => {
+            crabka_protocol::owned::describe_producers_response::default_json(version)
+        }
+        "DescribeQuorumRequest" => {
+            crabka_protocol::owned::describe_quorum_request::default_json(version)
+        }
+        "DescribeQuorumResponse" => {
+            crabka_protocol::owned::describe_quorum_response::default_json(version)
+        }
+        "DescribeShareGroupOffsetsRequest" => {
+            crabka_protocol::owned::describe_share_group_offsets_request::default_json(version)
+        }
+        "DescribeShareGroupOffsetsResponse" => {
+            crabka_protocol::owned::describe_share_group_offsets_response::default_json(version)
+        }
+        "DescribeTopicPartitionsRequest" => {
+            crabka_protocol::owned::describe_topic_partitions_request::default_json(version)
+        }
+        "DescribeTopicPartitionsResponse" => {
+            crabka_protocol::owned::describe_topic_partitions_response::default_json(version)
+        }
+        "DescribeTransactionsRequest" => {
+            crabka_protocol::owned::describe_transactions_request::default_json(version)
+        }
+        "DescribeTransactionsResponse" => {
+            crabka_protocol::owned::describe_transactions_response::default_json(version)
+        }
+        "DescribeUserScramCredentialsRequest" => {
+            crabka_protocol::owned::describe_user_scram_credentials_request::default_json(version)
+        }
+        "DescribeUserScramCredentialsResponse" => {
+            crabka_protocol::owned::describe_user_scram_credentials_response::default_json(version)
+        }
+        "ElectLeadersRequest" => {
+            crabka_protocol::owned::elect_leaders_request::default_json(version)
+        }
+        "ElectLeadersResponse" => {
+            crabka_protocol::owned::elect_leaders_response::default_json(version)
+        }
+        "EndQuorumEpochRequest" => {
+            crabka_protocol::owned::end_quorum_epoch_request::default_json(version)
+        }
+        "EndQuorumEpochResponse" => {
+            crabka_protocol::owned::end_quorum_epoch_response::default_json(version)
+        }
         "EndTxnRequest" => crabka_protocol::owned::end_txn_request::default_json(version),
         "EndTxnResponse" => crabka_protocol::owned::end_txn_response::default_json(version),
         "EnvelopeRequest" => crabka_protocol::owned::envelope_request::default_json(version),
         "EnvelopeResponse" => crabka_protocol::owned::envelope_response::default_json(version),
-        "ExpireDelegationTokenRequest" => crabka_protocol::owned::expire_delegation_token_request::default_json(version),
-        "ExpireDelegationTokenResponse" => crabka_protocol::owned::expire_delegation_token_response::default_json(version),
+        "ExpireDelegationTokenRequest" => {
+            crabka_protocol::owned::expire_delegation_token_request::default_json(version)
+        }
+        "ExpireDelegationTokenResponse" => {
+            crabka_protocol::owned::expire_delegation_token_response::default_json(version)
+        }
         "FetchRequest" => crabka_protocol::owned::fetch_request::default_json(version),
         "FetchResponse" => crabka_protocol::owned::fetch_response::default_json(version),
-        "FetchSnapshotRequest" => crabka_protocol::owned::fetch_snapshot_request::default_json(version),
-        "FetchSnapshotResponse" => crabka_protocol::owned::fetch_snapshot_response::default_json(version),
-        "FindCoordinatorRequest" => crabka_protocol::owned::find_coordinator_request::default_json(version),
-        "FindCoordinatorResponse" => crabka_protocol::owned::find_coordinator_response::default_json(version),
-        "GetTelemetrySubscriptionsRequest" => crabka_protocol::owned::get_telemetry_subscriptions_request::default_json(version),
-        "GetTelemetrySubscriptionsResponse" => crabka_protocol::owned::get_telemetry_subscriptions_response::default_json(version),
+        "FetchSnapshotRequest" => {
+            crabka_protocol::owned::fetch_snapshot_request::default_json(version)
+        }
+        "FetchSnapshotResponse" => {
+            crabka_protocol::owned::fetch_snapshot_response::default_json(version)
+        }
+        "FindCoordinatorRequest" => {
+            crabka_protocol::owned::find_coordinator_request::default_json(version)
+        }
+        "FindCoordinatorResponse" => {
+            crabka_protocol::owned::find_coordinator_response::default_json(version)
+        }
+        "GetTelemetrySubscriptionsRequest" => {
+            crabka_protocol::owned::get_telemetry_subscriptions_request::default_json(version)
+        }
+        "GetTelemetrySubscriptionsResponse" => {
+            crabka_protocol::owned::get_telemetry_subscriptions_response::default_json(version)
+        }
         "HeartbeatRequest" => crabka_protocol::owned::heartbeat_request::default_json(version),
         "HeartbeatResponse" => crabka_protocol::owned::heartbeat_response::default_json(version),
-        "IncrementalAlterConfigsRequest" => crabka_protocol::owned::incremental_alter_configs_request::default_json(version),
-        "IncrementalAlterConfigsResponse" => crabka_protocol::owned::incremental_alter_configs_response::default_json(version),
-        "InitProducerIdRequest" => crabka_protocol::owned::init_producer_id_request::default_json(version),
-        "InitProducerIdResponse" => crabka_protocol::owned::init_producer_id_response::default_json(version),
-        "InitializeShareGroupStateRequest" => crabka_protocol::owned::initialize_share_group_state_request::default_json(version),
-        "InitializeShareGroupStateResponse" => crabka_protocol::owned::initialize_share_group_state_response::default_json(version),
+        "IncrementalAlterConfigsRequest" => {
+            crabka_protocol::owned::incremental_alter_configs_request::default_json(version)
+        }
+        "IncrementalAlterConfigsResponse" => {
+            crabka_protocol::owned::incremental_alter_configs_response::default_json(version)
+        }
+        "InitProducerIdRequest" => {
+            crabka_protocol::owned::init_producer_id_request::default_json(version)
+        }
+        "InitProducerIdResponse" => {
+            crabka_protocol::owned::init_producer_id_response::default_json(version)
+        }
+        "InitializeShareGroupStateRequest" => {
+            crabka_protocol::owned::initialize_share_group_state_request::default_json(version)
+        }
+        "InitializeShareGroupStateResponse" => {
+            crabka_protocol::owned::initialize_share_group_state_response::default_json(version)
+        }
         "JoinGroupRequest" => crabka_protocol::owned::join_group_request::default_json(version),
         "JoinGroupResponse" => crabka_protocol::owned::join_group_response::default_json(version),
         "LeaveGroupRequest" => crabka_protocol::owned::leave_group_request::default_json(version),
         "LeaveGroupResponse" => crabka_protocol::owned::leave_group_response::default_json(version),
-        "ListConfigResourcesRequest" => crabka_protocol::owned::list_config_resources_request::default_json(version),
-        "ListConfigResourcesResponse" => crabka_protocol::owned::list_config_resources_response::default_json(version),
+        "ListConfigResourcesRequest" => {
+            crabka_protocol::owned::list_config_resources_request::default_json(version)
+        }
+        "ListConfigResourcesResponse" => {
+            crabka_protocol::owned::list_config_resources_response::default_json(version)
+        }
         "ListGroupsRequest" => crabka_protocol::owned::list_groups_request::default_json(version),
         "ListGroupsResponse" => crabka_protocol::owned::list_groups_response::default_json(version),
         "ListOffsetsRequest" => crabka_protocol::owned::list_offsets_request::default_json(version),
-        "ListOffsetsResponse" => crabka_protocol::owned::list_offsets_response::default_json(version),
-        "ListPartitionReassignmentsRequest" => crabka_protocol::owned::list_partition_reassignments_request::default_json(version),
-        "ListPartitionReassignmentsResponse" => crabka_protocol::owned::list_partition_reassignments_response::default_json(version),
-        "ListTransactionsRequest" => crabka_protocol::owned::list_transactions_request::default_json(version),
-        "ListTransactionsResponse" => crabka_protocol::owned::list_transactions_response::default_json(version),
+        "ListOffsetsResponse" => {
+            crabka_protocol::owned::list_offsets_response::default_json(version)
+        }
+        "ListPartitionReassignmentsRequest" => {
+            crabka_protocol::owned::list_partition_reassignments_request::default_json(version)
+        }
+        "ListPartitionReassignmentsResponse" => {
+            crabka_protocol::owned::list_partition_reassignments_response::default_json(version)
+        }
+        "ListTransactionsRequest" => {
+            crabka_protocol::owned::list_transactions_request::default_json(version)
+        }
+        "ListTransactionsResponse" => {
+            crabka_protocol::owned::list_transactions_response::default_json(version)
+        }
         "MetadataRequest" => crabka_protocol::owned::metadata_request::default_json(version),
         "MetadataResponse" => crabka_protocol::owned::metadata_response::default_json(version),
-        "OffsetCommitRequest" => crabka_protocol::owned::offset_commit_request::default_json(version),
-        "OffsetCommitResponse" => crabka_protocol::owned::offset_commit_response::default_json(version),
-        "OffsetDeleteRequest" => crabka_protocol::owned::offset_delete_request::default_json(version),
-        "OffsetDeleteResponse" => crabka_protocol::owned::offset_delete_response::default_json(version),
+        "OffsetCommitRequest" => {
+            crabka_protocol::owned::offset_commit_request::default_json(version)
+        }
+        "OffsetCommitResponse" => {
+            crabka_protocol::owned::offset_commit_response::default_json(version)
+        }
+        "OffsetDeleteRequest" => {
+            crabka_protocol::owned::offset_delete_request::default_json(version)
+        }
+        "OffsetDeleteResponse" => {
+            crabka_protocol::owned::offset_delete_response::default_json(version)
+        }
         "OffsetFetchRequest" => crabka_protocol::owned::offset_fetch_request::default_json(version),
-        "OffsetFetchResponse" => crabka_protocol::owned::offset_fetch_response::default_json(version),
-        "OffsetForLeaderEpochRequest" => crabka_protocol::owned::offset_for_leader_epoch_request::default_json(version),
-        "OffsetForLeaderEpochResponse" => crabka_protocol::owned::offset_for_leader_epoch_response::default_json(version),
+        "OffsetFetchResponse" => {
+            crabka_protocol::owned::offset_fetch_response::default_json(version)
+        }
+        "OffsetForLeaderEpochRequest" => {
+            crabka_protocol::owned::offset_for_leader_epoch_request::default_json(version)
+        }
+        "OffsetForLeaderEpochResponse" => {
+            crabka_protocol::owned::offset_for_leader_epoch_response::default_json(version)
+        }
         "ProduceRequest" => crabka_protocol::owned::produce_request::default_json(version),
         "ProduceResponse" => crabka_protocol::owned::produce_response::default_json(version),
-        "PushTelemetryRequest" => crabka_protocol::owned::push_telemetry_request::default_json(version),
-        "PushTelemetryResponse" => crabka_protocol::owned::push_telemetry_response::default_json(version),
-        "ReadShareGroupStateRequest" => crabka_protocol::owned::read_share_group_state_request::default_json(version),
-        "ReadShareGroupStateResponse" => crabka_protocol::owned::read_share_group_state_response::default_json(version),
-        "ReadShareGroupStateSummaryRequest" => crabka_protocol::owned::read_share_group_state_summary_request::default_json(version),
-        "ReadShareGroupStateSummaryResponse" => crabka_protocol::owned::read_share_group_state_summary_response::default_json(version),
-        "RemoveRaftVoterRequest" => crabka_protocol::owned::remove_raft_voter_request::default_json(version),
-        "RemoveRaftVoterResponse" => crabka_protocol::owned::remove_raft_voter_response::default_json(version),
-        "RenewDelegationTokenRequest" => crabka_protocol::owned::renew_delegation_token_request::default_json(version),
-        "RenewDelegationTokenResponse" => crabka_protocol::owned::renew_delegation_token_response::default_json(version),
+        "PushTelemetryRequest" => {
+            crabka_protocol::owned::push_telemetry_request::default_json(version)
+        }
+        "PushTelemetryResponse" => {
+            crabka_protocol::owned::push_telemetry_response::default_json(version)
+        }
+        "ReadShareGroupStateRequest" => {
+            crabka_protocol::owned::read_share_group_state_request::default_json(version)
+        }
+        "ReadShareGroupStateResponse" => {
+            crabka_protocol::owned::read_share_group_state_response::default_json(version)
+        }
+        "ReadShareGroupStateSummaryRequest" => {
+            crabka_protocol::owned::read_share_group_state_summary_request::default_json(version)
+        }
+        "ReadShareGroupStateSummaryResponse" => {
+            crabka_protocol::owned::read_share_group_state_summary_response::default_json(version)
+        }
+        "RemoveRaftVoterRequest" => {
+            crabka_protocol::owned::remove_raft_voter_request::default_json(version)
+        }
+        "RemoveRaftVoterResponse" => {
+            crabka_protocol::owned::remove_raft_voter_response::default_json(version)
+        }
+        "RenewDelegationTokenRequest" => {
+            crabka_protocol::owned::renew_delegation_token_request::default_json(version)
+        }
+        "RenewDelegationTokenResponse" => {
+            crabka_protocol::owned::renew_delegation_token_response::default_json(version)
+        }
         "RequestHeader" => crabka_protocol::owned::request_header::default_json(version),
         "ResponseHeader" => crabka_protocol::owned::response_header::default_json(version),
-        "SaslAuthenticateRequest" => crabka_protocol::owned::sasl_authenticate_request::default_json(version),
-        "SaslAuthenticateResponse" => crabka_protocol::owned::sasl_authenticate_response::default_json(version),
-        "SaslHandshakeRequest" => crabka_protocol::owned::sasl_handshake_request::default_json(version),
-        "SaslHandshakeResponse" => crabka_protocol::owned::sasl_handshake_response::default_json(version),
-        "ShareAcknowledgeRequest" => crabka_protocol::owned::share_acknowledge_request::default_json(version),
-        "ShareAcknowledgeResponse" => crabka_protocol::owned::share_acknowledge_response::default_json(version),
+        "SaslAuthenticateRequest" => {
+            crabka_protocol::owned::sasl_authenticate_request::default_json(version)
+        }
+        "SaslAuthenticateResponse" => {
+            crabka_protocol::owned::sasl_authenticate_response::default_json(version)
+        }
+        "SaslHandshakeRequest" => {
+            crabka_protocol::owned::sasl_handshake_request::default_json(version)
+        }
+        "SaslHandshakeResponse" => {
+            crabka_protocol::owned::sasl_handshake_response::default_json(version)
+        }
+        "ShareAcknowledgeRequest" => {
+            crabka_protocol::owned::share_acknowledge_request::default_json(version)
+        }
+        "ShareAcknowledgeResponse" => {
+            crabka_protocol::owned::share_acknowledge_response::default_json(version)
+        }
         "ShareFetchRequest" => crabka_protocol::owned::share_fetch_request::default_json(version),
         "ShareFetchResponse" => crabka_protocol::owned::share_fetch_response::default_json(version),
-        "ShareGroupDescribeRequest" => crabka_protocol::owned::share_group_describe_request::default_json(version),
-        "ShareGroupDescribeResponse" => crabka_protocol::owned::share_group_describe_response::default_json(version),
-        "ShareGroupHeartbeatRequest" => crabka_protocol::owned::share_group_heartbeat_request::default_json(version),
-        "ShareGroupHeartbeatResponse" => crabka_protocol::owned::share_group_heartbeat_response::default_json(version),
-        "StreamsGroupDescribeRequest" => crabka_protocol::owned::streams_group_describe_request::default_json(version),
-        "StreamsGroupDescribeResponse" => crabka_protocol::owned::streams_group_describe_response::default_json(version),
-        "StreamsGroupHeartbeatRequest" => crabka_protocol::owned::streams_group_heartbeat_request::default_json(version),
-        "StreamsGroupHeartbeatResponse" => crabka_protocol::owned::streams_group_heartbeat_response::default_json(version),
+        "ShareGroupDescribeRequest" => {
+            crabka_protocol::owned::share_group_describe_request::default_json(version)
+        }
+        "ShareGroupDescribeResponse" => {
+            crabka_protocol::owned::share_group_describe_response::default_json(version)
+        }
+        "ShareGroupHeartbeatRequest" => {
+            crabka_protocol::owned::share_group_heartbeat_request::default_json(version)
+        }
+        "ShareGroupHeartbeatResponse" => {
+            crabka_protocol::owned::share_group_heartbeat_response::default_json(version)
+        }
+        "StreamsGroupDescribeRequest" => {
+            crabka_protocol::owned::streams_group_describe_request::default_json(version)
+        }
+        "StreamsGroupDescribeResponse" => {
+            crabka_protocol::owned::streams_group_describe_response::default_json(version)
+        }
+        "StreamsGroupHeartbeatRequest" => {
+            crabka_protocol::owned::streams_group_heartbeat_request::default_json(version)
+        }
+        "StreamsGroupHeartbeatResponse" => {
+            crabka_protocol::owned::streams_group_heartbeat_response::default_json(version)
+        }
         "SyncGroupRequest" => crabka_protocol::owned::sync_group_request::default_json(version),
         "SyncGroupResponse" => crabka_protocol::owned::sync_group_response::default_json(version),
-        "TxnOffsetCommitRequest" => crabka_protocol::owned::txn_offset_commit_request::default_json(version),
-        "TxnOffsetCommitResponse" => crabka_protocol::owned::txn_offset_commit_response::default_json(version),
-        "UnregisterBrokerRequest" => crabka_protocol::owned::unregister_broker_request::default_json(version),
-        "UnregisterBrokerResponse" => crabka_protocol::owned::unregister_broker_response::default_json(version),
-        "UpdateFeaturesRequest" => crabka_protocol::owned::update_features_request::default_json(version),
-        "UpdateFeaturesResponse" => crabka_protocol::owned::update_features_response::default_json(version),
-        "UpdateRaftVoterRequest" => crabka_protocol::owned::update_raft_voter_request::default_json(version),
-        "UpdateRaftVoterResponse" => crabka_protocol::owned::update_raft_voter_response::default_json(version),
+        "TxnOffsetCommitRequest" => {
+            crabka_protocol::owned::txn_offset_commit_request::default_json(version)
+        }
+        "TxnOffsetCommitResponse" => {
+            crabka_protocol::owned::txn_offset_commit_response::default_json(version)
+        }
+        "UnregisterBrokerRequest" => {
+            crabka_protocol::owned::unregister_broker_request::default_json(version)
+        }
+        "UnregisterBrokerResponse" => {
+            crabka_protocol::owned::unregister_broker_response::default_json(version)
+        }
+        "UpdateFeaturesRequest" => {
+            crabka_protocol::owned::update_features_request::default_json(version)
+        }
+        "UpdateFeaturesResponse" => {
+            crabka_protocol::owned::update_features_response::default_json(version)
+        }
+        "UpdateRaftVoterRequest" => {
+            crabka_protocol::owned::update_raft_voter_request::default_json(version)
+        }
+        "UpdateRaftVoterResponse" => {
+            crabka_protocol::owned::update_raft_voter_response::default_json(version)
+        }
         "VoteRequest" => crabka_protocol::owned::vote_request::default_json(version),
         "VoteResponse" => crabka_protocol::owned::vote_response::default_json(version),
-        "WriteShareGroupStateRequest" => crabka_protocol::owned::write_share_group_state_request::default_json(version),
-        "WriteShareGroupStateResponse" => crabka_protocol::owned::write_share_group_state_response::default_json(version),
-        "WriteTxnMarkersRequest" => crabka_protocol::owned::write_txn_markers_request::default_json(version),
-        "WriteTxnMarkersResponse" => crabka_protocol::owned::write_txn_markers_response::default_json(version),
+        "WriteShareGroupStateRequest" => {
+            crabka_protocol::owned::write_share_group_state_request::default_json(version)
+        }
+        "WriteShareGroupStateResponse" => {
+            crabka_protocol::owned::write_share_group_state_response::default_json(version)
+        }
+        "WriteTxnMarkersRequest" => {
+            crabka_protocol::owned::write_txn_markers_request::default_json(version)
+        }
+        "WriteTxnMarkersResponse" => {
+            crabka_protocol::owned::write_txn_markers_response::default_json(version)
+        }
         _ => panic!("unknown message in default_json_for: {name}"),
     }
 }

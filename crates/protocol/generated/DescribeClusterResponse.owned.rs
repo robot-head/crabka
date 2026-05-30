@@ -2,14 +2,15 @@
 
 use bytes::{Buf, BufMut};
 
-use crate::primitives::fixed::{get_bool, get_i16, get_i32, get_i8, put_bool, put_i16, put_i32, put_i8};
+use crate::primitives::fixed::{
+    get_bool, get_i8, get_i16, get_i32, put_bool, put_i8, put_i16, put_i32,
+};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
     get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 60;
@@ -18,7 +19,9 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeClusterResponse {
@@ -32,7 +35,6 @@ pub struct DescribeClusterResponse {
     pub cluster_authorized_operations: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for DescribeClusterResponse {
     fn default() -> Self {
         Self {
@@ -48,21 +50,52 @@ impl Default for DescribeClusterResponse {
         }
     }
 }
-
 impl Encode for DescribeClusterResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.error_message.as_deref()) } else { put_nullable_string(buf, self.error_message.as_deref()) } }
-        if version >= 1 { put_i8(buf, self.endpoint_type) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.cluster_id) } else { put_string(buf, &self.cluster_id) } }
-        if version >= 0 { put_i32(buf, self.controller_id) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.brokers).len(), flex); for it in &self.brokers { it.encode(buf, version)?; } } }
-        if version >= 0 { put_i32(buf, self.cluster_authorized_operations) }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.error_message.as_deref());
+            } else {
+                put_nullable_string(buf, self.error_message.as_deref());
+            }
+        }
+        if version >= 1 {
+            put_i8(buf, self.endpoint_type);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.cluster_id);
+            } else {
+                put_string(buf, &self.cluster_id);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.controller_id);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.brokers).len(), flex);
+                for it in &self.brokers {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.cluster_authorized_operations);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -72,14 +105,46 @@ impl Encode for DescribeClusterResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.error_message.as_deref()) } else { nullable_string_len(self.error_message.as_deref()) }; }
-        if version >= 1 { n += 1; }
-        if version >= 0 { n += if flex { compact_string_len(&self.cluster_id) } else { string_len(&self.cluster_id) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.brokers).len(), flex); let body: usize = (self.brokers).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += 4; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.error_message.as_deref())
+            } else {
+                nullable_string_len(self.error_message.as_deref())
+            };
+        }
+        if version >= 1 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.cluster_id)
+            } else {
+                string_len(&self.cluster_id)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.brokers).len(), flex);
+                let body: usize = (self.brokers)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -87,48 +152,93 @@ impl Encode for DescribeClusterResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for DescribeClusterResponse {
+impl Decode<'_> for DescribeClusterResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 1 { out.endpoint_type = get_i8(buf)?; }
-        if version >= 0 { out.cluster_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.controller_id = get_i32(buf)?; }
-        if version >= 0 { out.brokers = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(DescribeClusterBroker::decode(buf, version)?); } v }; }
-        if version >= 0 { out.cluster_authorized_operations = get_i32(buf)?; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 1 {
+            out.endpoint_type = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.cluster_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.controller_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.brokers = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(DescribeClusterBroker::decode(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.cluster_authorized_operations = get_i32(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DescribeClusterResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.error_message = Some("x".to_string()); }
-        if version >= 1 { m.endpoint_type = 1i8; }
-        if version >= 0 { m.cluster_id = "x".to_string(); }
-        if version >= 0 { m.controller_id = 1i32; }
-        if version >= 0 { m.brokers = vec![DescribeClusterBroker::populated(version)]; }
-        if version >= 0 { m.cluster_authorized_operations = 1i32; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.error_message = Some("x".to_string());
+        }
+        if version >= 1 {
+            m.endpoint_type = 1i8;
+        }
+        if version >= 0 {
+            m.cluster_id = "x".to_string();
+        }
+        if version >= 0 {
+            m.controller_id = 1i32;
+        }
+        if version >= 0 {
+            m.brokers = vec![DescribeClusterBroker::populated(version)];
+        }
+        if version >= 0 {
+            m.cluster_authorized_operations = 1i32;
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DescribeClusterBroker {
     pub broker_id: i32,
@@ -138,15 +248,32 @@ pub struct DescribeClusterBroker {
     pub is_fenced: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for DescribeClusterBroker {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { put_i32(buf, self.broker_id) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) } }
-        if version >= 0 { put_i32(buf, self.port) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.rack.as_deref()) } else { put_nullable_string(buf, self.rack.as_deref()) } }
-        if version >= 2 { put_bool(buf, self.is_fenced) }
+        if version >= 0 {
+            put_i32(buf, self.broker_id);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.host);
+            } else {
+                put_string(buf, &self.host);
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.port);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.rack.as_deref());
+            } else {
+                put_nullable_string(buf, self.rack.as_deref());
+            }
+        }
+        if version >= 2 {
+            put_bool(buf, self.is_fenced);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -156,11 +283,29 @@ impl Encode for DescribeClusterBroker {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.rack.as_deref()) } else { nullable_string_len(self.rack.as_deref()) }; }
-        if version >= 2 { n += 1; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.rack.as_deref())
+            } else {
+                nullable_string_len(self.rack.as_deref())
+            };
+        }
+        if version >= 2 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -168,35 +313,59 @@ impl Encode for DescribeClusterBroker {
         n
     }
 }
-
-impl<'de> Decode<'de> for DescribeClusterBroker {
+impl Decode<'_> for DescribeClusterBroker {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.broker_id = get_i32(buf)?; }
-        if version >= 0 { out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.port = get_i32(buf)?; }
-        if version >= 0 { out.rack = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 2 { out.is_fenced = get_bool(buf)?; }
+        if version >= 0 {
+            out.broker_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.port = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.rack = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 2 {
+            out.is_fenced = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl DescribeClusterBroker {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.broker_id = 1i32; }
-        if version >= 0 { m.host = "x".to_string(); }
-        if version >= 0 { m.port = 1i32; }
-        if version >= 0 { m.rack = Some("x".to_string()); }
-        if version >= 2 { m.is_fenced = true; }
+        if version >= 0 {
+            m.broker_id = 1i32;
+        }
+        if version >= 0 {
+            m.host = "x".to_string();
+        }
+        if version >= 0 {
+            m.port = 1i32;
+        }
+        if version >= 0 {
+            m.rack = Some("x".to_string());
+        }
+        if version >= 2 {
+            m.is_fenced = true;
+        }
         m
     }
 }
@@ -213,9 +382,15 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version >= 1 {
         obj.insert("endpointType".to_string(), ::serde_json::json!(1));
     }
-    obj.insert("clusterId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "clusterId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     obj.insert("controllerId".to_string(), ::serde_json::json!(-1));
     obj.insert("brokers".to_string(), ::serde_json::Value::Array(vec![]));
-    obj.insert("clusterAuthorizedOperations".to_string(), ::serde_json::json!(-2147483648));
+    obj.insert(
+        "clusterAuthorizedOperations".to_string(),
+        ::serde_json::json!(-2147483648),
+    );
     ::serde_json::Value::Object(obj)
 }

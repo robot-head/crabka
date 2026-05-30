@@ -4,10 +4,10 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_bool, get_i16, get_i64, put_bool, put_i16, put_i64};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 26;
@@ -16,7 +16,9 @@ pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 3;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndTxnRequest {
@@ -26,17 +28,31 @@ pub struct EndTxnRequest {
     pub committed: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for EndTxnRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_string(buf, &self.transactional_id) } else { put_string(buf, &self.transactional_id) } }
-        if version >= 0 { put_i64(buf, self.producer_id) }
-        if version >= 0 { put_i16(buf, self.producer_epoch) }
-        if version >= 0 { put_bool(buf, self.committed) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.transactional_id);
+            } else {
+                put_string(buf, &self.transactional_id);
+            }
+        }
+        if version >= 0 {
+            put_i64(buf, self.producer_id);
+        }
+        if version >= 0 {
+            put_i16(buf, self.producer_epoch);
+        }
+        if version >= 0 {
+            put_bool(buf, self.committed);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -46,10 +62,22 @@ impl Encode for EndTxnRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.transactional_id) } else { string_len(&self.transactional_id) }; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.transactional_id)
+            } else {
+                string_len(&self.transactional_id)
+            };
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -57,36 +85,55 @@ impl Encode for EndTxnRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for EndTxnRequest {
+impl Decode<'_> for EndTxnRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.transactional_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.producer_id = get_i64(buf)?; }
-        if version >= 0 { out.producer_epoch = get_i16(buf)?; }
-        if version >= 0 { out.committed = get_bool(buf)?; }
+        if version >= 0 {
+            out.transactional_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.producer_id = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.producer_epoch = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.committed = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl EndTxnRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.transactional_id = "x".to_string(); }
-        if version >= 0 { m.producer_id = 1i64; }
-        if version >= 0 { m.producer_epoch = 1i16; }
-        if version >= 0 { m.committed = true; }
+        if version >= 0 {
+            m.transactional_id = "x".to_string();
+        }
+        if version >= 0 {
+            m.producer_id = 1i64;
+        }
+        if version >= 0 {
+            m.producer_epoch = 1i16;
+        }
+        if version >= 0 {
+            m.committed = true;
+        }
         m
     }
 }
@@ -97,7 +144,10 @@ impl EndTxnRequest {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("transactionalId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "transactionalId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     obj.insert("producerId".to_string(), ::serde_json::json!(0));
     obj.insert("producerEpoch".to_string(), ::serde_json::json!(0));
     obj.insert("committed".to_string(), ::serde_json::Value::Bool(false));

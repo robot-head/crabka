@@ -4,10 +4,10 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i8, put_i8};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned,
-    put_compact_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 30;
@@ -16,21 +16,32 @@ pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreateAclsRequest {
     pub creations: Vec<AclCreation>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for CreateAclsRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.creations).len(), flex); for it in &self.creations { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.creations).len(), flex);
+                for it in &self.creations {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -40,7 +51,17 @@ impl Encode for CreateAclsRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.creations).len(), flex); let body: usize = (self.creations).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.creations).len(), flex);
+                let body: usize = (self.creations)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -48,34 +69,43 @@ impl Encode for CreateAclsRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for CreateAclsRequest {
+impl Decode<'_> for CreateAclsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.creations = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(AclCreation::decode(buf, version)?); } v }; }
+        if version >= 0 {
+            out.creations = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(AclCreation::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl CreateAclsRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.creations = vec![AclCreation::populated(version)]; }
+        if version >= 0 {
+            m.creations = vec![AclCreation::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AclCreation {
     pub resource_type: i8,
@@ -87,7 +117,6 @@ pub struct AclCreation {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for AclCreation {
     fn default() -> Self {
         Self {
@@ -102,17 +131,42 @@ impl Default for AclCreation {
         }
     }
 }
-
 impl Encode for AclCreation {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { put_i8(buf, self.resource_type) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.resource_name) } else { put_string(buf, &self.resource_name) } }
-        if version >= 1 { put_i8(buf, self.resource_pattern_type) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.principal) } else { put_string(buf, &self.principal) } }
-        if version >= 0 { if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) } }
-        if version >= 0 { put_i8(buf, self.operation) }
-        if version >= 0 { put_i8(buf, self.permission_type) }
+        if version >= 0 {
+            put_i8(buf, self.resource_type);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.resource_name);
+            } else {
+                put_string(buf, &self.resource_name);
+            }
+        }
+        if version >= 1 {
+            put_i8(buf, self.resource_pattern_type);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.principal);
+            } else {
+                put_string(buf, &self.principal);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.host);
+            } else {
+                put_string(buf, &self.host);
+            }
+        }
+        if version >= 0 {
+            put_i8(buf, self.operation);
+        }
+        if version >= 0 {
+            put_i8(buf, self.permission_type);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -122,13 +176,39 @@ impl Encode for AclCreation {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += if flex { compact_string_len(&self.resource_name) } else { string_len(&self.resource_name) }; }
-        if version >= 1 { n += 1; }
-        if version >= 0 { n += if flex { compact_string_len(&self.principal) } else { string_len(&self.principal) }; }
-        if version >= 0 { n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) }; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.resource_name)
+            } else {
+                string_len(&self.resource_name)
+            };
+        }
+        if version >= 1 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.principal)
+            } else {
+                string_len(&self.principal)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -136,39 +216,75 @@ impl Encode for AclCreation {
         n
     }
 }
-
-impl<'de> Decode<'de> for AclCreation {
+impl Decode<'_> for AclCreation {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.resource_type = get_i8(buf)?; }
-        if version >= 0 { out.resource_name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 1 { out.resource_pattern_type = get_i8(buf)?; }
-        if version >= 0 { out.principal = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.operation = get_i8(buf)?; }
-        if version >= 0 { out.permission_type = get_i8(buf)?; }
+        if version >= 0 {
+            out.resource_type = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.resource_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 1 {
+            out.resource_pattern_type = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.principal = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.operation = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.permission_type = get_i8(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl AclCreation {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.resource_type = 1i8; }
-        if version >= 0 { m.resource_name = "x".to_string(); }
-        if version >= 1 { m.resource_pattern_type = 1i8; }
-        if version >= 0 { m.principal = "x".to_string(); }
-        if version >= 0 { m.host = "x".to_string(); }
-        if version >= 0 { m.operation = 1i8; }
-        if version >= 0 { m.permission_type = 1i8; }
+        if version >= 0 {
+            m.resource_type = 1i8;
+        }
+        if version >= 0 {
+            m.resource_name = "x".to_string();
+        }
+        if version >= 1 {
+            m.resource_pattern_type = 1i8;
+        }
+        if version >= 0 {
+            m.principal = "x".to_string();
+        }
+        if version >= 0 {
+            m.host = "x".to_string();
+        }
+        if version >= 0 {
+            m.operation = 1i8;
+        }
+        if version >= 0 {
+            m.permission_type = 1i8;
+        }
         m
     }
 }

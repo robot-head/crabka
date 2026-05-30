@@ -27,6 +27,7 @@ use crabka_client_core::Client;
 use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
 use crabka_protocol::owned::join_group_response::JoinGroupResponse;
+use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
@@ -190,6 +191,42 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
             }
         }
     }
+
+    // Graceful departure: tell the broker to evict us *now* rather than
+    // waiting out `session_timeout`. This MUST use `state.member_id`, which
+    // is the live id — a from-scratch rejoin (`UNKNOWN_MEMBER_ID`) replaces
+    // it mid-life, so the `Consumer`'s build-time copy can be stale. Leaving
+    // with a stale id is a silent no-op that orphans the real member until
+    // its session expires, stalling the rest of the group's rebalance.
+    // Best-effort and bounded: a hung broker must not block `close()`.
+    leave_group(&state).await;
+}
+
+/// Best-effort `LeaveGroup` for the coordinator's *current* member id.
+///
+/// Sent once, on shutdown, with a short timeout: the broker falling back to
+/// session-timeout eviction is harmless on close, but a stalled send would
+/// hang `close()` (which awaits this task). Mirrors the Java client, which
+/// leaves the group on close for dynamic members. Skips a cleared id (a
+/// from-scratch rejoin that never re-completed), which the broker wouldn't
+/// recognize anyway.
+async fn leave_group(state: &CoordinatorState) {
+    if state.member_id.is_empty() {
+        return;
+    }
+    // `member_id` is populated for both the v0–v2 (top-level) and v3+
+    // (`members` array) wire shapes so the negotiated version picks up
+    // whichever it serializes.
+    let send = state.client.send(LeaveGroupRequest {
+        group_id: state.group_id.clone(),
+        member_id: state.member_id.clone(),
+        members: vec![MemberIdentity {
+            member_id: state.member_id.clone(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
 }
 
 /// Send one `Heartbeat` and translate the response into a directive.

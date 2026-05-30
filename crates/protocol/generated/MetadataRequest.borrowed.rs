@@ -5,14 +5,13 @@ use bytes::BufMut;
 use crate::primitives::fixed::{get_bool, put_bool};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 3;
@@ -21,7 +20,9 @@ pub const MAX_VERSION: i16 = 13;
 pub const FLEXIBLE_MIN: i16 = 9;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetadataRequest<'a> {
@@ -31,8 +32,7 @@ pub struct MetadataRequest<'a> {
     pub include_topic_authorized_operations: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for MetadataRequest<'a> {
+impl Default for MetadataRequest<'_> {
     fn default() -> Self {
         Self {
             topics: None,
@@ -43,11 +43,12 @@ impl<'a> Default for MetadataRequest<'a> {
         }
     }
 }
-
-impl<'a> MetadataRequest<'a> {
+impl MetadataRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::metadata_request::MetadataRequest {
         crate::owned::metadata_request::MetadataRequest {
-            topics: (self.topics).as_ref().map(|v| v.iter().map(|it| it.to_owned()).collect()),
+            topics: (self.topics)
+                .as_ref()
+                .map(|v| v.iter().map(MetadataRequestTopic::to_owned).collect()),
             allow_auto_topic_creation: (self.allow_auto_topic_creation),
             include_cluster_authorized_operations: (self.include_cluster_authorized_operations),
             include_topic_authorized_operations: (self.include_topic_authorized_operations),
@@ -55,17 +56,45 @@ impl<'a> MetadataRequest<'a> {
         }
     }
 }
-
-impl<'a> Encode for MetadataRequest<'a> {
+impl Encode for MetadataRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if version >= 1 { { let len = (self.topics).as_ref().map(Vec::len); crate::primitives::array::put_nullable_array_len(buf, len, flex); if let Some(v) = &self.topics { for it in v { it.encode(buf, version)?; } } } } else { { let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]); crate::primitives::array::put_array_len(buf, v.len(), flex); for it in v { it.encode(buf, version)?; } } } }
-        if version >= 4 { put_bool(buf, self.allow_auto_topic_creation) }
-        if version >= 8 && version <= 10 { put_bool(buf, self.include_cluster_authorized_operations) }
-        if version >= 8 { put_bool(buf, self.include_topic_authorized_operations) }
+        if version >= 0 {
+            if version >= 1 {
+                {
+                    let len = (self.topics).as_ref().map(Vec::len);
+                    crate::primitives::array::put_nullable_array_len(buf, len, flex);
+                    if let Some(v) = &self.topics {
+                        for it in v {
+                            it.encode(buf, version)?;
+                        }
+                    }
+                }
+            } else {
+                {
+                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    crate::primitives::array::put_array_len(buf, v.len(), flex);
+                    for it in v {
+                        it.encode(buf, version)?;
+                    }
+                }
+            }
+        }
+        if version >= 4 {
+            put_bool(buf, self.allow_auto_topic_creation);
+        }
+        if (8..=10).contains(&version) {
+            put_bool(buf, self.include_cluster_authorized_operations);
+        }
+        if version >= 8 {
+            put_bool(buf, self.include_topic_authorized_operations);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -75,10 +104,36 @@ impl<'a> Encode for MetadataRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if version >= 1 { { let opt: Option<&Vec<_>> = (self.topics).as_ref(); let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(|v| v.len()), flex); let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum()); prefix + body } } else { { let v = (self.topics).as_ref().map(Vec::as_slice).unwrap_or(&[]); let prefix = crate::primitives::array::array_len_prefix_len(v.len(), flex); let body: usize = v.iter().map(|it| it.encoded_len(version)).sum(); prefix + body } }; }
-        if version >= 4 { n += 1; }
-        if version >= 8 && version <= 10 { n += 1; }
-        if version >= 8 { n += 1; }
+        if version >= 0 {
+            n += if version >= 1 {
+                {
+                    let opt: Option<&Vec<_>> = (self.topics).as_ref();
+                    let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                        opt.map(std::vec::Vec::len),
+                        flex,
+                    );
+                    let body: usize =
+                        opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                    prefix + body
+                }
+            } else {
+                {
+                    let v = (self.topics).as_deref().unwrap_or(&[]);
+                    let prefix = crate::primitives::array::array_len_prefix_len(v.len(), flex);
+                    let body: usize = v.iter().map(|it| it.encoded_len(version)).sum();
+                    prefix + body
+                }
+            };
+        }
+        if version >= 4 {
+            n += 1;
+        }
+        if (8..=10).contains(&version) {
+            n += 1;
+        }
+        if version >= 8 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -86,72 +141,113 @@ impl<'a> Encode for MetadataRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for MetadataRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.topics = if version >= 1 { { let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?; match opt { None => None, Some(n) => { let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(MetadataRequestTopic::decode_borrow(buf, version)?); } Some(v) } } } } else { Some({ let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(MetadataRequestTopic::decode_borrow(buf, version)?); } v }) }; }
-        if version >= 4 { out.allow_auto_topic_creation = get_bool(buf)?; }
-        if version >= 8 && version <= 10 { out.include_cluster_authorized_operations = get_bool(buf)?; }
-        if version >= 8 { out.include_topic_authorized_operations = get_bool(buf)?; }
+        if version >= 0 {
+            out.topics = if version >= 1 {
+                {
+                    let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                    match opt {
+                        None => None,
+                        Some(n) => {
+                            let mut v = Vec::with_capacity(n);
+                            for _ in 0..n {
+                                v.push(MetadataRequestTopic::decode_borrow(buf, version)?);
+                            }
+                            Some(v)
+                        }
+                    }
+                }
+            } else {
+                Some({
+                    let n = crate::primitives::array::get_array_len(buf, flex)?;
+                    let mut v = Vec::with_capacity(n);
+                    for _ in 0..n {
+                        v.push(MetadataRequestTopic::decode_borrow(buf, version)?);
+                    }
+                    v
+                })
+            };
+        }
+        if version >= 4 {
+            out.allow_auto_topic_creation = get_bool(buf)?;
+        }
+        if (8..=10).contains(&version) {
+            out.include_cluster_authorized_operations = get_bool(buf)?;
+        }
+        if version >= 8 {
+            out.include_topic_authorized_operations = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> MetadataRequest<'a> {
+impl MetadataRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.topics = Some(vec![MetadataRequestTopic::populated(version)]); }
-        if version >= 4 { m.allow_auto_topic_creation = true; }
-        if version >= 8 && version <= 10 { m.include_cluster_authorized_operations = true; }
-        if version >= 8 { m.include_topic_authorized_operations = true; }
+        if version >= 0 {
+            m.topics = Some(vec![MetadataRequestTopic::populated(version)]);
+        }
+        if version >= 4 {
+            m.allow_auto_topic_creation = true;
+        }
+        if (8..=10).contains(&version) {
+            m.include_cluster_authorized_operations = true;
+        }
+        if version >= 8 {
+            m.include_topic_authorized_operations = true;
+        }
         m
     }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MetadataRequestTopic<'a> {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub name: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for MetadataRequestTopic<'a> {
-    fn default() -> Self {
-        Self {
-            topic_id: Default::default(),
-            name: None,
-            unknown_tagged_fields: Default::default(),
-        }
-    }
-}
-
-impl<'a> MetadataRequestTopic<'a> {
+impl MetadataRequestTopic<'_> {
     pub fn to_owned(&self) -> crate::owned::metadata_request::MetadataRequestTopic {
         crate::owned::metadata_request::MetadataRequestTopic {
             topic_id: (self.topic_id),
-            name: (self.name).map(|s| s.to_string()),
+            name: (self.name).map(std::string::ToString::to_string),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for MetadataRequestTopic<'a> {
+impl Encode for MetadataRequestTopic<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
-        if version >= 10 { crate::primitives::uuid::put_uuid(buf, self.topic_id) }
-        if version >= 0 { if version >= 10 { if flex { put_compact_nullable_string(buf, self.name) } else { put_nullable_string(buf, self.name) } } else { if flex { put_compact_string(buf, (self.name).unwrap_or("")) } else { put_string(buf, (self.name).unwrap_or("")) } } }
+        if version >= 10 {
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+        }
+        if version >= 0 {
+            if version >= 10 {
+                if flex {
+                    put_compact_nullable_string(buf, self.name);
+                } else {
+                    put_nullable_string(buf, self.name);
+                }
+            } else {
+                if flex {
+                    put_compact_string(buf, (self.name).unwrap_or(""));
+                } else {
+                    put_string(buf, (self.name).unwrap_or(""));
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -161,8 +257,24 @@ impl<'a> Encode for MetadataRequestTopic<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 9;
         let mut n: usize = 0;
-        if version >= 10 { n += 16; }
-        if version >= 0 { n += if version >= 10 { if flex { compact_nullable_string_len(self.name) } else { nullable_string_len(self.name) } } else { if flex { compact_string_len((self.name).unwrap_or("")) } else { string_len((self.name).unwrap_or("")) } }; }
+        if version >= 10 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += if version >= 10 {
+                if flex {
+                    compact_nullable_string_len(self.name)
+                } else {
+                    nullable_string_len(self.name)
+                }
+            } else {
+                if flex {
+                    compact_string_len((self.name).unwrap_or(""))
+                } else {
+                    string_len((self.name).unwrap_or(""))
+                }
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -170,29 +282,45 @@ impl<'a> Encode for MetadataRequestTopic<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for MetadataRequestTopic<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
-        if version >= 10 { out.topic_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.name = if version >= 10 { if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? } } else { Some(if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }) }; }
+        if version >= 10 {
+            out.topic_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.name = if version >= 10 {
+                if flex {
+                    get_compact_nullable_string_borrowed(buf)?
+                } else {
+                    get_nullable_string_borrowed(buf)?
+                }
+            } else {
+                Some(if flex {
+                    get_compact_string_borrowed(buf)?
+                } else {
+                    get_string_borrowed(buf)?
+                })
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> MetadataRequestTopic<'a> {
+impl MetadataRequestTopic<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 10 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.name = Some("x"); }
+        if version >= 10 {
+            m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.name = Some("x");
+        }
         m
     }
 }

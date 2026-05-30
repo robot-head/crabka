@@ -14,6 +14,13 @@ workspace = true
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# AST-based codegen: build a token stream with quote!, then format it by
+# shelling out to rustfmt (see src/fmt.rs). proc-macro2/quote/syn are already
+# in the workspace lockfile (pulled by strum/prost), so marginal build cost is
+# near zero. syn is kept only for parse-validation in tests.
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "parsing", "printing"] }
 
 [lib]
 name = "crabka_protocol_codegen"

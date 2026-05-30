@@ -2,14 +2,14 @@
 
 use bytes::{Buf, BufMut};
 
-use crate::primitives::fixed::{get_bool, get_i16, get_i32, get_i64, put_bool, put_i16, put_i32, put_i64};
-use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+use crate::primitives::fixed::{
+    get_bool, get_i16, get_i32, get_i64, put_bool, put_i16, put_i32, put_i64,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes::{
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
+};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 22;
@@ -18,7 +18,9 @@ pub const MAX_VERSION: i16 = 6;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitProducerIdRequest {
@@ -30,7 +32,6 @@ pub struct InitProducerIdRequest {
     pub keep_prepared_txn: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for InitProducerIdRequest {
     fn default() -> Self {
         Self {
@@ -44,19 +45,37 @@ impl Default for InitProducerIdRequest {
         }
     }
 }
-
 impl Encode for InitProducerIdRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.transactional_id.as_deref()) } else { put_nullable_string(buf, self.transactional_id.as_deref()) } }
-        if version >= 0 { put_i32(buf, self.transaction_timeout_ms) }
-        if version >= 3 { put_i64(buf, self.producer_id) }
-        if version >= 3 { put_i16(buf, self.producer_epoch) }
-        if version >= 6 { put_bool(buf, self.enable2_pc) }
-        if version >= 6 { put_bool(buf, self.keep_prepared_txn) }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.transactional_id.as_deref());
+            } else {
+                put_nullable_string(buf, self.transactional_id.as_deref());
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.transaction_timeout_ms);
+        }
+        if version >= 3 {
+            put_i64(buf, self.producer_id);
+        }
+        if version >= 3 {
+            put_i16(buf, self.producer_epoch);
+        }
+        if version >= 6 {
+            put_bool(buf, self.enable2_pc);
+        }
+        if version >= 6 {
+            put_bool(buf, self.keep_prepared_txn);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -66,12 +85,28 @@ impl Encode for InitProducerIdRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.transactional_id.as_deref()) } else { nullable_string_len(self.transactional_id.as_deref()) }; }
-        if version >= 0 { n += 4; }
-        if version >= 3 { n += 8; }
-        if version >= 3 { n += 2; }
-        if version >= 6 { n += 1; }
-        if version >= 6 { n += 1; }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.transactional_id.as_deref())
+            } else {
+                nullable_string_len(self.transactional_id.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 3 {
+            n += 8;
+        }
+        if version >= 3 {
+            n += 2;
+        }
+        if version >= 6 {
+            n += 1;
+        }
+        if version >= 6 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -79,40 +114,67 @@ impl Encode for InitProducerIdRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for InitProducerIdRequest {
+impl Decode<'_> for InitProducerIdRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.transactional_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.transaction_timeout_ms = get_i32(buf)?; }
-        if version >= 3 { out.producer_id = get_i64(buf)?; }
-        if version >= 3 { out.producer_epoch = get_i16(buf)?; }
-        if version >= 6 { out.enable2_pc = get_bool(buf)?; }
-        if version >= 6 { out.keep_prepared_txn = get_bool(buf)?; }
+        if version >= 0 {
+            out.transactional_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.transaction_timeout_ms = get_i32(buf)?;
+        }
+        if version >= 3 {
+            out.producer_id = get_i64(buf)?;
+        }
+        if version >= 3 {
+            out.producer_epoch = get_i16(buf)?;
+        }
+        if version >= 6 {
+            out.enable2_pc = get_bool(buf)?;
+        }
+        if version >= 6 {
+            out.keep_prepared_txn = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl InitProducerIdRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.transactional_id = Some("x".to_string()); }
-        if version >= 0 { m.transaction_timeout_ms = 1i32; }
-        if version >= 3 { m.producer_id = 1i64; }
-        if version >= 3 { m.producer_epoch = 1i16; }
-        if version >= 6 { m.enable2_pc = true; }
-        if version >= 6 { m.keep_prepared_txn = true; }
+        if version >= 0 {
+            m.transactional_id = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.transaction_timeout_ms = 1i32;
+        }
+        if version >= 3 {
+            m.producer_id = 1i64;
+        }
+        if version >= 3 {
+            m.producer_epoch = 1i16;
+        }
+        if version >= 6 {
+            m.enable2_pc = true;
+        }
+        if version >= 6 {
+            m.keep_prepared_txn = true;
+        }
         m
     }
 }
@@ -135,7 +197,10 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
         obj.insert("enable2Pc".to_string(), ::serde_json::Value::Bool(false));
     }
     if version >= 6 {
-        obj.insert("keepPreparedTxn".to_string(), ::serde_json::Value::Bool(false));
+        obj.insert(
+            "keepPreparedTxn".to_string(),
+            ::serde_json::Value::Bool(false),
+        );
     }
     ::serde_json::Value::Object(obj)
 }

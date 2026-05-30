@@ -3,7 +3,7 @@
 use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 22;
@@ -12,7 +12,9 @@ pub const MAX_VERSION: i16 = 6;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitProducerIdResponse {
@@ -24,7 +26,6 @@ pub struct InitProducerIdResponse {
     pub ongoing_txn_producer_epoch: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for InitProducerIdResponse {
     fn default() -> Self {
         Self {
@@ -38,7 +39,6 @@ impl Default for InitProducerIdResponse {
         }
     }
 }
-
 impl InitProducerIdResponse {
     pub fn to_owned(&self) -> crate::owned::init_producer_id_response::InitProducerIdResponse {
         crate::owned::init_producer_id_response::InitProducerIdResponse {
@@ -52,19 +52,33 @@ impl InitProducerIdResponse {
         }
     }
 }
-
 impl Encode for InitProducerIdResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { put_i64(buf, self.producer_id) }
-        if version >= 0 { put_i16(buf, self.producer_epoch) }
-        if version >= 6 { put_i64(buf, self.ongoing_txn_producer_id) }
-        if version >= 6 { put_i16(buf, self.ongoing_txn_producer_epoch) }
+        if version >= 0 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            put_i64(buf, self.producer_id);
+        }
+        if version >= 0 {
+            put_i16(buf, self.producer_epoch);
+        }
+        if version >= 6 {
+            put_i64(buf, self.ongoing_txn_producer_id);
+        }
+        if version >= 6 {
+            put_i16(buf, self.ongoing_txn_producer_epoch);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -74,12 +88,24 @@ impl Encode for InitProducerIdResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 2; }
-        if version >= 6 { n += 8; }
-        if version >= 6 { n += 2; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 6 {
+            n += 8;
+        }
+        if version >= 6 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -87,40 +113,63 @@ impl Encode for InitProducerIdResponse {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for InitProducerIdResponse {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.producer_id = get_i64(buf)?; }
-        if version >= 0 { out.producer_epoch = get_i16(buf)?; }
-        if version >= 6 { out.ongoing_txn_producer_id = get_i64(buf)?; }
-        if version >= 6 { out.ongoing_txn_producer_epoch = get_i16(buf)?; }
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.producer_id = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.producer_epoch = get_i16(buf)?;
+        }
+        if version >= 6 {
+            out.ongoing_txn_producer_id = get_i64(buf)?;
+        }
+        if version >= 6 {
+            out.ongoing_txn_producer_epoch = get_i16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl InitProducerIdResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.producer_id = 1i64; }
-        if version >= 0 { m.producer_epoch = 1i16; }
-        if version >= 6 { m.ongoing_txn_producer_id = 1i64; }
-        if version >= 6 { m.ongoing_txn_producer_epoch = 1i16; }
+        if version >= 0 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.producer_id = 1i64;
+        }
+        if version >= 0 {
+            m.producer_epoch = 1i16;
+        }
+        if version >= 6 {
+            m.ongoing_txn_producer_id = 1i64;
+        }
+        if version >= 6 {
+            m.ongoing_txn_producer_epoch = 1i16;
+        }
         m
     }
 }

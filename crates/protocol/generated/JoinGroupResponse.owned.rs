@@ -4,13 +4,15 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_bool, get_i16, get_i32, put_bool, put_i16, put_i32};
 use crate::primitives::string_bytes::{
+    bytes_len, compact_bytes_len, get_bytes_owned, get_compact_bytes_owned, put_bytes,
+    put_compact_bytes,
+};
+use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
     get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::primitives::string_bytes::{bytes_len, compact_bytes_len, get_bytes_owned, get_compact_bytes_owned, put_bytes, put_compact_bytes};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 11;
@@ -19,7 +21,9 @@ pub const MAX_VERSION: i16 = 9;
 pub const FLEXIBLE_MIN: i16 = 6;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinGroupResponse {
@@ -34,7 +38,6 @@ pub struct JoinGroupResponse {
     pub members: Vec<JoinGroupResponseMember>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for JoinGroupResponse {
     fn default() -> Self {
         Self {
@@ -51,22 +54,71 @@ impl Default for JoinGroupResponse {
         }
     }
 }
-
 impl Encode for JoinGroupResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 2 { put_i32(buf, self.throttle_time_ms) }
-        if version >= 0 { put_i16(buf, self.error_code) }
-        if version >= 0 { put_i32(buf, self.generation_id) }
-        if version >= 7 { if flex { put_compact_nullable_string(buf, self.protocol_type.as_deref()) } else { put_nullable_string(buf, self.protocol_type.as_deref()) } }
-        if version >= 0 { if version >= 7 { if flex { put_compact_nullable_string(buf, self.protocol_name.as_deref()) } else { put_nullable_string(buf, self.protocol_name.as_deref()) } } else { if flex { put_compact_string(buf, (self.protocol_name).as_deref().unwrap_or("")) } else { put_string(buf, (self.protocol_name).as_deref().unwrap_or("")) } } }
-        if version >= 0 { if flex { put_compact_string(buf, &self.leader) } else { put_string(buf, &self.leader) } }
-        if version >= 9 { put_bool(buf, self.skip_assignment) }
-        if version >= 0 { if flex { put_compact_string(buf, &self.member_id) } else { put_string(buf, &self.member_id) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.members).len(), flex); for it in &self.members { it.encode(buf, version)?; } } }
+        if version >= 2 {
+            put_i32(buf, self.throttle_time_ms);
+        }
+        if version >= 0 {
+            put_i16(buf, self.error_code);
+        }
+        if version >= 0 {
+            put_i32(buf, self.generation_id);
+        }
+        if version >= 7 {
+            if flex {
+                put_compact_nullable_string(buf, self.protocol_type.as_deref());
+            } else {
+                put_nullable_string(buf, self.protocol_type.as_deref());
+            }
+        }
+        if version >= 0 {
+            if version >= 7 {
+                if flex {
+                    put_compact_nullable_string(buf, self.protocol_name.as_deref());
+                } else {
+                    put_nullable_string(buf, self.protocol_name.as_deref());
+                }
+            } else {
+                if flex {
+                    put_compact_string(buf, (self.protocol_name).as_deref().unwrap_or(""));
+                } else {
+                    put_string(buf, (self.protocol_name).as_deref().unwrap_or(""));
+                }
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.leader);
+            } else {
+                put_string(buf, &self.leader);
+            }
+        }
+        if version >= 9 {
+            put_bool(buf, self.skip_assignment);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.member_id);
+            } else {
+                put_string(buf, &self.member_id);
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.members).len(), flex);
+                for it in &self.members {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -76,15 +128,65 @@ impl Encode for JoinGroupResponse {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 2 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 4; }
-        if version >= 7 { n += if flex { compact_nullable_string_len(self.protocol_type.as_deref()) } else { nullable_string_len(self.protocol_type.as_deref()) }; }
-        if version >= 0 { n += if version >= 7 { if flex { compact_nullable_string_len(self.protocol_name.as_deref()) } else { nullable_string_len(self.protocol_name.as_deref()) } } else { if flex { compact_string_len((self.protocol_name).as_deref().unwrap_or("")) } else { string_len((self.protocol_name).as_deref().unwrap_or("")) } }; }
-        if version >= 0 { n += if flex { compact_string_len(&self.leader) } else { string_len(&self.leader) }; }
-        if version >= 9 { n += 1; }
-        if version >= 0 { n += if flex { compact_string_len(&self.member_id) } else { string_len(&self.member_id) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.members).len(), flex); let body: usize = (self.members).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 2 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 7 {
+            n += if flex {
+                compact_nullable_string_len(self.protocol_type.as_deref())
+            } else {
+                nullable_string_len(self.protocol_type.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += if version >= 7 {
+                if flex {
+                    compact_nullable_string_len(self.protocol_name.as_deref())
+                } else {
+                    nullable_string_len(self.protocol_name.as_deref())
+                }
+            } else {
+                if flex {
+                    compact_string_len((self.protocol_name).as_deref().unwrap_or(""))
+                } else {
+                    string_len((self.protocol_name).as_deref().unwrap_or(""))
+                }
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.leader)
+            } else {
+                string_len(&self.leader)
+            };
+        }
+        if version >= 9 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.member_id)
+            } else {
+                string_len(&self.member_id)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.members).len(), flex);
+                let body: usize = (self.members)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -92,50 +194,115 @@ impl Encode for JoinGroupResponse {
         n
     }
 }
-
-impl<'de> Decode<'de> for JoinGroupResponse {
+impl Decode<'_> for JoinGroupResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 2 { out.throttle_time_ms = get_i32(buf)?; }
-        if version >= 0 { out.error_code = get_i16(buf)?; }
-        if version >= 0 { out.generation_id = get_i32(buf)?; }
-        if version >= 7 { out.protocol_type = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.protocol_name = if version >= 7 { if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? } } else { Some(if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }) }; }
-        if version >= 0 { out.leader = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 9 { out.skip_assignment = get_bool(buf)?; }
-        if version >= 0 { out.member_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 0 { out.members = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(JoinGroupResponseMember::decode(buf, version)?); } v }; }
+        if version >= 2 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.generation_id = get_i32(buf)?;
+        }
+        if version >= 7 {
+            out.protocol_type = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.protocol_name = if version >= 7 {
+                if flex {
+                    get_compact_nullable_string_owned(buf)?
+                } else {
+                    get_nullable_string_owned(buf)?
+                }
+            } else {
+                Some(if flex {
+                    get_compact_string_owned(buf)?
+                } else {
+                    get_string_owned(buf)?
+                })
+            };
+        }
+        if version >= 0 {
+            out.leader = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 9 {
+            out.skip_assignment = get_bool(buf)?;
+        }
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.members = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(JoinGroupResponseMember::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl JoinGroupResponse {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 2 { m.throttle_time_ms = 1i32; }
-        if version >= 0 { m.error_code = 1i16; }
-        if version >= 0 { m.generation_id = 1i32; }
-        if version >= 7 { m.protocol_type = Some("x".to_string()); }
-        if version >= 0 { m.protocol_name = Some("x".to_string()); }
-        if version >= 0 { m.leader = "x".to_string(); }
-        if version >= 9 { m.skip_assignment = true; }
-        if version >= 0 { m.member_id = "x".to_string(); }
-        if version >= 0 { m.members = vec![JoinGroupResponseMember::populated(version)]; }
+        if version >= 2 {
+            m.throttle_time_ms = 1i32;
+        }
+        if version >= 0 {
+            m.error_code = 1i16;
+        }
+        if version >= 0 {
+            m.generation_id = 1i32;
+        }
+        if version >= 7 {
+            m.protocol_type = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.protocol_name = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.leader = "x".to_string();
+        }
+        if version >= 9 {
+            m.skip_assignment = true;
+        }
+        if version >= 0 {
+            m.member_id = "x".to_string();
+        }
+        if version >= 0 {
+            m.members = vec![JoinGroupResponseMember::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct JoinGroupResponseMember {
     pub member_id: String,
@@ -143,13 +310,30 @@ pub struct JoinGroupResponseMember {
     pub metadata: ::bytes::Bytes,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for JoinGroupResponseMember {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
-        if version >= 0 { if flex { put_compact_string(buf, &self.member_id) } else { put_string(buf, &self.member_id) } }
-        if version >= 5 { if flex { put_compact_nullable_string(buf, self.group_instance_id.as_deref()) } else { put_nullable_string(buf, self.group_instance_id.as_deref()) } }
-        if version >= 0 { if flex { put_compact_bytes(buf, &self.metadata) } else { put_bytes(buf, &self.metadata) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, &self.member_id);
+            } else {
+                put_string(buf, &self.member_id);
+            }
+        }
+        if version >= 5 {
+            if flex {
+                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
+            } else {
+                put_nullable_string(buf, self.group_instance_id.as_deref());
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_bytes(buf, &self.metadata);
+            } else {
+                put_bytes(buf, &self.metadata);
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -159,9 +343,27 @@ impl Encode for JoinGroupResponseMember {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 6;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(&self.member_id) } else { string_len(&self.member_id) }; }
-        if version >= 5 { n += if flex { compact_nullable_string_len(self.group_instance_id.as_deref()) } else { nullable_string_len(self.group_instance_id.as_deref()) }; }
-        if version >= 0 { n += if flex { compact_bytes_len(&self.metadata) } else { bytes_len(&self.metadata) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(&self.member_id)
+            } else {
+                string_len(&self.member_id)
+            };
+        }
+        if version >= 5 {
+            n += if flex {
+                compact_nullable_string_len(self.group_instance_id.as_deref())
+            } else {
+                nullable_string_len(self.group_instance_id.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_bytes_len(&self.metadata)
+            } else {
+                bytes_len(&self.metadata)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -169,31 +371,51 @@ impl Encode for JoinGroupResponseMember {
         n
     }
 }
-
-impl<'de> Decode<'de> for JoinGroupResponseMember {
+impl Decode<'_> for JoinGroupResponseMember {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 6;
         let mut out = Self::default();
-        if version >= 0 { out.member_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 5 { out.group_instance_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.metadata = if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? }; }
+        if version >= 0 {
+            out.member_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 5 {
+            out.group_instance_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.metadata = if flex {
+                get_compact_bytes_owned(buf)?
+            } else {
+                get_bytes_owned(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl JoinGroupResponseMember {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.member_id = "x".to_string(); }
-        if version >= 5 { m.group_instance_id = Some("x".to_string()); }
-        if version >= 0 { m.metadata = ::bytes::Bytes::from_static(b"x"); }
+        if version >= 0 {
+            m.member_id = "x".to_string();
+        }
+        if version >= 5 {
+            m.group_instance_id = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.metadata = ::bytes::Bytes::from_static(b"x");
+        }
         m
     }
 }
@@ -212,12 +434,28 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     if version >= 7 {
         obj.insert("protocolType".to_string(), ::serde_json::Value::Null);
     }
-    obj.insert("protocolName".to_string(), if version >= 7 { ::serde_json::Value::Null } else { ::serde_json::Value::String(String::new()) });
-    obj.insert("leader".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "protocolName".to_string(),
+        if version >= 7 {
+            ::serde_json::Value::Null
+        } else {
+            ::serde_json::Value::String(String::new())
+        },
+    );
+    obj.insert(
+        "leader".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     if version >= 9 {
-        obj.insert("skipAssignment".to_string(), ::serde_json::Value::Bool(false));
+        obj.insert(
+            "skipAssignment".to_string(),
+            ::serde_json::Value::Bool(false),
+        );
     }
-    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "memberId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     obj.insert("members".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)
 }

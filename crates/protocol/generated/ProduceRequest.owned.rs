@@ -6,11 +6,13 @@ use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
     get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::primitives::string_bytes::{get_compact_nullable_bytes_owned, get_nullable_bytes_owned, put_bytes, put_compact_bytes, put_compact_nullable_bytes, put_nullable_bytes};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes::{
+    get_compact_nullable_bytes_owned, get_nullable_bytes_owned, put_bytes, put_compact_bytes,
+    put_compact_nullable_bytes, put_nullable_bytes,
+};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 0;
@@ -19,7 +21,9 @@ pub const MAX_VERSION: i16 = 13;
 pub const FLEXIBLE_MIN: i16 = 9;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProduceRequest {
@@ -29,17 +33,36 @@ pub struct ProduceRequest {
     pub topic_data: Vec<TopicProduceData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for ProduceRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 3 { if flex { put_compact_nullable_string(buf, self.transactional_id.as_deref()) } else { put_nullable_string(buf, self.transactional_id.as_deref()) } }
-        if version >= 0 { put_i16(buf, self.acks) }
-        if version >= 0 { put_i32(buf, self.timeout_ms) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topic_data).len(), flex); for it in &self.topic_data { it.encode(buf, version)?; } } }
+        if version >= 3 {
+            if flex {
+                put_compact_nullable_string(buf, self.transactional_id.as_deref());
+            } else {
+                put_nullable_string(buf, self.transactional_id.as_deref());
+            }
+        }
+        if version >= 0 {
+            put_i16(buf, self.acks);
+        }
+        if version >= 0 {
+            put_i32(buf, self.timeout_ms);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topic_data).len(), flex);
+                for it in &self.topic_data {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -49,10 +72,30 @@ impl Encode for ProduceRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 3 { n += if flex { compact_nullable_string_len(self.transactional_id.as_deref()) } else { nullable_string_len(self.transactional_id.as_deref()) }; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topic_data).len(), flex); let body: usize = (self.topic_data).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 3 {
+            n += if flex {
+                compact_nullable_string_len(self.transactional_id.as_deref())
+            } else {
+                nullable_string_len(self.transactional_id.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topic_data).len(), flex);
+                let body: usize = (self.topic_data)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -60,40 +103,65 @@ impl Encode for ProduceRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for ProduceRequest {
+impl Decode<'_> for ProduceRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 3 { out.transactional_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.acks = get_i16(buf)?; }
-        if version >= 0 { out.timeout_ms = get_i32(buf)?; }
-        if version >= 0 { out.topic_data = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(TopicProduceData::decode(buf, version)?); } v }; }
+        if version >= 3 {
+            out.transactional_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.acks = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.timeout_ms = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.topic_data = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(TopicProduceData::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl ProduceRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 3 { m.transactional_id = Some("x".to_string()); }
-        if version >= 0 { m.acks = 1i16; }
-        if version >= 0 { m.timeout_ms = 1i32; }
-        if version >= 0 { m.topic_data = vec![TopicProduceData::populated(version)]; }
+        if version >= 3 {
+            m.transactional_id = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.acks = 1i16;
+        }
+        if version >= 0 {
+            m.timeout_ms = 1i32;
+        }
+        if version >= 0 {
+            m.topic_data = vec![TopicProduceData::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicProduceData {
     pub name: String,
@@ -101,13 +169,27 @@ pub struct TopicProduceData {
     pub partition_data: Vec<PartitionProduceData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for TopicProduceData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
-        if version >= 0 && version <= 12 { if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) } }
-        if version >= 13 { crate::primitives::uuid::put_uuid(buf, self.topic_id) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partition_data).len(), flex); for it in &self.partition_data { it.encode(buf, version)?; } } }
+        if (0..=12).contains(&version) {
+            if flex {
+                put_compact_string(buf, &self.name);
+            } else {
+                put_string(buf, &self.name);
+            }
+        }
+        if version >= 13 {
+            crate::primitives::uuid::put_uuid(buf, self.topic_id);
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partition_data).len(), flex);
+                for it in &self.partition_data {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -117,9 +199,29 @@ impl Encode for TopicProduceData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 9;
         let mut n: usize = 0;
-        if version >= 0 && version <= 12 { n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) }; }
-        if version >= 13 { n += 16; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partition_data).len(), flex); let body: usize = (self.partition_data).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if (0..=12).contains(&version) {
+            n += if flex {
+                compact_string_len(&self.name)
+            } else {
+                string_len(&self.name)
+            };
+        }
+        if version >= 13 {
+            n += 16;
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.partition_data).len(),
+                    flex,
+                );
+                let body: usize = (self.partition_data)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -127,47 +229,89 @@ impl Encode for TopicProduceData {
         n
     }
 }
-
-impl<'de> Decode<'de> for TopicProduceData {
+impl Decode<'_> for TopicProduceData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
-        if version >= 0 && version <= 12 { out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? }; }
-        if version >= 13 { out.topic_id = crate::primitives::uuid::get_uuid(buf)?; }
-        if version >= 0 { out.partition_data = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(PartitionProduceData::decode(buf, version)?); } v }; }
+        if (0..=12).contains(&version) {
+            out.name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
+        }
+        if version >= 13 {
+            out.topic_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
+        if version >= 0 {
+            out.partition_data = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(PartitionProduceData::decode(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl TopicProduceData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 && version <= 12 { m.name = "x".to_string(); }
-        if version >= 13 { m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]); }
-        if version >= 0 { m.partition_data = vec![PartitionProduceData::populated(version)]; }
+        if (0..=12).contains(&version) {
+            m.name = "x".to_string();
+        }
+        if version >= 13 {
+            m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
+        if version >= 0 {
+            m.partition_data = vec![PartitionProduceData::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PartitionProduceData {
     pub index: i32,
     pub records: Option<crate::records::RecordsPayload>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for PartitionProduceData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 9;
-        if version >= 0 { put_i32(buf, self.index) }
-        if version >= 0 { match &self.records { None => if flex { put_compact_nullable_bytes(buf, None) } else { put_nullable_bytes(buf, None) }, Some(__rb) => { let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordsPayload as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) } } } }
+        if version >= 0 {
+            put_i32(buf, self.index);
+        }
+        if version >= 0 {
+            match &self.records {
+                None => {
+                    if flex {
+                        put_compact_nullable_bytes(buf, None);
+                    } else {
+                        put_nullable_bytes(buf, None);
+                    }
+                }
+                Some(__rb) => {
+                    let mut __rb_buf = bytes::BytesMut::new();
+                    <crate::records::RecordsPayload as crate::Encode>::encode(
+                        __rb,
+                        &mut __rb_buf,
+                        version,
+                    )?;
+                    if flex {
+                        put_compact_bytes(buf, &__rb_buf);
+                    } else {
+                        put_bytes(buf, &__rb_buf);
+                    }
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -177,8 +321,30 @@ impl Encode for PartitionProduceData {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 9;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += match &self.records { None => if flex { crate::primitives::varint::uvarint_len(0) } else { 4 }, Some(__rb) => { let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(__rb, version); if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len } } }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += match &self.records {
+                None => {
+                    if flex {
+                        crate::primitives::varint::uvarint_len(0)
+                    } else {
+                        4
+                    }
+                }
+                Some(__rb) => {
+                    let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(
+                        __rb, version,
+                    );
+                    if flex {
+                        crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len)
+                    } else {
+                        4 + __rb_len
+                    }
+                }
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -186,28 +352,46 @@ impl Encode for PartitionProduceData {
         n
     }
 }
-
-impl<'de> Decode<'de> for PartitionProduceData {
+impl Decode<'_> for PartitionProduceData {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 9;
         let mut out = Self::default();
-        if version >= 0 { out.index = get_i32(buf)?; }
-        if version >= 0 { out.records = { let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? }; match __rb_opt { None => None, Some(__rb_bytes) => { let mut __rb_cur: &[u8] = &__rb_bytes; Some(<crate::records::RecordsPayload as crate::Decode>::decode(&mut __rb_cur, version)?) } } }; }
+        if version >= 0 {
+            out.index = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.records = {
+                let __rb_opt = if flex {
+                    get_compact_nullable_bytes_owned(buf)?
+                } else {
+                    get_nullable_bytes_owned(buf)?
+                };
+                match __rb_opt {
+                    None => None,
+                    Some(__rb_bytes) => {
+                        let mut __rb_cur: &[u8] = &__rb_bytes;
+                        Some(<crate::records::RecordsPayload as crate::Decode>::decode(
+                            &mut __rb_cur,
+                            version,
+                        )?)
+                    }
+                }
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl PartitionProduceData {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.index = 1i32; }
+        if version >= 0 {
+            m.index = 1i32;
+        }
         m
     }
 }

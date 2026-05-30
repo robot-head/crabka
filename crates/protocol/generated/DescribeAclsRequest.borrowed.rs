@@ -4,15 +4,13 @@ use bytes::BufMut;
 
 use crate::primitives::fixed::{get_i8, put_i8};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    compact_nullable_string_len, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::primitives::string_bytes_borrowed::{
-    get_compact_nullable_string_borrowed, get_compact_string_borrowed,
-    get_nullable_string_borrowed, get_string_borrowed,
+    get_compact_nullable_string_borrowed, get_nullable_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 29;
@@ -21,7 +19,9 @@ pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DescribeAclsRequest<'a> {
@@ -34,8 +34,7 @@ pub struct DescribeAclsRequest<'a> {
     pub permission_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
-impl<'a> Default for DescribeAclsRequest<'a> {
+impl Default for DescribeAclsRequest<'_> {
     fn default() -> Self {
         Self {
             resource_type_filter: 0i8,
@@ -49,35 +48,62 @@ impl<'a> Default for DescribeAclsRequest<'a> {
         }
     }
 }
-
-impl<'a> DescribeAclsRequest<'a> {
+impl DescribeAclsRequest<'_> {
     pub fn to_owned(&self) -> crate::owned::describe_acls_request::DescribeAclsRequest {
         crate::owned::describe_acls_request::DescribeAclsRequest {
             resource_type_filter: (self.resource_type_filter),
-            resource_name_filter: (self.resource_name_filter).map(|s| s.to_string()),
+            resource_name_filter: (self.resource_name_filter).map(std::string::ToString::to_string),
             pattern_type_filter: (self.pattern_type_filter),
-            principal_filter: (self.principal_filter).map(|s| s.to_string()),
-            host_filter: (self.host_filter).map(|s| s.to_string()),
+            principal_filter: (self.principal_filter).map(std::string::ToString::to_string),
+            host_filter: (self.host_filter).map(std::string::ToString::to_string),
             operation: (self.operation),
             permission_type: (self.permission_type),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
-impl<'a> Encode for DescribeAclsRequest<'a> {
+impl Encode for DescribeAclsRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { put_i8(buf, self.resource_type_filter) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.resource_name_filter) } else { put_nullable_string(buf, self.resource_name_filter) } }
-        if version >= 1 { put_i8(buf, self.pattern_type_filter) }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.principal_filter) } else { put_nullable_string(buf, self.principal_filter) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.host_filter) } else { put_nullable_string(buf, self.host_filter) } }
-        if version >= 0 { put_i8(buf, self.operation) }
-        if version >= 0 { put_i8(buf, self.permission_type) }
+        if version >= 0 {
+            put_i8(buf, self.resource_type_filter);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.resource_name_filter);
+            } else {
+                put_nullable_string(buf, self.resource_name_filter);
+            }
+        }
+        if version >= 1 {
+            put_i8(buf, self.pattern_type_filter);
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.principal_filter);
+            } else {
+                put_nullable_string(buf, self.principal_filter);
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.host_filter);
+            } else {
+                put_nullable_string(buf, self.host_filter);
+            }
+        }
+        if version >= 0 {
+            put_i8(buf, self.operation);
+        }
+        if version >= 0 {
+            put_i8(buf, self.permission_type);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -87,13 +113,39 @@ impl<'a> Encode for DescribeAclsRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.resource_name_filter) } else { nullable_string_len(self.resource_name_filter) }; }
-        if version >= 1 { n += 1; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.principal_filter) } else { nullable_string_len(self.principal_filter) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.host_filter) } else { nullable_string_len(self.host_filter) }; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.resource_name_filter)
+            } else {
+                nullable_string_len(self.resource_name_filter)
+            };
+        }
+        if version >= 1 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.principal_filter)
+            } else {
+                nullable_string_len(self.principal_filter)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.host_filter)
+            } else {
+                nullable_string_len(self.host_filter)
+            };
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -101,42 +153,81 @@ impl<'a> Encode for DescribeAclsRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for DescribeAclsRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.resource_type_filter = get_i8(buf)?; }
-        if version >= 0 { out.resource_name_filter = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 1 { out.pattern_type_filter = get_i8(buf)?; }
-        if version >= 0 { out.principal_filter = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.host_filter = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.operation = get_i8(buf)?; }
-        if version >= 0 { out.permission_type = get_i8(buf)?; }
+        if version >= 0 {
+            out.resource_type_filter = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.resource_name_filter = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 1 {
+            out.pattern_type_filter = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.principal_filter = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.host_filter = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.operation = get_i8(buf)?;
+        }
+        if version >= 0 {
+            out.permission_type = get_i8(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
-impl<'a> DescribeAclsRequest<'a> {
+impl DescribeAclsRequest<'_> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.resource_type_filter = 1i8; }
-        if version >= 0 { m.resource_name_filter = Some("x"); }
-        if version >= 1 { m.pattern_type_filter = 1i8; }
-        if version >= 0 { m.principal_filter = Some("x"); }
-        if version >= 0 { m.host_filter = Some("x"); }
-        if version >= 0 { m.operation = 1i8; }
-        if version >= 0 { m.permission_type = 1i8; }
+        if version >= 0 {
+            m.resource_type_filter = 1i8;
+        }
+        if version >= 0 {
+            m.resource_name_filter = Some("x");
+        }
+        if version >= 1 {
+            m.pattern_type_filter = 1i8;
+        }
+        if version >= 0 {
+            m.principal_filter = Some("x");
+        }
+        if version >= 0 {
+            m.host_filter = Some("x");
+        }
+        if version >= 0 {
+            m.operation = 1i8;
+        }
+        if version >= 0 {
+            m.permission_type = 1i8;
+        }
         m
     }
 }

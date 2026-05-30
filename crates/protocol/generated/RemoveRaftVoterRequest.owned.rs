@@ -4,12 +4,10 @@ use bytes::{Buf, BufMut};
 
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 81;
@@ -18,7 +16,9 @@ pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RemoveRaftVoterRequest {
@@ -27,16 +27,28 @@ pub struct RemoveRaftVoterRequest {
     pub voter_directory_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Encode for RemoveRaftVoterRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.cluster_id.as_deref()) } else { put_nullable_string(buf, self.cluster_id.as_deref()) } }
-        if version >= 0 { put_i32(buf, self.voter_id) }
-        if version >= 0 { crate::primitives::uuid::put_uuid(buf, self.voter_directory_id) }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.cluster_id.as_deref());
+            } else {
+                put_nullable_string(buf, self.cluster_id.as_deref());
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.voter_id);
+        }
+        if version >= 0 {
+            crate::primitives::uuid::put_uuid(buf, self.voter_directory_id);
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -46,9 +58,19 @@ impl Encode for RemoveRaftVoterRequest {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.cluster_id.as_deref()) } else { nullable_string_len(self.cluster_id.as_deref()) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 16; }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.cluster_id.as_deref())
+            } else {
+                nullable_string_len(self.cluster_id.as_deref())
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 16;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -56,34 +78,49 @@ impl Encode for RemoveRaftVoterRequest {
         n
     }
 }
-
-impl<'de> Decode<'de> for RemoveRaftVoterRequest {
+impl Decode<'_> for RemoveRaftVoterRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.cluster_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }; }
-        if version >= 0 { out.voter_id = get_i32(buf)?; }
-        if version >= 0 { out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?; }
+        if version >= 0 {
+            out.cluster_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
+        }
+        if version >= 0 {
+            out.voter_id = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.voter_directory_id = crate::primitives::uuid::get_uuid(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl RemoveRaftVoterRequest {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.cluster_id = Some("x".to_string()); }
-        if version >= 0 { m.voter_id = 1i32; }
-        if version >= 0 { m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]); }
+        if version >= 0 {
+            m.cluster_id = Some("x".to_string());
+        }
+        if version >= 0 {
+            m.voter_id = 1i32;
+        }
+        if version >= 0 {
+            m.voter_directory_id = crate::primitives::uuid::Uuid([1u8; 16]);
+        }
         m
     }
 }
@@ -96,7 +133,10 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
     obj.insert("voterId".to_string(), ::serde_json::json!(0));
-    obj.insert("voterDirectoryId".to_string(), ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()));
+    obj.insert(
+        "voterDirectoryId".to_string(),
+        ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()),
+    );
     ::serde_json::Value::Object(obj)
 }
 
