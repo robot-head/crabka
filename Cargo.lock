@@ -1195,6 +1195,7 @@ dependencies = [
  "lru",
  "opentelemetry",
  "opentelemetry-otlp",
+ "opentelemetry-proto",
  "opentelemetry_sdk",
  "pbkdf2 0.13.0-rc.10",
  "prometheus-client",
