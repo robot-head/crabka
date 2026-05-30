@@ -79,6 +79,7 @@ pub fn build_offset_map(segments: &[&Segment]) -> Result<HashMap<Bytes, i64>, Lo
 )]
 mod build_map_tests {
     use super::*;
+    use assert2::assert;
     use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
@@ -131,8 +132,8 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
-        assert_eq!(map.get(b"k1".as_ref()), Some(&2));
-        assert_eq!(map.get(b"k2".as_ref()), Some(&1));
+        assert!(map.get(b"k1".as_ref()) == Some(&2));
+        assert!(map.get(b"k2".as_ref()) == Some(&1));
     }
 
     #[test]
@@ -149,8 +150,8 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
-        assert_eq!(map.len(), 1);
-        assert_eq!(map.get(b"k1".as_ref()), Some(&1));
+        assert!(map.len() == 1);
+        assert!(map.get(b"k1".as_ref()) == Some(&1));
     }
 
     #[test]
@@ -168,7 +169,7 @@ mod build_map_tests {
         );
         let segs: Vec<&Segment> = vec![&seg0, &seg1];
         let map = build_offset_map(&segs).unwrap();
-        assert_eq!(map.get(b"k1".as_ref()), Some(&10));
+        assert!(map.get(b"k1".as_ref()) == Some(&10));
     }
 }
 
@@ -304,6 +305,7 @@ fn swap_path(dir: &Path, base_offset: i64, ext: &str) -> PathBuf {
 mod rewrite_tests {
     use super::build_map_tests::{make_record, write_sealed_segment};
     use super::*;
+    use assert2::assert;
     use std::fs;
 
     #[test]
@@ -321,19 +323,19 @@ mod rewrite_tests {
         let segs = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
         let out = rewrite_segments(dir.path(), &segs, &map, 4096).unwrap();
-        assert_eq!(out.new_base_offset, 0);
+        assert!(out.new_base_offset == 0);
 
         // Decode the swap .log to verify contents.
         let bytes = fs::read(&out.log_swap).unwrap();
         let mut cursor = &bytes[..];
         let batch = RecordBatch::decode(&mut cursor).unwrap();
-        assert_eq!(batch.records.len(), 2);
+        assert!(batch.records.len() == 2);
         let keys: Vec<_> = batch
             .records
             .iter()
             .map(|r| r.key.as_ref().unwrap().to_vec())
             .collect();
-        assert_eq!(keys, vec![b"k2".to_vec(), b"k1".to_vec()]);
+        assert!(keys == vec![b"k2".to_vec(), b"k1".to_vec()]);
     }
 
     #[test]
@@ -353,9 +355,9 @@ mod rewrite_tests {
         let bytes = fs::read(&out.log_swap).unwrap();
         let mut cursor = &bytes[..];
         let batch = RecordBatch::decode(&mut cursor).unwrap();
-        assert_eq!(batch.records.len(), 1);
+        assert!(batch.records.len() == 1);
         assert!(batch.records[0].value.is_none());
-        assert_eq!(batch.records[0].key.as_ref().unwrap().as_ref(), b"k1");
+        assert!(batch.records[0].key.as_ref().unwrap().as_ref() == b"k1");
     }
 
     #[test]
@@ -373,22 +375,22 @@ mod rewrite_tests {
         let segs = vec![&seg0];
         let map = build_offset_map(&segs).unwrap();
         let out = rewrite_segments(dir.path(), &segs, &map, 4096).unwrap();
-        assert_eq!(out.new_base_offset, 100);
-        assert_eq!(out.new_last_offset, 102);
+        assert!(out.new_base_offset == 100);
+        assert!(out.new_last_offset == 102);
 
         let bytes = std::fs::read(&out.log_swap).unwrap();
         let mut cursor = &bytes[..];
         let batch = RecordBatch::decode(&mut cursor).unwrap();
-        assert_eq!(batch.base_offset, 100);
+        assert!(batch.base_offset == 100);
         // k2 kept at offset_delta 1, k1 kept at offset_delta 2; base 100,
         // last_offset_delta 2 → batch covers abs offsets 100..=102 with k2,k1.
-        assert_eq!(batch.last_offset_delta, 2);
+        assert!(batch.last_offset_delta == 2);
         let abs_offsets: Vec<i64> = batch
             .records
             .iter()
             .map(|r| batch.base_offset + i64::from(r.offset_delta))
             .collect();
-        assert_eq!(abs_offsets, vec![101, 102]);
+        assert!(abs_offsets == vec![101, 102]);
     }
 }
 
@@ -462,6 +464,7 @@ pub fn atomic_swap(
 mod swap_tests {
     use super::build_map_tests::{make_record, write_sealed_segment};
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn atomic_swap_replaces_two_segments_with_one() {

@@ -109,16 +109,17 @@ fn zstd_decompress(_: &[u8]) -> Result<Bytes, CompressionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn passthrough_none_compress() {
         let out = compress(CompressionType::None, b"abcdef").unwrap();
-        assert_eq!(out.as_ref(), b"abcdef");
+        assert!(out.as_ref() == b"abcdef");
     }
 
     #[test]
     fn passthrough_none_decompress() {
         let out = decompress(CompressionType::None, b"abcdef").unwrap();
-        assert_eq!(out.as_ref(), b"abcdef");
+        assert!(out.as_ref() == b"abcdef");
     }
 }

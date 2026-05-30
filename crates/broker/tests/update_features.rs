@@ -7,6 +7,7 @@
 //! Validation rejects unsupported features and out-of-range levels;
 //! `validate_only` runs all checks without persisting.
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
@@ -33,13 +34,13 @@ async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
         .send(metadata_version_update(25))
         .await
         .expect("UpdateFeatures");
-    assert_eq!(resp.error_code, 0, "{resp:?}");
+    assert!(resp.error_code == 0, "{resp:?}");
     if let Some(row) = resp
         .results
         .iter()
         .find(|r| r.feature == "metadata.version")
     {
-        assert_eq!(row.error_code, 0, "{resp:?}");
+        assert!(row.error_code == 0, "{resp:?}");
     }
 
     // ApiVersions now surfaces the finalized feature with a real epoch.
@@ -57,7 +58,7 @@ async fn finalizes_metadata_version_and_surfaces_in_api_versions() {
         .iter()
         .find(|f| f.name == "metadata.version")
         .expect("metadata.version finalized");
-    assert_eq!(fin.max_version_level, 25, "{av:?}");
+    assert!(fin.max_version_level == 25, "{av:?}");
     assert!(av.finalized_features_epoch >= 0, "{av:?}");
 
     p.broker.shutdown().await;
@@ -72,9 +73,12 @@ fn assert_feature_error(
     code: i16,
 ) {
     if let Some(row) = resp.results.iter().find(|r| r.feature == feature) {
-        assert_eq!(row.error_code, code, "per-row error: {resp:?}");
+        assert!(row.error_code == code, "per-row error: {resp:?}");
     } else {
-        assert_eq!(resp.error_code, code, "promoted top-level error: {resp:?}");
+        assert!(
+            resp.error_code == code,
+            "promoted top-level error: {resp:?}"
+        );
     }
 }
 
@@ -108,7 +112,7 @@ async fn validate_only_does_not_persist() {
     let mut req = metadata_version_update(25);
     req.validate_only = true;
     let resp = p.client.send(req).await.expect("UpdateFeatures");
-    assert_eq!(resp.error_code, 0, "{resp:?}");
+    assert!(resp.error_code == 0, "{resp:?}");
 
     // Nothing finalized.
     let av = p
@@ -124,7 +128,7 @@ async fn validate_only_does_not_persist() {
         av.finalized_features.is_empty(),
         "validate_only must not persist: {av:?}",
     );
-    assert_eq!(av.finalized_features_epoch, -1, "{av:?}");
+    assert!(av.finalized_features_epoch == -1, "{av:?}");
     p.broker.shutdown().await;
 }
 

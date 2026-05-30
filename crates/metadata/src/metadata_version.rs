@@ -174,34 +174,35 @@ pub fn is_supported_level(level: i16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn min_max_levels() {
-        assert_eq!(METADATA_VERSION_MIN, 7);
-        assert_eq!(METADATA_VERSION_MAX, 25);
-        assert_eq!(TABLE.first().unwrap().level, METADATA_VERSION_MIN);
-        assert_eq!(TABLE.last().unwrap().level, METADATA_VERSION_MAX);
+        assert!(METADATA_VERSION_MIN == 7);
+        assert!(METADATA_VERSION_MAX == 25);
+        assert!(TABLE.first().unwrap().level == METADATA_VERSION_MIN);
+        assert!(TABLE.last().unwrap().level == METADATA_VERSION_MAX);
     }
 
     #[test]
     fn from_feature_level_known_and_unknown() {
-        assert_eq!(from_feature_level(7).unwrap().short(), "3.3");
-        assert_eq!(from_feature_level(25).unwrap().ivn(), "4.0-IV3");
+        assert!(from_feature_level(7).unwrap().short() == "3.3");
+        assert!(from_feature_level(25).unwrap().ivn() == "4.0-IV3");
         assert!(from_feature_level(6).is_none());
         assert!(from_feature_level(26).is_none());
     }
 
     #[test]
     fn from_version_string_exact_ivn() {
-        assert_eq!(from_version_string("3.5-IV2").unwrap().feature_level(), 11);
-        assert_eq!(from_version_string("4.0-IV3").unwrap().feature_level(), 25);
+        assert!(from_version_string("3.5-IV2").unwrap().feature_level() == 11);
+        assert!(from_version_string("4.0-IV3").unwrap().feature_level() == 25);
         assert!(from_version_string("3.5-IV9").is_none());
     }
 
     #[test]
     fn from_version_string_short_picks_highest_in_minor() {
-        assert_eq!(from_version_string("3.7").unwrap().feature_level(), 19);
-        assert_eq!(from_version_string("4.0").unwrap().feature_level(), 25);
+        assert!(from_version_string("3.7").unwrap().feature_level() == 19);
+        assert!(from_version_string("4.0").unwrap().feature_level() == 25);
         assert!(from_version_string("2.8").is_none());
     }
 
@@ -215,17 +216,14 @@ mod tests {
 
     #[test]
     fn gate_level_constants() {
-        assert_eq!(SCRAM_MIN_LEVEL, 11);
-        assert_eq!(DELEGATION_TOKEN_MIN_LEVEL, 14);
-        assert_eq!(
-            from_feature_level(SCRAM_MIN_LEVEL).unwrap().ivn(),
-            "3.5-IV2"
-        );
-        assert_eq!(
+        assert!(SCRAM_MIN_LEVEL == 11);
+        assert!(DELEGATION_TOKEN_MIN_LEVEL == 14);
+        assert!(from_feature_level(SCRAM_MIN_LEVEL).unwrap().ivn() == "3.5-IV2");
+        assert!(
             from_feature_level(DELEGATION_TOKEN_MIN_LEVEL)
                 .unwrap()
-                .ivn(),
-            "3.6-IV2"
+                .ivn()
+                == "3.6-IV2"
         );
     }
 }

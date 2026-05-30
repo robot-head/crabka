@@ -30,6 +30,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -65,7 +66,7 @@ async fn admin_round_trip_create_alter_delete() {
         )
         .await
         .unwrap();
-    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes.len() == 1);
     assert!(
         outcomes[0].error.is_none(),
         "create failed: {:?}",
@@ -76,8 +77,8 @@ async fn admin_round_trip_create_alter_delete() {
     let md = admin.metadata(&["foo"]).await.unwrap();
     let foo = md.topics.iter().find(|t| t.name == "foo").unwrap();
     assert!(foo.error.is_none());
-    assert_eq!(foo.partition_count, 3);
-    assert_eq!(foo.replication_factor, 1);
+    assert!(foo.partition_count == 3);
+    assert!(foo.replication_factor == 1);
 
     // 4. Increase partitions to 5.
     let outcomes = admin
@@ -95,17 +96,17 @@ async fn admin_round_trip_create_alter_delete() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     let md = admin.metadata(&["foo"]).await.unwrap();
     let foo = md.topics.iter().find(|t| t.name == "foo").unwrap();
-    assert_eq!(foo.partition_count, 5);
+    assert!(foo.partition_count == 5);
 
     // 5. describe_configs reports retention.ms as a dynamic override.
     let overrides = admin.describe_configs(&["foo"]).await.unwrap();
-    assert_eq!(overrides.len(), 1);
-    assert_eq!(
+    assert!(overrides.len() == 1);
+    assert!(
         overrides[0]
             .overrides
             .get("retention.ms")
-            .map(String::as_str),
-        Some("60000"),
+            .map(String::as_str)
+            == Some("60000")
     );
 
     // 6. incremental_alter SET a new key.
@@ -119,12 +120,12 @@ async fn admin_round_trip_create_alter_delete() {
         .unwrap();
     assert!(outcomes[0].error.is_none());
     let overrides = admin.describe_configs(&["foo"]).await.unwrap();
-    assert_eq!(
+    assert!(
         overrides[0]
             .overrides
             .get("cleanup.policy")
-            .map(String::as_str),
-        Some("compact"),
+            .map(String::as_str)
+            == Some("compact")
     );
 
     // 7. incremental_alter DELETE the retention override.

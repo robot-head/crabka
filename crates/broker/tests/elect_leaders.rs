@@ -37,6 +37,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -149,8 +150,8 @@ async fn drive_elect_leaders(
     let resp = ElectLeadersResponse::decode(&mut cur, ELECT_LEADERS_VERSION)
         .expect("decode ElectLeadersResponse");
 
-    assert_eq!(
-        resp.error_code, 0,
+    assert!(
+        resp.error_code == 0,
         "top-level error_code must be 0, got {}",
         resp.error_code
     );
@@ -354,9 +355,8 @@ async fn preferred_election_via_wire_returns_success() {
     // Now send ElectLeaders Preferred (election_type=0). Broker 1 is the
     // preferred replica (replicas[0]) and is now back in ISR and alive.
     let result = drive_elect_leaders(elect_addr, "foo-preferred", vec![0], 0).await;
-    assert_eq!(
-        result,
-        vec![(0, 0)],
+    assert!(
+        result == vec![(0, 0)],
         "expected error_code=0 for PREFERRED election; got {result:?}"
     );
 
@@ -434,9 +434,8 @@ async fn unclean_election_via_wire_picks_alive_replica() {
     // The algorithm finds: ISR=[99] — all dead → unclean eligible.
     // First alive in replicas=[1,2] → broker 1 → new leader=1, isr=[1].
     let result = drive_elect_leaders(addr, "foo-unclean", vec![0], 1).await;
-    assert_eq!(
-        result,
-        vec![(0, 0)],
+    assert!(
+        result == vec![(0, 0)],
         "expected error_code=0 for UNCLEAN election; got {result:?}"
     );
 
@@ -483,9 +482,9 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -627,9 +626,8 @@ async fn non_super_user_without_acl_denied() {
     handle.shutdown().await;
 
     // Per-row error code must be 31 (CLUSTER_AUTHORIZATION_FAILED).
-    assert_eq!(
-        resp,
-        vec![(0, 31)],
+    assert!(
+        resp == vec![(0, 31)],
         "expected CLUSTER_AUTHORIZATION_FAILED (31) for alice; got {resp:?}"
     );
 }
@@ -857,9 +855,9 @@ async fn create_topic_sasl_plain(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );

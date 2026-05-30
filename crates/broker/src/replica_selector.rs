@@ -67,6 +67,7 @@ impl ReplicaSelectorKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn view(node_id: i32, rack: &str, in_isr: bool) -> ReplicaView {
         ReplicaView {
@@ -78,13 +79,10 @@ mod tests {
 
     #[test]
     fn parse_known_values() {
-        assert_eq!(
-            ReplicaSelectorKind::from_config_str("leader"),
-            Ok(ReplicaSelectorKind::Leader)
-        );
-        assert_eq!(
-            ReplicaSelectorKind::from_config_str("rack-aware"),
-            Ok(ReplicaSelectorKind::RackAware)
+        assert!(ReplicaSelectorKind::from_config_str("leader") == Ok(ReplicaSelectorKind::Leader));
+        assert!(
+            ReplicaSelectorKind::from_config_str("rack-aware")
+                == Ok(ReplicaSelectorKind::RackAware)
         );
         assert!(ReplicaSelectorKind::from_config_str("bogus").is_err());
     }
@@ -92,10 +90,7 @@ mod tests {
     #[test]
     fn leader_kind_always_returns_minus_one() {
         let replicas = [view(1, "a", true), view(2, "b", true)];
-        assert_eq!(
-            ReplicaSelectorKind::Leader.select(Some("b"), 1, &replicas),
-            -1
-        );
+        assert!(ReplicaSelectorKind::Leader.select(Some("b"), 1, &replicas) == -1);
     }
 
     #[test]
@@ -103,51 +98,33 @@ mod tests {
         let replicas = [view(1, "a", true), view(2, "b", true), view(3, "b", true)];
         // leader is node 1 (rack a); client in rack b -> lowest-id same-rack
         // ISR member is node 2.
-        assert_eq!(
-            ReplicaSelectorKind::RackAware.select(Some("b"), 1, &replicas),
-            2
-        );
+        assert!(ReplicaSelectorKind::RackAware.select(Some("b"), 1, &replicas) == 2);
     }
 
     #[test]
     fn rack_aware_none_when_client_rack_missing() {
         let replicas = [view(1, "a", true), view(2, "b", true)];
-        assert_eq!(
-            ReplicaSelectorKind::RackAware.select(None, 1, &replicas),
-            -1
-        );
-        assert_eq!(
-            ReplicaSelectorKind::RackAware.select(Some(""), 1, &replicas),
-            -1
-        );
+        assert!(ReplicaSelectorKind::RackAware.select(None, 1, &replicas) == -1);
+        assert!(ReplicaSelectorKind::RackAware.select(Some(""), 1, &replicas) == -1);
     }
 
     #[test]
     fn rack_aware_none_when_no_same_rack_replica() {
         let replicas = [view(1, "a", true), view(2, "a", true)];
-        assert_eq!(
-            ReplicaSelectorKind::RackAware.select(Some("z"), 1, &replicas),
-            -1
-        );
+        assert!(ReplicaSelectorKind::RackAware.select(Some("z"), 1, &replicas) == -1);
     }
 
     #[test]
     fn rack_aware_ignores_non_isr_same_rack_replica() {
         let replicas = [view(1, "a", true), view(2, "b", false)];
         // Node 2 is same-rack but out of ISR -> no redirect.
-        assert_eq!(
-            ReplicaSelectorKind::RackAware.select(Some("b"), 1, &replicas),
-            -1
-        );
+        assert!(ReplicaSelectorKind::RackAware.select(Some("b"), 1, &replicas) == -1);
     }
 
     #[test]
     fn rack_aware_none_when_only_same_rack_replica_is_leader() {
         let replicas = [view(1, "b", true), view(2, "a", true)];
         // Client rack b matches only the leader (node 1) -> stay on leader.
-        assert_eq!(
-            ReplicaSelectorKind::RackAware.select(Some("b"), 1, &replicas),
-            -1
-        );
+        assert!(ReplicaSelectorKind::RackAware.select(Some("b"), 1, &replicas) == -1);
     }
 }

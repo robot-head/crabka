@@ -41,5 +41,6 @@ crabka-compression = { version = "0.1", path = "../compression", default-feature
 crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 proptest = { workspace = true }
 hex = { workspace = true }

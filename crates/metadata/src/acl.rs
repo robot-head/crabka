@@ -96,6 +96,7 @@ impl AclEntryFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use serde_wincode::SerdeCompat;
     use wincode::{Deserialize as _, Serialize as _};
 
@@ -118,7 +119,7 @@ mod tests {
             operation: AclOperation::Read,
             permission_type: PermissionType::Allow,
         };
-        assert_eq!(rt(&entry), entry);
+        assert!(rt(&entry) == entry);
     }
 
     #[test]
@@ -132,7 +133,7 @@ mod tests {
             operation: Some(AclOperation::All),
             permission_type: None,
         };
-        assert_eq!(rt(&filter), filter);
+        assert!(rt(&filter) == filter);
     }
 
     #[test]

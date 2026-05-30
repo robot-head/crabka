@@ -122,6 +122,7 @@ impl PartitionRegistry {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use std::path::Path;
     use std::sync::Arc;
 
@@ -151,7 +152,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let reg = PartitionRegistry::new();
         assert!(reg.arcs().is_empty());
-        assert_eq!(reg.arcs().len(), 0);
+        assert!(reg.arcs().len() == 0);
         assert!(reg.get("t", 0).is_none());
         assert!(!reg.contains("t", 0));
 
@@ -159,7 +160,7 @@ mod tests {
         assert!(reg.insert("t".to_string(), 0, Arc::clone(&p)).is_none());
         assert!(reg.contains("t", 0));
         assert!(!reg.arcs().is_empty());
-        assert_eq!(reg.arcs().len(), 1);
+        assert!(reg.arcs().len() == 1);
 
         let got = reg.get("t", 0).expect("present");
         assert!(Arc::ptr_eq(&got, &p));
@@ -170,7 +171,7 @@ mod tests {
             .insert("t".to_string(), 0, Arc::clone(&p2))
             .expect("prev");
         assert!(Arc::ptr_eq(&prev, &p));
-        assert_eq!(reg.arcs().len(), 1);
+        assert!(reg.arcs().len() == 1);
 
         let removed = reg.remove("t", 0).expect("removed");
         assert!(Arc::ptr_eq(&removed, &p2));
@@ -202,7 +203,7 @@ mod tests {
     async fn materialize_if_vacant_propagates_error() {
         let reg = PartitionRegistry::new();
         let err = reg.materialize_if_vacant::<String>("t", 2, || Err("boom".to_string()));
-        assert_eq!(err, Err("boom".to_string()));
+        assert!(err == Err("boom".to_string()));
         assert!(!reg.contains("t", 2));
     }
 
@@ -214,6 +215,6 @@ mod tests {
         reg.insert("a".to_string(), 1, fixture_partition(dir.path(), "a", 1));
         reg.insert("b".to_string(), 0, fixture_partition(dir.path(), "b", 0));
         let arcs = reg.arcs();
-        assert_eq!(arcs.len(), 3);
+        assert!(arcs.len() == 3);
     }
 }

@@ -223,6 +223,7 @@ mod tests {
     use crate::capacity::{BrokerCapacities, BrokerCapacity};
     use crate::model::BrokerView;
     use crate::scraper::UsageStore;
+    use assert2::assert;
     use std::sync::Arc;
 
     fn ctx_with(caps: BrokerCapacities) -> GoalContext {
@@ -370,8 +371,8 @@ mod tests {
                 .find(|r| !first.new_replicas.contains(r))
                 .copied()
                 .expect("a broker was evicted");
-            assert_eq!(
-                evicted, 1,
+            assert!(
+                evicted == 1,
                 "tie should resolve to broker 1 (lowest id), got broker {evicted}"
             );
         }

@@ -465,6 +465,7 @@ fn pick_least_loaded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn tp(items: &[(&str, i32)]) -> Vec<(String, i32)> {
         items.iter().map(|(t, p)| ((*t).to_string(), *p)).collect()
@@ -486,8 +487,8 @@ mod tests {
             &[("m1".to_string(), topics(&["t"]), vec![], 0)],
             &topic_parts,
         );
-        assert_eq!(a["m1"].len(), 4);
-        assert_eq!(a["m1"], tp(&[("t", 0), ("t", 1), ("t", 2), ("t", 3)]));
+        assert!(a["m1"].len() == 4);
+        assert!(a["m1"] == tp(&[("t", 0), ("t", 1), ("t", 2), ("t", 3)]));
     }
 
     #[test]
@@ -501,9 +502,9 @@ mod tests {
             ],
             &topic_parts,
         );
-        assert_eq!(a["m1"].len(), 2);
-        assert_eq!(a["m2"].len(), 2);
-        assert_eq!(total_assigned(&a), 4);
+        assert!(a["m1"].len() == 2);
+        assert!(a["m2"].len() == 2);
+        assert!(total_assigned(&a) == 4);
     }
 
     #[test]
@@ -519,9 +520,9 @@ mod tests {
             ],
             &topic_parts,
         );
-        assert_eq!(a["m1"], owned_m1);
-        assert_eq!(a["m2"], owned_m2);
-        assert_eq!(total_assigned(&a), 4);
+        assert!(a["m1"] == owned_m1);
+        assert!(a["m2"] == owned_m2);
+        assert!(total_assigned(&a) == 4);
     }
 
     #[test]
@@ -548,8 +549,8 @@ mod tests {
         // m1, m2 each keep 3 of their owned; m3 only receives brand-new
         // (unowned) partitions in phase 1. Partition 8 was unowned, so it
         // goes to m3 in phase 1.
-        assert_eq!(a["m1"].len(), 3);
-        assert_eq!(a["m2"].len(), 3);
+        assert!(a["m1"].len() == 3);
+        assert!(a["m2"].len() == 3);
         // m3 picks up unowned partitions only in phase 1.
         assert!(a["m3"].len() <= 1, "m3 got {:?}", a["m3"]);
         // Total < 9 — the partitions being moved are omitted.
@@ -601,10 +602,10 @@ mod tests {
             &topic_parts,
         );
 
-        assert_eq!(total_assigned(&phase2), 9, "phase 2 must place all 9");
-        assert_eq!(phase2["m1"].len(), 3);
-        assert_eq!(phase2["m2"].len(), 3);
-        assert_eq!(phase2["m3"].len(), 3);
+        assert!(total_assigned(&phase2) == 9, "phase 2 must place all 9");
+        assert!(phase2["m1"].len() == 3);
+        assert!(phase2["m2"].len() == 3);
+        assert!(phase2["m3"].len() == 3);
     }
 
     #[test]
@@ -623,8 +624,8 @@ mod tests {
             )],
             &topic_parts,
         );
-        assert_eq!(a["m2"].len(), 4);
-        assert_eq!(total_assigned(&a), 4);
+        assert!(a["m2"].len() == 4);
+        assert!(total_assigned(&a) == 4);
     }
 
     #[test]
@@ -644,15 +645,15 @@ mod tests {
         );
         // m2 only gets t1 partitions.
         for (t, _) in &a["m2"] {
-            assert_eq!(t, "t1");
+            assert!(t == "t1");
         }
         // m1 gets both t2 partitions (only it can hold them).
         let m1_t2: Vec<&(String, i32)> = a["m1"].iter().filter(|(t, _)| t == "t2").collect();
-        assert_eq!(m1_t2.len(), 2);
-        assert_eq!(total_assigned(&a), 4);
+        assert!(m1_t2.len() == 2);
+        assert!(total_assigned(&a) == 4);
         // Balanced: 2/2.
-        assert_eq!(a["m1"].len(), 2);
-        assert_eq!(a["m2"].len(), 2);
+        assert!(a["m1"].len() == 2);
+        assert!(a["m2"].len() == 2);
     }
 
     #[test]
@@ -713,7 +714,7 @@ mod tests {
         // Partition (t,3) was always unowned.
         // Phase 1: m1 keeps (t,1), m2 keeps (t,2); (t,0) and (t,3) are
         // unowned → distributed in this round.
-        assert_eq!(total_assigned(&a), 4);
+        assert!(total_assigned(&a) == 4);
     }
 
     #[test]
@@ -729,10 +730,10 @@ mod tests {
             ],
             &topic_parts,
         );
-        assert_eq!(total_assigned(&a), 3);
+        assert!(total_assigned(&a) == 3);
         // 2/1 split, lex-first gets the extra.
-        assert_eq!(a["m1"].len(), 2);
-        assert_eq!(a["m2"].len(), 1);
+        assert!(a["m1"].len() == 2);
+        assert!(a["m2"].len() == 1);
     }
 
     #[test]
@@ -750,7 +751,7 @@ mod tests {
             &topic_parts,
         );
         // m1 still receives (t,0..3) but never (t,5).
-        assert_eq!(a["m1"].len(), 3);
+        assert!(a["m1"].len() == 3);
         assert!(!a["m1"].contains(&("t".to_string(), 5)));
     }
 
@@ -773,7 +774,7 @@ mod tests {
             ],
             &topic_parts,
         );
-        assert_eq!(a["m1"].len(), 2);
-        assert_eq!(a["m2"].len(), 0);
+        assert!(a["m1"].len() == 2);
+        assert!(a["m2"].len() == 0);
     }
 }

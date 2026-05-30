@@ -27,6 +27,7 @@
 //! check, the rendered TOML landing in the ConfigMap, and the mounts
 //! landing on the StatefulSet.
 
+use assert2::assert;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -212,8 +213,8 @@ fn assert_ready_false_with_reason(
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition present; body = {body}"));
-    assert_eq!(ready["status"], "False", "body = {body}");
-    assert_eq!(ready["reason"], expected_reason, "body = {body}");
+    assert!(ready["status"] == "False", "body = {body}");
+    assert!(ready["reason"] == expected_reason, "body = {body}");
 }
 
 /// Extract the `broker-0.toml` string from the `ConfigMap` PATCH captured
@@ -468,21 +469,20 @@ async fn gssapi_listener_statefulset_mounts_keytab_volume() {
         .iter()
         .find(|v| v["name"] == "gssapi-keytab")
         .unwrap_or_else(|| panic!("gssapi-keytab volume present; body = {body}"));
-    assert_eq!(
-        kt_vol["secret"]["secretName"], KEYTAB_SECRET_NAME,
+    assert!(
+        kt_vol["secret"]["secretName"] == KEYTAB_SECRET_NAME,
         "keytab volume sources the user's Secret; body = {body}"
     );
     let kt_items = kt_vol["secret"]["items"]
         .as_array()
         .unwrap_or_else(|| panic!("projected items present; body = {body}"));
-    assert_eq!(
-        kt_items.len(),
-        1,
+    assert!(
+        kt_items.len() == 1,
         "exactly one projected item; body = {body}"
     );
-    assert_eq!(kt_items[0]["key"], KEYTAB_KEY, "body = {body}");
-    assert_eq!(
-        kt_items[0]["path"], "keytab",
+    assert!(kt_items[0]["key"] == KEYTAB_KEY, "body = {body}");
+    assert!(
+        kt_items[0]["path"] == "keytab",
         "item pinned to fixed `keytab` path; body = {body}"
     );
 
@@ -497,8 +497,8 @@ async fn gssapi_listener_statefulset_mounts_keytab_volume() {
         .iter()
         .find(|m| m["name"] == "gssapi-keytab")
         .unwrap_or_else(|| panic!("gssapi-keytab mount present; body = {body}"));
-    assert_eq!(
-        kt_mount["mountPath"], "/etc/crabka/gssapi-keytab",
+    assert!(
+        kt_mount["mountPath"] == "/etc/crabka/gssapi-keytab",
         "canonical keytab mount dir; body = {body}"
     );
 }
@@ -648,18 +648,14 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
 
     // [gssapi] survives the round trip with every field intact.
     let g = bc.gssapi.expect("bc.gssapi must be Some after round trip");
-    assert_eq!(g.service_name, "kafka");
-    assert_eq!(
-        g.principal_to_local_rules.len(),
-        2,
+    assert!(g.service_name == "kafka");
+    assert!(
+        g.principal_to_local_rules.len() == 2,
         "both auth_to_local rules must parse through"
     );
-    assert_eq!(g.realm, Some("EXAMPLE.COM".into()));
-    assert_eq!(g.kdc, Some("tcp://kdc:88".into()));
-    assert_eq!(
-        g.keytab_path,
-        std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
-    );
+    assert!(g.realm == Some("EXAMPLE.COM".into()));
+    assert!(g.kdc == Some("tcp://kdc:88".into()));
+    assert!(g.keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
 
     // [inter_broker_credentials] survives as the Gssapi variant with the
     // shared client principal, service name, KDC URL, and keytab path.
@@ -673,13 +669,10 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
             service_name,
             kdc_url,
         } => {
-            assert_eq!(client_principal, "kafka@EXAMPLE.COM");
-            assert_eq!(service_name, "kafka");
-            assert_eq!(kdc_url, "tcp://kdc:88");
-            assert_eq!(
-                keytab_path,
-                std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab")
-            );
+            assert!(client_principal == "kafka@EXAMPLE.COM");
+            assert!(service_name == "kafka");
+            assert!(kdc_url == "tcp://kdc:88");
+            assert!(keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
         }
         other => panic!("expected InterBrokerCredentials::Gssapi, got {other:?}"),
     }
@@ -721,14 +714,14 @@ async fn krb5_conf_statefulset_mounts_volume_and_sets_env() {
         .iter()
         .find(|v| v["name"] == "krb5-conf")
         .unwrap_or_else(|| panic!("krb5-conf volume present; body = {body}"));
-    assert_eq!(
-        krb5_vol["secret"]["secretName"], KRB5_SECRET_NAME,
+    assert!(
+        krb5_vol["secret"]["secretName"] == KRB5_SECRET_NAME,
         "krb5-conf volume sources the user's Secret; body = {body}"
     );
     let krb5_items = krb5_vol["secret"]["items"]
         .as_array()
         .unwrap_or_else(|| panic!("projected items present; body = {body}"));
-    assert_eq!(krb5_items[0]["path"], "krb5.conf", "body = {body}");
+    assert!(krb5_items[0]["path"] == "krb5.conf", "body = {body}");
 
     // Broker-container volumeMount + KRB5_CONFIG env.
     let containers = pod_spec["containers"].as_array().expect("containers array");
@@ -741,15 +734,18 @@ async fn krb5_conf_statefulset_mounts_volume_and_sets_env() {
         .iter()
         .find(|m| m["name"] == "krb5-conf")
         .unwrap_or_else(|| panic!("krb5-conf mount present; body = {body}"));
-    assert_eq!(krb5_mount["mountPath"], "/etc/crabka/krb5", "body = {body}");
+    assert!(
+        krb5_mount["mountPath"] == "/etc/crabka/krb5",
+        "body = {body}"
+    );
 
     let env = broker["env"].as_array().expect("env array");
     let krb5_config = env
         .iter()
         .find(|e| e["name"] == "KRB5_CONFIG")
         .unwrap_or_else(|| panic!("KRB5_CONFIG env present; body = {body}"));
-    assert_eq!(
-        krb5_config["value"], "/etc/crabka/krb5/krb5.conf",
+    assert!(
+        krb5_config["value"] == "/etc/crabka/krb5/krb5.conf",
         "KRB5_CONFIG must point at the mounted krb5.conf; body = {body}"
     );
 }

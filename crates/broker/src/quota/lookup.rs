@@ -106,6 +106,7 @@ pub fn lookup_ip_quota_with_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
 
     fn img_with(records: Vec<ClientQuotaRecord>) -> MetadataImage {
@@ -137,10 +138,7 @@ mod tests {
             "producer_byte_rate",
             1024.0,
         )]);
-        assert_eq!(
-            lookup_quota(&img, "alice", "app1", "producer_byte_rate"),
-            Some(1024.0)
-        );
+        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(1024.0));
     }
 
     #[test]
@@ -151,10 +149,7 @@ mod tests {
             "producer_byte_rate",
             1024.0,
         )]);
-        assert_eq!(
-            lookup_quota(&img, "alice", "app1", "producer_byte_rate"),
-            Some(1024.0)
-        );
+        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(1024.0));
     }
 
     #[test]
@@ -164,10 +159,7 @@ mod tests {
             "producer_byte_rate",
             2048.0,
         )]);
-        assert_eq!(
-            lookup_quota(&img, "alice", "anyclient", "producer_byte_rate"),
-            Some(2048.0)
-        );
+        assert!(lookup_quota(&img, "alice", "anyclient", "producer_byte_rate") == Some(2048.0));
     }
 
     #[test]
@@ -177,10 +169,7 @@ mod tests {
             "producer_byte_rate",
             512.0,
         )]);
-        assert_eq!(
-            lookup_quota(&img, "anyuser", "app1", "producer_byte_rate"),
-            Some(512.0)
-        );
+        assert!(lookup_quota(&img, "anyuser", "app1", "producer_byte_rate") == Some(512.0));
     }
 
     #[test]
@@ -190,19 +179,13 @@ mod tests {
             "producer_byte_rate",
             256.0,
         )]);
-        assert_eq!(
-            lookup_quota(&img, "alice", "app1", "producer_byte_rate"),
-            Some(256.0)
-        );
+        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(256.0));
     }
 
     #[test]
     fn default_user_alone() {
         let img = img_with(vec![rec(vec![("user", None)], "producer_byte_rate", 128.0)]);
-        assert_eq!(
-            lookup_quota(&img, "alice", "app1", "producer_byte_rate"),
-            Some(128.0)
-        );
+        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(128.0));
     }
 
     #[test]
@@ -212,19 +195,13 @@ mod tests {
             "producer_byte_rate",
             64.0,
         )]);
-        assert_eq!(
-            lookup_quota(&img, "alice", "app1", "producer_byte_rate"),
-            Some(64.0)
-        );
+        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(64.0));
     }
 
     #[test]
     fn no_match_returns_none() {
         let img = img_with(vec![]);
-        assert_eq!(
-            lookup_quota(&img, "alice", "app1", "producer_byte_rate"),
-            None
-        );
+        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == None);
     }
 
     #[test]
@@ -237,10 +214,7 @@ mod tests {
                 512.0,
             ),
         ]);
-        assert_eq!(
-            lookup_quota(&img, "alice", "app1", "producer_byte_rate"),
-            Some(512.0)
-        );
+        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(512.0));
     }
 
     fn rec_ip(ip: Option<&str>, key: &str, value: f64) -> ClientQuotaRecord {
@@ -270,20 +244,14 @@ mod tests {
             1.0,
         )]);
         let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
-        assert_eq!(
-            lookup_ip_quota(&img, &ip, "connection_creation_rate"),
-            Some(1.0)
-        );
+        assert!(lookup_ip_quota(&img, &ip, "connection_creation_rate") == Some(1.0));
     }
 
     #[test]
     fn ip_default_fallback() {
         let img = img_with_ip(vec![rec_ip(None, "connection_creation_rate", 2.0)]);
         let ip: std::net::Ipv4Addr = "10.0.0.7".parse().unwrap();
-        assert_eq!(
-            lookup_ip_quota(&img, &ip, "connection_creation_rate"),
-            Some(2.0)
-        );
+        assert!(lookup_ip_quota(&img, &ip, "connection_creation_rate") == Some(2.0));
     }
 
     #[test]
@@ -293,10 +261,7 @@ mod tests {
             rec_ip(Some("127.0.0.1"), "connection_creation_rate", 1.0),
         ]);
         let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
-        assert_eq!(
-            lookup_ip_quota(&img, &ip, "connection_creation_rate"),
-            Some(1.0)
-        );
+        assert!(lookup_ip_quota(&img, &ip, "connection_creation_rate") == Some(1.0));
     }
 
     #[test]

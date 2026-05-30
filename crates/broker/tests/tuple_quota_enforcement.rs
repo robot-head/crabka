@@ -29,6 +29,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -258,9 +259,9 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -528,13 +529,12 @@ async fn tuple_quota_throttles_only_matching_client_id() {
         false,
     )
     .await;
-    assert_eq!(
-        alter_resp.len(),
-        1,
+    assert!(
+        alter_resp.len() == 1,
         "one entry in AlterClientQuotas response"
     );
-    assert_eq!(
-        alter_resp[0].1, 0,
+    assert!(
+        alter_resp[0].1 == 0,
         "AlterClientQuotas must succeed; error_code={}",
         alter_resp[0].1
     );
@@ -596,8 +596,8 @@ async fn tuple_quota_throttles_only_matching_client_id() {
     };
 
     let part = &matching_resp.responses[0].partition_responses[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "produce (alice, app-x) must succeed; error_code={}",
         part.error_code
     );
@@ -643,13 +643,13 @@ async fn tuple_quota_throttles_only_matching_client_id() {
     };
 
     let part = &non_matching_resp.responses[0].partition_responses[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "produce (alice, other) must succeed; error_code={}",
         part.error_code
     );
-    assert_eq!(
-        non_matching_resp.throttle_time_ms, 0,
+    assert!(
+        non_matching_resp.throttle_time_ms == 0,
         "expected throttle_time_ms == 0 for (alice, other) — no tuple or user-only \
          quota is set for this client_id; got {}",
         non_matching_resp.throttle_time_ms

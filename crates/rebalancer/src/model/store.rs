@@ -155,6 +155,7 @@ fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {
 mod tests {
     use super::*;
     use crate::model::proposal::{Proposal, ProposalStatus, ProposalSummary};
+    use assert2::assert;
 
     fn p(id: &str) -> Proposal {
         Proposal {
@@ -197,7 +198,7 @@ mod tests {
         s.insert(p("b"));
         s.insert(p("c"));
         let listed: Vec<String> = s.list(2).into_iter().map(|p| p.id).collect();
-        assert_eq!(listed, vec!["c".to_string(), "b".to_string()]);
+        assert!(listed == vec!["c".to_string(), "b".to_string()]);
     }
 
     #[test]
@@ -207,7 +208,7 @@ mod tests {
         s.insert(p("b"));
         s.insert(p("c"));
         let listed: Vec<String> = s.list(0).into_iter().map(|p| p.id).collect();
-        assert_eq!(listed, vec!["c".to_string(), "b".to_string()]);
+        assert!(listed == vec!["c".to_string(), "b".to_string()]);
     }
 
     #[test]
@@ -229,9 +230,9 @@ mod tests {
                 pp.started_at_ms = 42;
             })
             .expect("mutated");
-        assert_eq!(updated.status, ProposalStatus::Executing);
-        assert_eq!(updated.started_at_ms, 42);
-        assert_eq!(s.get("a").unwrap().status, ProposalStatus::Executing);
+        assert!(updated.status == ProposalStatus::Executing);
+        assert!(updated.started_at_ms == 42);
+        assert!(s.get("a").unwrap().status == ProposalStatus::Executing);
     }
 
     #[test]
@@ -257,7 +258,7 @@ mod tests {
             s.mutate("a", |pp| pp.status = ProposalStatus::Executing);
         }
         let s2 = ProposalStore::open(dir.path(), 4).unwrap();
-        assert_eq!(s2.get("a").unwrap().status, ProposalStatus::Executing);
+        assert!(s2.get("a").unwrap().status == ProposalStatus::Executing);
         assert!(s2.get("b").is_some());
     }
 

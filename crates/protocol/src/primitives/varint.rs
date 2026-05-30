@@ -128,6 +128,7 @@ pub fn varlong_len(v: i64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::BytesMut;
 
     #[test]
@@ -145,11 +146,11 @@ mod tests {
         for (v, expected) in cases {
             let mut buf = BytesMut::new();
             put_uvarint(&mut buf, *v);
-            assert_eq!(&buf[..], *expected, "encoding {v}");
+            assert!(&buf[..] == *expected, "encoding {v}");
             let mut cur = *expected;
-            assert_eq!(get_uvarint(&mut cur).unwrap(), *v);
+            assert!(get_uvarint(&mut cur).unwrap() == *v);
             assert!(cur.is_empty());
-            assert_eq!(uvarint_len(*v), expected.len());
+            assert!(uvarint_len(*v) == expected.len());
         }
     }
 
@@ -168,10 +169,10 @@ mod tests {
         for (v, expected) in cases {
             let mut buf = BytesMut::new();
             put_varint(&mut buf, *v);
-            assert_eq!(&buf[..], *expected, "encoding {v}");
+            assert!(&buf[..] == *expected, "encoding {v}");
             let mut cur = *expected;
-            assert_eq!(get_varint(&mut cur).unwrap(), *v);
-            assert_eq!(varint_len(*v), expected.len());
+            assert!(get_varint(&mut cur).unwrap() == *v);
+            assert!(varint_len(*v) == expected.len());
         }
     }
 
@@ -207,7 +208,7 @@ mod tests {
             (u64::MAX, 10),
         ];
         for (v, expected) in cases {
-            assert_eq!(uvarlong_len(*v), *expected, "uvarlong_len({v})");
+            assert!(uvarlong_len(*v) == *expected, "uvarlong_len({v})");
         }
     }
 
@@ -226,7 +227,7 @@ mod tests {
             (i64::MIN, 10),
         ];
         for (v, expected) in cases {
-            assert_eq!(varlong_len(*v), *expected, "varlong_len({v})");
+            assert!(varlong_len(*v) == *expected, "varlong_len({v})");
         }
     }
 }

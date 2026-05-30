@@ -43,6 +43,7 @@ lz4_flex = { workspace = true, optional = true }
 zstd     = { workspace = true, optional = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 proptest = { workspace = true }
 hex = { workspace = true }
 serde = { workspace = true }

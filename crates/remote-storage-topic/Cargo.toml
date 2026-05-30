@@ -26,5 +26,6 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 crabka-security = { version = "0.1", path = "../security" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "time"] }

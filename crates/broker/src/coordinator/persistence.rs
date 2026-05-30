@@ -333,6 +333,7 @@ pub(crate) fn put_bytes<B: BufMut>(buf: &mut B, b: &Bytes) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn offset_commit_round_trip() {
@@ -344,10 +345,10 @@ mod tests {
         };
         let encoded = v.encode_value();
         let decoded = OffsetCommitValue::decode_value(&encoded).unwrap();
-        assert_eq!(decoded.offset, 42);
-        assert_eq!(decoded.leader_epoch, 0);
-        assert_eq!(decoded.metadata, "meta");
-        assert_eq!(decoded.commit_timestamp_ms, 1_000_000);
+        assert!(decoded.offset == 42);
+        assert!(decoded.leader_epoch == 0);
+        assert!(decoded.metadata == "meta");
+        assert!(decoded.commit_timestamp_ms == 1_000_000);
     }
 
     #[test]
@@ -371,9 +372,9 @@ mod tests {
         };
         let encoded = v.encode_value();
         let decoded = GroupMetadataValue::decode_value(&encoded).unwrap();
-        assert_eq!(decoded.members.len(), 1);
-        assert_eq!(decoded.members[0].member_id, "m1");
-        assert_eq!(decoded.members[0].subscription.as_ref(), b"sub");
+        assert!(decoded.members.len() == 1);
+        assert!(decoded.members[0].member_id == "m1");
+        assert!(decoded.members[0].subscription.as_ref() == b"sub");
     }
 
     #[test]
@@ -385,9 +386,9 @@ mod tests {
                 topic,
                 partition,
             } => {
-                assert_eq!(group_id, "grp");
-                assert_eq!(topic, "topic");
-                assert_eq!(partition, 7);
+                assert!(group_id == "grp");
+                assert!(topic == "topic");
+                assert!(partition == 7);
             }
             k @ (Key::GroupMetadata { .. } | Key::NextGen(_)) => {
                 panic!("expected OffsetCommit, got {k:?}")
@@ -399,7 +400,7 @@ mod tests {
     fn parse_key_group_metadata_v2() {
         let key = GroupMetadataValue::encode_key("grp");
         match parse_key(&key).unwrap() {
-            Key::GroupMetadata { group_id } => assert_eq!(group_id, "grp"),
+            Key::GroupMetadata { group_id } => assert!(group_id == "grp"),
             k @ (Key::OffsetCommit { .. } | Key::NextGen(_)) => {
                 panic!("expected GroupMetadata, got {k:?}")
             }

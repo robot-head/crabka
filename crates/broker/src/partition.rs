@@ -555,6 +555,7 @@ impl std::fmt::Debug for Partition {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use std::sync::atomic::{AtomicI32, AtomicU64};
 
     use super::*;
@@ -625,7 +626,7 @@ mod tests {
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
-        assert_eq!(p.high_watermark().await, 42);
+        assert!(p.high_watermark().await == 42);
     }
 
     #[tokio::test]
@@ -651,9 +652,9 @@ mod tests {
         };
         p.install_isr(&[1, 2, 3], &[1, 2, 3], 1).await;
         let st = p.replica_state.lock().await;
-        assert_eq!(st.isr.len(), 3);
+        assert!(st.isr.len() == 3);
         assert!(st.isr.contains(&1) && st.isr.contains(&2) && st.isr.contains(&3));
-        assert_eq!(st.per_follower.get(&2).map(|f| f.leo), Some(0));
+        assert!(st.per_follower.get(&2).map(|f| f.leo) == Some(0));
     }
 
     #[tokio::test]
@@ -764,7 +765,7 @@ mod tests {
             .expect("log mutex")
             .append(&mut batch)
             .expect("append");
-        assert_eq!(p.log_end_offset(), 3);
+        assert!(p.log_end_offset() == 3);
 
         // reported_hw below log_end: stored verbatim, notify fires.
         // A `Notified` future does not register with the `Notify` until it is
@@ -777,7 +778,7 @@ mod tests {
             "waiter registers on first poll"
         );
         p.set_follower_hw(2).await;
-        assert_eq!(p.high_watermark().await, 2);
+        assert!(p.high_watermark().await == 2);
         assert!(
             futures_util::poll!(&mut waiter).is_ready(),
             "notify should fire when HW advances"
@@ -785,11 +786,11 @@ mod tests {
 
         // reported_hw above log_end: clamped to log_end (3).
         p.set_follower_hw(100).await;
-        assert_eq!(p.high_watermark().await, 3);
+        assert!(p.high_watermark().await == 3);
 
         // reported_hw below current HW: no regression.
         p.set_follower_hw(1).await;
-        assert_eq!(p.high_watermark().await, 3);
+        assert!(p.high_watermark().await == 3);
     }
 
     #[tokio::test]

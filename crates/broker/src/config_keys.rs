@@ -393,6 +393,7 @@ pub fn topic_config_docs() -> Vec<TopicConfigDoc> {
 #[cfg(test)]
 mod doc_tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn topic_config_docs_cover_known_keys() {
@@ -400,9 +401,8 @@ mod doc_tests {
         let docs = topic_config_docs();
         let doc_keys: HashSet<&str> = docs.iter().map(|d| d.key).collect();
         // No duplicate keys in the doc table.
-        assert_eq!(
-            doc_keys.len(),
-            docs.len(),
+        assert!(
+            doc_keys.len() == docs.len(),
             "duplicate key in topic_config_docs"
         );
         // Every documented key is recognized by the validator.
@@ -440,6 +440,7 @@ mod doc_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn validate_retention_ms_accepts_positive_and_minus_one() {
@@ -500,32 +501,17 @@ mod tests {
 
     #[test]
     fn parse_compression_type_maps_producer_to_none() {
-        assert_eq!(parse_compression_type("producer"), Ok(None));
+        assert!(parse_compression_type("producer") == Ok(None));
     }
 
     #[test]
     fn parse_compression_type_maps_codecs() {
         use crabka_compression::CompressionType;
-        assert_eq!(
-            parse_compression_type("gzip"),
-            Ok(Some(CompressionType::Gzip))
-        );
-        assert_eq!(
-            parse_compression_type("snappy"),
-            Ok(Some(CompressionType::Snappy))
-        );
-        assert_eq!(
-            parse_compression_type("lz4"),
-            Ok(Some(CompressionType::Lz4))
-        );
-        assert_eq!(
-            parse_compression_type("zstd"),
-            Ok(Some(CompressionType::Zstd))
-        );
-        assert_eq!(
-            parse_compression_type("uncompressed"),
-            Ok(Some(CompressionType::None))
-        );
+        assert!(parse_compression_type("gzip") == Ok(Some(CompressionType::Gzip)));
+        assert!(parse_compression_type("snappy") == Ok(Some(CompressionType::Snappy)));
+        assert!(parse_compression_type("lz4") == Ok(Some(CompressionType::Lz4)));
+        assert!(parse_compression_type("zstd") == Ok(Some(CompressionType::Zstd)));
+        assert!(parse_compression_type("uncompressed") == Ok(Some(CompressionType::None)));
     }
 
     #[test]
@@ -534,7 +520,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(COMPRESSION_TYPE.into(), "zstd".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert_eq!(out.compression_type, Some(CompressionType::Zstd));
+        assert!(out.compression_type == Some(CompressionType::Zstd));
     }
 
     #[test]
@@ -547,7 +533,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(COMPRESSION_TYPE.into(), "producer".into());
         let out = apply_to_log_config(&o, &base);
-        assert_eq!(out.compression_type, None);
+        assert!(out.compression_type == None);
     }
 
     #[test]
@@ -634,7 +620,7 @@ mod tests {
         o.insert(RETENTION_MS.into(), "60000".into());
         let base = LogConfig::default();
         let out = apply_to_log_config(&o, &base);
-        assert_eq!(out.retention_ms, Some(Duration::from_mins(1)));
+        assert!(out.retention_ms == Some(Duration::from_mins(1)));
     }
 
     #[test]
@@ -642,7 +628,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_MS.into(), "-1".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert_eq!(out.retention_ms, None);
+        assert!(out.retention_ms == None);
     }
 
     #[test]
@@ -650,7 +636,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_BYTES.into(), "1048576".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert_eq!(out.retention_bytes, Some(1_048_576));
+        assert!(out.retention_bytes == Some(1_048_576));
     }
 
     #[test]
@@ -658,7 +644,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_BYTES.into(), "-1".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert_eq!(out.retention_bytes, None);
+        assert!(out.retention_bytes == None);
     }
 
     #[test]
@@ -666,7 +652,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(SEGMENT_BYTES.into(), "1048576".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert_eq!(out.segment_bytes, 1_048_576);
+        assert!(out.segment_bytes == 1_048_576);
     }
 
     #[test]
@@ -676,7 +662,7 @@ mod tests {
             ..LogConfig::default()
         };
         let out = apply_to_log_config(&BTreeMap::new(), &base);
-        assert_eq!(out.retention_ms, base.retention_ms);
+        assert!(out.retention_ms == base.retention_ms);
     }
 
     #[test]
@@ -684,7 +670,7 @@ mod tests {
         let mut overrides = std::collections::BTreeMap::new();
         overrides.insert(CLEANUP_POLICY.to_string(), "compact".to_string());
         let out = apply_to_log_config(&overrides, &crabka_log::LogConfig::default());
-        assert_eq!(out.cleanup_policy, crabka_log::CleanupPolicy::Compact);
+        assert!(out.cleanup_policy == crabka_log::CleanupPolicy::Compact);
     }
 
     #[test]
@@ -696,7 +682,7 @@ mod tests {
             ..crabka_log::LogConfig::default()
         };
         let out = apply_to_log_config(&overrides, &base);
-        assert_eq!(out.cleanup_policy, crabka_log::CleanupPolicy::Delete);
+        assert!(out.cleanup_policy == crabka_log::CleanupPolicy::Delete);
     }
 
     #[test]
@@ -722,12 +708,12 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_MS.into(), "-2".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert_eq!(out.local_retention_ms, None);
+        assert!(out.local_retention_ms == None);
 
         let mut unlimited = BTreeMap::new();
         unlimited.insert(LOCAL_RETENTION_MS.into(), "-1".into());
         let out = apply_to_log_config(&unlimited, &LogConfig::default());
-        assert_eq!(out.local_retention_ms, None);
+        assert!(out.local_retention_ms == None);
     }
 
     #[test]
@@ -735,7 +721,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_MS.into(), "60000".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert_eq!(out.local_retention_ms, Some(Duration::from_mins(1)));
+        assert!(out.local_retention_ms == Some(Duration::from_mins(1)));
     }
 
     #[test]
@@ -743,7 +729,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_BYTES.into(), "1048576".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert_eq!(out.local_retention_bytes, Some(1_048_576));
+        assert!(out.local_retention_bytes == Some(1_048_576));
     }
 
     #[test]
@@ -751,7 +737,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_BYTES.into(), "-2".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert_eq!(out.local_retention_bytes, None);
+        assert!(out.local_retention_bytes == None);
     }
 
     #[test]
@@ -776,19 +762,10 @@ mod tests {
 
     #[test]
     fn parse_recovery_strategy_maps_values() {
-        assert_eq!(
-            RecoveryStrategy::parse("None"),
-            Some(RecoveryStrategy::None)
-        );
-        assert_eq!(
-            RecoveryStrategy::parse("Balanced"),
-            Some(RecoveryStrategy::Balanced)
-        );
-        assert_eq!(
-            RecoveryStrategy::parse("Aggressive"),
-            Some(RecoveryStrategy::Aggressive)
-        );
-        assert_eq!(RecoveryStrategy::parse("bogus"), None);
+        assert!(RecoveryStrategy::parse("None") == Some(RecoveryStrategy::None));
+        assert!(RecoveryStrategy::parse("Balanced") == Some(RecoveryStrategy::Balanced));
+        assert!(RecoveryStrategy::parse("Aggressive") == Some(RecoveryStrategy::Aggressive));
+        assert!(RecoveryStrategy::parse("bogus") == None);
     }
 
     #[test]
@@ -797,16 +774,13 @@ mod tests {
         use std::collections::BTreeMap;
         use uuid::Uuid;
         let mut img = MetadataImage::new(Uuid::nil());
-        assert_eq!(resolve_recovery_strategy(&img, "t"), RecoveryStrategy::None);
+        assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::None);
         let mut overrides = BTreeMap::new();
         overrides.insert(UNCLEAN_RECOVERY_STRATEGY.into(), "Balanced".into());
         img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
             topic: "t".into(),
             overrides,
         }));
-        assert_eq!(
-            resolve_recovery_strategy(&img, "t"),
-            RecoveryStrategy::Balanced
-        );
+        assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::Balanced);
     }
 }

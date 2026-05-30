@@ -47,6 +47,7 @@ pub fn parse_targets(spec: &str) -> Result<Vec<ScrapeTarget>, TargetParseError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn empty_input_returns_empty_vec() {
@@ -57,11 +58,11 @@ mod tests {
     #[test]
     fn well_formed_entries_parse() {
         let out = parse_targets("1:broker1:9100,2:broker2:9100,3:broker3:9100").unwrap();
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0].broker_id, 1);
-        assert_eq!(out[0].addr, "broker1:9100");
-        assert_eq!(out[2].broker_id, 3);
-        assert_eq!(out[2].addr, "broker3:9100");
+        assert!(out.len() == 3);
+        assert!(out[0].broker_id == 1);
+        assert!(out[0].addr == "broker1:9100");
+        assert!(out[2].broker_id == 3);
+        assert!(out[2].addr == "broker3:9100");
     }
 
     #[test]
@@ -153,6 +154,7 @@ fn warn_once_empty_host(broker_id: i32) {
 mod target_source_tests {
     use super::*;
     use crate::model::{BrokerView, ClusterState, InFlightReassignment, PartitionView};
+    use assert2::assert;
 
     fn cluster_state_with(brokers: Vec<BrokerView>) -> ClusterState {
         ClusterState {
@@ -177,7 +179,7 @@ mod target_source_tests {
             },
         ];
         let src = TargetSource::Static(targets.clone());
-        assert_eq!(src.current(), targets);
+        assert!(src.current() == targets);
     }
 
     #[test]
@@ -219,27 +221,27 @@ mod target_source_tests {
         };
         let mut out = src.current();
         out.sort_by_key(|t| t.broker_id);
-        assert_eq!(out.len(), 3);
-        assert_eq!(
-            out[0],
-            ScrapeTarget {
-                broker_id: 1,
-                addr: "broker1:9404".into()
-            }
+        assert!(out.len() == 3);
+        assert!(
+            out[0]
+                == ScrapeTarget {
+                    broker_id: 1,
+                    addr: "broker1:9404".into()
+                }
         );
-        assert_eq!(
-            out[1],
-            ScrapeTarget {
-                broker_id: 2,
-                addr: "broker2:9404".into()
-            }
+        assert!(
+            out[1]
+                == ScrapeTarget {
+                    broker_id: 2,
+                    addr: "broker2:9404".into()
+                }
         );
-        assert_eq!(
-            out[2],
-            ScrapeTarget {
-                broker_id: 3,
-                addr: "broker3:9404".into()
-            }
+        assert!(
+            out[2]
+                == ScrapeTarget {
+                    broker_id: 3,
+                    addr: "broker3:9404".into()
+                }
         );
     }
 
@@ -272,11 +274,8 @@ mod target_source_tests {
         };
         let mut out = src.current();
         out.sort_by_key(|t| t.broker_id);
-        assert_eq!(out.len(), 2);
-        assert_eq!(
-            out.iter().map(|t| t.broker_id).collect::<Vec<_>>(),
-            vec![1, 3]
-        );
+        assert!(out.len() == 2);
+        assert!(out.iter().map(|t| t.broker_id).collect::<Vec<_>>() == vec![1, 3]);
     }
 
     #[test]
@@ -298,9 +297,8 @@ mod target_source_tests {
         snapshot.store(Arc::new(Some(state)));
 
         let out = src.current();
-        assert_eq!(
-            out,
-            vec![ScrapeTarget {
+        assert!(
+            out == vec![ScrapeTarget {
                 broker_id: 7,
                 addr: "newbie:9404".into()
             }]

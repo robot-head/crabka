@@ -260,6 +260,7 @@ impl Consumer {
 
 #[cfg(test)]
 mod offset_advance_tests {
+    use assert2::assert;
     use crabka_protocol::records::{RecordBatch, RecordsPayload};
 
     #[test]
@@ -274,12 +275,12 @@ mod offset_advance_tests {
         };
         let payload = RecordsPayload::V2(vec![batch]);
         let batches = payload.as_v2().unwrap();
-        assert_eq!(super::next_offset_after(batches), Some(15));
+        assert!(super::next_offset_after(batches) == Some(15));
     }
 
     #[test]
     fn advance_target_none_for_empty() {
         let payload = RecordsPayload::V2(vec![]);
-        assert_eq!(super::next_offset_after(payload.as_v2().unwrap()), None);
+        assert!(super::next_offset_after(payload.as_v2().unwrap()) == None);
     }
 }

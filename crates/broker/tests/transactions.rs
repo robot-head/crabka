@@ -10,6 +10,7 @@
 //! control plane is platform-correct; the gate avoids a flaky CI
 //! signal until the Windows scheduling work is addressed.
 
+use assert2::assert;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -173,7 +174,7 @@ async fn commit_then_read_committed_sees_records() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert_eq!(seen, vec!["a", "b", "c"]);
+    assert!(seen == vec!["a", "b", "c"]);
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
@@ -220,7 +221,7 @@ async fn abort_then_read_committed_skips_records() {
             break;
         }
     }
-    assert_eq!(seen, 0, "read_committed must skip aborted records");
+    assert!(seen == 0, "read_committed must skip aborted records");
     consumer.close().await.unwrap();
 
     // read_uncommitted: sees all 3 records (including aborted ones).
@@ -240,7 +241,10 @@ async fn abort_then_read_committed_skips_records() {
             seen2.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert_eq!(seen2.len(), 3, "read_uncommitted must see aborted records");
+    assert!(
+        seen2.len() == 3,
+        "read_uncommitted must see aborted records"
+    );
     consumer_uc.close().await.unwrap();
 
     producer.close().await.unwrap();
@@ -310,7 +314,7 @@ async fn interleaved_commit_and_abort() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert_eq!(seen, vec!["a", "b", "c", "d", "e", "f", "g"]);
+    assert!(seen == vec!["a", "b", "c", "d", "e", "f", "g"]);
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
@@ -434,7 +438,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
                 read += 1;
             }
         }
-        assert_eq!(read, 5, "expected to read 5 input records");
+        assert!(read == 5, "expected to read 5 input records");
 
         // Commit the input consumer offset as part of the transaction.
         if let Some(offset_entry) = last_offset {
@@ -464,7 +468,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
     while seen < 5 && std::time::Instant::now() < deadline {
         seen += c2.poll(Duration::from_millis(200)).await.unwrap().len();
     }
-    assert_eq!(seen, 5, "expected 5 records on output topic");
+    assert!(seen == 5, "expected 5 records on output topic");
 
     c2.close().await.unwrap();
     broker.shutdown().await;
@@ -534,7 +538,7 @@ async fn sasl_authenticated_transactional_flow_commits() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert_eq!(seen, vec!["a", "b", "c"]);
+    assert!(seen == vec!["a", "b", "c"]);
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();

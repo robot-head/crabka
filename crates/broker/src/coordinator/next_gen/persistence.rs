@@ -366,11 +366,12 @@ fn decode_topic_partitions(buf: &mut &[u8]) -> Result<Vec<AssignedTopicPartition
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn group_metadata_value_roundtrip() {
         let v = GroupMetadataValue { epoch: 7 };
-        assert_eq!(GroupMetadataValue::decode(&v.encode()).unwrap(), v);
+        assert!(GroupMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -385,7 +386,7 @@ mod tests {
             server_assignor: Some("uniform".into()),
             rebalance_timeout_ms: 60_000,
         };
-        assert_eq!(MemberMetadataValue::decode(&v.encode()).unwrap(), v);
+        assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -403,7 +404,7 @@ mod tests {
             server_assignor: Some("uniform".into()),
             rebalance_timeout_ms: 60_000,
         };
-        assert_eq!(MemberMetadataValue::decode(&v.encode()).unwrap(), v);
+        assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -411,10 +412,7 @@ mod tests {
         let v = TargetAssignmentMetadataValue {
             assignment_epoch: 12,
         };
-        assert_eq!(
-            TargetAssignmentMetadataValue::decode(&v.encode()).unwrap(),
-            v
-        );
+        assert!(TargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -425,7 +423,7 @@ mod tests {
                 partitions: vec![0, 1, 2],
             }],
         };
-        assert_eq!(TargetAssignmentMemberValue::decode(&v.encode()).unwrap(), v);
+        assert!(TargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -440,10 +438,7 @@ mod tests {
             }],
             partitions_pending_revocation: vec![],
         };
-        assert_eq!(
-            CurrentMemberAssignmentValue::decode(&v.encode()).unwrap(),
-            v
-        );
+        assert!(CurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -460,6 +455,6 @@ mod tests {
         let kb = encode_key(&k);
         let mut r = &kb[..];
         let v = bytes::Buf::get_i16(&mut r);
-        assert_eq!(parse_key(v, r).unwrap(), k);
+        assert!(parse_key(v, r).unwrap() == k);
     }
 }

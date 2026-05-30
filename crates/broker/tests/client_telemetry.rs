@@ -22,6 +22,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
@@ -69,11 +70,10 @@ async fn get_telemetry_subscriptions_with_nil_id_returns_assigned_id_and_empty_s
         .await
         .expect("GetTelemetrySubscriptions");
 
-    assert_eq!(resp.error_code, 0, "no-op handler must succeed: {resp:?}");
-    assert_ne!(
-        resp.client_instance_id,
-        WireUuid::ZERO,
-        "broker must assign a fresh client_instance_id when caller sent nil",
+    assert!(resp.error_code == 0, "no-op handler must succeed: {resp:?}");
+    assert!(
+        resp.client_instance_id != WireUuid::ZERO,
+        "broker must assign a fresh client_instance_id when caller sent nil"
     );
     // The crucial KIP-714 signal: empty `requested_metrics` → JVM
     // client treats this as "no subscription" and skips PushTelemetry.
@@ -85,7 +85,7 @@ async fn get_telemetry_subscriptions_with_nil_id_returns_assigned_id_and_empty_s
     // `accepted_compression_types` empty + `telemetry_max_bytes` 0
     // belt-and-braces the "don't push" signal.
     assert!(resp.accepted_compression_types.is_empty());
-    assert_eq!(resp.telemetry_max_bytes, 0);
+    assert!(resp.telemetry_max_bytes == 0);
     // The push interval shouldn't be so low that clients spin on
     // re-fetching — 5 minutes is the JVM default.
     assert!(
@@ -115,11 +115,10 @@ async fn get_telemetry_subscriptions_with_set_id_echoes_nil() {
         .await
         .expect("GetTelemetrySubscriptions");
 
-    assert_eq!(resp.error_code, 0);
-    assert_eq!(
-        resp.client_instance_id,
-        WireUuid::ZERO,
-        "non-nil request id must round-trip as nil per schema rules",
+    assert!(resp.error_code == 0);
+    assert!(
+        resp.client_instance_id == WireUuid::ZERO,
+        "non-nil request id must round-trip as nil per schema rules"
     );
 
     p.broker.shutdown().await;
@@ -145,7 +144,7 @@ async fn push_telemetry_accepts_no_op_with_arbitrary_payload() {
         .await
         .expect("PushTelemetry");
 
-    assert_eq!(resp.error_code, 0, "no-op handler must ack: {resp:?}");
+    assert!(resp.error_code == 0, "no-op handler must ack: {resp:?}");
 
     p.broker.shutdown().await;
 }

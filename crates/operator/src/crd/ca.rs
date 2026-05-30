@@ -78,19 +78,20 @@ pub struct CertificateAuthorityStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn defaults_match_strimzi() {
         let d = CertificateAuthority::default();
         assert!(d.generate_certificate_authority);
-        assert_eq!(d.validity_days, 365);
-        assert_eq!(d.renewal_days, 30);
+        assert!(d.validity_days == 365);
+        assert!(d.renewal_days == 30);
     }
 
     #[test]
     fn deserialize_empty_object_uses_defaults() {
         let v: CertificateAuthority = serde_json::from_value(serde_json::json!({})).expect("parse");
-        assert_eq!(v, CertificateAuthority::default());
+        assert!(v == CertificateAuthority::default());
     }
 
     #[test]
@@ -102,7 +103,7 @@ mod tests {
         }))
         .expect("parse");
         assert!(!v.generate_certificate_authority);
-        assert_eq!(v.validity_days, 90);
-        assert_eq!(v.renewal_days, 7);
+        assert!(v.validity_days == 90);
+        assert!(v.renewal_days == 7);
     }
 }

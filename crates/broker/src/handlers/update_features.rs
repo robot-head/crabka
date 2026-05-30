@@ -253,6 +253,7 @@ fn finalize(results: Vec<UpdatableFeatureResult>, version: i16) -> UpdateFeature
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn downgrade_flag_v0_uses_allow_downgrade() {
@@ -274,15 +275,15 @@ mod tests {
                 .error_message
                 .is_none()
         );
-        assert_eq!(
+        assert!(
             row(
                 "metadata.version".into(),
                 codes::INVALID_UPDATE_VERSION,
                 "bad"
             )
             .error_message
-            .as_deref(),
-            Some("bad"),
+            .as_deref()
+                == Some("bad")
         );
     }
 
@@ -293,14 +294,14 @@ mod tests {
             row("b".into(), codes::INVALID_UPDATE_VERSION, "bad"),
         ];
         let resp = finalize(results, 2);
-        assert_eq!(resp.error_code, codes::INVALID_UPDATE_VERSION);
+        assert!(resp.error_code == codes::INVALID_UPDATE_VERSION);
     }
 
     #[test]
     fn finalize_v1_keeps_top_level_none() {
         let results = vec![row("b".into(), codes::INVALID_UPDATE_VERSION, "bad")];
         let resp = finalize(results, 1);
-        assert_eq!(resp.error_code, codes::NONE);
+        assert!(resp.error_code == codes::NONE);
     }
 
     #[test]

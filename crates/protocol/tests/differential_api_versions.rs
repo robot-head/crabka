@@ -1,3 +1,4 @@
+use assert2::assert;
 mod support;
 use support::oracle;
 
@@ -27,9 +28,9 @@ fn apiversions_request_v0_byte_equal() {
     let req = ApiVersionsRequest::default();
     let rust = rust_encode(&req, 0);
     let java = o.encode(18, 0, true, &json!({}));
-    assert_eq!(
-        rust, java,
-        "v0 byte mismatch\n  rust: {rust:?}\n  java: {java:?}",
+    assert!(
+        rust == java,
+        "v0 byte mismatch\n  rust: {rust:?}\n  java: {java:?}"
     );
 }
 
@@ -52,9 +53,9 @@ fn apiversions_request_v3_byte_equal() {
             "clientSoftwareVersion": "0.0.0",
         }),
     );
-    assert_eq!(
-        rust, java,
-        "v3 byte mismatch\n  rust: {rust:?}\n  java: {java:?}",
+    assert!(
+        rust == java,
+        "v3 byte mismatch\n  rust: {rust:?}\n  java: {java:?}"
     );
 }
 
@@ -99,9 +100,8 @@ fn apiversions_response_v3_byte_equal() {
             "throttleTimeMs": 5,
         }),
     );
-    assert_eq!(
-        rust,
-        java,
+    assert!(
+        rust == java,
         "v3 response byte mismatch\n  rust hex: {}\n  java hex: {}",
         hex::encode(&rust),
         hex::encode(&java)
@@ -123,7 +123,7 @@ fn apiversions_response_decode_matches_java() {
         }),
     );
     let decoded: ApiVersionsResponse = rust_decode(&java, 3);
-    assert_eq!(decoded.api_keys.len(), 1);
-    assert_eq!(decoded.api_keys[0].api_key, 18);
-    assert_eq!(decoded.throttle_time_ms, 0);
+    assert!(decoded.api_keys.len() == 1);
+    assert!(decoded.api_keys[0].api_key == 18);
+    assert!(decoded.throttle_time_ms == 0);
 }

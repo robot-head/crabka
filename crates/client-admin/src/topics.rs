@@ -324,6 +324,7 @@ fn error_if(code: i16, message: Option<String>) -> Option<KafkaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::collections::BTreeMap;
 
     #[test]
@@ -337,15 +338,15 @@ mod tests {
             }],
             5_000,
         );
-        assert_eq!(req.topics.len(), 1);
+        assert!(req.topics.len() == 1);
         let t = &req.topics[0];
-        assert_eq!(t.name, "foo");
-        assert_eq!(t.num_partitions, 3);
-        assert_eq!(t.replication_factor, 1);
-        assert_eq!(t.configs.len(), 1);
-        assert_eq!(t.configs[0].name, "retention.ms");
-        assert_eq!(t.configs[0].value.as_deref(), Some("60000"));
-        assert_eq!(req.timeout_ms, 5_000);
+        assert!(t.name == "foo");
+        assert!(t.num_partitions == 3);
+        assert!(t.replication_factor == 1);
+        assert!(t.configs.len() == 1);
+        assert!(t.configs[0].name == "retention.ms");
+        assert!(t.configs[0].value.as_deref() == Some("60000"));
+        assert!(req.timeout_ms == 5_000);
         assert!(!req.validate_only);
     }
 
@@ -357,9 +358,9 @@ mod tests {
     #[test]
     fn error_if_nonzero_carries_name() {
         let e = error_if(36, Some("dup".into())).unwrap();
-        assert_eq!(e.code, 36);
-        assert_eq!(e.name, "TOPIC_ALREADY_EXISTS");
-        assert_eq!(e.message.as_deref(), Some("dup"));
+        assert!(e.code == 36);
+        assert!(e.name == "TOPIC_ALREADY_EXISTS");
+        assert!(e.message.as_deref() == Some("dup"));
     }
 
     // ── NOT_CONTROLLER retry predicate ─────────────────────────────
@@ -454,7 +455,7 @@ mod tests {
             ..Default::default()
         };
         let addr = controller_endpoint(&resp);
-        assert_eq!(addr.as_deref(), Some("h2:9093"));
+        assert!(addr.as_deref() == Some("h2:9093"));
     }
 
     /// When the controller id doesn't appear in the broker list (e.g.
@@ -505,13 +506,13 @@ mod tests {
             ..Default::default()
         };
         let md = parse_metadata(resp);
-        assert_eq!(md.topics.len(), 2);
-        assert_eq!(md.topics[0].name, "ok-topic");
+        assert!(md.topics.len() == 2);
+        assert!(md.topics[0].name == "ok-topic");
         assert!(md.topics[0].error.is_none());
-        assert_eq!(md.topics[1].name, "missing");
+        assert!(md.topics[1].name == "missing");
         let err = md.topics[1].error.as_ref().expect("error expected");
-        assert_eq!(err.code, 3);
-        assert_eq!(err.name, "UNKNOWN_TOPIC_OR_PARTITION");
+        assert!(err.code == 3);
+        assert!(err.name == "UNKNOWN_TOPIC_OR_PARTITION");
     }
 
     #[test]
@@ -547,8 +548,8 @@ mod tests {
             ..Default::default()
         };
         let md = parse_metadata(resp);
-        assert_eq!(md.topics[0].partition_count, 3);
-        assert_eq!(md.topics[0].replication_factor, 2);
+        assert!(md.topics[0].partition_count == 3);
+        assert!(md.topics[0].replication_factor == 2);
     }
 
     // ── parse_create_topics ────────────────────────────────────────────
@@ -577,19 +578,19 @@ mod tests {
             ..Default::default()
         };
         let outcomes = parse_create_topics(resp);
-        assert_eq!(outcomes.len(), 2);
-        assert_eq!(outcomes[0].name, "ok");
+        assert!(outcomes.len() == 2);
+        assert!(outcomes[0].name == "ok");
         assert!(outcomes[0].error.is_none());
         assert!(
             outcomes[0].topic_id.is_some(),
             "non-zero uuid should map to Some"
         );
 
-        assert_eq!(outcomes[1].name, "dup");
+        assert!(outcomes[1].name == "dup");
         let err = outcomes[1].error.as_ref().expect("error expected");
-        assert_eq!(err.code, 36);
-        assert_eq!(err.name, "TOPIC_ALREADY_EXISTS");
-        assert_eq!(err.message.as_deref(), Some("already there"));
+        assert!(err.code == 36);
+        assert!(err.name == "TOPIC_ALREADY_EXISTS");
+        assert!(err.message.as_deref() == Some("already there"));
     }
 
     // ── parse_delete_topics ────────────────────────────────────────────
@@ -616,15 +617,15 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_delete_topics(resp);
-        assert_eq!(outs.len(), 2);
+        assert!(outs.len() == 2);
         // `name: None` falls through to `unwrap_or_default()` → empty string.
-        assert_eq!(outs[0].name, String::new());
+        assert!(outs[0].name == String::new());
         assert!(outs[0].error.is_none());
-        assert_eq!(outs[1].name, "named");
+        assert!(outs[1].name == "named");
         let err = outs[1].error.as_ref().expect("error expected");
-        assert_eq!(err.code, 3);
-        assert_eq!(err.name, "UNKNOWN_TOPIC_OR_PARTITION");
-        assert_eq!(err.message.as_deref(), Some("nope"));
+        assert!(err.code == 3);
+        assert!(err.name == "UNKNOWN_TOPIC_OR_PARTITION");
+        assert!(err.message.as_deref() == Some("nope"));
     }
 
     // ── parse_create_partitions ────────────────────────────────────────
@@ -652,13 +653,13 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_create_partitions(resp);
-        assert_eq!(outs.len(), 2);
-        assert_eq!(outs[0].name, "ok");
+        assert!(outs.len() == 2);
+        assert!(outs[0].name == "ok");
         assert!(outs[0].error.is_none());
-        assert_eq!(outs[1].name, "bad");
+        assert!(outs[1].name == "bad");
         let err = outs[1].error.as_ref().expect("error expected");
-        assert_eq!(err.code, 37);
-        assert_eq!(err.name, "INVALID_PARTITIONS");
-        assert_eq!(err.message.as_deref(), Some("bad count"));
+        assert!(err.code == 37);
+        assert!(err.name == "INVALID_PARTITIONS");
+        assert!(err.message.as_deref() == Some("bad count"));
     }
 }

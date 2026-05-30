@@ -26,6 +26,7 @@
 #![allow(clippy::unnecessary_unwrap)]
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -333,7 +334,7 @@ async fn rust_producer_to_console_consumer() {
             })
             .await;
         let m = fut.await.expect("oneshot").expect("ack");
-        assert_eq!(m.partition, 0);
+        assert!(m.partition == 0);
     }
     producer.flush().await.expect("flush");
     producer.close().await.expect("close");
@@ -1105,8 +1106,8 @@ async fn three_node_replication_byte_compare() {
     }
 
     // 6. All three dumps should be byte-identical.
-    assert_eq!(dumps[0], dumps[1], "broker 1 vs broker 2 dump differ");
-    assert_eq!(dumps[1], dumps[2], "broker 2 vs broker 3 dump differ");
+    assert!(dumps[0] == dumps[1], "broker 1 vs broker 2 dump differ");
+    assert!(dumps[1] == dumps[2], "broker 2 vs broker 3 dump differ");
 
     for (h, _) in cluster {
         h.shutdown().await;
@@ -5675,8 +5676,8 @@ async fn jvm_kafka_leader_election_preferred() {
     // For the preferred election to do anything interesting we need broker 1
     // to be the preferred (replicas[0]). The scheduler should assign [1, 2]
     // since broker 1 is node_id=1 (lowest). Assert this assumption.
-    assert_eq!(
-        initial_leader, 1,
+    assert!(
+        initial_leader == 1,
         "expected broker 1 to be the initial/preferred leader; got {initial_leader}"
     );
 
@@ -5949,8 +5950,8 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
         if pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty() {
             let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
             let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
-            assert_eq!(
-                got, want,
+            assert!(
+                got == want,
                 "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
             );
             break;
@@ -6182,8 +6183,8 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         if pr.adding_replicas.is_empty() && pr.removing_replicas.is_empty() {
             let got: std::collections::HashSet<u64> = pr.replicas.iter().copied().collect();
             let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
-            assert_eq!(
-                got, want,
+            assert!(
+                got == want,
                 "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
             );
             break;

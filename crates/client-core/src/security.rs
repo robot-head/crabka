@@ -103,6 +103,7 @@ impl ClientSecurity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_security::ListenerProtocol;
 
     #[test]
@@ -142,10 +143,7 @@ mod tests {
             sasl: None,
             sasl_host: Some("kdc-broker.example.com".into()),
         };
-        assert_eq!(
-            s.sasl_handshake_host(Some("10.0.0.5")),
-            "kdc-broker.example.com"
-        );
+        assert!(s.sasl_handshake_host(Some("10.0.0.5")) == "kdc-broker.example.com");
     }
 
     #[test]
@@ -160,7 +158,7 @@ mod tests {
             sasl: None,
             sasl_host: None,
         };
-        assert_eq!(with_tls.sasl_handshake_host(Some("10.0.0.5")), "tls-host");
+        assert!(with_tls.sasl_handshake_host(Some("10.0.0.5")) == "tls-host");
 
         // No sasl_host, no TLS → target host wins.
         let no_tls = ClientSecurity {
@@ -169,10 +167,10 @@ mod tests {
             sasl: None,
             sasl_host: None,
         };
-        assert_eq!(no_tls.sasl_handshake_host(Some("10.0.0.5")), "10.0.0.5");
+        assert!(no_tls.sasl_handshake_host(Some("10.0.0.5")) == "10.0.0.5");
 
         // Nothing set at all → localhost.
-        assert_eq!(no_tls.sasl_handshake_host(None), "localhost");
+        assert!(no_tls.sasl_handshake_host(None) == "localhost");
     }
 
     #[test]

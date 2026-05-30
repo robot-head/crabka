@@ -94,6 +94,7 @@ impl NextGenConfig {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use std::collections::HashMap;
 
     use super::*;
@@ -113,7 +114,7 @@ mod tests {
     #[test]
     fn default_registers_uniform_and_range() {
         let cfg = NextGenConfig::default();
-        assert_eq!(cfg.assignors.len(), 2);
+        assert!(cfg.assignors.len() == 2);
         let names: Vec<&str> = cfg.assignors.iter().map(|a| a.name()).collect();
         assert!(names.contains(&"uniform"));
         assert!(names.contains(&"range"));
@@ -134,7 +135,7 @@ mod tests {
             .register_assignor(Arc::new(TestAssignor("uniform")))
             .unwrap_err();
         match err {
-            AssignorRegistrationError::DuplicateName(name) => assert_eq!(name, "uniform"),
+            AssignorRegistrationError::DuplicateName(name) => assert!(name == "uniform"),
         }
     }
 
@@ -143,7 +144,7 @@ mod tests {
         let mut cfg = NextGenConfig::default();
         cfg.register_assignor(Arc::new(TestAssignor("x"))).unwrap();
         let resolved = cfg.find_assignor("x").expect("registered");
-        assert_eq!(resolved.name(), "x");
+        assert!(resolved.name() == "x");
     }
 
     #[test]
@@ -151,10 +152,7 @@ mod tests {
         let mut cfg = NextGenConfig::default();
         cfg.register_assignor(Arc::new(TestAssignor("y"))).unwrap();
         for name in ["uniform", "range", "y", "ghost"] {
-            assert_eq!(
-                cfg.assignor_enabled(name),
-                cfg.find_assignor(name).is_some()
-            );
+            assert!(cfg.assignor_enabled(name) == cfg.find_assignor(name).is_some());
         }
     }
 }

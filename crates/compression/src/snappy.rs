@@ -93,6 +93,7 @@ pub fn decompress(data: &[u8]) -> Result<Bytes, CompressionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     const HELLO: &[u8] = b"hello kafka, this is a moderately repetitive payload to compress";
 
@@ -100,7 +101,7 @@ mod tests {
     fn roundtrip() {
         let z = compress(HELLO).unwrap();
         let back = decompress(&z).unwrap();
-        assert_eq!(back.as_ref(), HELLO);
+        assert!(back.as_ref() == HELLO);
     }
 
     #[test]

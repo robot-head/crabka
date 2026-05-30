@@ -102,6 +102,7 @@ impl BrokerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn refresh_inserts_addresses() {
@@ -122,13 +123,7 @@ mod tests {
         ]);
         assert!(pool.by_addr.contains_key(&1));
         assert!(pool.by_addr.contains_key(&2));
-        assert_eq!(
-            *pool.by_addr.get(&1).unwrap(),
-            "127.0.0.1:9092".parse().unwrap()
-        );
-        assert_eq!(
-            *pool.by_addr.get(&2).unwrap(),
-            "127.0.0.1:9093".parse().unwrap()
-        );
+        assert!(*pool.by_addr.get(&1).unwrap() == "127.0.0.1:9092".parse().unwrap());
+        assert!(*pool.by_addr.get(&2).unwrap() == "127.0.0.1:9093".parse().unwrap());
     }
 }

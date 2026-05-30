@@ -3,6 +3,7 @@
 //! snapshot and a full process-style restart that rebuilds the image
 //! from the on-disk checkpoint (not from in-memory state).
 
+use assert2::assert;
 use std::net::SocketAddr;
 use std::time::Duration;
 

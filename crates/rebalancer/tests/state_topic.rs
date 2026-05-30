@@ -5,6 +5,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
+use assert2::assert;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -98,8 +99,8 @@ async fn write_load_round_trip_via_real_broker() {
 
     drive_loader_until_loaded(state.clone(), Duration::from_secs(10)).await;
     let loaded = state.current().expect("non-tombstone");
-    assert_eq!(loaded.proposal_id, "p-1");
-    assert_eq!(loaded.phase, Phase::Wait);
+    assert!(loaded.proposal_id == "p-1");
+    assert!(loaded.phase == Phase::Wait);
     shutdown.cancel();
     handle.await.unwrap();
 

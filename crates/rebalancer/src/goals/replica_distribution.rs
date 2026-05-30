@@ -143,6 +143,7 @@ impl Goal for ReplicaDistribution {
 mod tests {
     use super::*;
     use crate::model::BrokerView;
+    use assert2::assert;
 
     fn ctx() -> GoalContext {
         GoalContext {
@@ -218,7 +219,7 @@ mod tests {
         assert!(!mvs.is_empty(), "expected at least one swap");
         // RF preserved on every movement.
         for m in &mvs {
-            assert_eq!(m.old_replicas.len(), m.new_replicas.len());
+            assert!(m.old_replicas.len() == m.new_replicas.len());
         }
     }
 
@@ -273,13 +274,13 @@ mod tests {
                 .iter()
                 .find(|p| p.topic == m.topic && p.partition == m.partition)
                 .expect("movement references a partition in the input");
-            assert_eq!(
-                m.old_replicas, original.replicas,
+            assert!(
+                m.old_replicas == original.replicas,
                 "movement old_replicas must reflect the original cluster state, \
                  not an intermediate working-state snapshot"
             );
-            assert_eq!(
-                m.old_leader, original.leader,
+            assert!(
+                m.old_leader == original.leader,
                 "movement old_leader must reflect the original cluster state, \
                  not an intermediate working-state snapshot"
             );

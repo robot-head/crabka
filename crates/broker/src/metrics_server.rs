@@ -69,6 +69,7 @@ async fn metrics(State(registry): State<SharedRegistry>) -> impl IntoResponse {
 mod tests {
     use super::*;
     use crate::metrics::BrokerMetrics;
+    use assert2::assert;
     use axum::body::Body;
     use axum::http::Request;
     use tower::ServiceExt as _;
@@ -87,7 +88,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(resp.status() == StatusCode::OK);
         let ct = resp
             .headers()
             .get("content-type")

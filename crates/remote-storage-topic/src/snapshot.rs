@@ -249,6 +249,7 @@ fn read_u16(r: &mut Reader<'_>) -> Result<u16, CodecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -295,7 +296,7 @@ mod tests {
         let snap = sample_snapshot();
         let bytes = snap.encode();
         let back = Snapshot::decode(&bytes).expect("decodes");
-        assert_eq!(back, snap);
+        assert!(back == snap);
     }
 
     #[test]
@@ -331,7 +332,7 @@ mod tests {
         let snap = sample_snapshot();
         snap.write_atomic(&path).expect("write");
         let loaded = Snapshot::load(&path).expect("load").expect("present");
-        assert_eq!(loaded, snap);
+        assert!(loaded == snap);
         // No temp file left behind.
         assert!(
             std::fs::read_dir(&dir)
@@ -346,7 +347,7 @@ mod tests {
     fn load_absent_file_is_ok_none() {
         let path = std::env::temp_dir().join("crabka-snap-does-not-exist-xyz");
         let _ = std::fs::remove_file(&path);
-        assert_eq!(Snapshot::load(&path).unwrap(), None);
+        assert!(Snapshot::load(&path).unwrap() == None);
     }
 
     #[test]

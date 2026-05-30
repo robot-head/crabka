@@ -59,6 +59,7 @@ pub fn from_kafka_record(rec: &Record) -> Result<MetadataRecord, KafkaRecordErro
 mod tests {
     use super::*;
     use crate::records::{MetadataRecord, TopicRecord};
+    use assert2::assert;
     use uuid::Uuid;
 
     fn sample_topic() -> MetadataRecord {
@@ -75,7 +76,7 @@ mod tests {
         let rec = sample_topic();
         let kafka = to_kafka_record(&rec).expect("encode");
         let back = from_kafka_record(&kafka).expect("decode");
-        assert_eq!(rec, back);
+        assert!(rec == back);
     }
 
     #[test]
@@ -101,6 +102,6 @@ mod tests {
         let rec = sample_topic();
         let a = to_kafka_record(&rec).expect("encode");
         let b = to_kafka_record(&rec).expect("encode");
-        assert_eq!(a.value, b.value);
+        assert!(a.value == b.value);
     }
 }

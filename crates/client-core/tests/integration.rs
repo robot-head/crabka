@@ -45,6 +45,7 @@
 // is poor. On Linux CI the tests run via the `client-core-integration` job.
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::time::Duration;
 
 use testcontainers::runners::AsyncRunner;
@@ -147,8 +148,8 @@ async fn api_versions_against_real_broker() {
         .await
         .expect("ApiVersions failed");
 
-    assert_eq!(
-        resp.error_code, 0,
+    assert!(
+        resp.error_code == 0,
         "ApiVersions returned error: {}",
         resp.error_code
     );
@@ -205,8 +206,8 @@ async fn create_then_delete_topic() {
     };
     let create_resp = client.send(create).await.expect("CreateTopics failed");
     let topic_result = &create_resp.topics[0];
-    assert_eq!(
-        topic_result.error_code, 0,
+    assert!(
+        topic_result.error_code == 0,
         "CreateTopics error: {topic_result:?}"
     );
 
@@ -224,8 +225,8 @@ async fn create_then_delete_topic() {
     };
     let delete_resp = client.send(delete).await.expect("DeleteTopics failed");
     let del_result = &delete_resp.responses[0];
-    assert_eq!(
-        del_result.error_code, 0,
+    assert!(
+        del_result.error_code == 0,
         "DeleteTopics error: {del_result:?}"
     );
 

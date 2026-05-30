@@ -8,6 +8,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -126,13 +127,13 @@ async fn list_transactions_returns_ongoing_txn() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
-    assert_eq!(resp.error_code, 0);
+    assert!(resp.error_code == 0);
     let row = resp
         .transaction_states
         .iter()
         .find(|r| r.transactional_id == "my-tid")
         .expect("my-tid not present");
-    assert_eq!(row.transaction_state, "Ongoing");
+    assert!(row.transaction_state == "Ongoing");
     assert!(row.producer_id > 0);
     assert!(
         resp.unknown_state_filters.is_empty(),
@@ -159,7 +160,7 @@ async fn list_transactions_state_filter_excludes_non_matching() {
         })
         .await
         .expect("ListTransactions(state=Empty)");
-    assert_eq!(r.error_code, 0);
+    assert!(r.error_code == 0);
     assert!(
         r.transaction_states
             .iter()
@@ -183,10 +184,10 @@ async fn list_transactions_reports_unknown_state_filters() {
         })
         .await
         .expect("ListTransactions");
-    assert_eq!(r.error_code, 0);
+    assert!(r.error_code == 0);
     // The known names round-trip silently; the bogus one rides on the
     // unknown_state_filters echo per KIP-664.
-    assert_eq!(r.unknown_state_filters, vec!["BogusState".to_string()]);
+    assert!(r.unknown_state_filters == vec!["BogusState".to_string()]);
 
     broker.shutdown().await;
 }
@@ -210,7 +211,7 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
             })
             .await
             .expect("DescribeTransactions");
-        assert_eq!(r.transaction_states.len(), 1);
+        assert!(r.transaction_states.len() == 1);
         let row = &r.transaction_states[0];
         if row.error_code == 0 && !row.topics.is_empty() {
             break row.clone();
@@ -221,16 +222,16 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
-    assert_eq!(row.transactional_id, "describe-tid");
-    assert_eq!(row.transaction_state, "Ongoing");
+    assert!(row.transactional_id == "describe-tid");
+    assert!(row.transaction_state == "Ongoing");
     assert!(row.producer_id > 0);
-    assert_eq!(row.transaction_timeout_ms, 60_000);
+    assert!(row.transaction_timeout_ms == 60_000);
     assert!(row.transaction_start_time_ms > 0);
     // Exactly one topic + partition, since we produced one record to
     // a 1-partition topic.
-    assert_eq!(row.topics.len(), 1);
-    assert_eq!(row.topics[0].topic, "t-describe");
-    assert_eq!(row.topics[0].partitions, vec![0]);
+    assert!(row.topics.len() == 1);
+    assert!(row.topics[0].topic == "t-describe");
+    assert!(row.topics[0].partitions == vec![0]);
 
     producer.close().await.unwrap();
     broker.shutdown().await;
@@ -248,13 +249,13 @@ async fn describe_transactions_returns_not_found_for_unknown_tid() {
         })
         .await
         .expect("DescribeTransactions");
-    assert_eq!(r.transaction_states.len(), 1);
-    assert_eq!(
-        r.transaction_states[0].error_code, 75,
+    assert!(r.transaction_states.len() == 1);
+    assert!(
+        r.transaction_states[0].error_code == 75,
         "expected TRANSACTIONAL_ID_NOT_FOUND (75), got {:?}",
-        r.transaction_states[0],
+        r.transaction_states[0]
     );
-    assert_eq!(r.transaction_states[0].transactional_id, "ghost-tid");
+    assert!(r.transaction_states[0].transactional_id == "ghost-tid");
 
     broker.shutdown().await;
 }

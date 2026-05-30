@@ -192,6 +192,7 @@ fn err_response(code: i16) -> CreateDelegationTokenResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
     use std::collections::HashSet;
@@ -265,10 +266,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
         controller.cancel().await;
     }
 
@@ -294,26 +292,26 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
-        assert_eq!(resp.principal_type, "User");
-        assert_eq!(resp.principal_name, "alice");
+        assert!(resp.error_code == 0);
+        assert!(resp.principal_type == "User");
+        assert!(resp.principal_name == "alice");
         assert!(!resp.token_id.is_empty(), "token_id should be non-empty");
         // HMAC-SHA-256 output is 32 bytes; the response carries them raw.
-        assert_eq!(resp.hmac.len(), 32);
+        assert!(resp.hmac.len() == 32);
         // 60s ceiling < 24h default renew period → both timestamps collapse
         // to issue + 60s (the chosen_lifetime ceiling).
-        assert_eq!(resp.expiry_timestamp_ms - resp.issue_timestamp_ms, 60_000);
-        assert_eq!(resp.max_timestamp_ms, resp.expiry_timestamp_ms);
+        assert!(resp.expiry_timestamp_ms - resp.issue_timestamp_ms == 60_000);
+        assert!(resp.max_timestamp_ms == resp.expiry_timestamp_ms);
         // Persisted in image with the same hmac + owner + timestamps.
         let img = controller.current_image();
         let stored = img
             .delegation_token_by_id(&resp.token_id)
             .expect("token in image");
-        assert_eq!(stored.hmac.as_slice(), &resp.hmac[..]);
-        assert_eq!(stored.owner.principal_type, "User");
-        assert_eq!(stored.owner.name, "alice");
-        assert_eq!(stored.expiry_timestamp_ms, resp.expiry_timestamp_ms);
-        assert_eq!(stored.max_timestamp_ms, resp.max_timestamp_ms);
+        assert!(stored.hmac.as_slice() == &resp.hmac[..]);
+        assert!(stored.owner.principal_type == "User");
+        assert!(stored.owner.name == "alice");
+        assert!(stored.expiry_timestamp_ms == resp.expiry_timestamp_ms);
+        assert!(stored.max_timestamp_ms == resp.max_timestamp_ms);
         controller.cancel().await;
     }
 
@@ -336,10 +334,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_REQUEST_NOT_ALLOWED
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_REQUEST_NOT_ALLOWED);
         controller.cancel().await;
     }
 
@@ -364,14 +359,14 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         // 5-minute ceiling < 24h default renew period → both timestamps
         // collapse to issue + ceiling.
         let max_offset = resp.max_timestamp_ms - resp.issue_timestamp_ms;
         let expiry_offset = resp.expiry_timestamp_ms - resp.issue_timestamp_ms;
-        assert_eq!(max_offset, ceiling_ms);
-        assert_eq!(expiry_offset, ceiling_ms);
-        assert_eq!(resp.max_timestamp_ms, resp.expiry_timestamp_ms);
+        assert!(max_offset == ceiling_ms);
+        assert!(expiry_offset == ceiling_ms);
+        assert!(resp.max_timestamp_ms == resp.expiry_timestamp_ms);
         controller.cancel().await;
     }
 
@@ -403,20 +398,18 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
-        assert_eq!(
-            resp.expiry_timestamp_ms - resp.issue_timestamp_ms,
-            one_hour,
-            "1h ceiling clamps the 24h renew period; expiry must == issue + 1h",
+        assert!(resp.error_code == 0);
+        assert!(
+            resp.expiry_timestamp_ms - resp.issue_timestamp_ms == one_hour,
+            "1h ceiling clamps the 24h renew period; expiry must == issue + 1h"
         );
-        assert_eq!(
-            resp.max_timestamp_ms - resp.issue_timestamp_ms,
-            one_hour,
-            "max must equal issue + chosen_lifetime",
+        assert!(
+            resp.max_timestamp_ms - resp.issue_timestamp_ms == one_hour,
+            "max must equal issue + chosen_lifetime"
         );
-        assert_eq!(
-            resp.expiry_timestamp_ms, resp.max_timestamp_ms,
-            "expiry must collapse to max when renew period > chosen_lifetime",
+        assert!(
+            resp.expiry_timestamp_ms == resp.max_timestamp_ms,
+            "expiry must collapse to max when renew period > chosen_lifetime"
         );
 
         // Branch 2: max_lifetime_ms = 7d, default_renew_period_ms = 24h.
@@ -438,16 +431,14 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
-        assert_eq!(
-            resp.expiry_timestamp_ms - resp.issue_timestamp_ms,
-            RENEW_24H_MS,
-            "24h renew period < 7d ceiling, so expiry must == issue + 24h",
+        assert!(resp.error_code == 0);
+        assert!(
+            resp.expiry_timestamp_ms - resp.issue_timestamp_ms == RENEW_24H_MS,
+            "24h renew period < 7d ceiling, so expiry must == issue + 24h"
         );
-        assert_eq!(
-            resp.max_timestamp_ms - resp.issue_timestamp_ms,
-            seven_days,
-            "max must == issue + 7d (the ceiling, untouched)",
+        assert!(
+            resp.max_timestamp_ms - resp.issue_timestamp_ms == seven_days,
+            "max must == issue + 7d (the ceiling, untouched)"
         );
         assert!(
             resp.expiry_timestamp_ms < resp.max_timestamp_ms,
@@ -477,7 +468,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
+        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
         controller.cancel().await;
     }
 
@@ -507,20 +498,20 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         // Owner = the act-as target.
-        assert_eq!(resp.principal_type, "User");
-        assert_eq!(resp.principal_name, "alice");
+        assert!(resp.principal_type == "User");
+        assert!(resp.principal_name == "alice");
         // Requester = the caller (admin), set for act-as mints.
-        assert_eq!(resp.token_requester_principal_type, "User");
-        assert_eq!(resp.token_requester_principal_name, "admin");
+        assert!(resp.token_requester_principal_type == "User");
+        assert!(resp.token_requester_principal_name == "admin");
         // Persisted owner matches the response owner.
         let img = controller.current_image();
         let stored = img
             .delegation_token_by_id(&resp.token_id)
             .expect("token in image");
-        assert_eq!(stored.owner.principal_type, "User");
-        assert_eq!(stored.owner.name, "alice");
+        assert!(stored.owner.principal_type == "User");
+        assert!(stored.owner.name == "alice");
         controller.cancel().await;
     }
 
@@ -550,10 +541,7 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED);
         controller.cancel().await;
     }
 
@@ -584,7 +572,7 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
+        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
 
         // Name set but type empty.
         let req_type_missing = CreateDelegationTokenRequest {
@@ -603,7 +591,7 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
+        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
 
         controller.cancel().await;
     }
@@ -650,7 +638,7 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert_eq!(resp.error_code, crate::codes::INVALID_REQUEST);
+        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
         controller.cancel().await;
     }
 }

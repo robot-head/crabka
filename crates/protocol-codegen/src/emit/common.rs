@@ -89,30 +89,28 @@ fn hex_to_signed(v: u64, suffix: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn decimal_literals() {
-        assert_eq!(format_int_literal("0", "i32"), "0i32");
-        assert_eq!(format_int_literal("-1", "i32"), "-1i32");
-        assert_eq!(format_int_literal("2147483647", "i32"), "2_147_483_647i32");
-        assert_eq!(
-            format_int_literal("-2147483648", "i32"),
-            "-2_147_483_648i32"
-        );
+        assert!(format_int_literal("0", "i32") == "0i32");
+        assert!(format_int_literal("-1", "i32") == "-1i32");
+        assert!(format_int_literal("2147483647", "i32") == "2_147_483_647i32");
+        assert!(format_int_literal("-2147483648", "i32") == "-2_147_483_648i32");
     }
 
     #[test]
     fn hex_positive_normalizes_to_decimal() {
-        assert_eq!(format_int_literal("0x7fffffff", "i32"), "2_147_483_647i32");
-        assert_eq!(format_int_literal("0X10", "i32"), "16i32");
+        assert!(format_int_literal("0x7fffffff", "i32") == "2_147_483_647i32");
+        assert!(format_int_literal("0X10", "i32") == "16i32");
     }
 
     #[test]
     fn hex_high_bit_is_sign_extended_to_target_width() {
         // 0xffffffff as i32 is -1, not 4_294_967_295 (which would overflow i32).
-        assert_eq!(format_int_literal("0xffffffff", "i32"), "-1i32");
-        assert_eq!(format_int_literal("0x80000000", "i32"), "-2_147_483_648i32");
+        assert!(format_int_literal("0xffffffff", "i32") == "-1i32");
+        assert!(format_int_literal("0x80000000", "i32") == "-2_147_483_648i32");
         // Same 32-bit pattern widened to i64 is a large positive value.
-        assert_eq!(format_int_literal("0xffffffff", "i64"), "4_294_967_295i64");
+        assert!(format_int_literal("0xffffffff", "i64") == "4_294_967_295i64");
     }
 }

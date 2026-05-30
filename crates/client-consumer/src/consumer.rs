@@ -435,6 +435,7 @@ impl Consumer {
 #[cfg(test)]
 mod security_arg_tests {
     use super::*;
+    use assert2::assert;
     use crabka_client_core::security::{ClientSecurity, SaslCredentials};
     use crabka_security::ListenerProtocol;
 

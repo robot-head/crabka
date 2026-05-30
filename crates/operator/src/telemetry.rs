@@ -30,6 +30,7 @@ pub fn new_registry() -> Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn registry_has_prefix() {

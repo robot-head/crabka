@@ -5,6 +5,7 @@
 //! (using real PEM material from `crabka_security::ca`), calls
 //! `run_renewal_check`, and asserts on the observed request log.
 
+use assert2::assert;
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -274,10 +275,9 @@ async fn cronjob_reissues_aging_broker_leafs() {
         .expect("data[0.crt] present in PATCH body");
     let b64 = base64::engine::general_purpose::STANDARD;
     let old_crt_b64 = b64.encode(old_leaf.cert_pem.as_bytes());
-    assert_ne!(
-        new_crt_b64,
-        old_crt_b64.as_str(),
-        "renewed cert must differ from the pre-seeded cert",
+    assert!(
+        new_crt_b64 != old_crt_b64.as_str(),
+        "renewed cert must differ from the pre-seeded cert"
     );
 
     // Must have emitted a BrokerCertRenewed event.
@@ -293,18 +293,16 @@ async fn cronjob_reissues_aging_broker_leafs() {
     );
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    assert_eq!(
-        event_body["reason"].as_str().unwrap_or(""),
-        "BrokerCertRenewed",
-        "event reason must be BrokerCertRenewed; body = {event_body}",
+    assert!(
+        event_body["reason"].as_str().unwrap_or("") == "BrokerCertRenewed",
+        "event reason must be BrokerCertRenewed; body = {event_body}"
     );
-    assert_eq!(
-        event_body["type"].as_str().unwrap_or(""),
-        "Normal",
-        "event type must be Normal; body = {event_body}",
+    assert!(
+        event_body["type"].as_str().unwrap_or("") == "Normal",
+        "event type must be Normal; body = {event_body}"
     );
 
-    assert_eq!(state.remaining_rules(), 0, "all rules consumed");
+    assert!(state.remaining_rules() == 0, "all rules consumed");
 }
 
 // ---------------------------------------------------------------------------
@@ -456,15 +454,13 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
     );
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    assert_eq!(
-        event_body["reason"].as_str().unwrap_or(""),
-        "CaRenewalScheduled",
-        "event reason must be CaRenewalScheduled; body = {event_body}",
+    assert!(
+        event_body["reason"].as_str().unwrap_or("") == "CaRenewalScheduled",
+        "event reason must be CaRenewalScheduled; body = {event_body}"
     );
-    assert_eq!(
-        event_body["type"].as_str().unwrap_or(""),
-        "Normal",
-        "event type must be Normal; body = {event_body}",
+    assert!(
+        event_body["type"].as_str().unwrap_or("") == "Normal",
+        "event type must be Normal; body = {event_body}"
     );
 
     // Must have PATCHed the Kafka CR metadata with the ca-renew-after annotation
@@ -485,7 +481,7 @@ async fn cronjob_flags_expiring_cluster_ca_without_rotating() {
         "metadata PATCH must stamp crabka.io/ca-renew-after; body = {meta_body}",
     );
 
-    assert_eq!(state.remaining_rules(), 0, "all rules consumed");
+    assert!(state.remaining_rules() == 0, "all rules consumed");
 }
 
 // ---------------------------------------------------------------------------
@@ -648,15 +644,13 @@ async fn cronjob_byo_ca_expiring_emits_byo_event() {
     );
     let event_body: serde_json::Value =
         serde_json::from_slice(event_post.unwrap().body()).expect("event body is JSON");
-    assert_eq!(
-        event_body["reason"].as_str().unwrap_or(""),
-        "ByoCaExpiringSoon",
-        "event reason must be ByoCaExpiringSoon; body = {event_body}",
+    assert!(
+        event_body["reason"].as_str().unwrap_or("") == "ByoCaExpiringSoon",
+        "event reason must be ByoCaExpiringSoon; body = {event_body}"
     );
-    assert_eq!(
-        event_body["type"].as_str().unwrap_or(""),
-        "Warning",
-        "event type must be Warning; body = {event_body}",
+    assert!(
+        event_body["type"].as_str().unwrap_or("") == "Warning",
+        "event type must be Warning; body = {event_body}"
     );
 
     // Must NOT have PATCHed Kafka status (no CaRotationRequired condition for BYO).
@@ -671,5 +665,5 @@ async fn cronjob_byo_ca_expiring_emits_byo_event() {
         "BYO CA must NOT set CaRotationRequired status condition; requests: {methods_uris:?}",
     );
 
-    assert_eq!(state.remaining_rules(), 0, "all rules consumed");
+    assert!(state.remaining_rules() == 0, "all rules consumed");
 }

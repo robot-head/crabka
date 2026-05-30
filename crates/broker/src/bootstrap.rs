@@ -94,6 +94,7 @@ pub fn load_bootstrap_records(log_dir: &Path) -> Result<Vec<MetadataRecord>, Bro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::ScramCredentialRecord;
     use crabka_security::SaslMechanism;
     use serde_wincode::SerdeCompat;
@@ -131,9 +132,9 @@ mod tests {
         write_frame(&mut bytes, &rec);
         std::fs::write(dir.path().join("bootstrap.records.bin"), &bytes).unwrap();
         let got = load_bootstrap_records(dir.path()).unwrap();
-        assert_eq!(got.len(), 1);
+        assert!(got.len() == 1);
         match &got[0] {
-            MetadataRecord::V1ScramCredential(r) => assert_eq!(r.user, "alice"),
+            MetadataRecord::V1ScramCredential(r) => assert!(r.user == "alice"),
             _ => panic!("wrong variant"),
         }
     }
@@ -169,8 +170,8 @@ mod tests {
         std::fs::write(dir.path().join("bootstrap.records.bin"), &bytes).unwrap();
 
         let records = load_bootstrap_records(dir.path()).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(initial_voters(&records), seeded);
+        assert!(records.len() == 2);
+        assert!(initial_voters(&records) == seeded);
     }
 
     #[test]
@@ -195,7 +196,7 @@ mod tests {
             serde_json::to_vec_pretty(&meta).unwrap(),
         )
         .unwrap();
-        assert_eq!(read_directory_id(dir.path()).unwrap(), id);
+        assert!(read_directory_id(dir.path()).unwrap() == id);
     }
 
     #[test]

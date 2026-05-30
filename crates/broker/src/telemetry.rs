@@ -324,6 +324,7 @@ pub fn api_name(api_key: i16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn env_from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
         move |k: &str| {
@@ -348,12 +349,12 @@ mod tests {
             "0.1.1",
         )
         .expect("enabled");
-        assert_eq!(cfg.endpoint, "http://collector:4317");
-        assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
+        assert!(cfg.endpoint == "http://collector:4317");
+        assert!(cfg.protocol == OtlpProtocol::Grpc);
         assert!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
-        assert_eq!(cfg.service_name, "crabka-broker");
-        assert_eq!(cfg.service_instance_id, "7");
-        assert_eq!(cfg.service_version, "0.1.1");
+        assert!(cfg.service_name == "crabka-broker");
+        assert!(cfg.service_instance_id == "7");
+        assert!(cfg.service_version == "0.1.1");
     }
 
     #[test]
@@ -367,16 +368,16 @@ mod tests {
             "0.1.1",
         )
         .expect("enabled");
-        assert_eq!(cfg.protocol, OtlpProtocol::HttpProtobuf);
-        assert_eq!(cfg.endpoint, "http://localhost:4318");
+        assert!(cfg.protocol == OtlpProtocol::HttpProtobuf);
+        assert!(cfg.endpoint == "http://localhost:4318");
     }
 
     #[test]
     fn grpc_is_the_default_protocol() {
         let cfg = OtlpConfig::from_env(env_from(&[("CRABKA_OTLP_ENABLED", "1")]), "1", "0.1.1")
             .expect("enabled");
-        assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
-        assert_eq!(cfg.endpoint, "http://localhost:4317");
+        assert!(cfg.protocol == OtlpProtocol::Grpc);
+        assert!(cfg.endpoint == "http://localhost:4317");
     }
 
     #[test]
@@ -401,7 +402,7 @@ mod tests {
             "0.1.1",
         )
         .expect("enabled");
-        assert_eq!(cfg.endpoint, "http://otel:4317");
+        assert!(cfg.endpoint == "http://otel:4317");
 
         // Traces-specific endpoint wins over the generic one.
         let cfg = OtlpConfig::from_env(
@@ -413,7 +414,7 @@ mod tests {
             "0.1.1",
         )
         .expect("enabled");
-        assert_eq!(cfg.endpoint, "http://traces:4317");
+        assert!(cfg.endpoint == "http://traces:4317");
 
         // CRABKA override wins over everything.
         let cfg = OtlpConfig::from_env(
@@ -425,7 +426,7 @@ mod tests {
             "0.1.1",
         )
         .expect("enabled");
-        assert_eq!(cfg.endpoint, "http://crabka:4317");
+        assert!(cfg.endpoint == "http://crabka:4317");
     }
 
     #[test]
@@ -466,29 +467,26 @@ mod tests {
             "0.1.1",
         )
         .expect("enabled");
-        assert_eq!(cfg.service_name, "my-kafka");
-        assert_eq!(cfg.timeout, Duration::from_secs(3));
+        assert!(cfg.service_name == "my-kafka");
+        assert!(cfg.timeout == Duration::from_secs(3));
     }
 
     #[test]
     fn protocol_parse_variants() {
-        assert_eq!(OtlpProtocol::parse("grpc"), OtlpProtocol::Grpc);
-        assert_eq!(
-            OtlpProtocol::parse("http/protobuf"),
-            OtlpProtocol::HttpProtobuf
-        );
-        assert_eq!(OtlpProtocol::parse("HTTP"), OtlpProtocol::HttpProtobuf);
-        assert_eq!(OtlpProtocol::parse("nonsense"), OtlpProtocol::Grpc);
+        assert!(OtlpProtocol::parse("grpc") == OtlpProtocol::Grpc);
+        assert!(OtlpProtocol::parse("http/protobuf") == OtlpProtocol::HttpProtobuf);
+        assert!(OtlpProtocol::parse("HTTP") == OtlpProtocol::HttpProtobuf);
+        assert!(OtlpProtocol::parse("nonsense") == OtlpProtocol::Grpc);
     }
 
     #[test]
     fn api_name_known_and_unknown() {
-        assert_eq!(api_name(0), "Produce");
-        assert_eq!(api_name(1), "Fetch");
-        assert_eq!(api_name(18), "ApiVersions");
-        assert_eq!(api_name(51), "AlterUserScramCredentials");
-        assert_eq!(api_name(30), "CreateAcls");
-        assert_eq!(api_name(9999), "Unknown");
+        assert!(api_name(0) == "Produce");
+        assert!(api_name(1) == "Fetch");
+        assert!(api_name(18) == "ApiVersions");
+        assert!(api_name(51) == "AlterUserScramCredentials");
+        assert!(api_name(30) == "CreateAcls");
+        assert!(api_name(9999) == "Unknown");
     }
 
     #[test]
@@ -544,8 +542,8 @@ mod tests {
         });
 
         let g = captured.lock().unwrap();
-        assert_eq!(g.name.as_deref(), Some("Produce"));
-        assert_eq!(g.kind.as_deref(), Some("server"));
-        assert_eq!(g.api_key, Some(0));
+        assert!(g.name.as_deref() == Some("Produce"));
+        assert!(g.kind.as_deref() == Some("server"));
+        assert!(g.api_key == Some(0));
     }
 }

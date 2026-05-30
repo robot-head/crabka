@@ -11,6 +11,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
@@ -41,7 +42,7 @@ async fn bootstrap_member(p: &support::InProcess) -> (String, i32) {
         })
         .await
         .expect("JoinGroup (bootstrap)");
-    assert_eq!(r1.error_code, 79, "expected MEMBER_ID_REQUIRED");
+    assert!(r1.error_code == 79, "expected MEMBER_ID_REQUIRED");
     let mid = r1.member_id.clone();
     assert!(!mid.is_empty());
 
@@ -63,19 +64,17 @@ async fn bootstrap_member(p: &support::InProcess) -> (String, i32) {
         })
         .await
         .expect("JoinGroup");
-    assert_eq!(r2.error_code, 0, "JoinGroup must succeed: {r2:?}");
+    assert!(r2.error_code == 0, "JoinGroup must succeed: {r2:?}");
 
     // KIP-559: protocol_type and protocol_name must be set on the
     // success response.
-    assert_eq!(
-        r2.protocol_type.as_deref(),
-        Some(PROTOCOL_TYPE),
-        "JoinGroup must echo protocol_type: {r2:?}",
+    assert!(
+        r2.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
+        "JoinGroup must echo protocol_type: {r2:?}"
     );
-    assert_eq!(
-        r2.protocol_name.as_deref(),
-        Some(PROTOCOL_NAME),
-        "JoinGroup must echo protocol_name: {r2:?}",
+    assert!(
+        r2.protocol_name.as_deref() == Some(PROTOCOL_NAME),
+        "JoinGroup must echo protocol_name: {r2:?}"
     );
 
     (mid, r2.generation_id)
@@ -110,18 +109,16 @@ async fn sync_group_response_carries_protocol_type_and_name_on_success() {
         })
         .await
         .expect("SyncGroup");
-    assert_eq!(r3.error_code, 0, "SyncGroup must succeed: {r3:?}");
+    assert!(r3.error_code == 0, "SyncGroup must succeed: {r3:?}");
 
     // KIP-559: both fields must be echoed on the v5+ response.
-    assert_eq!(
-        r3.protocol_type.as_deref(),
-        Some(PROTOCOL_TYPE),
-        "SyncGroup must echo protocol_type: {r3:?}",
+    assert!(
+        r3.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
+        "SyncGroup must echo protocol_type: {r3:?}"
     );
-    assert_eq!(
-        r3.protocol_name.as_deref(),
-        Some(PROTOCOL_NAME),
-        "SyncGroup must echo protocol_name: {r3:?}",
+    assert!(
+        r3.protocol_name.as_deref() == Some(PROTOCOL_NAME),
+        "SyncGroup must echo protocol_name: {r3:?}"
     );
 
     p.broker.shutdown().await;
@@ -154,14 +151,13 @@ async fn join_group_response_carries_protocol_type_on_inconsistent_protocol_erro
         })
         .await
         .expect("JoinGroup");
-    assert_eq!(
-        r.error_code, 23,
-        "expected INCONSISTENT_GROUP_PROTOCOL (23), got {r:?}",
+    assert!(
+        r.error_code == 23,
+        "expected INCONSISTENT_GROUP_PROTOCOL (23), got {r:?}"
     );
-    assert_eq!(
-        r.protocol_type.as_deref(),
-        Some(PROTOCOL_TYPE),
-        "INCONSISTENT_GROUP_PROTOCOL response must echo the recorded protocol_type: {r:?}",
+    assert!(
+        r.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
+        "INCONSISTENT_GROUP_PROTOCOL response must echo the recorded protocol_type: {r:?}"
     );
     p.broker.shutdown().await;
 }
@@ -187,19 +183,17 @@ async fn sync_group_response_carries_protocol_type_on_unknown_member_error() {
         })
         .await
         .expect("SyncGroup");
-    assert_eq!(
-        r.error_code, 25,
-        "expected UNKNOWN_MEMBER_ID (25), got {r:?}",
+    assert!(
+        r.error_code == 25,
+        "expected UNKNOWN_MEMBER_ID (25), got {r:?}"
     );
-    assert_eq!(
-        r.protocol_type.as_deref(),
-        Some(PROTOCOL_TYPE),
-        "UNKNOWN_MEMBER_ID response must echo the recorded protocol_type: {r:?}",
+    assert!(
+        r.protocol_type.as_deref() == Some(PROTOCOL_TYPE),
+        "UNKNOWN_MEMBER_ID response must echo the recorded protocol_type: {r:?}"
     );
-    assert_eq!(
-        r.protocol_name.as_deref(),
-        Some(PROTOCOL_NAME),
-        "UNKNOWN_MEMBER_ID response must echo the recorded protocol_name: {r:?}",
+    assert!(
+        r.protocol_name.as_deref() == Some(PROTOCOL_NAME),
+        "UNKNOWN_MEMBER_ID response must echo the recorded protocol_name: {r:?}"
     );
 
     p.broker.shutdown().await;

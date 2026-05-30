@@ -53,21 +53,22 @@ pub fn assign(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn one_member_takes_everything() {
         let mut tp = HashMap::new();
         tp.insert("t".into(), 4);
         let a = assign(vec![("m1".into(), vec!["t".into()])], &tp);
-        assert_eq!(a["m1"].len(), 4);
-        assert_eq!(
-            a["m1"],
-            vec![
-                ("t".into(), 0),
-                ("t".into(), 1),
-                ("t".into(), 2),
-                ("t".into(), 3),
-            ]
+        assert!(a["m1"].len() == 4);
+        assert!(
+            a["m1"]
+                == vec![
+                    ("t".into(), 0),
+                    ("t".into(), 1),
+                    ("t".into(), 2),
+                    ("t".into(), 3),
+                ]
         );
     }
 
@@ -82,8 +83,8 @@ mod tests {
             ],
             &tp,
         );
-        assert_eq!(a["m1"], vec![("t".into(), 0), ("t".into(), 1)]);
-        assert_eq!(a["m2"], vec![("t".into(), 2), ("t".into(), 3)]);
+        assert!(a["m1"] == vec![("t".into(), 0), ("t".into(), 1)]);
+        assert!(a["m2"] == vec![("t".into(), 2), ("t".into(), 3)]);
     }
 
     #[test]
@@ -97,8 +98,8 @@ mod tests {
             ],
             &tp,
         );
-        assert_eq!(a["m1"].len(), 3);
-        assert_eq!(a["m2"].len(), 2);
+        assert!(a["m1"].len() == 3);
+        assert!(a["m2"].len() == 2);
     }
 
     #[test]
@@ -109,7 +110,7 @@ mod tests {
             vec![("m1".into(), vec!["t".into()]), ("m2".into(), vec![])],
             &tp,
         );
-        assert_eq!(a["m1"].len(), 2);
-        assert_eq!(a["m2"].len(), 0);
+        assert!(a["m1"].len() == 2);
+        assert!(a["m2"].len() == 0);
     }
 }

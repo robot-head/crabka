@@ -1772,6 +1772,7 @@ fn cm_name(kafka: &str) -> String {
 mod tests {
     use super::*;
     use crate::crd::{KafkaNodePoolSpec, KafkaNodePoolStatus, NodeRole};
+    use assert2::assert;
 
     fn pool_with_status(name: &str, replicas: i32, ready: i32) -> KafkaNodePool {
         let mut p = KafkaNodePool::new(
@@ -1799,7 +1800,7 @@ mod tests {
         let r = aggregate_pool_status(std::iter::empty::<&KafkaNodePool>());
         let (ready, reason, _) = rollup_condition(&r);
         assert!(!ready);
-        assert_eq!(reason, "NoNodePools");
+        assert!(reason == "NoNodePools");
     }
 
     #[test]
@@ -1808,7 +1809,7 @@ mod tests {
         let r = aggregate_pool_status([&p]);
         let (ready, reason, _) = rollup_condition(&r);
         assert!(!ready);
-        assert_eq!(reason, "PartiallyReady");
+        assert!(reason == "PartiallyReady");
     }
 
     #[test]
@@ -1817,7 +1818,7 @@ mod tests {
         let r = aggregate_pool_status([&p]);
         let (ready, reason, _) = rollup_condition(&r);
         assert!(ready);
-        assert_eq!(reason, "Available");
+        assert!(reason == "Available");
     }
 
     #[test]
@@ -1829,7 +1830,7 @@ mod tests {
         };
         let (rolling, reason, _) = rolling_condition_from_rollup(&r);
         assert!(rolling);
-        assert_eq!(reason, "RollingUpdate");
+        assert!(reason == "RollingUpdate");
     }
 
     #[test]
@@ -1841,7 +1842,7 @@ mod tests {
         };
         let (rolling, reason, _) = rolling_condition_from_rollup(&r);
         assert!(!rolling);
-        assert_eq!(reason, "Stable");
+        assert!(reason == "Stable");
     }
 
     // Pure helper — picks the first OAuth listener as canonical.
@@ -1968,7 +1969,7 @@ mod tests {
             listener_with_auth("plain", None),
             listener_with_auth("oauth", Some(ListenerAuthentication::OAuth(cfg.clone()))),
         ];
-        assert_eq!(canonical_oauth_config(&ls), Some(cfg));
+        assert!(canonical_oauth_config(&ls) == Some(cfg));
     }
 
     #[test]
@@ -2033,8 +2034,8 @@ mod tests {
             Some(ListenerAuthentication::OAuth(cfg)),
         )]);
         let mount = oauth_introspection_secret_mount(&kafka).expect("mount derived");
-        assert_eq!(mount.secret_name, "oauth-cs");
-        assert_eq!(mount.key, "client-secret");
+        assert!(mount.secret_name == "oauth-cs");
+        assert!(mount.key == "client-secret");
     }
 
     #[test]
@@ -2054,8 +2055,8 @@ mod tests {
             Some(ListenerAuthentication::Gssapi(g)),
         )]);
         let m = gssapi_keytab_mount(&k).expect("keytab mount present");
-        assert_eq!(m.secret_name, "kt");
-        assert_eq!(m.key, "krb5.keytab");
+        assert!(m.secret_name == "kt");
+        assert!(m.key == "krb5.keytab");
     }
 
     #[test]
@@ -2073,7 +2074,7 @@ mod tests {
             key: "krb5.conf".into(),
         });
         let (secret_name, key) = krb5_conf_mount(&k).expect("krb5.conf mount present");
-        assert_eq!(secret_name, "krb5");
-        assert_eq!(key, "krb5.conf");
+        assert!(secret_name == "krb5");
+        assert!(key == "krb5.conf");
     }
 }

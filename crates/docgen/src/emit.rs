@@ -81,6 +81,7 @@ pub fn write_reference_tree(out_dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use tempfile::tempdir;
     #[test]
     fn page_front_matter_wraps_body() {

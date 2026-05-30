@@ -13,6 +13,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;

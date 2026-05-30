@@ -185,6 +185,7 @@ pub fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn rules(specs: &[&str]) -> Vec<Rule> {
         specs.iter().map(|s| Rule::parse(s).unwrap()).collect()
@@ -195,7 +196,7 @@ mod tests {
         let r = rules(&["DEFAULT"]);
         // DEFAULT only matches when the principal realm equals the default
         // realm (matching the JVM `KerberosName`), so realm == default_realm.
-        assert_eq!(apply(&r, "REALM", &["alice"], "REALM").unwrap(), "alice");
+        assert!(apply(&r, "REALM", &["alice"], "REALM").unwrap() == "alice");
     }
 
     #[test]
@@ -207,35 +208,32 @@ mod tests {
     #[test]
     fn rule_substitutes_and_matches_regex() {
         let r = rules(&["RULE:[2:$1](kafka.*)s/^.*$/kafka/", "DEFAULT"]);
-        assert_eq!(
-            apply(&r, "REALM", &["kafka", "host"], "REALM").unwrap(),
-            "kafka"
-        );
+        assert!(apply(&r, "REALM", &["kafka", "host"], "REALM").unwrap() == "kafka");
     }
 
     #[test]
     fn rule_lowercase_modifier() {
         let r = rules(&["RULE:[1:$1]/L"]);
-        assert_eq!(apply(&r, "REALM", &["Alice"], "REALM").unwrap(), "alice");
+        assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice");
     }
 
     #[test]
     fn rule_lowercase_modifier_after_substitution() {
         // `/L` riding in the substitution flags must still lowercase the result.
         let r = rules(&["RULE:[1:$1](.*)s/$/-X/L"]);
-        assert_eq!(apply(&r, "REALM", &["Alice"], "REALM").unwrap(), "alice-x");
+        assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice-x");
     }
 
     #[test]
     fn rule_global_and_lowercase_flags_combined() {
         let r = rules(&["RULE:[1:$1](.*)s/A/a/gL"]);
-        assert_eq!(apply(&r, "REALM", &["BANANA"], "REALM").unwrap(), "banana");
+        assert!(apply(&r, "REALM", &["BANANA"], "REALM").unwrap() == "banana");
     }
 
     #[test]
     fn first_matching_rule_wins() {
         let r = rules(&["RULE:[1:$1](nomatch)s/x/y/", "RULE:[1:$1]/L"]);
-        assert_eq!(apply(&r, "REALM", &["BOB"], "REALM").unwrap(), "bob");
+        assert!(apply(&r, "REALM", &["BOB"], "REALM").unwrap() == "bob");
     }
 
     #[test]
@@ -248,7 +246,7 @@ mod tests {
     fn parse_round_trips_two_component_format_string() {
         let rule = Rule::parse("RULE:[2:$1@$0](.*@REALM)s/@REALM//").unwrap();
         match rule {
-            Rule::Translate { num_components, .. } => assert_eq!(num_components, 2),
+            Rule::Translate { num_components, .. } => assert!(num_components == 2),
             Rule::Default => panic!("expected Translate"),
         }
     }

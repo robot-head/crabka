@@ -193,17 +193,18 @@ impl AdminClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn dynamic_topic_config_source_is_one() {
         // Guard so a future protocol change can't silently flip the
         // filter we use to distinguish overrides from broker defaults.
-        assert_eq!(DYNAMIC_TOPIC_CONFIG_SOURCE, 1);
+        assert!(DYNAMIC_TOPIC_CONFIG_SOURCE == 1);
     }
 
     #[test]
     fn resource_type_topic_is_two() {
-        assert_eq!(RESOURCE_TYPE_TOPIC, 2);
+        assert!(RESOURCE_TYPE_TOPIC == 2);
     }
 
     /// Spec test name: `describe_configs_filters_to_dynamic_topic`.
@@ -249,16 +250,10 @@ mod tests {
             },
         ];
         let r = filter_dynamic_overrides("foo".into(), entries);
-        assert_eq!(r.topic, "foo");
-        assert_eq!(r.overrides.len(), 2);
-        assert_eq!(
-            r.overrides.get("retention.ms").map(String::as_str),
-            Some("60000")
-        );
-        assert_eq!(
-            r.overrides.get("cleanup.policy").map(String::as_str),
-            Some("compact")
-        );
+        assert!(r.topic == "foo");
+        assert!(r.overrides.len() == 2);
+        assert!(r.overrides.get("retention.ms").map(String::as_str) == Some("60000"));
+        assert!(r.overrides.get("cleanup.policy").map(String::as_str) == Some("compact"));
         assert!(!r.overrides.contains_key("log.dirs"));
         assert!(!r.overrides.contains_key("segment.bytes"));
         assert!(!r.overrides.contains_key("max.message.bytes"));
@@ -289,11 +284,8 @@ mod tests {
             ..Default::default()
         };
         let parsed = parse_describe_configs_resource(r).expect("Ok branch");
-        assert_eq!(parsed.topic, "foo");
-        assert_eq!(
-            parsed.overrides.get("retention.ms").map(String::as_str),
-            Some("60000")
-        );
+        assert!(parsed.topic == "foo");
+        assert!(parsed.overrides.get("retention.ms").map(String::as_str) == Some("60000"));
     }
 
     #[test]
@@ -315,10 +307,10 @@ mod tests {
                 name,
                 message,
             } => {
-                assert_eq!(api, "DescribeConfigs");
-                assert_eq!(code, 3);
-                assert_eq!(name, "UNKNOWN_TOPIC_OR_PARTITION");
-                assert_eq!(message.as_deref(), Some("nope"));
+                assert!(api == "DescribeConfigs");
+                assert!(code == 3);
+                assert!(name == "UNKNOWN_TOPIC_OR_PARTITION");
+                assert!(message.as_deref() == Some("nope"));
             }
             other => panic!("expected Broker, got {other:?}"),
         }
@@ -342,8 +334,8 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_incremental_alter_outcomes(resp);
-        assert_eq!(outs.len(), 1);
-        assert_eq!(outs[0].topic, "foo");
+        assert!(outs.len() == 1);
+        assert!(outs[0].topic == "foo");
         assert!(outs[0].error.is_none());
     }
 
@@ -372,11 +364,11 @@ mod tests {
             ..Default::default()
         };
         let outs = parse_incremental_alter_outcomes(resp);
-        assert_eq!(outs.len(), 2);
+        assert!(outs.len() == 2);
         assert!(outs[0].error.is_none());
         let err = outs[1].error.as_ref().expect("error expected");
-        assert_eq!(err.code, 40);
-        assert_eq!(err.name, "INVALID_CONFIG");
-        assert_eq!(err.message.as_deref(), Some("bad value"));
+        assert!(err.code == 40);
+        assert!(err.name == "INVALID_CONFIG");
+        assert!(err.message.as_deref() == Some("bad value"));
     }
 }

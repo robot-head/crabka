@@ -136,6 +136,7 @@ pub(crate) async fn compute_reassignment_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use std::time::Duration;
     use uuid::Uuid;
@@ -198,14 +199,14 @@ mod tests {
         let img = img(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 1);
         let l = liveness(&[1, 2, 3]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert_eq!(updates.len(), 1);
+        assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert_eq!(pr.replicas, vec![1, 3]);
-        assert_eq!(pr.adding_replicas, Vec::<NodeId>::new());
-        assert_eq!(pr.removing_replicas, Vec::<NodeId>::new());
-        assert_eq!(pr.isr, vec![1, 3]);
-        assert_eq!(pr.leader, 1); // unchanged
-        assert_eq!(pr.leader_epoch, 5); // unchanged (leader didn't change)
+        assert!(pr.replicas == vec![1, 3]);
+        assert!(pr.adding_replicas == Vec::<NodeId>::new());
+        assert!(pr.removing_replicas == Vec::<NodeId>::new());
+        assert!(pr.isr == vec![1, 3]);
+        assert!(pr.leader == 1); // unchanged
+        assert!(pr.leader_epoch == 5); // unchanged (leader didn't change)
     }
 
     #[tokio::test]
@@ -222,13 +223,13 @@ mod tests {
         let img = img(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 2);
         let l = liveness(&[1, 2, 3]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert_eq!(updates.len(), 1);
+        assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
         assert!(pr.leader == 1 || pr.leader == 3, "leader was {}", pr.leader);
-        assert_eq!(pr.leader_epoch, 6); // bumped
+        assert!(pr.leader_epoch == 6); // bumped
         // Replica set unchanged — completion happens next tick.
-        assert_eq!(pr.adding_replicas, vec![3]);
-        assert_eq!(pr.removing_replicas, vec![2]);
+        assert!(pr.adding_replicas == vec![3]);
+        assert!(pr.removing_replicas == vec![2]);
     }
 
     #[tokio::test]
@@ -284,7 +285,7 @@ mod tests {
         let img = Arc::new(img_inner);
         let l = liveness(&[1, 2, 3]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert_eq!(updates.len(), 2);
+        assert!(updates.len() == 2);
     }
 
     #[tokio::test]
@@ -294,10 +295,10 @@ mod tests {
         let img = img(&[1, 2, 3, 4, 5], &[1, 2, 3, 4, 5], &[4, 5], &[1, 2], 3);
         let l = liveness(&[1, 2, 3, 4, 5]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert_eq!(updates.len(), 1);
+        assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert_eq!(pr.replicas, vec![3, 4, 5]);
-        assert_eq!(pr.isr, vec![3, 4, 5]);
+        assert!(pr.replicas == vec![3, 4, 5]);
+        assert!(pr.isr == vec![3, 4, 5]);
     }
 
     #[tokio::test]
@@ -307,8 +308,8 @@ mod tests {
         let img = img(&[1, 2, 3, 4], &[1, 2, 3, 4], &[4], &[2], 1);
         let l = liveness(&[1, 2, 3, 4]).await;
         let updates = compute_reassignment_progress(&img, &l).await;
-        assert_eq!(updates.len(), 1);
+        assert!(updates.len() == 1);
         let pr = first_partition(&updates[0]);
-        assert_eq!(pr.isr, vec![1, 3, 4]);
+        assert!(pr.isr == vec![1, 3, 4]);
     }
 }

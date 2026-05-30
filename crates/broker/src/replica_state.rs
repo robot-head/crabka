@@ -132,6 +132,7 @@ impl ReplicaState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn fresh() -> ReplicaState {
         ReplicaState::new()
@@ -140,7 +141,7 @@ mod tests {
     #[test]
     fn new_state_has_zero_hw_and_empty_membership() {
         let s = fresh();
-        assert_eq!(s.hw, 0);
+        assert!(s.hw == 0);
         assert!(s.isr.is_empty());
         assert!(s.per_follower.is_empty());
     }
@@ -149,9 +150,9 @@ mod tests {
     fn install_isr_seeds_non_leader_followers_at_zero() {
         let mut s = fresh();
         s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
-        assert_eq!(s.isr, [1, 2, 3].into_iter().collect());
-        assert_eq!(s.per_follower.get(&2).map(|f| f.leo), Some(0));
-        assert_eq!(s.per_follower.get(&3).map(|f| f.leo), Some(0));
+        assert!(s.isr == [1, 2, 3].into_iter().collect());
+        assert!(s.per_follower.get(&2).map(|f| f.leo) == Some(0));
+        assert!(s.per_follower.get(&3).map(|f| f.leo) == Some(0));
         assert!(!s.per_follower.contains_key(&1));
     }
 
@@ -162,8 +163,8 @@ mod tests {
         s.update_follower_leo(2, 50, 100);
         s.update_follower_leo(3, 75, 100);
         s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
-        assert_eq!(s.per_follower.get(&2).map(|f| f.leo), Some(50));
-        assert_eq!(s.per_follower.get(&3).map(|f| f.leo), Some(75));
+        assert!(s.per_follower.get(&2).map(|f| f.leo) == Some(50));
+        assert!(s.per_follower.get(&3).map(|f| f.leo) == Some(75));
     }
 
     #[test]
@@ -191,7 +192,7 @@ mod tests {
             s.per_follower.contains_key(&3),
             "a replica catching up toward ISR re-admission must keep its progress"
         );
-        assert_eq!(s.per_follower.get(&3).map(|f| f.leo), Some(75));
+        assert!(s.per_follower.get(&3).map(|f| f.leo) == Some(75));
     }
 
     #[test]
@@ -199,11 +200,11 @@ mod tests {
         let mut s = fresh();
         s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
         let hw1 = s.update_follower_leo(2, 50, 100);
-        assert_eq!(hw1, 0);
+        assert!(hw1 == 0);
         let hw2 = s.update_follower_leo(3, 75, 100);
-        assert_eq!(hw2, 50);
+        assert!(hw2 == 50);
         let hw3 = s.update_follower_leo(2, 80, 100);
-        assert_eq!(hw3, 75);
+        assert!(hw3 == 75);
     }
 
     #[test]
@@ -212,7 +213,7 @@ mod tests {
         s.install_isr(&[1, 2, 3], &[1, 2, 3], 1);
         s.update_follower_leo(2, 100, 100);
         s.update_follower_leo(3, 30, 100);
-        assert_eq!(s.hw, 30);
+        assert!(s.hw == 30);
     }
 
     #[test]
@@ -223,8 +224,8 @@ mod tests {
         // recompute_hw_for_leader_append. per_follower[2] = 0 from
         // install, so HW = min(100, 0) = 0.
         let hw = s.update_follower_leo(3, 999, 100);
-        assert_eq!(hw, 0);
-        assert_eq!(s.hw, 0);
+        assert!(hw == 0);
+        assert!(s.hw == 0);
     }
 
     #[test]
@@ -232,7 +233,7 @@ mod tests {
         let mut s = fresh();
         s.install_isr(&[1], &[1], 1);
         let hw = s.recompute_hw_for_leader_append(42);
-        assert_eq!(hw, 42);
+        assert!(hw == 42);
     }
 
     #[test]
@@ -240,15 +241,15 @@ mod tests {
         let mut s = fresh();
         s.install_isr(&[1, 2], &[1, 2], 1);
         let hw = s.update_follower_leo(2, 200, 100);
-        assert_eq!(hw, 100);
-        assert_eq!(s.per_follower.get(&2).map(|f| f.leo), Some(100));
+        assert!(hw == 100);
+        assert!(s.per_follower.get(&2).map(|f| f.leo) == Some(100));
     }
 
     #[test]
     fn empty_isr_hw_equals_leader_leo() {
         let mut s = fresh();
         let hw = s.recompute_hw_for_leader_append(50);
-        assert_eq!(hw, 50);
+        assert!(hw == 50);
     }
 
     #[test]

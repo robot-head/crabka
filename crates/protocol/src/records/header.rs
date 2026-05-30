@@ -120,6 +120,7 @@ const _: () = assert!(size_of::<RecordBatchHeader>() == HEADER_LEN);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_compression::CompressionType;
 
     macro_rules! attr_case {
@@ -127,27 +128,23 @@ mod tests {
             #[test]
             fn $name() {
                 let a = Attributes($bits);
-                assert_eq!(
-                    a.compression(),
-                    $codec,
+                assert!(
+                    a.compression() == $codec,
                     "compression mismatch in {}",
                     stringify!($name)
                 );
-                assert_eq!(
-                    a.timestamp_type(),
-                    $ts,
+                assert!(
+                    a.timestamp_type() == $ts,
                     "timestamp_type mismatch in {}",
                     stringify!($name)
                 );
-                assert_eq!(
-                    a.is_transactional(),
-                    $txn,
+                assert!(
+                    a.is_transactional() == $txn,
                     "is_transactional mismatch in {}",
                     stringify!($name)
                 );
-                assert_eq!(
-                    a.is_control_batch(),
-                    $ctrl,
+                assert!(
+                    a.is_control_batch() == $ctrl,
                     "is_control_batch mismatch in {}",
                     stringify!($name)
                 );
@@ -236,8 +233,8 @@ mod tests {
             .with_transactional(true)
             .with_control(false);
 
-        assert_eq!(a.compression(), CompressionType::Snappy);
-        assert_eq!(a.timestamp_type(), TimestampType::LogAppendTime);
+        assert!(a.compression() == CompressionType::Snappy);
+        assert!(a.timestamp_type() == TimestampType::LogAppendTime);
         assert!(a.is_transactional());
         assert!(!a.is_control_batch());
     }
@@ -248,8 +245,8 @@ mod tests {
         // must clear bit 1, not OR over it.
         let a = Attributes::default().with_compression(CompressionType::Lz4);
         let b = a.with_compression(CompressionType::Gzip);
-        assert_eq!(b.compression(), CompressionType::Gzip);
-        assert_eq!(b.0 & 0x07, 1);
+        assert!(b.compression() == CompressionType::Gzip);
+        assert!(b.0 & 0x07 == 1);
     }
 
     /// Build a sample 61-byte header with known values. Reused across the
@@ -278,7 +275,7 @@ mod tests {
             fn $name() {
                 let buf = sample_header_bytes();
                 let h = RecordBatchHeader::ref_from_bytes(&buf[..]).expect("header reinterpret");
-                assert_eq!(h.$field.get(), $expected);
+                assert!(h.$field.get() == $expected);
             }
         };
     }
@@ -299,12 +296,12 @@ mod tests {
     fn reads_magic_directly() {
         let buf = sample_header_bytes();
         let h = RecordBatchHeader::ref_from_bytes(&buf[..]).unwrap();
-        assert_eq!(h.magic, 2);
+        assert!(h.magic == 2);
     }
 
     #[test]
     fn header_is_exactly_61_bytes() {
-        assert_eq!(std::mem::size_of::<RecordBatchHeader>(), HEADER_LEN);
+        assert!(std::mem::size_of::<RecordBatchHeader>() == HEADER_LEN);
     }
 
     #[test]

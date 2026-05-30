@@ -3,6 +3,7 @@
 // snapshot file is asymmetric with the test); a separate compile check happens
 // via crates/protocol/build.rs in a later task.
 
+use assert2::assert;
 #[test]
 fn snapshot_smoke() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

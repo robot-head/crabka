@@ -68,6 +68,7 @@ fn refresh_buckets(image: &MetadataImage, buckets: &QuotaBuckets) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{ClientQuotaRecord, EntityKey, MetadataRecord, QuotaEntity};
 
     fn img_with_quota(
@@ -95,11 +96,11 @@ mod tests {
         let buckets = Arc::new(QuotaBuckets::new());
         let key: EntityKey = vec![("user".into(), Some("alice".into()))];
         let b = buckets.get_or_create("producer_byte_rate", &key, 0);
-        assert_eq!(b.rate(), 0);
+        assert!(b.rate() == 0);
 
         let img = img_with_quota(vec![("user", Some("alice"))], "producer_byte_rate", 2048.0);
         refresh_buckets(&img, &buckets);
-        assert_eq!(b.rate(), 2048);
+        assert!(b.rate() == 2048);
     }
 
     #[test]
@@ -107,10 +108,10 @@ mod tests {
         let buckets = Arc::new(QuotaBuckets::new());
         let key: EntityKey = vec![("user".into(), Some("alice".into()))];
         let b = buckets.get_or_create("producer_byte_rate", &key, 1024);
-        assert_eq!(b.rate(), 1024);
+        assert!(b.rate() == 1024);
 
         let empty = Arc::new(MetadataImage::new(uuid::Uuid::nil()));
         refresh_buckets(&empty, &buckets);
-        assert_eq!(b.rate(), 0);
+        assert!(b.rate() == 0);
     }
 }

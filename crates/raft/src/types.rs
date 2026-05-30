@@ -81,6 +81,7 @@ pub type Raft = openraft::Raft<TypeConfig>;
 #[cfg(test)]
 mod node_tests {
     use super::*;
+    use assert2::assert;
     #[test]
     fn node_controller_addr_prefers_controller_listener() {
         let n = Node {
@@ -99,6 +100,6 @@ mod node_tests {
             ],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         };
-        assert_eq!(n.controller_addr().unwrap().port(), 9093);
+        assert!(n.controller_addr().unwrap().port() == 9093);
     }
 }

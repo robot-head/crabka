@@ -98,6 +98,7 @@ fn encode_resp(version: i16, resp: &RemoveRaftVoterResponse) -> Result<Bytes, Br
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     /// Decode→encode round-trip at min and max versions.
     #[test]
@@ -115,7 +116,7 @@ mod tests {
             let bytes = encode_resp(version, &resp).expect("encode");
             let mut cur: &[u8] = &bytes;
             let decoded = RemoveRaftVoterResponse::decode(&mut cur, version).expect("decode");
-            assert_eq!(decoded.error_code, codes::INVALID_REQUEST);
+            assert!(decoded.error_code == codes::INVALID_REQUEST);
             assert!(cur.is_empty(), "all bytes consumed at v{version}");
         }
     }

@@ -96,6 +96,7 @@ pub fn encode_committed_records(entries: &[Entry<TypeConfig>], max_bytes: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{MetadataRecord, TopicRecord, from_kafka_record};
     use crabka_protocol::records::RecordBatch as OwnedBatch;
     use openraft::{LeaderId, LogId};
@@ -144,12 +145,12 @@ mod tests {
         let entries = vec![normal_entry(1, "a"), blank_entry(2), normal_entry(3, "b")];
         let bytes = encode_committed_records(&entries, usize::MAX);
         let batches = decode_all(&bytes);
-        assert_eq!(batches.len(), 3);
-        assert_eq!(batches[0].base_offset, 1);
-        assert_eq!(batches[1].base_offset, 2);
-        assert_eq!(batches[2].base_offset, 3);
+        assert!(batches.len() == 3);
+        assert!(batches[0].base_offset == 1);
+        assert!(batches[1].base_offset == 2);
+        assert!(batches[2].base_offset == 3);
         // Blank entry -> empty batch.
-        assert_eq!(batches[1].records.len(), 0);
+        assert!(batches[1].records.len() == 0);
         // Normal entry -> one decodable MetadataRecord.
         let rec = from_kafka_record(&batches[0].records[0]).expect("decode record");
         assert!(matches!(rec, MetadataRecord::V1Topic(t) if t.name == "a"));
@@ -161,7 +162,7 @@ mod tests {
         // max_bytes = 1 forces truncation after the first batch.
         let bytes = encode_committed_records(&entries, 1);
         let batches = decode_all(&bytes);
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].base_offset, 1);
+        assert!(batches.len() == 1);
+        assert!(batches[0].base_offset == 1);
     }
 }

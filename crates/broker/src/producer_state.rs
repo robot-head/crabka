@@ -244,12 +244,13 @@ impl ProducerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[tokio::test]
     async fn first_batch_appends() {
         let s = ProducerState::new();
         let d = s.check("t", 0, 1000, 0, 0, 4).await;
-        assert_eq!(d, Decision::Append);
+        assert!(d == Decision::Append);
     }
 
     #[tokio::test]
@@ -260,7 +261,7 @@ mod tests {
         )
         .await;
         let d = s.check("t", 0, 1000, 0, 5, 2).await;
-        assert_eq!(d, Decision::Append);
+        assert!(d == Decision::Append);
     }
 
     #[tokio::test]
@@ -268,7 +269,7 @@ mod tests {
         let s = ProducerState::new();
         s.commit("t", 0, 1000, 0, 0, 4, 0, 1).await;
         let d = s.check("t", 0, 1000, 0, 0, 4).await;
-        assert_eq!(d, Decision::Duplicate { base_offset: 0 });
+        assert!(d == Decision::Duplicate { base_offset: 0 });
     }
 
     #[tokio::test]
@@ -277,7 +278,7 @@ mod tests {
         s.commit("t", 0, 1000, 0, 0, 4, 0, 1).await;
         // Last seq is 4; next valid base_seq is 5. Sending 10 → OutOfOrder.
         let d = s.check("t", 0, 1000, 0, 10, 2).await;
-        assert_eq!(d, Decision::OutOfOrder);
+        assert!(d == Decision::OutOfOrder);
     }
 
     #[tokio::test]
@@ -285,7 +286,7 @@ mod tests {
         let s = ProducerState::new();
         s.commit("t", 0, 1000, 5, 0, 4, 0, 1).await;
         let d = s.check("t", 0, 1000, 4, 5, 2).await;
-        assert_eq!(d, Decision::Fenced);
+        assert!(d == Decision::Fenced);
     }
 
     #[tokio::test]
@@ -293,9 +294,9 @@ mod tests {
         let s = ProducerState::new();
         s.commit("t", 3, 1000, 0, 0, 4, 7, 1).await;
         let snap = s.snapshot("t", 3).await;
-        assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].0, 1000);
-        assert_eq!(snap[0].1.base_offset, 7);
+        assert!(snap.len() == 1);
+        assert!(snap[0].0 == 1000);
+        assert!(snap[0].1.base_offset == 7);
         // Untouched partition / topic report empty without panicking.
         assert!(s.snapshot("t", 0).await.is_empty());
         assert!(s.snapshot("other", 3).await.is_empty());
@@ -318,10 +319,10 @@ mod tests {
         // now = 10_000, ttl = 5_000 → pid 1 (age 9_000) expires, pid 2
         // (age 1_000) survives.
         let evicted = s.expire_older_than(10_000, 5_000).await;
-        assert_eq!(evicted, 1);
+        assert!(evicted == 1);
         let snap = s.snapshot("t", 0).await;
-        assert_eq!(snap.len(), 1);
-        assert_eq!(snap[0].0, 2, "only the recently-active producer survives");
+        assert!(snap.len() == 1);
+        assert!(snap[0].0 == 2, "only the recently-active producer survives");
     }
 
     #[tokio::test]
@@ -333,13 +334,13 @@ mod tests {
             h.lock().await.entries.get_mut(&1).unwrap().last_activity_ms = 0;
         }
         let evicted = s.expire_older_than(1_000_000, 1).await;
-        assert_eq!(evicted, 1);
+        assert!(evicted == 1);
         // The empty partition and topic maps are pruned.
         assert!(
             s.by_topic.get("t").is_none(),
             "empty topic slot must be removed"
         );
         // A subsequent produce still works after pruning.
-        assert_eq!(s.check("t", 0, 1, 0, 0, 0).await, Decision::Append);
+        assert!(s.check("t", 0, 1, 0, 0, 0).await == Decision::Append);
     }
 }

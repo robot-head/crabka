@@ -26,6 +26,7 @@ impl Authorizer for AllowAllAuthorizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{AclOperation, ResourceType};
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
@@ -47,9 +48,6 @@ mod tests {
             resource_name: "anything",
             operation: AclOperation::Write,
         };
-        assert_eq!(
-            AllowAllAuthorizer.authorize(&img, &req),
-            AuthorizationResult::Allow
-        );
+        assert!(AllowAllAuthorizer.authorize(&img, &req) == AuthorizationResult::Allow);
     }
 }

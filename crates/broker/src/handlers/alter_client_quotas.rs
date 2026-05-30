@@ -215,6 +215,7 @@ fn encode_response<R: Encode>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_protocol::owned::alter_client_quotas_request::{EntityData, EntryData, OpData};
 
     fn entry(entity: Vec<(&str, Option<&str>)>, ops: Vec<(&str, f64, bool)>) -> EntryData {
@@ -247,12 +248,12 @@ mod tests {
             vec![("producer_byte_rate", 1024.0, false)],
         );
         let records = process_one_entry(&e).expect("ok");
-        assert_eq!(records.len(), 1);
+        assert!(records.len() == 1);
         let MetadataRecord::V1ClientQuota(r) = &records[0] else {
             panic!("wrong variant")
         };
-        assert_eq!(r.config_key, "producer_byte_rate");
-        assert_eq!(r.config_value, Some(1024.0));
+        assert!(r.config_key == "producer_byte_rate");
+        assert!(r.config_value == Some(1024.0));
     }
 
     #[test]
@@ -276,7 +277,7 @@ mod tests {
         let MetadataRecord::V1ClientQuota(r) = &records[0] else {
             panic!()
         };
-        assert_eq!(r.config_value, None);
+        assert!(r.config_value == None);
     }
 
     #[test]
@@ -286,7 +287,7 @@ mod tests {
             vec![("producer_byte_rate", 1024.0, false)],
         );
         let err = process_one_entry(&e).unwrap_err();
-        assert_eq!(err.0, INVALID_REQUEST);
+        assert!(err.0 == INVALID_REQUEST);
     }
 
     #[test]
@@ -296,7 +297,7 @@ mod tests {
             vec![("producer_byte_rate", 1024.0, false)],
         );
         let err = process_one_entry(&e).unwrap_err();
-        assert_eq!(err.0, INVALID_REQUEST);
+        assert!(err.0 == INVALID_REQUEST);
     }
 
     #[test]
@@ -306,21 +307,21 @@ mod tests {
             vec![("producer_byte_rate", -100.0, false)],
         );
         let err = process_one_entry(&e).unwrap_err();
-        assert_eq!(err.0, INVALID_CONFIG);
+        assert!(err.0 == INVALID_CONFIG);
 
         let e2 = entry(
             vec![("user", Some("alice"))],
             vec![("request_percentage", 250.0, false)],
         );
         let err2 = process_one_entry(&e2).unwrap_err();
-        assert_eq!(err2.0, INVALID_CONFIG);
+        assert!(err2.0 == INVALID_CONFIG);
 
         let e3 = entry(
             vec![("user", Some("alice"))],
             vec![("producer_byte_rate", f64::NAN, false)],
         );
         let err3 = process_one_entry(&e3).unwrap_err();
-        assert_eq!(err3.0, INVALID_CONFIG);
+        assert!(err3.0 == INVALID_CONFIG);
     }
 
     #[test]
@@ -330,12 +331,12 @@ mod tests {
             vec![("connection_creation_rate", 1.0, false)],
         );
         let records = process_one_entry(&e).expect("ok");
-        assert_eq!(records.len(), 1);
+        assert!(records.len() == 1);
         let MetadataRecord::V1ClientQuota(r) = &records[0] else {
             panic!()
         };
-        assert_eq!(r.config_key, "connection_creation_rate");
-        assert_eq!(r.config_value, Some(1.0));
+        assert!(r.config_key == "connection_creation_rate");
+        assert!(r.config_value == Some(1.0));
     }
 
     #[test]
@@ -345,7 +346,7 @@ mod tests {
             vec![("connection_creation_rate", 1.0, false)],
         );
         let err = process_one_entry(&e).unwrap_err();
-        assert_eq!(err.0, INVALID_REQUEST);
+        assert!(err.0 == INVALID_REQUEST);
     }
 
     #[test]
@@ -355,11 +356,11 @@ mod tests {
             vec![("controller_mutation_rate", 2.0, false)],
         );
         let records = process_one_entry(&e).expect("ok");
-        assert_eq!(records.len(), 1);
+        assert!(records.len() == 1);
         let MetadataRecord::V1ClientQuota(r) = &records[0] else {
             panic!("wrong variant");
         };
-        assert_eq!(r.config_key, "controller_mutation_rate");
-        assert_eq!(r.config_value, Some(2.0));
+        assert!(r.config_key == "controller_mutation_rate");
+        assert!(r.config_value == Some(2.0));
     }
 }

@@ -3,6 +3,7 @@
 //! triggers a controller snapshot, then fetches the `__cluster_metadata`
 //! snapshot byte range over the wire and asserts the page is served.
 
+use assert2::assert;
 use std::time::{Duration, Instant};
 
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -53,7 +54,7 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
         })
         .await
         .unwrap();
-    assert_eq!(resp.topics[0].error_code, 0);
+    assert!(resp.topics[0].error_code == 0);
 
     env.broker
         .trigger_snapshot_for_test()
@@ -65,10 +66,10 @@ async fn fetch_snapshot_serves_metadata_snapshot() {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let out = env.client.send(fetch_at(0)).await.unwrap();
-        assert_eq!(out.error_code, 0, "top-level error_code");
+        assert!(out.error_code == 0, "top-level error_code");
         let part = &out.topics[0].partitions[0];
         if part.error_code == 0 {
-            assert_eq!(part.index, 0);
+            assert!(part.index == 0);
             assert!(
                 part.size > 0,
                 "served snapshot reports a non-zero total size"
@@ -97,9 +98,9 @@ async fn fetch_snapshot_rejects_non_metadata_topic() {
     let mut req = fetch_at(0);
     req.topics[0].name = "not-metadata".into();
     let out = env.client.send(req).await.unwrap();
-    assert_eq!(out.error_code, 0, "top-level error_code is success");
+    assert!(out.error_code == 0, "top-level error_code is success");
     // INVALID_TOPIC_EXCEPTION (17) for any topic other than __cluster_metadata.
-    assert_eq!(out.topics[0].partitions[0].error_code, 17);
+    assert!(out.topics[0].partitions[0].error_code == 17);
 
     env.broker.shutdown().await;
 }

@@ -1519,6 +1519,7 @@ mod tests {
     use crate::crd::{
         KafkaNodePoolSpec, KafkaSpec, MetadataTemplate, PersistentClaimSpec, PodTemplate, Storage,
     };
+    use assert2::assert;
     use std::collections::BTreeMap;
 
     fn parent_fixture(name: &str) -> Kafka {
@@ -1574,7 +1575,7 @@ mod tests {
         let parent = parent_fixture("demo");
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
-        assert_eq!(sts.metadata.name.as_deref(), Some("demo-brokers"));
+        assert!(sts.metadata.name.as_deref() == Some("demo-brokers"));
     }
 
     #[test]
@@ -1583,7 +1584,7 @@ mod tests {
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).unwrap();
         let spec = sts.spec.expect("sts spec");
-        assert_eq!(spec.service_name.as_deref(), Some("demo-broker-headless"));
+        assert!(spec.service_name.as_deref() == Some("demo-broker-headless"));
     }
 
     #[test]
@@ -1598,16 +1599,13 @@ mod tests {
             .as_ref()
             .and_then(|m| m.labels.as_ref())
             .expect("pod template labels");
-        assert_eq!(
+        assert!(
             pod_labels
                 .get("app.kubernetes.io/instance")
-                .map(String::as_str),
-            Some("demo")
+                .map(String::as_str)
+                == Some("demo")
         );
-        assert_eq!(
-            pod_labels.get("crabka.io/pool").map(String::as_str),
-            Some("brokers")
-        );
+        assert!(pod_labels.get("crabka.io/pool").map(String::as_str) == Some("brokers"));
     }
 
     #[test]
@@ -1625,7 +1623,7 @@ mod tests {
             .iter()
             .find(|e| e.name == "NODE_ID_START")
             .expect("NODE_ID_START env");
-        assert_eq!(node_id_start.value.as_deref(), Some("42"));
+        assert!(node_id_start.value.as_deref() == Some("42"));
 
         // The shell script should combine NODE_ID_START + the pod ordinal.
         let args = init.args.as_ref().expect("init args");
@@ -1671,7 +1669,7 @@ mod tests {
             .iter()
             .find(|e| e["name"] == "CRABKA_METADATA_VERSION")
             .expect("CRABKA_METADATA_VERSION env present");
-        assert_eq!(mv["value"], "4.0");
+        assert!(mv["value"] == "4.0");
     }
 
     #[test]
@@ -1690,9 +1688,8 @@ mod tests {
             .iter()
             .find(|e| e.name == "CRABKA_METADATA_VERSION")
             .expect("CRABKA_METADATA_VERSION env present");
-        assert_eq!(
-            mv.value.as_deref(),
-            Some("3.7"),
+        assert!(
+            mv.value.as_deref() == Some("3.7"),
             "init container must receive short major.minor form, not the 3-part kafka_version"
         );
     }
@@ -1721,9 +1718,8 @@ mod tests {
         )
         .unwrap()
         .short();
-        assert_eq!(
-            mv.value.as_deref(),
-            Some(max_short),
+        assert!(
+            mv.value.as_deref() == Some(max_short),
             "out-of-range kafka_version must clamp to MAX short form ({max_short}), \
              not the unsupported \"4.1\""
         );
@@ -1793,12 +1789,9 @@ mod tests {
         });
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let pod_labels = sts.spec.unwrap().template.metadata.unwrap().labels.unwrap();
-        assert_eq!(pod_labels.get("team").map(String::as_str), Some("platform"));
+        assert!(pod_labels.get("team").map(String::as_str) == Some("platform"));
         // operator-managed name MUST win
-        assert_eq!(
-            pod_labels.get("app.kubernetes.io/name").map(String::as_str),
-            Some(APP_LABEL)
-        );
+        assert!(pod_labels.get("app.kubernetes.io/name").map(String::as_str) == Some(APP_LABEL));
     }
 
     #[test]
@@ -1821,10 +1814,7 @@ mod tests {
             .unwrap()
             .annotations
             .unwrap();
-        assert_eq!(
-            anno.get("crabka.io/test-anno").map(String::as_str),
-            Some("yes")
-        );
+        assert!(anno.get("crabka.io/test-anno").map(String::as_str) == Some("yes"));
     }
 
     #[test]
@@ -1845,7 +1835,7 @@ mod tests {
         });
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let rendered = sts.spec.unwrap().template.spec.unwrap().affinity;
-        assert_eq!(rendered, Some(affinity));
+        assert!(rendered == Some(affinity));
     }
 
     #[test]
@@ -1870,7 +1860,7 @@ mod tests {
             .unwrap()
             .tolerations
             .unwrap();
-        assert_eq!(tols, vec![tol]);
+        assert!(tols == vec![tol]);
     }
 
     #[test]
@@ -1890,7 +1880,7 @@ mod tests {
             .unwrap()
             .node_selector
             .unwrap();
-        assert_eq!(rendered.get("disktype").map(String::as_str), Some("ssd"));
+        assert!(rendered.get("disktype").map(String::as_str) == Some("ssd"));
     }
 
     #[test]
@@ -1919,10 +1909,7 @@ mod tests {
             .unwrap()
             .annotations
             .unwrap();
-        assert_eq!(
-            anno.get("crabka.io/config-hash").map(String::as_str),
-            Some("abc123")
-        );
+        assert!(anno.get("crabka.io/config-hash").map(String::as_str) == Some("abc123"));
     }
 
     #[test]
@@ -1989,14 +1976,11 @@ mod tests {
             );
         }
         let vct = spec.volume_claim_templates.unwrap();
-        assert_eq!(vct.len(), 1);
+        assert!(vct.len() == 1);
         let data_pvc = &vct[0];
-        assert_eq!(data_pvc.metadata.name.as_deref(), Some("data"));
+        assert!(data_pvc.metadata.name.as_deref() == Some("data"));
         let pvc_spec = data_pvc.spec.as_ref().unwrap();
-        assert_eq!(
-            pvc_spec.access_modes.as_deref(),
-            Some(["ReadWriteOnce".to_string()].as_slice())
-        );
+        assert!(pvc_spec.access_modes.as_deref() == Some(["ReadWriteOnce".to_string()].as_slice()));
         let req = pvc_spec
             .resources
             .as_ref()
@@ -2004,8 +1988,8 @@ mod tests {
             .requests
             .as_ref()
             .unwrap();
-        assert_eq!(req.get("storage").map(|q| q.0.as_str()), Some("10Gi"));
-        assert_eq!(pvc_spec.storage_class_name.as_deref(), Some("fast-ssd"));
+        assert!(req.get("storage").map(|q| q.0.as_str()) == Some("10Gi"));
+        assert!(pvc_spec.storage_class_name.as_deref() == Some("fast-ssd"));
     }
 
     #[test]
@@ -2041,14 +2025,8 @@ mod tests {
             .labels
             .clone()
             .expect("PVC has labels");
-        assert_eq!(
-            labels.get("app.kubernetes.io/instance").map(String::as_str),
-            Some("demo")
-        );
-        assert_eq!(
-            labels.get("crabka.io/pool").map(String::as_str),
-            Some("brokers")
-        );
+        assert!(labels.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo"));
+        assert!(labels.get("crabka.io/pool").map(String::as_str) == Some("brokers"));
     }
 
     #[test]
@@ -2065,8 +2043,8 @@ mod tests {
             .unwrap()
             .persistent_volume_claim_retention_policy
             .unwrap();
-        assert_eq!(policy.when_deleted.as_deref(), Some("Delete"));
-        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+        assert!(policy.when_deleted.as_deref() == Some("Delete"));
+        assert!(policy.when_scaled.as_deref() == Some("Retain"));
     }
 
     #[test]
@@ -2083,8 +2061,8 @@ mod tests {
             .unwrap()
             .persistent_volume_claim_retention_policy
             .unwrap();
-        assert_eq!(policy.when_deleted.as_deref(), Some("Retain"));
-        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+        assert!(policy.when_deleted.as_deref() == Some("Retain"));
+        assert!(policy.when_scaled.as_deref() == Some("Retain"));
     }
 
     #[test]
@@ -2272,10 +2250,10 @@ mod tests {
         let pool = jbod_pool(&[(0, "10Gi", None), (1, "20Gi", Some("fast-ssd"))], false);
         let sts = render_statefulset(&parent_fixture("demo"), &pool, "img:1").unwrap();
         let vct = sts.spec.unwrap().volume_claim_templates.unwrap();
-        assert_eq!(vct.len(), 2);
+        assert!(vct.len() == 2);
         // Primary (lowest id) keeps the `data` name.
-        assert_eq!(vct[0].metadata.name.as_deref(), Some("data"));
-        assert_eq!(vct[1].metadata.name.as_deref(), Some("data-1"));
+        assert!(vct[0].metadata.name.as_deref() == Some("data"));
+        assert!(vct[1].metadata.name.as_deref() == Some("data-1"));
         let req0 = vct[0]
             .spec
             .as_ref()
@@ -2286,7 +2264,7 @@ mod tests {
             .requests
             .as_ref()
             .unwrap();
-        assert_eq!(req0.get("storage").map(|q| q.0.as_str()), Some("10Gi"));
+        assert!(req0.get("storage").map(|q| q.0.as_str()) == Some("10Gi"));
         let req1 = vct[1]
             .spec
             .as_ref()
@@ -2297,15 +2275,9 @@ mod tests {
             .requests
             .as_ref()
             .unwrap();
-        assert_eq!(req1.get("storage").map(|q| q.0.as_str()), Some("20Gi"));
-        assert_eq!(
-            vct[0].spec.as_ref().unwrap().storage_class_name.as_deref(),
-            None
-        );
-        assert_eq!(
-            vct[1].spec.as_ref().unwrap().storage_class_name.as_deref(),
-            Some("fast-ssd")
-        );
+        assert!(req1.get("storage").map(|q| q.0.as_str()) == Some("20Gi"));
+        assert!(vct[0].spec.as_ref().unwrap().storage_class_name.as_deref() == None);
+        assert!(vct[1].spec.as_ref().unwrap().storage_class_name.as_deref() == Some("fast-ssd"));
     }
 
     #[test]
@@ -2321,7 +2293,7 @@ mod tests {
             .iter()
             .map(|t| t.metadata.name.as_deref().unwrap())
             .collect();
-        assert_eq!(names, vec!["data", "data-1", "data-2"]);
+        assert!(names == vec!["data", "data-1", "data-2"]);
     }
 
     #[test]
@@ -2340,10 +2312,7 @@ mod tests {
             .find(|e| e.name == "CRABKA_EXTRA_LOG_DIRS")
             .expect("CRABKA_EXTRA_LOG_DIRS env present for JBOD");
         // Primary (`/var/lib/crabka/data`) excluded; extras sorted by id.
-        assert_eq!(
-            extra.value.as_deref(),
-            Some("/var/lib/crabka/data-1,/var/lib/crabka/data-2")
-        );
+        assert!(extra.value.as_deref() == Some("/var/lib/crabka/data-1,/var/lib/crabka/data-2"));
     }
 
     #[test]
@@ -2391,8 +2360,8 @@ mod tests {
             .unwrap()
             .persistent_volume_claim_retention_policy
             .unwrap();
-        assert_eq!(policy.when_deleted.as_deref(), Some("Delete"));
-        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+        assert!(policy.when_deleted.as_deref() == Some("Delete"));
+        assert!(policy.when_scaled.as_deref() == Some("Retain"));
     }
 
     #[test]
@@ -2402,9 +2371,8 @@ mod tests {
         let vct = sts.spec.unwrap().volume_claim_templates.unwrap();
         for t in &vct {
             let labels = t.metadata.labels.clone().expect("PVC labels");
-            assert_eq!(
-                labels.get("app.kubernetes.io/instance").map(String::as_str),
-                Some("demo"),
+            assert!(
+                labels.get("app.kubernetes.io/instance").map(String::as_str) == Some("demo"),
                 "every JBOD PVC inherits the GC instance label"
             );
         }
@@ -2505,7 +2473,7 @@ mod tests {
     fn build_main_script_disabled_matches_slice_25_constant() {
         // Upgrade-stability contract: clusters with metrics_config=None
         // must get a byte-identical pod template.
-        assert_eq!(build_main_script(false), MAIN_SCRIPT);
+        assert!(build_main_script(false) == MAIN_SCRIPT);
     }
 
     #[test]
@@ -2593,11 +2561,11 @@ mod tests {
             .find(|v| v.name == "gssapi-keytab")
             .expect("gssapi-keytab volume present");
         let secret = kt.secret.as_ref().expect("keytab volume is a Secret");
-        assert_eq!(secret.secret_name.as_deref(), Some("broker-keytab"));
+        assert!(secret.secret_name.as_deref() == Some("broker-keytab"));
         let items = secret.items.as_ref().expect("projected items");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].key, "krb5.keytab");
-        assert_eq!(items[0].path, "keytab");
+        assert!(items.len() == 1);
+        assert!(items[0].key == "krb5.keytab");
+        assert!(items[0].path == "keytab");
     }
 
     #[test]
@@ -2629,10 +2597,7 @@ mod tests {
             .iter()
             .find(|e| e.name == "KRB5_CONFIG")
             .expect("KRB5_CONFIG env present");
-        assert_eq!(
-            krb5_config.value.as_deref(),
-            Some("/etc/crabka/krb5/krb5.conf")
-        );
+        assert!(krb5_config.value.as_deref() == Some("/etc/crabka/krb5/krb5.conf"));
 
         let volumes = pod_spec.volumes.unwrap_or_default();
         let kc = volumes
@@ -2640,10 +2605,10 @@ mod tests {
             .find(|v| v.name == "krb5-conf")
             .expect("krb5-conf volume present");
         let secret = kc.secret.as_ref().expect("krb5-conf volume is a Secret");
-        assert_eq!(secret.secret_name.as_deref(), Some("krb5-conf"));
+        assert!(secret.secret_name.as_deref() == Some("krb5-conf"));
         let items = secret.items.as_ref().expect("projected items");
-        assert_eq!(items[0].key, "config");
-        assert_eq!(items[0].path, "krb5.conf");
+        assert!(items[0].key == "config");
+        assert!(items[0].path == "krb5.conf");
     }
 
     #[test]
@@ -2688,8 +2653,8 @@ mod tests {
             .ports
             .clone()
             .unwrap();
-        assert_eq!(ports.len(), 1);
-        assert_eq!(ports[0].name.as_deref(), Some("kafka-internal"));
+        assert!(ports.len() == 1);
+        assert!(ports[0].name.as_deref() == Some("kafka-internal"));
     }
 
     #[test]
@@ -2728,9 +2693,9 @@ mod tests {
             .as_ref()
             .and_then(|vf| vf.config_map_key_ref.as_ref())
             .expect("RUST_LOG sourced from configMapKeyRef");
-        assert_eq!(cm_ref.name, "demo-broker-config");
-        assert_eq!(cm_ref.key, "rust.log");
-        assert_eq!(cm_ref.optional, Some(true));
+        assert!(cm_ref.name == "demo-broker-config");
+        assert!(cm_ref.key == "rust.log");
+        assert!(cm_ref.optional == Some(true));
         // Value must be sourced (not literal) so a ConfigMap update + config
         // hash roll re-reads it.
         assert!(rust_log.value.is_none());
@@ -2790,8 +2755,8 @@ mod tests {
             .as_ref()
             .and_then(|vf| vf.secret_key_ref.as_ref())
             .expect("secretKeyRef present");
-        assert_eq!(secret_ref.name, "dt-master");
-        assert_eq!(secret_ref.key, "secret-key");
+        assert!(secret_ref.name == "dt-master");
+        assert!(secret_ref.key == "secret-key");
     }
 
     /// Explicit `key` override surfaces in the `SecretKeySelector`.
@@ -2817,8 +2782,8 @@ mod tests {
             .and_then(|e| e.value_from.as_ref())
             .and_then(|vf| vf.secret_key_ref.as_ref())
             .expect("secretKeyRef present");
-        assert_eq!(secret_ref.name, "dt-master");
-        assert_eq!(secret_ref.key, "hmac");
+        assert!(secret_ref.name == "dt-master");
+        assert!(secret_ref.key == "hmac");
     }
 
     #[test]
@@ -2835,7 +2800,7 @@ mod tests {
             .ports
             .clone()
             .unwrap();
-        assert_eq!(ports.len(), 2);
+        assert!(ports.len() == 2);
         assert!(
             ports
                 .iter()
@@ -2909,8 +2874,8 @@ mod tests {
             .iter()
             .find(|m| m.name == "oauth-jwks-trust")
             .expect("oauth-jwks-trust mount present");
-        assert_eq!(mount.mount_path, "/etc/crabka/oauth-jwks-trust");
-        assert_eq!(mount.read_only, Some(true));
+        assert!(mount.mount_path == "/etc/crabka/oauth-jwks-trust");
+        assert!(mount.read_only == Some(true));
 
         // Pod volume sources the managed `{kafka}-oauth-jwks-trust`
         // Secret with the same 0o400 mode as the other CA volumes.
@@ -2922,8 +2887,8 @@ mod tests {
             .find(|v| v.name == "oauth-jwks-trust")
             .expect("oauth-jwks-trust volume present");
         let secret = volume.secret.as_ref().expect("secret volume source");
-        assert_eq!(secret.secret_name.as_deref(), Some("demo-oauth-jwks-trust"));
-        assert_eq!(secret.default_mode, Some(0o400));
+        assert!(secret.secret_name.as_deref() == Some("demo-oauth-jwks-trust"));
+        assert!(secret.default_mode == Some(0o400));
     }
 
     #[test]
@@ -3085,8 +3050,8 @@ mod tests {
             .iter()
             .find(|m| m.name == "oauth-introspection-secret")
             .expect("oauth-introspection-secret mount present");
-        assert_eq!(mount.mount_path, "/etc/crabka/oauth-introspection");
-        assert_eq!(mount.read_only, Some(true));
+        assert!(mount.mount_path == "/etc/crabka/oauth-introspection");
+        assert!(mount.read_only == Some(true));
 
         // Pod volume sources the user-owned Secret directly with a
         // projected items mapping (user's key -> fixed path
@@ -3100,12 +3065,12 @@ mod tests {
             .find(|v| v.name == "oauth-introspection-secret")
             .expect("oauth-introspection-secret volume present");
         let secret = volume.secret.as_ref().expect("secret volume source");
-        assert_eq!(secret.secret_name.as_deref(), Some("my-oauth-secret"));
-        assert_eq!(secret.default_mode, Some(0o400));
+        assert!(secret.secret_name.as_deref() == Some("my-oauth-secret"));
+        assert!(secret.default_mode == Some(0o400));
         let items = secret.items.as_ref().expect("projected items present");
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].key, "my-key");
-        assert_eq!(items[0].path, "client-secret");
+        assert!(items.len() == 1);
+        assert!(items[0].key == "my-key");
+        assert!(items[0].path == "client-secret");
     }
 
     /// JWT-mode OAuth listeners (the default —
@@ -3212,10 +3177,7 @@ mod tests {
             .iter()
             .find(|m| m.name == "tier-storage")
             .expect("tier-storage mount present");
-        assert_eq!(
-            mount.mount_path,
-            crate::controller::listeners::TIER_STORAGE_PATH
-        );
+        assert!(mount.mount_path == crate::controller::listeners::TIER_STORAGE_PATH);
         // The mount is writable (no read_only flag).
         assert!(
             mount.read_only.is_none() || mount.read_only == Some(false),
@@ -3256,8 +3218,8 @@ mod tests {
             .as_ref()
             .and_then(|v| v.secret_key_ref.as_ref())
             .expect("secretKeyRef present");
-        assert_eq!(ak_ref.name, "crabka-s3-creds");
-        assert_eq!(ak_ref.key, "access-key-id");
+        assert!(ak_ref.name == "crabka-s3-creds");
+        assert!(ak_ref.key == "access-key-id");
 
         let sk = env
             .iter()
@@ -3269,8 +3231,8 @@ mod tests {
             .as_ref()
             .and_then(|v| v.secret_key_ref.as_ref())
             .expect("secretKeyRef present");
-        assert_eq!(sk_ref.name, "crabka-s3-creds");
-        assert_eq!(sk_ref.key, "secret-access-key");
+        assert!(sk_ref.name == "crabka-s3-creds");
+        assert!(sk_ref.key == "secret-access-key");
     }
 
     /// S3 backend without `credentials` must produce a byte-identical
@@ -3410,8 +3372,8 @@ mod tests {
             .as_ref()
             .and_then(|r| r.requests.as_ref())
             .expect("resources.requests");
-        assert_eq!(req.get("storage").map(|q| q.0.as_str()), Some("50Gi"));
-        assert_eq!(spec.storage_class_name.as_deref(), Some("fast-ssd"));
+        assert!(req.get("storage").map(|q| q.0.as_str()) == Some("50Gi"));
+        assert!(spec.storage_class_name.as_deref() == Some("fast-ssd"));
         // Mount inside the broker container still lands at the canonical path.
         let broker = pod_spec
             .containers
@@ -3425,10 +3387,7 @@ mod tests {
             .iter()
             .find(|m| m.name == "tier-storage")
             .expect("tier-storage mount");
-        assert_eq!(
-            mount.mount_path,
-            crate::controller::listeners::TIER_STORAGE_PATH
-        );
+        assert!(mount.mount_path == crate::controller::listeners::TIER_STORAGE_PATH);
     }
 
     #[test]
@@ -3557,12 +3516,11 @@ mod tests {
             .persistent_volume_claim_retention_policy
             .as_ref()
             .expect("policy must exist when tier PVC is present");
-        assert_eq!(
-            policy.when_deleted.as_deref(),
-            Some("Delete"),
+        assert!(
+            policy.when_deleted.as_deref() == Some("Delete"),
             "delete_claim=true should map to whenDeleted=Delete"
         );
-        assert_eq!(policy.when_scaled.as_deref(), Some("Retain"));
+        assert!(policy.when_scaled.as_deref() == Some("Retain"));
     }
 
     #[test]
@@ -3630,12 +3588,12 @@ mod tests {
                 .clone()
                 .unwrap_or_default()
         };
-        assert_eq!(by_name("CRABKA_OTLP_ENABLED"), "true");
-        assert_eq!(by_name("CRABKA_OTLP_ENDPOINT"), "http://otel:4317");
-        assert_eq!(by_name("CRABKA_OTLP_PROTOCOL"), "http/protobuf");
-        assert_eq!(by_name("CRABKA_OTLP_SAMPLE_RATIO"), "0.25");
-        assert_eq!(by_name("OTEL_SERVICE_NAME"), "svc");
-        assert_eq!(by_name("CRABKA_OTLP_TIMEOUT_SECS"), "7");
+        assert!(by_name("CRABKA_OTLP_ENABLED") == "true");
+        assert!(by_name("CRABKA_OTLP_ENDPOINT") == "http://otel:4317");
+        assert!(by_name("CRABKA_OTLP_PROTOCOL") == "http/protobuf");
+        assert!(by_name("CRABKA_OTLP_SAMPLE_RATIO") == "0.25");
+        assert!(by_name("OTEL_SERVICE_NAME") == "svc");
+        assert!(by_name("CRABKA_OTLP_TIMEOUT_SECS") == "7");
     }
 
     #[test]
@@ -3763,9 +3721,9 @@ mod tests {
         let parent = parent_with_version_status("demo", Some(false), None);
         match version_gate(&parent) {
             VersionGate::Blocked(cond) => {
-                assert_eq!(cond.type_, "Ready");
-                assert_eq!(cond.status, "False");
-                assert_eq!(cond.reason, "KafkaVersionInvalid");
+                assert!(cond.type_ == "Ready");
+                assert!(cond.status == "False");
+                assert!(cond.reason == "KafkaVersionInvalid");
                 assert!(
                     cond.message.contains("KafkaVersionValid=False"),
                     "pool condition should surface the parent's verdict, got: {}",
@@ -3788,9 +3746,9 @@ mod tests {
         assert!(parent.status.is_none(), "fixture precondition");
         match version_gate(&parent) {
             VersionGate::Blocked(cond) => {
-                assert_eq!(cond.type_, "Ready");
-                assert_eq!(cond.status, "False");
-                assert_eq!(cond.reason, "WaitingForVersionValidation");
+                assert!(cond.type_ == "Ready");
+                assert!(cond.status == "False");
+                assert!(cond.reason == "WaitingForVersionValidation");
             }
             VersionGate::Cleared => {
                 panic!("missing parent version status must block pod creation")
@@ -3809,7 +3767,7 @@ mod tests {
         let pool = pool_fixture("brokers", "demo", 1);
         let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE)
             .expect("pods are created as today when the version is valid");
-        assert_eq!(sts.metadata.name.as_deref(), Some("demo-brokers"));
+        assert!(sts.metadata.name.as_deref() == Some("demo-brokers"));
     }
 
     #[test]

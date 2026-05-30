@@ -216,14 +216,15 @@ pub struct KafkaNodePoolStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaNodePool::crd();
-        assert_eq!(crd.spec.group, "crabka.io");
-        assert_eq!(crd.spec.names.kind, "KafkaNodePool");
-        assert_eq!(crd.spec.names.plural, "kafkanodepools");
+        assert!(crd.spec.group == "crabka.io");
+        assert!(crd.spec.names.kind == "KafkaNodePool");
+        assert!(crd.spec.names.plural == "kafkanodepools");
         assert!(
             crd.spec
                 .names
@@ -233,8 +234,8 @@ mod tests {
             "expected shortname `knp`, got {:?}",
             crd.spec.names.short_names
         );
-        assert_eq!(crd.spec.versions.len(), 1);
-        assert_eq!(crd.spec.versions[0].name, "v1alpha1");
+        assert!(crd.spec.versions.len() == 1);
+        assert!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -261,14 +262,14 @@ mod tests {
             "roles serialized in UpperCamelCase, got: {json}"
         );
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.spec, pool.spec);
+        assert!(back.spec == pool.spec);
     }
 
     #[test]
     fn spec_defaults_replicas_to_one() {
         let json = r#"{"roles":["Controller","Broker"],"nodeIdStart":0}"#;
         let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
-        assert_eq!(spec.replicas, 1);
+        assert!(spec.replicas == 1);
         assert!(spec.image.is_none());
         assert!(spec.resources.is_none());
     }
@@ -326,7 +327,7 @@ mod tests {
         assert!(json.contains("\"dedicated\""), "tolerations: {json}");
         assert!(json.contains("\"nodeSelector\""), "node_selector: {json}");
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.spec, pool.spec);
+        assert!(back.spec == pool.spec);
     }
 
     #[test]
@@ -349,7 +350,7 @@ mod tests {
             "expected flat tagged shape, got: {json}"
         );
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.spec, pool.spec);
+        assert!(back.spec == pool.spec);
     }
 
     #[test]
@@ -376,7 +377,7 @@ mod tests {
         assert!(json.contains("\"class\":\"fast-ssd\""), "got: {json}");
         assert!(json.contains("\"deleteClaim\":true"), "got: {json}");
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.spec, pool.spec);
+        assert!(back.spec == pool.spec);
     }
 
     #[test]
@@ -422,7 +423,7 @@ mod tests {
         assert!(json.contains("\"class\":\"fast-ssd\""), "got: {json}");
         assert!(json.contains("\"deleteClaim\":true"), "got: {json}");
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.spec, pool.spec);
+        assert!(back.spec == pool.spec);
     }
 
     #[test]
@@ -438,8 +439,8 @@ mod tests {
         let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
         match spec.storage {
             Some(Storage::Jbod(j)) => {
-                assert_eq!(j.volumes.len(), 2);
-                assert_eq!(j.volumes[0].id, 0);
+                assert!(j.volumes.len() == 2);
+                assert!(j.volumes[0].id == 0);
                 assert!(!j.delete_claim, "deleteClaim defaults to false");
             }
             other => panic!("expected Jbod, got {other:?}"),

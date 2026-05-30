@@ -102,42 +102,40 @@ fn is_reserved_keyword(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn camel_to_snake() {
-        assert_eq!(field_name("errorCode"), "error_code");
-        assert_eq!(field_name("apiKeys"), "api_keys");
-        assert_eq!(field_name("aclEntries"), "acl_entries");
-        assert_eq!(field_name("zkMigrationReady"), "zk_migration_ready");
+        assert!(field_name("errorCode") == "error_code");
+        assert!(field_name("apiKeys") == "api_keys");
+        assert!(field_name("aclEntries") == "acl_entries");
+        assert!(field_name("zkMigrationReady") == "zk_migration_ready");
     }
 
     #[test]
     fn pascal_to_snake() {
-        assert_eq!(field_name("ZkMigrationReady"), "zk_migration_ready");
-        assert_eq!(field_name("ApiVersionsRequest"), "api_versions_request");
+        assert!(field_name("ZkMigrationReady") == "zk_migration_ready");
+        assert!(field_name("ApiVersionsRequest") == "api_versions_request");
     }
 
     #[test]
     fn acronym_runs_stay_together() {
         // KafkaClusterID -> kafka_cluster_id (acronym ID at the end)
-        assert_eq!(field_name("KafkaClusterID"), "kafka_cluster_id");
+        assert!(field_name("KafkaClusterID") == "kafka_cluster_id");
         // HTTPSEndpoint -> https_endpoint (acronym followed by Title)
-        assert_eq!(field_name("HTTPSEndpoint"), "https_endpoint");
+        assert!(field_name("HTTPSEndpoint") == "https_endpoint");
     }
 
     #[test]
     fn reserved_keywords_get_underscore() {
-        assert_eq!(field_name("type"), "type_");
-        assert_eq!(field_name("Match"), "match_");
-        assert_eq!(field_name("loop"), "loop_");
+        assert!(field_name("type") == "type_");
+        assert!(field_name("Match") == "match_");
+        assert!(field_name("loop") == "loop_");
     }
 
     #[test]
     fn module_name_uses_snake_case() {
-        assert_eq!(module_name("ApiVersionsRequest"), "api_versions_request");
-        assert_eq!(
-            module_name("OffsetCommitResponse"),
-            "offset_commit_response"
-        );
+        assert!(module_name("ApiVersionsRequest") == "api_versions_request");
+        assert!(module_name("OffsetCommitResponse") == "offset_commit_response");
     }
 }

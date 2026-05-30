@@ -84,21 +84,16 @@ pub const FOLLOWER_THROTTLED_RATE_KEY: &str = "follower.replication.throttled.ra
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn empty_string_parses_as_none() {
-        assert_eq!(
-            ThrottledReplicas::parse("").unwrap(),
-            ThrottledReplicas::None
-        );
+        assert!(ThrottledReplicas::parse("").unwrap() == ThrottledReplicas::None);
     }
 
     #[test]
     fn wildcard_parses_as_all() {
-        assert_eq!(
-            ThrottledReplicas::parse("*").unwrap(),
-            ThrottledReplicas::All
-        );
+        assert!(ThrottledReplicas::parse("*").unwrap() == ThrottledReplicas::All);
     }
 
     #[test]

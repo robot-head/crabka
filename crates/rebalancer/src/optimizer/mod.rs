@@ -243,6 +243,7 @@ mod tests {
     use crate::goals::tests::FixedGoal;
     use crate::model::{BrokerView, PartitionView};
     use crate::scraper::UsageStore;
+    use assert2::assert;
     use std::sync::Arc;
 
     fn ctx() -> GoalContext {
@@ -310,8 +311,8 @@ mod tests {
         // Soft first in `goals` list — but optimizer must call hard first.
         let goals: Vec<&dyn Goal> = vec![&soft, &hard];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert_eq!(out.proposal.goals_applied[0], "hard");
-        assert_eq!(out.proposal.goals_applied[1], "soft");
+        assert!(out.proposal.goals_applied[0] == "hard");
+        assert!(out.proposal.goals_applied[1] == "soft");
     }
 
     #[test]
@@ -319,7 +320,7 @@ mod tests {
         let goals: Vec<&dyn Goal> = vec![];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
         assert!(out.proposal.movements.is_empty());
-        assert_eq!(out.proposal.status, ProposalStatus::Computed);
+        assert!(out.proposal.status == ProposalStatus::Computed);
     }
 
     #[test]
@@ -355,8 +356,8 @@ mod tests {
         };
         let goals: Vec<&dyn Goal> = vec![&g1, &g2];
         let out = optimize(&state(), &goals, &ctx()).unwrap();
-        assert_eq!(out.proposal.movements.len(), 1);
-        assert_eq!(out.proposal.movements[0].new_leader, 2);
+        assert!(out.proposal.movements.len() == 1);
+        assert!(out.proposal.movements[0].new_leader == 2);
     }
 
     #[test]
@@ -471,7 +472,7 @@ mod tests {
         let goals: Vec<&dyn Goal> = vec![&hard, &soft];
         let out = optimize(&s, &goals, &ctx).unwrap();
 
-        assert_eq!(out.proposal.movements.len(), 3);
+        assert!(out.proposal.movements.len() == 3);
         let z_count = out
             .proposal
             .movements
@@ -485,9 +486,12 @@ mod tests {
             .filter(|m| m.topic == "a")
             .count();
         // Both hard movements must survive.
-        assert_eq!(z_count, 2, "both hard ('z', _) movements must be kept");
+        assert!(z_count == 2, "both hard ('z', _) movements must be kept");
         // Exactly one soft movement fits in the remaining slot.
-        assert_eq!(a_count, 1, "exactly one soft ('a', _) movement should fit");
+        assert!(
+            a_count == 1,
+            "exactly one soft ('a', _) movement should fit"
+        );
     }
 
     #[test]

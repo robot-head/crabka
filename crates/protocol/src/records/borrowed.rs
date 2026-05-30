@@ -387,6 +387,7 @@ impl crate::Encode for RecordBatch<'_> {
 mod tests {
     use super::*;
     use crate::DecodeBorrow;
+    use assert2::assert;
     use bytes::BytesMut;
     use crabka_compression::CompressionType;
 
@@ -412,15 +413,15 @@ mod tests {
                 let mut cur: &[u8] = &encoded[..];
                 let borrowed = RecordBatch::decode_borrow(&mut cur, 0).unwrap();
                 assert!(cur.is_empty());
-                assert_eq!(borrowed.attributes(), owned.attributes);
+                assert!(borrowed.attributes() == owned.attributes);
 
                 let records: Vec<_> = borrowed.iter().collect::<Result<_, _>>().unwrap();
-                assert_eq!(records.len(), 1);
-                assert_eq!(records[0].key, Some(b"key".as_slice()));
-                assert_eq!(records[0].value, Some(b"value".as_slice()));
+                assert!(records.len() == 1);
+                assert!(records[0].key == Some(b"key".as_slice()));
+                assert!(records[0].value == Some(b"value".as_slice()));
 
                 let back_owned = borrowed.to_owned().unwrap();
-                assert_eq!(back_owned, owned);
+                assert!(back_owned == owned);
             }
         };
     }
@@ -474,6 +475,6 @@ mod tests {
 
         let mut out = BytesMut::new();
         borrowed.encode(&mut out, 0).unwrap();
-        assert_eq!(&out[..], &bytes_in[..]);
+        assert!(&out[..] == &bytes_in[..]);
     }
 }

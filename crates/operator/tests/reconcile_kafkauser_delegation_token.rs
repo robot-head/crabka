@@ -16,6 +16,7 @@
 //! broker-side act-as wire path is covered by `crabka_broker`'s own
 //! integration tests.
 
+use assert2::assert;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -190,9 +191,9 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
     });
     let (owner, renewers, max_lifetime_ms) =
         create_call.expect("CreateDelegationToken must have been issued");
-    assert_eq!(owner, "alice", "owner principal name (no User: prefix)");
-    assert_eq!(renewers, vec!["User:bob".to_string()]);
-    assert_eq!(max_lifetime_ms, -1, "unset spec field → broker default");
+    assert!(owner == "alice", "owner principal name (no User: prefix)");
+    assert!(renewers == vec!["User:bob".to_string()]);
+    assert!(max_lifetime_ms == -1, "unset spec field → broker default");
 
     // ── Secret PATCH body: four KIP-48 keys ────────────────────────
     let observed = state.take_observed();
@@ -336,13 +337,16 @@ async fn delegation_token_user_reconcile_renews_when_within_threshold() {
         .iter()
         .filter(|c| matches!(c, RecordedCall::RenewDelegationToken { .. }))
         .count();
-    assert_eq!(renews, 1, "expected exactly one Renew call, got: {calls:?}");
+    assert!(
+        renews == 1,
+        "expected exactly one Renew call, got: {calls:?}"
+    );
     let creates = calls
         .iter()
         .filter(|c| matches!(c, RecordedCall::CreateDelegationToken { .. }))
         .count();
-    assert_eq!(
-        creates, 1,
+    assert!(
+        creates == 1,
         "expected exactly one Create call, got: {calls:?}"
     );
 
@@ -398,7 +402,7 @@ async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
     {
         let store = fake_for_assert.lock().await;
         let tokens = store.delegation_tokens.lock().unwrap();
-        assert_eq!(tokens.len(), 1, "pass 1 must mint exactly one token");
+        assert!(tokens.len() == 1, "pass 1 must mint exactly one token");
     }
 
     // ── Pass 2: delete ────────────────────────────────────────────
@@ -420,17 +424,17 @@ async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
             )
         })
         .count();
-    assert_eq!(
-        describes, 2,
-        "expected 2 Describes (provision + finalizer), got: {calls:?}",
+    assert!(
+        describes == 2,
+        "expected 2 Describes (provision + finalizer), got: {calls:?}"
     );
     let expires = calls
         .iter()
         .filter(|c| matches!(c, RecordedCall::ExpireDelegationToken { .. }))
         .count();
-    assert_eq!(
-        expires, 1,
-        "expected exactly one Expire from the finalizer, got: {calls:?}",
+    assert!(
+        expires == 1,
+        "expected exactly one Expire from the finalizer, got: {calls:?}"
     );
 
     // ── Token store is now empty (Expire dropped the entry). ──────
@@ -442,9 +446,9 @@ async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
         .iter()
         .filter(|t| t.owner.principal_type == "User" && t.owner.name == "alice")
         .count();
-    assert_eq!(
-        owned, 0,
-        "Expire must have removed every token owned by User:alice",
+    assert!(
+        owned == 0,
+        "Expire must have removed every token owned by User:alice"
     );
 
     // ── Finalizer-removal PATCH landed on the KafkaUser itself. ───
@@ -457,10 +461,9 @@ async fn delegation_token_user_deletion_expires_token_and_removes_secret() {
     let patch = finalizer_patch.expect("finalizer-removal PATCH must have been observed");
     let body: serde_json::Value = serde_json::from_slice(patch.body()).unwrap();
     // The patch body clears the finalizer list.
-    assert_eq!(
-        body["metadata"]["finalizers"],
-        json!([]),
-        "finalizer-removal PATCH must empty the finalizer list",
+    assert!(
+        body["metadata"]["finalizers"] == json!([]),
+        "finalizer-removal PATCH must empty the finalizer list"
     );
 
     // 404 the would-be Secret GET (the operator doesn't issue one in

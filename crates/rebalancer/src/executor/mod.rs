@@ -387,6 +387,7 @@ mod tests {
     use crate::executor::phases::tests::{MockCall, MockClient};
     use crate::model::Movement;
     use crate::model::proposal::ProposalSummary;
+    use assert2::assert;
 
     fn cfg(dir: &std::path::Path) -> ExecutorConfig {
         ExecutorConfig {
@@ -463,12 +464,12 @@ mod tests {
 
         let calls = client.calls();
         let kinds: Vec<&str> = calls.iter().map(kind).collect();
-        assert_eq!(kinds.first(), Some(&"set"));
-        assert_eq!(kinds.last(), Some(&"del"));
+        assert!(kinds.first() == Some(&"set"));
+        assert!(kinds.last() == Some(&"del"));
         assert!(kinds.contains(&"submit"));
 
         let after = state.store.get("p1").unwrap();
-        assert_eq!(after.status, ProposalStatus::Completed);
+        assert!(after.status == ProposalStatus::Completed);
         assert!(after.terminated_at_ms > 0);
 
         // After a clean terminal the backend should have been tombstoned.
@@ -491,7 +492,7 @@ mod tests {
         exec.run().await;
 
         let after = state.store.get("p1").unwrap();
-        assert_eq!(after.status, ProposalStatus::Failed);
+        assert!(after.status == ProposalStatus::Failed);
         assert!(after.failure_reason.as_deref().unwrap().contains("Submit"));
         let kinds: Vec<&str> = client.calls().iter().map(kind).collect();
         assert!(kinds.contains(&"del"));
@@ -520,7 +521,7 @@ mod tests {
         handle.await.unwrap();
 
         let after = state.store.get("p1").unwrap();
-        assert_eq!(after.status, ProposalStatus::Cancelled);
+        assert!(after.status == ProposalStatus::Cancelled);
         let cancels: usize = client
             .calls()
             .iter()
@@ -542,9 +543,8 @@ mod tests {
         exec.run().await;
 
         let after = state.store.get("p1").unwrap();
-        assert_eq!(
-            after.status,
-            ProposalStatus::Cancelled,
+        assert!(
+            after.status == ProposalStatus::Cancelled,
             "cancel-before-Submit must produce Cancelled, not {:?}",
             after.status
         );
@@ -583,7 +583,7 @@ mod tests {
         exec.run().await;
 
         let after = state.store.get("p1").unwrap();
-        assert_eq!(after.status, ProposalStatus::Completed);
+        assert!(after.status == ProposalStatus::Completed);
         let dels: usize = client
             .calls()
             .iter()
@@ -597,6 +597,6 @@ mod tests {
                 )
             })
             .count();
-        assert_eq!(dels, 1);
+        assert!(dels == 1);
     }
 }

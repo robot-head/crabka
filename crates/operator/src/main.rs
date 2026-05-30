@@ -65,6 +65,7 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use clap::Parser;
 
     #[test]
@@ -72,7 +73,7 @@ mod tests {
         let cli = Cli::parse_from(["bin", "ca-renewal-check", "--namespace", "demo"]);
         match cli.command {
             Command::CaRenewalCheck(args) => {
-                assert_eq!(args.namespace.as_deref(), Some("demo"));
+                assert!(args.namespace.as_deref() == Some("demo"));
             }
             _ => panic!("expected CaRenewalCheck variant"),
         }

@@ -680,6 +680,7 @@ async fn prime_offsets(
 #[cfg(test)]
 mod retry_tests {
     use super::*;
+    use assert2::assert;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Resp {
@@ -704,8 +705,8 @@ mod retry_tests {
         )
         .await
         .unwrap();
-        assert_eq!(r.error_code, 0);
-        assert_eq!(calls.load(Ordering::SeqCst), 4);
+        assert!(r.error_code == 0);
+        assert!(calls.load(Ordering::SeqCst) == 4);
     }
 
     #[tokio::test(start_paused = true)]
@@ -719,7 +720,7 @@ mod retry_tests {
         .unwrap();
         // Deadline hit while still retriable: return the last response so the
         // caller's `error_code != 0` handling surfaces it.
-        assert_eq!(r.error_code, 15);
+        assert!(r.error_code == 15);
     }
 
     #[tokio::test(start_paused = true)]
@@ -735,8 +736,8 @@ mod retry_tests {
         )
         .await
         .unwrap();
-        assert_eq!(r.error_code, 25);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(r.error_code == 25);
+        assert!(calls.load(Ordering::SeqCst) == 1);
     }
 
     #[tokio::test(start_paused = true)]

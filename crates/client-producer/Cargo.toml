@@ -26,6 +26,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 crabka-broker = { version = "0.1", path = "../broker" }
 crabka-log = { version = "0.1", path = "../log" }
 crabka-client-consumer = { version = "0.1", path = "../client-consumer" }

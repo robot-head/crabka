@@ -6,6 +6,7 @@
 
 //! KIP-429 batch-4 T4A: broker-side JoinGroup protocol-set negotiation tests.
 
+use assert2::assert;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -87,8 +88,8 @@ async fn bootstrap_member_id(
         .send(req)
         .await
         .expect("first JoinGroup must round-trip");
-    assert_eq!(
-        resp.error_code, ERR_MEMBER_ID_REQUIRED,
+    assert!(
+        resp.error_code == ERR_MEMBER_ID_REQUIRED,
         "first JoinGroup (empty member_id) must return MEMBER_ID_REQUIRED (79), got {resp:?}"
     );
     assert!(
@@ -295,13 +296,12 @@ async fn vote_picks_cooperative_when_majority() {
     handle.shutdown().await;
 
     for (label, resp) in [("A", &resp_a), ("B", &resp_b), ("C", &resp_c)] {
-        assert_eq!(
-            resp.error_code, ERR_NONE,
+        assert!(
+            resp.error_code == ERR_NONE,
             "member {label} must succeed, got {resp:?}"
         );
-        assert_eq!(
-            resp.protocol_name.as_deref(),
-            Some("cooperative-sticky"),
+        assert!(
+            resp.protocol_name.as_deref() == Some("cooperative-sticky"),
             "member {label} must see protocol_name=cooperative-sticky (2 votes vs 1 for range), got {resp:?}"
         );
     }
@@ -370,13 +370,12 @@ async fn vote_ties_broken_lexicographically() {
     handle.shutdown().await;
 
     for (label, resp) in [("A", &resp_a), ("B", &resp_b)] {
-        assert_eq!(
-            resp.error_code, ERR_NONE,
+        assert!(
+            resp.error_code == ERR_NONE,
             "member {label} must succeed, got {resp:?}"
         );
-        assert_eq!(
-            resp.protocol_name.as_deref(),
-            Some("cooperative-sticky"),
+        assert!(
+            resp.protocol_name.as_deref() == Some("cooperative-sticky"),
             "tie must break lexicographically to cooperative-sticky ('c' < 'r'), got {resp:?}"
         );
     }
@@ -392,13 +391,12 @@ async fn single_member_picks_its_first_protocol() {
     let resp = full_join(&client, "cg-single", "consumer", &[("range", b"")]).await;
     handle.shutdown().await;
 
-    assert_eq!(
-        resp.error_code, ERR_NONE,
+    assert!(
+        resp.error_code == ERR_NONE,
         "single-member JoinGroup must succeed, got {resp:?}"
     );
-    assert_eq!(
-        resp.protocol_name.as_deref(),
-        Some("range"),
+    assert!(
+        resp.protocol_name.as_deref() == Some("range"),
         "single-member must land on its only proposed protocol, got {resp:?}"
     );
 }
@@ -417,11 +415,11 @@ async fn protocol_type_mismatch_rejected() {
     // Member A: full two-step, completes the rebalance. After this the
     // group has `protocol_type = Some("consumer")` and is Stable.
     let resp_a = full_join(&client_a, group_id, "consumer", &[("range", b"")]).await;
-    assert_eq!(
-        resp_a.error_code, ERR_NONE,
+    assert!(
+        resp_a.error_code == ERR_NONE,
         "member A must complete first-round rebalance, got {resp_a:?}"
     );
-    assert_eq!(resp_a.protocol_name.as_deref(), Some("range"));
+    assert!(resp_a.protocol_name.as_deref() == Some("range"));
 
     // Member B: bootstrap a member id, then join with `protocol_type =
     // "stream"`. The handler checks the existing group's protocol_type
@@ -430,8 +428,8 @@ async fn protocol_type_mismatch_rejected() {
     let resp_b = second_join(&client_b, group_id, &member_b, "stream", &[("range", b"")]).await;
     handle.shutdown().await;
 
-    assert_eq!(
-        resp_b.error_code, ERR_INCONSISTENT_GROUP_PROTOCOL,
+    assert!(
+        resp_b.error_code == ERR_INCONSISTENT_GROUP_PROTOCOL,
         "member B with protocol_type=stream must hit INCONSISTENT_GROUP_PROTOCOL on a consumer group, got {resp_b:?}"
     );
 }

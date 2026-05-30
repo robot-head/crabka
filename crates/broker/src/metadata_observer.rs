@@ -231,6 +231,7 @@ async fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{MetadataRecord, TopicRecord};
     use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
     use tempfile::TempDir;

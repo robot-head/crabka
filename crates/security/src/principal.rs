@@ -130,28 +130,14 @@ pub enum AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn from_sasl_mapping() {
-        assert_eq!(
-            AuthMethod::from_sasl(SaslMechanism::Plain),
-            AuthMethod::SaslPlain
-        );
-        assert_eq!(
-            AuthMethod::from_sasl(SaslMechanism::ScramSha256),
-            AuthMethod::SaslScramSha256
-        );
-        assert_eq!(
-            AuthMethod::from_sasl(SaslMechanism::ScramSha512),
-            AuthMethod::SaslScramSha512
-        );
-        assert_eq!(
-            AuthMethod::from_sasl(SaslMechanism::OAuthBearer),
-            AuthMethod::SaslOAuthBearer
-        );
-        assert_eq!(
-            AuthMethod::from_sasl(SaslMechanism::Gssapi),
-            AuthMethod::SaslGssapi
-        );
+        assert!(AuthMethod::from_sasl(SaslMechanism::Plain) == AuthMethod::SaslPlain);
+        assert!(AuthMethod::from_sasl(SaslMechanism::ScramSha256) == AuthMethod::SaslScramSha256);
+        assert!(AuthMethod::from_sasl(SaslMechanism::ScramSha512) == AuthMethod::SaslScramSha512);
+        assert!(AuthMethod::from_sasl(SaslMechanism::OAuthBearer) == AuthMethod::SaslOAuthBearer);
+        assert!(AuthMethod::from_sasl(SaslMechanism::Gssapi) == AuthMethod::SaslGssapi);
     }
 }

@@ -54,21 +54,22 @@ impl ProducerIdManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn allocate_returns_monotonic_pids_starting_at_base() {
         let m = ProducerIdManager::new();
-        assert_eq!(m.allocate(), (PID_BASE, 0));
-        assert_eq!(m.allocate(), (PID_BASE + 1, 0));
-        assert_eq!(m.allocate(), (PID_BASE + 2, 0));
+        assert!(m.allocate() == (PID_BASE, 0));
+        assert!(m.allocate() == (PID_BASE + 1, 0));
+        assert!(m.allocate() == (PID_BASE + 2, 0));
     }
 
     #[test]
     fn bump_epoch_increments() {
         let m = ProducerIdManager::new();
         let (pid, _) = m.allocate();
-        assert_eq!(m.bump_epoch(pid), Some(1));
-        assert_eq!(m.bump_epoch(pid), Some(2));
-        assert_eq!(m.bump_epoch(9999), None);
+        assert!(m.bump_epoch(pid) == Some(1));
+        assert!(m.bump_epoch(pid) == Some(2));
+        assert!(m.bump_epoch(9999) == None);
     }
 }

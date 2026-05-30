@@ -412,6 +412,7 @@ impl RemoteStorageManager for S3RemoteStorage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::collections::BTreeMap;
     use std::io::Write;
     use std::path::PathBuf;
@@ -475,10 +476,7 @@ mod tests {
             store
                 .copy_log_segment_data(&md, &sample_data(src.path(), true))
                 .unwrap();
-            assert_eq!(
-                store.fetch_log_segment(&md, 0, None).unwrap(),
-                b"0123456789"
-            );
+            assert!(store.fetch_log_segment(&md, 0, None).unwrap() == b"0123456789");
         })
         .await
         .unwrap();
@@ -494,9 +492,9 @@ mod tests {
                 .copy_log_segment_data(&md, &sample_data(src.path(), false))
                 .unwrap();
             // Inclusive [2, 5] -> "2345".
-            assert_eq!(store.fetch_log_segment(&md, 2, Some(5)).unwrap(), b"2345");
+            assert!(store.fetch_log_segment(&md, 2, Some(5)).unwrap() == b"2345");
             // Open-ended from 7 -> "789".
-            assert_eq!(store.fetch_log_segment(&md, 7, None).unwrap(), b"789");
+            assert!(store.fetch_log_segment(&md, 7, None).unwrap() == b"789");
         })
         .await
         .unwrap();
@@ -511,26 +509,11 @@ mod tests {
             store
                 .copy_log_segment_data(&md, &sample_data(src.path(), true))
                 .unwrap();
-            assert_eq!(
-                store.fetch_index(&md, IndexType::Offset).unwrap(),
-                b"OFFSET-IDX"
-            );
-            assert_eq!(
-                store.fetch_index(&md, IndexType::Timestamp).unwrap(),
-                b"TIME-IDX"
-            );
-            assert_eq!(
-                store.fetch_index(&md, IndexType::ProducerSnapshot).unwrap(),
-                b"SNAP"
-            );
-            assert_eq!(
-                store.fetch_index(&md, IndexType::LeaderEpoch).unwrap(),
-                b"EPOCH-BYTES"
-            );
-            assert_eq!(
-                store.fetch_index(&md, IndexType::Transaction).unwrap(),
-                b"TXN-IDX"
-            );
+            assert!(store.fetch_index(&md, IndexType::Offset).unwrap() == b"OFFSET-IDX");
+            assert!(store.fetch_index(&md, IndexType::Timestamp).unwrap() == b"TIME-IDX");
+            assert!(store.fetch_index(&md, IndexType::ProducerSnapshot).unwrap() == b"SNAP");
+            assert!(store.fetch_index(&md, IndexType::LeaderEpoch).unwrap() == b"EPOCH-BYTES");
+            assert!(store.fetch_index(&md, IndexType::Transaction).unwrap() == b"TXN-IDX");
         })
         .await
         .unwrap();
@@ -597,7 +580,7 @@ mod tests {
                 .copy_log_segment_data(&b, &sample_data(src.path(), false))
                 .unwrap();
             store.delete_log_segment_data(&a).unwrap();
-            assert_eq!(store.fetch_log_segment(&b, 0, None).unwrap(), b"0123456789");
+            assert!(store.fetch_log_segment(&b, 0, None).unwrap() == b"0123456789");
         })
         .await
         .unwrap();
@@ -660,9 +643,9 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert_eq!(fetched.len(), SEG_LEN);
+            assert!(fetched.len() == SEG_LEN);
             for (i, b) in fetched.iter().enumerate() {
-                assert_eq!(*b, u8::try_from(i % 251).unwrap(), "byte mismatch at {i}");
+                assert!(*b == u8::try_from(i % 251).unwrap(), "byte mismatch at {i}");
             }
         })
         .await
@@ -694,11 +677,10 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert_eq!(fetched.len(), SEG_LEN);
-            assert_eq!(
-                fetched.last().copied(),
-                Some(u8::try_from((SEG_LEN - 1) % 251).unwrap()),
-                "tail byte was dropped",
+            assert!(fetched.len() == SEG_LEN);
+            assert!(
+                fetched.last().copied() == Some(u8::try_from((SEG_LEN - 1) % 251).unwrap()),
+                "tail byte was dropped"
             );
         })
         .await
@@ -729,7 +711,7 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert_eq!(fetched.len(), 10);
+            assert!(fetched.len() == 10);
         })
         .await
         .unwrap();

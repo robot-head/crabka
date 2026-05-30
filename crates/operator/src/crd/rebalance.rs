@@ -105,14 +105,15 @@ pub struct KafkaRebalanceStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use kube::CustomResourceExt as _;
 
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaRebalance::crd();
-        assert_eq!(crd.spec.group, "crabka.io");
-        assert_eq!(crd.spec.names.kind, "KafkaRebalance");
-        assert_eq!(crd.spec.names.plural, "kafkarebalances");
+        assert!(crd.spec.group == "crabka.io");
+        assert!(crd.spec.names.kind == "KafkaRebalance");
+        assert!(crd.spec.names.plural == "kafkarebalances");
         assert!(
             crd.spec
                 .names
@@ -121,8 +122,8 @@ mod tests {
                 .is_some_and(|v| v.contains(&"kr".to_string())),
             "expected shortname `kr`",
         );
-        assert_eq!(crd.spec.versions.len(), 1);
-        assert_eq!(crd.spec.versions[0].name, "v1alpha1");
+        assert!(crd.spec.versions.len() == 1);
+        assert!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -146,7 +147,7 @@ mod tests {
             "got: {json}"
         );
         let back: KafkaRebalance = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.spec, kr.spec);
+        assert!(back.spec == kr.spec);
     }
 
     #[test]
@@ -156,7 +157,7 @@ mod tests {
         assert!(spec.throttle_bytes_per_sec.is_none());
         assert!(spec.endpoint.is_none());
         let j = serde_json::to_string(&spec).unwrap();
-        assert_eq!(j, "{}", "all-default spec must serialize to empty object");
+        assert!(j == "{}", "all-default spec must serialize to empty object");
     }
 
     #[test]
@@ -176,8 +177,8 @@ mod tests {
     #[test]
     fn optimization_result_defaults_to_zeroes() {
         let r: OptimizationResult = serde_json::from_str("{}").unwrap();
-        assert_eq!(r, OptimizationResult::default());
-        assert_eq!(r.replica_movements, 0);
+        assert!(r == OptimizationResult::default());
+        assert!(r.replica_movements == 0);
         assert!(r.goals.is_empty());
     }
 }

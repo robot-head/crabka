@@ -32,6 +32,7 @@ pub fn verify_plain<S: BuildHasher>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn creds() -> HashMap<String, String> {
         let mut m = HashMap::new();
@@ -42,23 +43,17 @@ mod tests {
     #[test]
     fn correct_creds_pass() {
         let p = verify_plain(&creds(), "alice", b"wonderland").unwrap();
-        assert_eq!(p.name, "alice");
-        assert_eq!(p.auth_method, AuthMethod::SaslPlain);
+        assert!(p.name == "alice");
+        assert!(p.auth_method == AuthMethod::SaslPlain);
     }
 
     #[test]
     fn wrong_password_fails() {
-        assert_eq!(
-            verify_plain(&creds(), "alice", b"hunter2"),
-            Err(AuthError::BadPassword),
-        );
+        assert!(verify_plain(&creds(), "alice", b"hunter2") == Err(AuthError::BadPassword));
     }
 
     #[test]
     fn unknown_user_fails() {
-        assert_eq!(
-            verify_plain(&creds(), "bob", b"anything"),
-            Err(AuthError::UnknownUser),
-        );
+        assert!(verify_plain(&creds(), "bob", b"anything") == Err(AuthError::UnknownUser));
     }
 }

@@ -47,21 +47,22 @@ impl Compression {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn none_round_trip_is_identity() {
         let raw = b"hello producer";
         let out = Compression::None.compress(raw).unwrap();
-        assert_eq!(out.as_ref(), raw);
+        assert!(out.as_ref() == raw);
     }
 
     #[test]
     fn attribute_bits_match_kafka_table() {
-        assert_eq!(Compression::None.attribute_bits(), 0);
-        assert_eq!(Compression::Gzip.attribute_bits(), 1);
-        assert_eq!(Compression::Snappy.attribute_bits(), 2);
-        assert_eq!(Compression::Lz4.attribute_bits(), 3);
-        assert_eq!(Compression::Zstd.attribute_bits(), 4);
+        assert!(Compression::None.attribute_bits() == 0);
+        assert!(Compression::Gzip.attribute_bits() == 1);
+        assert!(Compression::Snappy.attribute_bits() == 2);
+        assert!(Compression::Lz4.attribute_bits() == 3);
+        assert!(Compression::Zstd.attribute_bits() == 4);
     }
 
     #[test]
@@ -70,6 +71,6 @@ mod tests {
         let raw = b"the quick brown fox";
         let compressed = Compression::Gzip.compress(raw).unwrap();
         let decoded = crabka_compression::decompress(CompressionType::Gzip, &compressed).unwrap();
-        assert_eq!(decoded.as_ref(), raw);
+        assert!(decoded.as_ref() == raw);
     }
 }

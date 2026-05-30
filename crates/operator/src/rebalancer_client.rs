@@ -297,49 +297,37 @@ impl RebalancerClientLike for ConnectRebalancerClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn status_parses_pbjson_enum_names() {
-        assert_eq!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_COMPUTED")),
-            ProposalStatus::Computed
+        assert!(
+            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_COMPUTED"))
+                == ProposalStatus::Computed
         );
-        assert_eq!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_EXECUTING")),
-            ProposalStatus::Executing
+        assert!(
+            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_EXECUTING"))
+                == ProposalStatus::Executing
         );
-        assert_eq!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_COMPLETED")),
-            ProposalStatus::Completed
+        assert!(
+            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_COMPLETED"))
+                == ProposalStatus::Completed
         );
-        assert_eq!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_FAILED")),
-            ProposalStatus::Failed
+        assert!(
+            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_FAILED")) == ProposalStatus::Failed
         );
-        assert_eq!(
-            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_CANCELLED")),
-            ProposalStatus::Cancelled
+        assert!(
+            ProposalStatus::from_json(&json!("PROPOSAL_STATUS_CANCELLED"))
+                == ProposalStatus::Cancelled
         );
     }
 
     #[test]
     fn status_parses_numeric_ordinals_and_unknown() {
-        assert_eq!(
-            ProposalStatus::from_json(&json!(1)),
-            ProposalStatus::Computed
-        );
-        assert_eq!(
-            ProposalStatus::from_json(&json!(2)),
-            ProposalStatus::Executing
-        );
-        assert_eq!(
-            ProposalStatus::from_json(&json!("WAT")),
-            ProposalStatus::Unspecified
-        );
-        assert_eq!(
-            ProposalStatus::from_json(&Value::Null),
-            ProposalStatus::Unspecified
-        );
+        assert!(ProposalStatus::from_json(&json!(1)) == ProposalStatus::Computed);
+        assert!(ProposalStatus::from_json(&json!(2)) == ProposalStatus::Executing);
+        assert!(ProposalStatus::from_json(&json!("WAT")) == ProposalStatus::Unspecified);
+        assert!(ProposalStatus::from_json(&Value::Null) == ProposalStatus::Unspecified);
     }
 
     #[test]
@@ -361,12 +349,12 @@ mod tests {
             "throttleBytesPerSec": "52428800"
         });
         let p = proposal_from_json(&body);
-        assert_eq!(p.id, "abc-123");
-        assert_eq!(p.status, ProposalStatus::Computed);
-        assert_eq!(p.goals_applied, vec!["RackAware", "ReplicaDistribution"]);
-        assert_eq!(p.summary.replica_movements, 4);
-        assert_eq!(p.summary.max_replicas_after, 7);
-        assert_eq!(p.movement_count, 4);
+        assert!(p.id == "abc-123");
+        assert!(p.status == ProposalStatus::Computed);
+        assert!(p.goals_applied == vec!["RackAware", "ReplicaDistribution"]);
+        assert!(p.summary.replica_movements == 4);
+        assert!(p.summary.max_replicas_after == 7);
+        assert!(p.movement_count == 4);
         assert!(p.failure_reason.is_none());
     }
 
@@ -380,8 +368,8 @@ mod tests {
             }
         });
         let p = proposal_from_json(&body);
-        assert_eq!(p.id, "xyz");
-        assert_eq!(p.status, ProposalStatus::Executing);
+        assert!(p.id == "xyz");
+        assert!(p.status == ProposalStatus::Executing);
     }
 
     #[test]
@@ -393,8 +381,8 @@ mod tests {
             "status": "PROPOSAL_STATUS_COMPUTED"
         });
         let p = proposal_from_json(&body);
-        assert_eq!(p.summary, ProposalSummary::default());
-        assert_eq!(p.movement_count, 0);
+        assert!(p.summary == ProposalSummary::default());
+        assert!(p.movement_count == 0);
         assert!(p.goals_applied.is_empty());
     }
 
@@ -406,8 +394,8 @@ mod tests {
             "failureReason": "broker 3 unreachable"
         });
         let p = proposal_from_json(&body);
-        assert_eq!(p.status, ProposalStatus::Failed);
-        assert_eq!(p.failure_reason.as_deref(), Some("broker 3 unreachable"));
+        assert!(p.status == ProposalStatus::Failed);
+        assert!(p.failure_reason.as_deref() == Some("broker 3 unreachable"));
     }
 
     #[test]
@@ -418,8 +406,8 @@ mod tests {
         );
         match e {
             RebalancerError::Rpc { code, message } => {
-                assert_eq!(code, "failed_precondition");
-                assert_eq!(message, "proposal not in Computed state");
+                assert!(code == "failed_precondition");
+                assert!(message == "proposal not in Computed state");
             }
             other => panic!("expected Rpc, got {other:?}"),
         }
@@ -430,8 +418,8 @@ mod tests {
         let e = connect_error("upstream exploded", 503);
         match e {
             RebalancerError::Rpc { code, message } => {
-                assert_eq!(code, "http_503");
-                assert_eq!(message, "upstream exploded");
+                assert!(code == "http_503");
+                assert!(message == "upstream exploded");
             }
             other => panic!("expected Rpc, got {other:?}"),
         }
@@ -440,14 +428,14 @@ mod tests {
     #[test]
     fn json_i32_accepts_number_string_and_missing() {
         let obj = json!({ "a": 5, "b": "9" });
-        assert_eq!(json_i32(&obj, "a", "a"), 5);
-        assert_eq!(json_i32(&obj, "b", "b"), 9);
-        assert_eq!(json_i32(&obj, "missing", "missing"), 0);
+        assert!(json_i32(&obj, "a", "a") == 5);
+        assert!(json_i32(&obj, "b", "b") == 9);
+        assert!(json_i32(&obj, "missing", "missing") == 0);
     }
 
     #[test]
     fn base_url_trailing_slash_trimmed() {
         let c = ConnectRebalancerClient::new("http://host:9300/");
-        assert_eq!(c.base_url, "http://host:9300");
+        assert!(c.base_url == "http://host:9300");
     }
 }

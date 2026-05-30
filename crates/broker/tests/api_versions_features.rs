@@ -24,6 +24,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
@@ -42,7 +43,7 @@ async fn v3_response_advertises_supported_metadata_version_no_finalized() {
         .await
         .expect("ApiVersions");
 
-    assert_eq!(resp.error_code, 0, "{resp:?}");
+    assert!(resp.error_code == 0, "{resp:?}");
 
     // KIP-584 write-side: supported_features advertises metadata.version at
     // the conservative level, but a fresh broker has no finalized features
@@ -53,16 +54,16 @@ async fn v3_response_advertises_supported_metadata_version_no_finalized() {
         .iter()
         .find(|f| f.name == "metadata.version")
         .expect("metadata.version advertised in supported_features");
-    assert_eq!(mv.min_version, 7, "{resp:?}");
-    assert_eq!(mv.max_version, 25, "{resp:?}");
+    assert!(mv.min_version == 7, "{resp:?}");
+    assert!(mv.max_version == 25, "{resp:?}");
     assert!(
         resp.finalized_features.is_empty(),
         "fresh broker has no finalized features: {:?}",
         resp.finalized_features,
     );
-    assert_eq!(
-        resp.finalized_features_epoch, -1,
-        "fresh broker epoch must be -1 until UpdateFeatures lands a record",
+    assert!(
+        resp.finalized_features_epoch == -1,
+        "fresh broker epoch must be -1 until UpdateFeatures lands a record"
     );
 
     p.broker.shutdown().await;

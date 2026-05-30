@@ -145,38 +145,39 @@ fn encode_resp(version: i16, resp: &AddRaftVoterResponse) -> Result<Bytes, Broke
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn committed_maps_to_none() {
         let (code, msg) = outcome_to_code(Ok(ReconfigOutcome::Committed));
-        assert_eq!(code, codes::NONE);
+        assert!(code == codes::NONE);
         assert!(msg.is_none());
     }
 
     #[test]
     fn not_leader_maps_to_not_leader_or_follower() {
         let (code, msg) = outcome_to_code(Ok(ReconfigOutcome::NotLeader { leader: Some(3) }));
-        assert_eq!(code, codes::NOT_LEADER_OR_FOLLOWER);
+        assert!(code == codes::NOT_LEADER_OR_FOLLOWER);
         assert!(msg.unwrap().contains('3'));
     }
 
     #[test]
     fn not_caught_up_maps_to_invalid_request() {
         let (code, _) = outcome_to_code(Err(RaftError::VoterNotCaughtUp { id: 7, lag: 99 }));
-        assert_eq!(code, codes::INVALID_REQUEST);
+        assert!(code == codes::INVALID_REQUEST);
     }
 
     #[test]
     fn in_progress_maps_to_request_timed_out() {
         let (code, _) = outcome_to_code(Err(RaftError::ReconfigInProgress));
-        assert_eq!(code, codes::REQUEST_TIMED_OUT);
+        assert!(code == codes::REQUEST_TIMED_OUT);
     }
 
     #[test]
     fn rejected_maps_to_invalid_request_with_reason() {
         let (code, msg) = outcome_to_code(Err(RaftError::ReconfigRejected("nope".into())));
-        assert_eq!(code, codes::INVALID_REQUEST);
-        assert_eq!(msg.as_deref(), Some("nope"));
+        assert!(code == codes::INVALID_REQUEST);
+        assert!(msg.as_deref() == Some("nope"));
     }
 
     /// Decode→encode round-trip at min and max versions. Guards against
@@ -197,7 +198,7 @@ mod tests {
             let bytes = encode_resp(version, &resp).expect("encode");
             let mut cur: &[u8] = &bytes;
             let decoded = AddRaftVoterResponse::decode(&mut cur, version).expect("decode");
-            assert_eq!(decoded.error_code, codes::NOT_LEADER_OR_FOLLOWER);
+            assert!(decoded.error_code == codes::NOT_LEADER_OR_FOLLOWER);
             assert!(cur.is_empty(), "all bytes consumed at v{version}");
         }
     }

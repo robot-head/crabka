@@ -89,6 +89,7 @@ impl RebalancerMetrics {
 mod tests {
     use super::*;
     use crate::health::new_registry;
+    use assert2::assert;
 
     #[test]
     fn register_emits_three_metric_names_with_crate_prefix() {
@@ -119,6 +120,6 @@ mod tests {
         let cloned = m.clone();
         cloned.snapshots_total.inc();
         cloned.snapshots_total.inc();
-        assert_eq!(m.snapshots_total.get(), 2);
+        assert!(m.snapshots_total.get() == 2);
     }
 }

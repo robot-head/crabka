@@ -392,6 +392,7 @@ fn swap_future_log(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
     use tempfile::tempdir;
@@ -440,7 +441,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert_eq!(assigned, 0);
+        assert!(assigned == 0);
 
         // Second append assigns offset 3.
         let (ack, ack_rx) = oneshot::channel();
@@ -450,7 +451,7 @@ mod tests {
         }))
         .await
         .expect("send job 2");
-        assert_eq!(ack_rx.await.expect("ack recv 2").expect("append 2 ok"), 3);
+        assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -526,7 +527,7 @@ mod tests {
             .await
             .expect("send replicate");
         ack_rx.await.expect("ack recv").expect("replicate ok");
-        assert_eq!(log.lock().unwrap().log_end_offset(), 3);
+        assert!(log.lock().unwrap().log_end_offset() == 3);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -565,7 +566,7 @@ mod tests {
             .expect_err("expected offset mismatch");
         assert!(matches!(err, crate::error::BrokerError::Log(_)));
         // Local log must not have advanced.
-        assert_eq!(log.lock().unwrap().log_end_offset(), 0);
+        assert!(log.lock().unwrap().log_end_offset() == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -602,14 +603,14 @@ mod tests {
             .expect("send produce");
             ack_rx.await.expect("ack").expect("ok");
         }
-        assert_eq!(log.lock().unwrap().log_end_offset(), 4);
+        assert!(log.lock().unwrap().log_end_offset() == 4);
 
         let (ack, ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Truncate { offset: 0, ack })
             .await
             .expect("send truncate");
         ack_rx.await.expect("ack").expect("truncate ok");
-        assert_eq!(log.lock().unwrap().log_end_offset(), 0);
+        assert!(log.lock().unwrap().log_end_offset() == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -656,7 +657,7 @@ mod tests {
             .await
             .expect("hw_advance_notify did not fire");
 
-        assert_eq!(replica_state.lock().await.hw, 2);
+        assert!(replica_state.lock().await.hw == 2);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -699,7 +700,7 @@ mod tests {
         ack_rx.await.expect("ack");
 
         let observed = log.lock().expect("lock").config_snapshot();
-        assert_eq!(observed.retention_ms, new_cfg.retention_ms);
+        assert!(observed.retention_ms == new_cfg.retention_ms);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -742,7 +743,7 @@ mod tests {
             .expect("send");
         let new_start = ack_rx.await.expect("ack").expect("trim ok");
         assert!(new_start >= 3);
-        assert_eq!(log.lock().expect("lock").log_start_offset(), new_start);
+        assert!(log.lock().expect("lock").log_start_offset() == new_start);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -783,7 +784,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert_eq!(replica_state.lock().await.hw, 0);
+        assert!(replica_state.lock().await.hw == 0);
 
         drop(tx);
         writer.await.expect("writer join");

@@ -279,6 +279,7 @@ impl UsageStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn sample(metric: MetricKind, topic: &str, partition: i32, value: f64) -> ParsedSample {
         ParsedSample {

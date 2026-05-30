@@ -201,6 +201,7 @@ fn probe_one(dir: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use tempfile::tempdir;
 
     #[test]
@@ -209,7 +210,7 @@ mod tests {
         let reg = LogDirRegistry::probe(&[tmp.path().to_path_buf()]);
         assert!(!reg.is_offline(tmp.path()));
         assert!(reg.offline().is_empty());
-        assert_eq!(reg.online_subset(&[tmp.path().to_path_buf()]).len(), 1);
+        assert!(reg.online_subset(&[tmp.path().to_path_buf()]).len() == 1);
     }
 
     #[test]
@@ -244,8 +245,8 @@ mod tests {
         let reg = LogDirRegistry::probe(std::slice::from_ref(&blocker));
         assert!(reg.is_offline(&blocker));
         let offline = reg.offline();
-        assert_eq!(offline.len(), 1);
-        assert_eq!(offline[0].0, blocker);
+        assert!(offline.len() == 1);
+        assert!(offline[0].0 == blocker);
         assert!(
             !offline[0].1.is_empty(),
             "offline entry must carry a non-empty reason",
@@ -265,7 +266,7 @@ mod tests {
         let reg = LogDirRegistry::probe(&[good.clone(), blocker.clone()]);
         assert!(!reg.is_offline(&good));
         assert!(reg.is_offline(&blocker));
-        assert_eq!(reg.online_subset(&[good.clone(), blocker]), vec![good]);
+        assert!(reg.online_subset(&[good.clone(), blocker]) == vec![good]);
     }
 
     /// Unknown dirs (never probed) report `is_offline = false`. This
@@ -295,9 +296,9 @@ mod tests {
 
         assert!(reg.is_offline(&dir));
         let offline = reg.offline();
-        assert_eq!(offline.len(), 1);
-        assert_eq!(offline[0].0, dir);
-        assert_eq!(offline[0].1, "EIO from segment fsync");
+        assert!(offline.len() == 1);
+        assert!(offline[0].0 == dir);
+        assert!(offline[0].1 == "EIO from segment fsync");
         assert!(reg.online_subset(&[dir]).is_empty());
     }
 
@@ -314,7 +315,7 @@ mod tests {
         let second = reg.mark_offline(&dir, "second reason");
         assert!(first, "first call must flip");
         assert!(!second, "second call must be a no-op");
-        assert_eq!(reg.offline()[0].1, "first reason");
+        assert!(reg.offline()[0].1 == "first reason");
     }
 
     /// Marking an unknown dir (never probed) offline still records

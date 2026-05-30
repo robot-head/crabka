@@ -49,11 +49,12 @@ pub struct ServiceMonitorSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn metrics_config_defaults_type_prometheus() {
         let cfg: MetricsConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.r#type, MetricsType::Prometheus);
+        assert!(cfg.r#type == MetricsType::Prometheus);
         assert!(cfg.pod_monitor.is_none());
         assert!(cfg.service_monitor.is_none());
     }
@@ -73,7 +74,7 @@ mod tests {
         assert!(j.contains("\"podMonitor\""));
         assert!(j.contains("\"interval\":\"15s\""));
         let back: MetricsConfig = serde_json::from_str(&j).unwrap();
-        assert_eq!(back, cfg);
+        assert!(back == cfg);
     }
 
     #[test]

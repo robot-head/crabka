@@ -484,6 +484,7 @@ pub struct ListenerAddress {
 #[cfg(test)]
 mod auth_tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn listener_deserializes_tls_authentication() {
@@ -498,7 +499,7 @@ authentication:
 ",
         )
         .unwrap();
-        assert_eq!(l.authentication, Some(ListenerAuthentication::Tls));
+        assert!(l.authentication == Some(ListenerAuthentication::Tls));
     }
 
     #[test]
@@ -514,7 +515,7 @@ authentication:
 ",
         )
         .unwrap();
-        assert_eq!(l.authentication, Some(ListenerAuthentication::ScramSha512));
+        assert!(l.authentication == Some(ListenerAuthentication::ScramSha512));
     }
 
     #[test]
@@ -530,7 +531,7 @@ authentication:
 ",
         )
         .unwrap();
-        assert_eq!(l.authentication, Some(ListenerAuthentication::ScramSha256));
+        assert!(l.authentication == Some(ListenerAuthentication::ScramSha256));
     }
 
     #[test]
@@ -613,10 +614,7 @@ authentication:
             jwks_expiry_seconds: None,
             jwks_ignore_key_use: None,
         };
-        assert_eq!(
-            l.authentication,
-            Some(ListenerAuthentication::OAuth(expected))
-        );
+        assert!(l.authentication == Some(ListenerAuthentication::OAuth(expected)));
     }
 
     #[test]
@@ -637,16 +635,13 @@ authentication:
         let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
             panic!("expected OAuth authentication, got {:?}", l.authentication);
         };
-        assert_eq!(oauth.valid_issuer_uri, "https://issuer.example.com/");
-        assert_eq!(
-            oauth.jwks_endpoint_uri.as_deref(),
-            Some("https://issuer.example.com/jwks")
-        );
-        assert_eq!(oauth.valid_audience, None);
-        assert_eq!(oauth.user_name_claim, None);
-        assert_eq!(oauth.custom_claim_check, None);
-        assert_eq!(oauth.jwks_refresh_seconds, None);
-        assert_eq!(oauth.max_clock_skew_seconds, None);
+        assert!(oauth.valid_issuer_uri == "https://issuer.example.com/");
+        assert!(oauth.jwks_endpoint_uri.as_deref() == Some("https://issuer.example.com/jwks"));
+        assert!(oauth.valid_audience == None);
+        assert!(oauth.user_name_claim == None);
+        assert!(oauth.custom_claim_check == None);
+        assert!(oauth.jwks_refresh_seconds == None);
+        assert!(oauth.max_clock_skew_seconds == None);
         // `enable_oauth_bearer` defaults to true when omitted.
         assert!(oauth.enable_oauth_bearer);
     }
@@ -670,10 +665,7 @@ authentication:
         let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
             panic!("expected OAuth authentication");
         };
-        assert_eq!(
-            oauth.custom_claim_check.as_deref(),
-            Some("$.scope[?@ == 'kafka.write']")
-        );
+        assert!(oauth.custom_claim_check.as_deref() == Some("$.scope[?@ == 'kafka.write']"));
     }
 
     #[test]
@@ -742,7 +734,7 @@ authentication:
         let json = serde_json::to_string(&auth).unwrap();
         assert!(json.contains("\"enableOauthBearer\":false"), "got: {json}");
         let back: ListenerAuthentication = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, auth);
+        assert!(back == auth);
     }
 
     #[test]
@@ -769,11 +761,8 @@ authentication:
         let Some(ListenerAuthentication::OAuth(oauth)) = l.authentication else {
             panic!("expected OAuth authentication");
         };
-        assert_eq!(oauth.valid_issuer_uri, "https://issuer.example.com/");
-        assert_eq!(
-            oauth.jwks_endpoint_uri.as_deref(),
-            Some("https://issuer.example.com/jwks")
-        );
+        assert!(oauth.valid_issuer_uri == "https://issuer.example.com/");
+        assert!(oauth.jwks_endpoint_uri.as_deref() == Some("https://issuer.example.com/jwks"));
     }
 
     #[test]
@@ -840,9 +829,8 @@ authentication:
         let ccc = v
             .pointer("/properties/customClaimCheck")
             .expect("customClaimCheck must be present");
-        assert_eq!(
-            ccc.pointer("/type").and_then(|x| x.as_str()),
-            Some("string"),
+        assert!(
+            ccc.pointer("/type").and_then(|x| x.as_str()) == Some("string"),
             "customClaimCheck must be a string; got: {ccc}"
         );
 
@@ -850,9 +838,8 @@ authentication:
         let vtt = v
             .pointer("/properties/validTokenType")
             .expect("validTokenType must be present");
-        assert_eq!(
-            vtt.pointer("/type").and_then(|x| x.as_str()),
-            Some("string"),
+        assert!(
+            vtt.pointer("/type").and_then(|x| x.as_str()) == Some("string"),
             "validTokenType must be a string; got: {vtt}"
         );
     }
@@ -900,7 +887,7 @@ authentication:
             "expected tlsTrustedCertificates array in JSON; got: {json}"
         );
         let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_tripped, original);
+        assert!(round_tripped == original);
     }
 
     #[test]
@@ -1004,7 +991,7 @@ authentication:
             "expected clientSecret object in JSON; got: {json}"
         );
         let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_tripped, original);
+        assert!(round_tripped == original);
     }
 
     #[test]
@@ -1049,9 +1036,9 @@ authentication:
             key: "client-secret".into(),
         };
         let json = serde_json::to_string(&original).unwrap();
-        assert_eq!(json, r#"{"secretName":"my-secret","key":"client-secret"}"#);
+        assert!(json == r#"{"secretName":"my-secret","key":"client-secret"}"#);
         let round_tripped: OauthClientSecretRef = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_tripped, original);
+        assert!(round_tripped == original);
     }
 
     #[test]
@@ -1129,7 +1116,7 @@ authentication:
             "expected userInfoEndpointUri in JSON; got: {json}"
         );
         let round_tripped: ListenerAuthenticationOAuth = serde_json::from_str(&json).unwrap();
-        assert_eq!(round_tripped, original);
+        assert!(round_tripped == original);
     }
 
     #[test]
@@ -1144,7 +1131,7 @@ maxSecondsWithoutReauthentication: 300
         let ListenerAuthentication::OAuth(oauth) = &parsed else {
             panic!("expected oauth variant");
         };
-        assert_eq!(oauth.max_seconds_without_reauthentication, Some(300));
+        assert!(oauth.max_seconds_without_reauthentication == Some(300));
     }
 
     #[test]
@@ -1196,11 +1183,8 @@ validTokenType: JWT
         let ListenerAuthentication::OAuth(oauth) = &parsed else {
             panic!("expected oauth variant");
         };
-        assert_eq!(
-            oauth.custom_claim_check.as_deref(),
-            Some("$.scope[?@ == 'kafka.write']")
-        );
-        assert_eq!(oauth.valid_token_type.as_deref(), Some("JWT"));
+        assert!(oauth.custom_claim_check.as_deref() == Some("$.scope[?@ == 'kafka.write']"));
+        assert!(oauth.valid_token_type.as_deref() == Some("JWT"));
     }
 
     #[test]
@@ -1272,16 +1256,10 @@ groupsClaimDelimiter: ","
         let ListenerAuthentication::OAuth(oauth) = &parsed else {
             panic!("expected oauth variant");
         };
-        assert_eq!(oauth.fallback_user_name_claim.as_deref(), Some("client_id"));
-        assert_eq!(
-            oauth.fallback_user_name_prefix.as_deref(),
-            Some("service-account-")
-        );
-        assert_eq!(
-            oauth.groups_claim.as_deref(),
-            Some("$.realm_access.roles[*]")
-        );
-        assert_eq!(oauth.groups_claim_delimiter.as_deref(), Some(","));
+        assert!(oauth.fallback_user_name_claim.as_deref() == Some("client_id"));
+        assert!(oauth.fallback_user_name_prefix.as_deref() == Some("service-account-"));
+        assert!(oauth.groups_claim.as_deref() == Some("$.realm_access.roles[*]"));
+        assert!(oauth.groups_claim_delimiter.as_deref() == Some(","));
     }
 
     #[test]
@@ -1338,9 +1316,9 @@ jwksIgnoreKeyUse: false
         let ListenerAuthentication::OAuth(oauth) = &parsed else {
             panic!("expected oauth variant");
         };
-        assert_eq!(oauth.jwks_min_refresh_pause_seconds, Some(1));
-        assert_eq!(oauth.jwks_expiry_seconds, Some(3600));
-        assert_eq!(oauth.jwks_ignore_key_use, Some(false));
+        assert!(oauth.jwks_min_refresh_pause_seconds == Some(1));
+        assert!(oauth.jwks_expiry_seconds == Some(3600));
+        assert!(oauth.jwks_ignore_key_use == Some(false));
     }
 
     #[test]
@@ -1386,6 +1364,7 @@ jwksIgnoreKeyUse: false
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn internal_listener_round_trips_through_json() {
@@ -1402,7 +1381,7 @@ mod tests {
         assert!(json.contains("\"type\":\"internal\""), "got: {json}");
         assert!(json.contains("\"port\":9092"), "got: {json}");
         let back: Listener = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, l);
+        assert!(back == l);
     }
 
     #[test]
@@ -1435,7 +1414,7 @@ mod tests {
         );
         assert!(json.contains("\"nodePort\":32100"), "got: {json}");
         let back: Listener = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, l);
+        assert!(back == l);
     }
 
     #[test]
@@ -1484,7 +1463,7 @@ mod tests {
         let json = serde_json::to_string(&l).unwrap();
         assert!(json.contains("\"networkPolicyPeers\":[]"), "got: {json}");
         let back: Listener = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, l);
+        assert!(back == l);
     }
 
     #[test]
@@ -1518,6 +1497,6 @@ mod tests {
             "got: {json}"
         );
         let back: Listener = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, l);
+        assert!(back == l);
     }
 }

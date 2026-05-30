@@ -211,6 +211,7 @@ fn sort_by_start_offset(segments: &mut [RemoteLogSegmentMetadata]) {
 mod tests {
     use super::*;
     use crate::metadata::{CustomMetadata, RemoteLogSegmentId, TopicIdPartition};
+    use assert2::assert;
 
     fn tp() -> TopicIdPartition {
         TopicIdPartition::new(Uuid::from_u128(1), "t", 0)
@@ -258,7 +259,7 @@ mod tests {
         assert!(c.segment_for(0, 50).is_none(), "started not yet readable");
         c.update(&finish(10)).unwrap();
         let got = c.segment_for(0, 50).expect("finished is readable");
-        assert_eq!(got.remote_log_segment_id().id, Uuid::from_u128(10));
+        assert!(got.remote_log_segment_id().id == Uuid::from_u128(10));
     }
 
     #[test]
@@ -268,22 +269,10 @@ mod tests {
         c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
         c.update(&finish(10)).unwrap();
         c.update(&finish(11)).unwrap();
-        assert_eq!(
-            c.segment_for(0, 0).unwrap().remote_log_segment_id().id,
-            Uuid::from_u128(10)
-        );
-        assert_eq!(
-            c.segment_for(0, 99).unwrap().remote_log_segment_id().id,
-            Uuid::from_u128(10)
-        );
-        assert_eq!(
-            c.segment_for(0, 100).unwrap().remote_log_segment_id().id,
-            Uuid::from_u128(11)
-        );
-        assert_eq!(
-            c.segment_for(0, 199).unwrap().remote_log_segment_id().id,
-            Uuid::from_u128(11)
-        );
+        assert!(c.segment_for(0, 0).unwrap().remote_log_segment_id().id == Uuid::from_u128(10));
+        assert!(c.segment_for(0, 99).unwrap().remote_log_segment_id().id == Uuid::from_u128(10));
+        assert!(c.segment_for(0, 100).unwrap().remote_log_segment_id().id == Uuid::from_u128(11));
+        assert!(c.segment_for(0, 199).unwrap().remote_log_segment_id().id == Uuid::from_u128(11));
         assert!(c.segment_for(0, 200).is_none(), "past the end");
     }
 
@@ -298,23 +287,14 @@ mod tests {
         c.update(&finish(11)).unwrap();
 
         // Epoch 0 lookups only see the first segment.
-        assert_eq!(
-            c.segment_for(0, 10).unwrap().remote_log_segment_id().id,
-            Uuid::from_u128(10)
-        );
+        assert!(c.segment_for(0, 10).unwrap().remote_log_segment_id().id == Uuid::from_u128(10));
         assert!(
             c.segment_for(0, 150).is_none(),
             "epoch 0 has no segment at 150"
         );
         // Epoch 1 floor lookup picks the right segment.
-        assert_eq!(
-            c.segment_for(1, 60).unwrap().remote_log_segment_id().id,
-            Uuid::from_u128(10)
-        );
-        assert_eq!(
-            c.segment_for(1, 150).unwrap().remote_log_segment_id().id,
-            Uuid::from_u128(11)
-        );
+        assert!(c.segment_for(1, 60).unwrap().remote_log_segment_id().id == Uuid::from_u128(10));
+        assert!(c.segment_for(1, 150).unwrap().remote_log_segment_id().id == Uuid::from_u128(11));
     }
 
     #[test]
@@ -324,8 +304,8 @@ mod tests {
         c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
         c.update(&finish(10)).unwrap();
         c.update(&finish(11)).unwrap();
-        assert_eq!(c.highest_offset_for_epoch(0), Some(199));
-        assert_eq!(c.highest_offset_for_epoch(7), None);
+        assert!(c.highest_offset_for_epoch(0) == Some(199));
+        assert!(c.highest_offset_for_epoch(7) == None);
     }
 
     #[test]
@@ -338,7 +318,10 @@ mod tests {
         c.update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
             .unwrap();
         assert!(c.segment_for(0, 50).is_none(), "delete-started hides it");
-        assert_eq!(c.list().len(), 1, "still tracked while delete in progress");
+        assert!(
+            c.list().len() == 1,
+            "still tracked while delete in progress"
+        );
 
         c.update(&transition(
             10,
@@ -393,20 +376,17 @@ mod tests {
 
         // Finished seg 10 is queryable; delete-started seg 11 is hidden
         // but still listed; delete_state survives.
-        assert_eq!(
+        assert!(
             seeded
                 .segment_for(0, 50)
                 .unwrap()
                 .remote_log_segment_id()
-                .id,
-            Uuid::from_u128(10)
+                .id
+                == Uuid::from_u128(10)
         );
         assert!(seeded.segment_for(0, 150).is_none());
-        assert_eq!(seeded.list().len(), 2);
-        assert_eq!(
-            seeded.delete_state(),
-            Some(RemotePartitionDeleteState::DeletePartitionMarked)
-        );
+        assert!(seeded.list().len() == 2);
+        assert!(seeded.delete_state() == Some(RemotePartitionDeleteState::DeletePartitionMarked));
     }
 
     #[test]
@@ -415,7 +395,7 @@ mod tests {
         c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         let listed = c.list();
-        assert_eq!(listed[0].start_offset(), 0);
-        assert_eq!(listed[1].start_offset(), 100);
+        assert!(listed[0].start_offset() == 0);
+        assert!(listed[1].start_offset() == 100);
     }
 }

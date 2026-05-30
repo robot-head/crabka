@@ -16,6 +16,7 @@ pub(crate) fn crc32c_append(seed: u32, data: &[u8]) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     /// Standard CRC-32C reference vectors.
     /// "123456789" -> 0xE3069283 (RFC 3720 / iSCSI).
@@ -30,9 +31,9 @@ mod tests {
     fn known_vectors() {
         for (input, expected) in VECTORS {
             let got = crc32c(input);
-            assert_eq!(
-                got, *expected,
-                "input={input:?}: expected {expected:#010x}, got {got:#010x}",
+            assert!(
+                got == *expected,
+                "input={input:?}: expected {expected:#010x}, got {got:#010x}"
             );
         }
     }

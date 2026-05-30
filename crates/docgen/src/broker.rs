@@ -64,6 +64,7 @@ pub fn protocol_apis_md() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     #[test]
     fn server_config_page_has_field_table() {
         assert!(server_config_md().contains("| Field | Type | Required | Default | Description |"));

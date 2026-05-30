@@ -11,6 +11,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::manual_assert)]
 
+use assert2::assert;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
@@ -104,8 +105,8 @@ async fn broker_only_node_observes_and_forwards() {
         })
         .await
         .unwrap();
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(
+        resp.topics[0].error_code == 0,
         "create via broker-only node forwards to the controller and succeeds"
     );
 

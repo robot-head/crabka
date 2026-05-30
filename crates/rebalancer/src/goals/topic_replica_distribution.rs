@@ -141,6 +141,7 @@ impl Goal for TopicReplicaDistribution {
 mod tests {
     use super::*;
     use crate::model::BrokerView;
+    use assert2::assert;
 
     fn ctx_with(threshold: u32, cap: usize) -> GoalContext {
         GoalContext {
@@ -207,7 +208,7 @@ mod tests {
             "expected swaps for hot-broker concentration"
         );
         for m in &mvs {
-            assert_eq!(m.old_replicas.len(), m.new_replicas.len());
+            assert!(m.old_replicas.len() == m.new_replicas.len());
         }
     }
 
@@ -224,7 +225,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = TopicReplicaDistribution.propose(&s, &ctx());
         for m in &mvs {
-            assert_eq!(m.topic, "b", "movement on wrong topic: {m:?}");
+            assert!(m.topic == "b", "movement on wrong topic: {m:?}");
         }
         assert!(!mvs.is_empty(), "expected swaps on topic b");
     }

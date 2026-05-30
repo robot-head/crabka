@@ -138,15 +138,16 @@ pub(crate) async fn handle(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn txn_state_str_matches_jvm_names() {
-        assert_eq!(txn_state_str(TxnState::Empty), "Empty");
-        assert_eq!(txn_state_str(TxnState::Ongoing), "Ongoing");
-        assert_eq!(txn_state_str(TxnState::PrepareCommit), "PrepareCommit");
-        assert_eq!(txn_state_str(TxnState::PrepareAbort), "PrepareAbort");
-        assert_eq!(txn_state_str(TxnState::CompleteCommit), "CompleteCommit");
-        assert_eq!(txn_state_str(TxnState::CompleteAbort), "CompleteAbort");
-        assert_eq!(txn_state_str(TxnState::Dead), "Dead");
+        assert!(txn_state_str(TxnState::Empty) == "Empty");
+        assert!(txn_state_str(TxnState::Ongoing) == "Ongoing");
+        assert!(txn_state_str(TxnState::PrepareCommit) == "PrepareCommit");
+        assert!(txn_state_str(TxnState::PrepareAbort) == "PrepareAbort");
+        assert!(txn_state_str(TxnState::CompleteCommit) == "CompleteCommit");
+        assert!(txn_state_str(TxnState::CompleteAbort) == "CompleteAbort");
+        assert!(txn_state_str(TxnState::Dead) == "Dead");
     }
 }

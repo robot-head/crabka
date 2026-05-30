@@ -531,11 +531,12 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn release_version_maps_to_feature_level() {
-        assert_eq!(resolve_release_level("4.0").unwrap(), 25);
-        assert_eq!(resolve_release_level("3.7-IV4").unwrap(), 19);
+        assert!(resolve_release_level("4.0").unwrap() == 25);
+        assert!(resolve_release_level("3.7-IV4").unwrap() == 19);
         assert!(resolve_release_level("2.8").is_err()); // below MIN / unknown
         assert!(resolve_release_level("9.9-IV0").is_err()); // unknown
     }
@@ -545,9 +546,9 @@ mod tests {
     // `--release-version` and asserts the FeatureLevel record is present.
     #[test]
     fn max_version_string_resolves_to_max() {
-        assert_eq!(
-            resolve_release_level("4.0").unwrap(),
-            crabka_metadata::metadata_version::METADATA_VERSION_MAX
+        assert!(
+            resolve_release_level("4.0").unwrap()
+                == crabka_metadata::metadata_version::METADATA_VERSION_MAX
         );
     }
 
@@ -555,24 +556,24 @@ mod tests {
     fn parse_scram_spec_happy_path() {
         let spec = parse_scram_spec("SCRAM-SHA-512=[name=alice,password=hunter2,iterations=8192]")
             .unwrap();
-        assert_eq!(spec.name, "alice");
-        assert_eq!(spec.password, "hunter2");
-        assert_eq!(spec.iterations, 8192);
-        assert_eq!(spec.mechanism, SaslMechanism::ScramSha512);
+        assert!(spec.name == "alice");
+        assert!(spec.password == "hunter2");
+        assert!(spec.iterations == 8192);
+        assert!(spec.mechanism == SaslMechanism::ScramSha512);
     }
 
     #[test]
     fn parse_scram_spec_iterations_default() {
         let spec = parse_scram_spec("SCRAM-SHA-512=[name=bob,password=p]").unwrap();
-        assert_eq!(spec.iterations, 4096);
+        assert!(spec.iterations == 4096);
     }
 
     #[test]
     fn parse_scram_spec_sha256_prefix() {
         let spec = parse_scram_spec("SCRAM-SHA-256=[name=alice,password=hunter2,iterations=8192]")
             .unwrap();
-        assert_eq!(spec.name, "alice");
-        assert_eq!(spec.mechanism, SaslMechanism::ScramSha256);
+        assert!(spec.name == "alice");
+        assert!(spec.mechanism == SaslMechanism::ScramSha256);
     }
 
     #[test]
@@ -594,23 +595,20 @@ mod tests {
     fn parse_acl_spec_minimal() {
         let s = "principal=User:admin,host=*,operation=All,permission=Allow,resource=Cluster:kafka-cluster";
         let entry = parse_acl_spec(s).unwrap();
-        assert_eq!(entry.resource_type, crabka_metadata::ResourceType::Cluster);
-        assert_eq!(entry.resource_name, "kafka-cluster");
-        assert_eq!(entry.pattern_type, crabka_metadata::PatternType::Literal);
-        assert_eq!(entry.principal, "User:admin");
-        assert_eq!(entry.operation, crabka_metadata::AclOperation::All);
-        assert_eq!(
-            entry.permission_type,
-            crabka_metadata::PermissionType::Allow
-        );
+        assert!(entry.resource_type == crabka_metadata::ResourceType::Cluster);
+        assert!(entry.resource_name == "kafka-cluster");
+        assert!(entry.pattern_type == crabka_metadata::PatternType::Literal);
+        assert!(entry.principal == "User:admin");
+        assert!(entry.operation == crabka_metadata::AclOperation::All);
+        assert!(entry.permission_type == crabka_metadata::PermissionType::Allow);
     }
 
     #[test]
     fn parse_acl_spec_with_prefixed_pattern() {
         let s = "principal=User:alice,host=*,operation=Read,permission=Allow,resource=Topic:team-:Prefixed";
         let entry = parse_acl_spec(s).unwrap();
-        assert_eq!(entry.pattern_type, crabka_metadata::PatternType::Prefixed);
-        assert_eq!(entry.resource_name, "team-");
+        assert!(entry.pattern_type == crabka_metadata::PatternType::Prefixed);
+        assert!(entry.resource_name == "team-");
     }
 
     #[test]
@@ -623,11 +621,11 @@ mod tests {
     fn parses_initial_controller_spec() {
         let v =
             parse_initial_controller("3@host:9093:00000000-0000-0000-0000-000000000003").unwrap();
-        assert_eq!(v.id, 3);
-        assert_eq!(v.endpoints[0].name, "CONTROLLER");
-        assert_eq!(v.endpoints[0].host, "host");
-        assert_eq!(v.endpoints[0].port, 9093);
-        assert_eq!(v.directory_id, Uuid::from_u128(3));
+        assert!(v.id == 3);
+        assert!(v.endpoints[0].name == "CONTROLLER");
+        assert!(v.endpoints[0].host == "host");
+        assert!(v.endpoints[0].port == 9093);
+        assert!(v.directory_id == Uuid::from_u128(3));
     }
 
     #[test]
@@ -658,7 +656,7 @@ mod tests {
         ] {
             let spec =
                 format!("principal=User:u,host=*,operation={s},permission=Allow,resource=Topic:t");
-            assert_eq!(parse_acl_spec(&spec).unwrap().operation, op);
+            assert!(parse_acl_spec(&spec).unwrap().operation == op);
         }
     }
 
@@ -674,8 +672,8 @@ mod tests {
             let spec =
                 format!("principal=User:u,host=*,operation=All,permission=Deny,resource={s}:n");
             let entry = parse_acl_spec(&spec).unwrap();
-            assert_eq!(entry.resource_type, rt);
-            assert_eq!(entry.permission_type, PermissionType::Deny);
+            assert!(entry.resource_type == rt);
+            assert!(entry.permission_type == PermissionType::Deny);
         }
     }
 
@@ -728,12 +726,12 @@ mod tests {
     #[test]
     fn base64_encode_known_vectors() {
         // RFC 4648 §10
-        assert_eq!(base64_encode(b""), "");
-        assert_eq!(base64_encode(b"f"), "Zg==");
-        assert_eq!(base64_encode(b"fo"), "Zm8=");
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
-        assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert!(base64_encode(b"") == "");
+        assert!(base64_encode(b"f") == "Zg==");
+        assert!(base64_encode(b"fo") == "Zm8=");
+        assert!(base64_encode(b"foo") == "Zm9v");
+        assert!(base64_encode(b"foob") == "Zm9vYg==");
+        assert!(base64_encode(b"fooba") == "Zm9vYmE=");
+        assert!(base64_encode(b"foobar") == "Zm9vYmFy");
     }
 }

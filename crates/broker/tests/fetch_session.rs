@@ -3,6 +3,7 @@
 //! shared `Client` so the exact `session_id` / `session_epoch` paths
 //! are exercised end-to-end.
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -48,7 +49,7 @@ async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics for {name}");
+    assert!(resp.topics[0].error_code == 0, "CreateTopics for {name}");
 }
 
 async fn topic_id_for(p: &support::InProcess, name: &str) -> WireUuid {
@@ -88,8 +89,8 @@ async fn produce(p: &support::InProcess, topic: &str, partition: i32, records: i
         ..Default::default()
     };
     let resp = p.client.send(req).await.expect("Produce");
-    assert_eq!(
-        resp.responses[0].partition_responses[0].error_code, 0,
+    assert!(
+        resp.responses[0].partition_responses[0].error_code == 0,
         "Produce error"
     );
 }
@@ -141,10 +142,10 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         })
         .await
         .expect("Fetch new-session");
-    assert_eq!(r1.error_code, 0, "no top-level error");
+    assert!(r1.error_code == 0, "no top-level error");
     assert!(r1.session_id > 0, "broker allocated a session id");
-    assert_eq!(r1.responses.len(), 1, "new session emits full response");
-    assert_eq!(r1.responses[0].partitions.len(), 3, "all 3 partitions");
+    assert!(r1.responses.len() == 1, "new session emits full response");
+    assert!(r1.responses[0].partitions.len() == 3, "all 3 partitions");
     let sid = r1.session_id;
 
     // (2) Immediate incremental: nothing changed → empty response.
@@ -161,8 +162,8 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         })
         .await
         .expect("Fetch incremental empty");
-    assert_eq!(r2.error_code, 0);
-    assert_eq!(r2.session_id, sid, "session id echoed");
+    assert!(r2.error_code == 0);
+    assert!(r2.session_id == sid, "session id echoed");
     assert!(
         r2.responses.is_empty(),
         "no partition changed → no topics in response, got {:?}",
@@ -184,18 +185,18 @@ async fn new_session_then_incremental_filters_unchanged_partitions() {
         })
         .await
         .expect("Fetch incremental after produce");
-    assert_eq!(r3.error_code, 0);
-    assert_eq!(r3.session_id, sid);
-    assert_eq!(r3.responses.len(), 1);
-    assert_eq!(r3.responses[0].partitions.len(), 1);
-    assert_eq!(r3.responses[0].partitions[0].partition_index, 0);
+    assert!(r3.error_code == 0);
+    assert!(r3.session_id == sid);
+    assert!(r3.responses.len() == 1);
+    assert!(r3.responses[0].partitions.len() == 1);
+    assert!(r3.responses[0].partitions[0].partition_index == 0);
     let batches = r3.responses[0].partitions[0]
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
         .expect("v2 records present");
     let total: usize = batches.iter().map(|b| b.records.len()).sum();
-    assert_eq!(total, 5);
+    assert!(total == 5);
 
     p.broker.shutdown().await;
 }
@@ -251,8 +252,8 @@ async fn forgotten_topics_drop_partitions_from_subscription() {
         })
         .await
         .expect("forget t-1");
-    assert_eq!(r2.error_code, 0);
-    assert_eq!(r2.session_id, sid);
+    assert!(r2.error_code == 0);
+    assert!(r2.session_id == sid);
 
     // Produce to t-1 — should NOT reappear in the next incremental.
     produce(&p, "t", 1, 4).await;
@@ -272,16 +273,15 @@ async fn forgotten_topics_drop_partitions_from_subscription() {
         })
         .await
         .expect("after produce");
-    assert_eq!(r3.error_code, 0);
+    assert!(r3.error_code == 0);
     let mut seen_partitions: Vec<i32> = r3
         .responses
         .iter()
         .flat_map(|t| t.partitions.iter().map(|p| p.partition_index))
         .collect();
     seen_partitions.sort_unstable();
-    assert_eq!(
-        seen_partitions,
-        vec![2],
+    assert!(
+        seen_partitions == vec![2],
         "t-1 forgotten, only t-2 should appear (t-0 had no new data)"
     );
 
@@ -305,8 +305,8 @@ async fn unknown_session_id_returns_not_found() {
         })
         .await
         .expect("Fetch unknown sid");
-    assert_eq!(r.error_code, FETCH_SESSION_ID_NOT_FOUND);
-    assert_eq!(r.session_id, 0);
+    assert!(r.error_code == FETCH_SESSION_ID_NOT_FOUND);
+    assert!(r.session_id == 0);
     assert!(r.responses.is_empty());
     p.broker.shutdown().await;
 }
@@ -342,8 +342,8 @@ async fn stale_session_epoch_returns_invalid_epoch() {
         })
         .await
         .expect("stale epoch");
-    assert_eq!(r2.error_code, INVALID_FETCH_SESSION_EPOCH);
-    assert_eq!(r2.session_id, 0);
+    assert!(r2.error_code == INVALID_FETCH_SESSION_EPOCH);
+    assert!(r2.session_id == 0);
     assert!(r2.responses.is_empty());
     p.broker.shutdown().await;
 }
@@ -381,8 +381,8 @@ async fn close_session_drops_cache_entry() {
         })
         .await
         .expect("close");
-    assert_eq!(r2.error_code, 0);
-    assert_eq!(r2.session_id, 0, "close → response session_id=0");
+    assert!(r2.error_code == 0);
+    assert!(r2.session_id == 0, "close → response session_id=0");
 
     // Re-using sid afterwards is NOT_FOUND.
     let r3 = p
@@ -395,7 +395,7 @@ async fn close_session_drops_cache_entry() {
         })
         .await
         .expect("after close");
-    assert_eq!(r3.error_code, FETCH_SESSION_ID_NOT_FOUND);
+    assert!(r3.error_code == FETCH_SESSION_ID_NOT_FOUND);
     p.broker.shutdown().await;
 }
 
@@ -413,8 +413,8 @@ async fn sessionless_zero_id_with_stray_epoch_is_invalid() {
         })
         .await
         .expect("stray");
-    assert_eq!(r.error_code, INVALID_FETCH_SESSION_EPOCH);
-    assert_eq!(r.session_id, 0);
+    assert!(r.error_code == INVALID_FETCH_SESSION_EPOCH);
+    assert!(r.session_id == 0);
     p.broker.shutdown().await;
 }
 
@@ -439,15 +439,15 @@ async fn sessionless_full_fetch_round_trip() {
         })
         .await
         .expect("sessionless");
-    assert_eq!(r.error_code, 0);
-    assert_eq!(r.session_id, 0, "sessionless → no allocation");
-    assert_eq!(r.responses.len(), 1);
+    assert!(r.error_code == 0);
+    assert!(r.session_id == 0, "sessionless → no allocation");
+    assert!(r.responses.len() == 1);
     let batches = r.responses[0].partitions[0]
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
         .expect("v2 records");
     let total: usize = batches.iter().map(|b| b.records.len()).sum();
-    assert_eq!(total, 2);
+    assert!(total == 2);
     p.broker.shutdown().await;
 }

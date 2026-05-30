@@ -1,6 +1,7 @@
 // Bespoke tests for borrowed OffsetCommit wrappers. Relocated from
 // hand-written wrappers.
 
+use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::borrowed::offset_commit_request::{
     MAX_VERSION, MIN_VERSION, OffsetCommitRequest,
@@ -15,12 +16,12 @@ fn borrowed_offset_commit_request_min_version_empty_topics() {
     let req = OffsetCommitRequest::default();
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MIN_VERSION).unwrap();
-    assert_eq!(req.encoded_len(MIN_VERSION), buf.len());
+    assert!(req.encoded_len(MIN_VERSION) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = OffsetCommitRequest::decode_borrow(&mut cur, MIN_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert_eq!(decoded.topics.len(), 0);
+    assert!(decoded.topics.len() == 0);
 }
 
 #[test]
@@ -36,13 +37,13 @@ fn borrowed_offset_commit_request_max_version_specific_values() {
     };
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MAX_VERSION).unwrap();
-    assert_eq!(req.encoded_len(MAX_VERSION), buf.len());
+    assert!(req.encoded_len(MAX_VERSION) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = OffsetCommitRequest::decode_borrow(&mut cur, MAX_VERSION).unwrap();
     assert!(cur.is_empty());
-    assert_eq!(decoded.group_id, req.group_id);
-    assert_eq!(decoded.topics, req.topics);
+    assert!(decoded.group_id == req.group_id);
+    assert!(decoded.topics == req.topics);
 }
 
 #[test]
@@ -50,12 +51,12 @@ fn borrowed_offset_commit_response_min_version_empty_topics() {
     let resp = OffsetCommitResponse::default();
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MIN).unwrap();
-    assert_eq!(resp.encoded_len(RESP_MIN), buf.len());
+    assert!(resp.encoded_len(RESP_MIN) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = OffsetCommitResponse::decode_borrow(&mut cur, RESP_MIN).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert_eq!(decoded.topics.len(), 0);
+    assert!(decoded.topics.len() == 0);
 }
 
 #[test]
@@ -67,10 +68,10 @@ fn borrowed_offset_commit_response_max_version_roundtrips() {
     };
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MAX).unwrap();
-    assert_eq!(resp.encoded_len(RESP_MAX), buf.len());
+    assert!(resp.encoded_len(RESP_MAX) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = OffsetCommitResponse::decode_borrow(&mut cur, RESP_MAX).unwrap();
     assert!(cur.is_empty());
-    assert_eq!(decoded.topics, resp.topics);
+    assert!(decoded.topics == resp.topics);
 }

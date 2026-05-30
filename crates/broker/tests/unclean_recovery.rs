@@ -41,6 +41,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -141,9 +142,9 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({name}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -179,8 +180,8 @@ async fn drive_elect_leaders(
     let resp = ElectLeadersResponse::decode(&mut cur, ELECT_LEADERS_VERSION)
         .expect("decode ElectLeadersResponse");
 
-    assert_eq!(
-        resp.error_code, 0,
+    assert!(
+        resp.error_code == 0,
         "top-level error_code must be 0, got {}",
         resp.error_code
     );
@@ -301,9 +302,8 @@ async fn unclean_recovery_elects_longest_log_replica() {
         }
     };
     eprintln!("partition before divergence: {pr_before:?}");
-    assert_eq!(
-        pr_before.replicas,
-        vec![1, 2, 3],
+    assert!(
+        pr_before.replicas == vec![1, 2, 3],
         "expected RF=3 replicas [1,2,3]; got {:?}",
         pr_before.replicas
     );
@@ -395,9 +395,8 @@ async fn unclean_recovery_elects_longest_log_replica() {
 
     // ── Trigger offset-aware recovery (election_type = 1 = UNCLEAN). ──
     let result = drive_elect_leaders(elect_addr, topic, vec![0], 1).await;
-    assert_eq!(
-        result,
-        vec![(0, 0)],
+    assert!(
+        result == vec![(0, 0)],
         "expected error_code=0 for UNCLEAN election; got {result:?}"
     );
 
@@ -407,8 +406,8 @@ async fn unclean_recovery_elects_longest_log_replica() {
     let final_leader = h1
         .partition_leader_for_test(topic, 0)
         .expect("leader present");
-    assert_eq!(
-        final_leader, 2,
+    assert!(
+        final_leader == 2,
         "URM must elect the highest-LEO survivor (broker 2), not the \
          first-alive replica (broker 1); got leader={final_leader}"
     );

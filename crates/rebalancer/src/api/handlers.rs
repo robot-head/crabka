@@ -477,6 +477,7 @@ mod tests {
     use crate::metrics::RebalancerMetrics;
     use crate::model::proposal::{Movement, Proposal, ProposalSummary};
     use crate::scraper::UsageStore;
+    use assert2::assert;
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::time::Duration;
@@ -599,7 +600,7 @@ mod tests {
         )
         .await
         .expect_err("expected FailedPrecondition");
-        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.code() == Code::FailedPrecondition);
     }
 
     #[tokio::test]
@@ -616,7 +617,7 @@ mod tests {
         )
         .await
         .expect_err("expected NotFound");
-        assert_eq!(err.code(), Code::NotFound);
+        assert!(err.code() == Code::NotFound);
     }
 
     #[tokio::test]
@@ -645,7 +646,7 @@ mod tests {
         )
         .await
         .expect_err("expected FailedPrecondition");
-        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.code() == Code::FailedPrecondition);
     }
 
     #[tokio::test]
@@ -661,28 +662,19 @@ mod tests {
         )
         .await
         .expect_err("expected NotFound");
-        assert_eq!(err.code(), Code::NotFound);
+        assert!(err.code() == Code::NotFound);
     }
 
     #[test]
     fn anomaly_kind_to_proto_covers_all_variants() {
         use crate::detector::AnomalyKind;
-        assert_eq!(
-            anomaly_kind_to_proto(AnomalyKind::BrokerDeath),
-            pb::AnomalyKind::BrokerDeath
+        assert!(anomaly_kind_to_proto(AnomalyKind::BrokerDeath) == pb::AnomalyKind::BrokerDeath);
+        assert!(
+            anomaly_kind_to_proto(AnomalyKind::UnderReplicatedPartitions)
+                == pb::AnomalyKind::UnderReplicatedPartitions
         );
-        assert_eq!(
-            anomaly_kind_to_proto(AnomalyKind::UnderReplicatedPartitions),
-            pb::AnomalyKind::UnderReplicatedPartitions
-        );
-        assert_eq!(
-            anomaly_kind_to_proto(AnomalyKind::DiskPressure),
-            pb::AnomalyKind::DiskPressure
-        );
-        assert_eq!(
-            anomaly_kind_to_proto(AnomalyKind::SlowBroker),
-            pb::AnomalyKind::SlowBroker
-        );
+        assert!(anomaly_kind_to_proto(AnomalyKind::DiskPressure) == pb::AnomalyKind::DiskPressure);
+        assert!(anomaly_kind_to_proto(AnomalyKind::SlowBroker) == pb::AnomalyKind::SlowBroker);
     }
 
     #[test]
@@ -753,6 +745,6 @@ mod tests {
         )
         .await
         .expect_err("expected FailedPrecondition");
-        assert_eq!(err.code(), Code::FailedPrecondition);
+        assert!(err.code() == Code::FailedPrecondition);
     }
 }

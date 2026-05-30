@@ -84,6 +84,7 @@ pub fn get_f64<B: Buf>(buf: &mut B) -> Result<f64, ProtocolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::BytesMut;
 
     macro_rules! roundtrip {
@@ -94,7 +95,7 @@ mod tests {
                     let mut buf = BytesMut::new();
                     $put(&mut buf, v);
                     let mut cur = &buf[..];
-                    assert_eq!($get(&mut cur).unwrap(), v);
+                    assert!($get(&mut cur).unwrap() == v);
                     assert!(cur.is_empty(), "decoder did not consume all bytes");
                 }
             }
@@ -127,7 +128,7 @@ mod tests {
             let mut buf = BytesMut::new();
             put_bool(&mut buf, v);
             let mut cur = &buf[..];
-            assert_eq!(get_bool(&mut cur).unwrap(), v);
+            assert!(get_bool(&mut cur).unwrap() == v);
         }
     }
 
@@ -152,6 +153,6 @@ mod tests {
     fn big_endian_layout_i32() {
         let mut buf = BytesMut::new();
         put_i32(&mut buf, 0x0102_0304);
-        assert_eq!(&buf[..], &[0x01, 0x02, 0x03, 0x04]);
+        assert!(&buf[..] == &[0x01, 0x02, 0x03, 0x04]);
     }
 }

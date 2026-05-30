@@ -7,6 +7,7 @@
 //! file only uses `support::start` which is cross-platform — no gate
 //! needed).
 
+use assert2::assert;
 mod support;
 
 use bytes::BufMut;
@@ -40,7 +41,7 @@ async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "CreateTopics for {name}");
+    assert!(resp.topics[0].error_code == 0, "CreateTopics for {name}");
 }
 
 async fn commit_offset(p: &support::InProcess, group: &str, topic: &str, partition: i32, off: i64) {
@@ -65,8 +66,8 @@ async fn commit_offset(p: &support::InProcess, group: &str, topic: &str, partiti
         })
         .await
         .expect("OffsetCommit");
-    assert_eq!(
-        resp.topics[0].partitions[0].error_code, 0,
+    assert!(
+        resp.topics[0].partitions[0].error_code == 0,
         "OffsetCommit({group},{topic},{partition})"
     );
 }
@@ -115,23 +116,21 @@ async fn delete_offsets_from_empty_group_round_trip() {
         })
         .await
         .expect("OffsetDelete");
-    assert_eq!(resp.error_code, 0, "top-level NONE");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(resp.topics[0].partitions.len(), 1);
-    assert_eq!(
-        resp.topics[0].partitions[0].error_code, 0,
+    assert!(resp.error_code == 0, "top-level NONE");
+    assert!(resp.topics.len() == 1);
+    assert!(resp.topics[0].partitions.len() == 1);
+    assert!(
+        resp.topics[0].partitions[0].error_code == 0,
         "partition 0 NONE"
     );
 
     // Verify partition 0 is gone, partition 1 still has its offset.
-    assert_eq!(
-        fetch_offset(&p, "g1", "t1", 0).await,
-        OFFSET_ABSENT_SENTINEL,
+    assert!(
+        fetch_offset(&p, "g1", "t1", 0).await == OFFSET_ABSENT_SENTINEL,
         "partition 0 offset cleared"
     );
-    assert_eq!(
-        fetch_offset(&p, "g1", "t1", 1).await,
-        100,
+    assert!(
+        fetch_offset(&p, "g1", "t1", 1).await == 100,
         "partition 1 offset untouched"
     );
 
@@ -161,7 +160,7 @@ async fn delete_offsets_unknown_group_returns_group_id_not_found() {
         })
         .await
         .expect("OffsetDelete");
-    assert_eq!(resp.error_code, 69, "top-level GROUP_ID_NOT_FOUND (69)");
+    assert!(resp.error_code == 69, "top-level GROUP_ID_NOT_FOUND (69)");
 
     p.broker.shutdown().await;
 }
@@ -190,9 +189,9 @@ async fn delete_offsets_missing_topic_returns_unknown_topic_or_partition() {
         })
         .await
         .expect("OffsetDelete");
-    assert_eq!(resp.error_code, 0, "top-level NONE");
-    assert_eq!(
-        resp.topics[0].partitions[0].error_code, 3,
+    assert!(resp.error_code == 0, "top-level NONE");
+    assert!(
+        resp.topics[0].partitions[0].error_code == 3,
         "UNKNOWN_TOPIC_OR_PARTITION (3) for missing topic"
     );
 
@@ -230,10 +229,10 @@ async fn delete_offsets_partition_out_of_range_returns_unknown_topic_or_partitio
         })
         .await
         .expect("OffsetDelete");
-    assert_eq!(resp.error_code, 0);
-    assert_eq!(resp.topics[0].partitions[0].error_code, 0, "p=0 deleted");
-    assert_eq!(
-        resp.topics[0].partitions[1].error_code, 3,
+    assert!(resp.error_code == 0);
+    assert!(resp.topics[0].partitions[0].error_code == 0, "p=0 deleted");
+    assert!(
+        resp.topics[0].partitions[1].error_code == 3,
         "p=99 UNKNOWN_TOPIC_OR_PARTITION"
     );
 
@@ -278,7 +277,7 @@ async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {
         .await
         .expect("JoinGroup1");
     // First JoinGroup with empty member_id returns MEMBER_ID_REQUIRED (79).
-    assert_eq!(r1.error_code, 79);
+    assert!(r1.error_code == 79);
     let mid = r1.member_id.clone();
     assert!(!mid.is_empty());
 
@@ -300,7 +299,7 @@ async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {
         })
         .await
         .expect("JoinGroup2");
-    assert_eq!(r2.error_code, 0);
+    assert!(r2.error_code == 0);
 
     // OffsetDelete on the subscribed topic → GROUP_SUBSCRIBED_TO_TOPIC.
     let resp = p
@@ -319,14 +318,17 @@ async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {
         })
         .await
         .expect("OffsetDelete");
-    assert_eq!(resp.error_code, 0, "top-level NONE");
-    assert_eq!(
-        resp.topics[0].partitions[0].error_code, 86,
+    assert!(resp.error_code == 0, "top-level NONE");
+    assert!(
+        resp.topics[0].partitions[0].error_code == 86,
         "GROUP_SUBSCRIBED_TO_TOPIC (86)"
     );
 
     // Offset is unchanged.
-    assert_eq!(fetch_offset(&p, "g5", "t5", 0).await, 9, "offset survived");
+    assert!(
+        fetch_offset(&p, "g5", "t5", 0).await == 9,
+        "offset survived"
+    );
 
     p.broker.shutdown().await;
 }

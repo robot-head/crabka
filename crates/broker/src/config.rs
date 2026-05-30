@@ -851,6 +851,7 @@ impl Default for BrokerConfig {
 mod tests {
     use super::*;
     use crate::BrokerError as BrokerStartError;
+    use assert2::assert;
 
     #[test]
     fn kafka_rlmm_config_carries_snapshot_settings() {
@@ -862,11 +863,8 @@ mod tests {
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
             security: None,
         };
-        assert_eq!(c.snapshot_interval, std::time::Duration::from_mins(1));
-        assert_eq!(
-            c.snapshot_dir,
-            std::path::PathBuf::from("/data/remote-log-metadata")
-        );
+        assert!(c.snapshot_interval == std::time::Duration::from_mins(1));
+        assert!(c.snapshot_dir == std::path::PathBuf::from("/data/remote-log-metadata"));
     }
 
     #[test]
@@ -946,27 +944,21 @@ mod tests {
     #[test]
     fn defaults_listen_on_localhost_9092() {
         let c = BrokerConfig::default();
-        assert_eq!(c.listen_addr.port(), 9092);
-        assert_eq!(c.broker_id, 1);
+        assert!(c.listen_addr.port() == 9092);
+        assert!(c.broker_id == 1);
     }
 
     #[test]
     fn for_tests_uses_port_0() {
         let c = BrokerConfig::for_tests(PathBuf::from("/tmp"));
-        assert_eq!(c.listen_addr.port(), 0);
+        assert!(c.listen_addr.port() == 0);
     }
 
     #[test]
     fn defaults_use_conservative_raft_timings() {
         let c = BrokerConfig::default();
-        assert_eq!(
-            c.controller_election_timeout,
-            std::time::Duration::from_secs(5)
-        );
-        assert_eq!(
-            c.controller_heartbeat_interval,
-            std::time::Duration::from_millis(500)
-        );
+        assert!(c.controller_election_timeout == std::time::Duration::from_secs(5));
+        assert!(c.controller_heartbeat_interval == std::time::Duration::from_millis(500));
     }
 
     #[test]
@@ -982,13 +974,13 @@ mod tests {
     #[test]
     fn defaults_use_bootstrap_mode() {
         let c = BrokerConfig::default();
-        assert_eq!(c.bootstrap_mode, BootstrapMode::Bootstrap);
+        assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
     }
 
     #[test]
     fn for_tests_uses_bootstrap_mode() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert_eq!(c.bootstrap_mode, BootstrapMode::Bootstrap);
+        assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
     }
 
     #[test]
@@ -996,9 +988,8 @@ mod tests {
         let d = BrokerConfig::default();
         assert!(d.is_controller(), "default node is a controller");
         assert!(d.is_broker(), "default node is a broker");
-        assert_eq!(
-            d.roles,
-            vec![NodeRole::Controller, NodeRole::Broker],
+        assert!(
+            d.roles == vec![NodeRole::Controller, NodeRole::Broker],
             "default roles are the combined set"
         );
 
@@ -1155,8 +1146,8 @@ mod tests {
     fn auto_leader_rebalance_defaults_to_true_in_default() {
         let c = BrokerConfig::default();
         assert!(c.auto_leader_rebalance_enable);
-        assert_eq!(c.leader_imbalance_check_interval_secs, 300);
-        assert_eq!(c.leader_imbalance_per_broker_percentage, 10);
+        assert!(c.leader_imbalance_check_interval_secs == 300);
+        assert!(c.leader_imbalance_per_broker_percentage == 10);
     }
 
     #[test]
@@ -1192,16 +1183,10 @@ mod tests {
     #[test]
     fn rack_and_selector_default_off() {
         let c = BrokerConfig::default();
-        assert_eq!(c.rack, None);
-        assert_eq!(
-            c.replica_selector,
-            crate::replica_selector::ReplicaSelectorKind::Leader
-        );
+        assert!(c.rack == None);
+        assert!(c.replica_selector == crate::replica_selector::ReplicaSelectorKind::Leader);
         let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert_eq!(t.rack, None);
-        assert_eq!(
-            t.replica_selector,
-            crate::replica_selector::ReplicaSelectorKind::Leader
-        );
+        assert!(t.rack == None);
+        assert!(t.replica_selector == crate::replica_selector::ReplicaSelectorKind::Leader);
     }
 }

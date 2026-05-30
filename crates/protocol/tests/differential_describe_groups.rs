@@ -1,3 +1,4 @@
+use assert2::assert;
 mod support;
 use support::oracle;
 
@@ -69,18 +70,17 @@ fn describe_groups_request_default_byte_equal_every_version() {
         let oracle_json = request_oracle_value(version);
         // api_key=15, is_request=true
         let java = o.encode(15, version, true, &oracle_json);
-        assert_eq!(
-            rust,
-            java,
+        assert!(
+            rust == java,
             "DescribeGroupsRequest v{version} byte mismatch\n  rust: {}\n  java: {}",
             hex::encode(&rust),
-            hex::encode(&java),
+            hex::encode(&java)
         );
         // Also verify decode roundtrip
         let decoded: DescribeGroupsRequest = rust_decode(&rust, version);
         let re_encoded = rust_encode(&decoded, version);
-        assert_eq!(
-            rust, re_encoded,
+        assert!(
+            rust == re_encoded,
             "DescribeGroupsRequest v{version} roundtrip mismatch after decode"
         );
     }
@@ -96,18 +96,17 @@ fn describe_groups_response_default_byte_equal_every_version() {
         let oracle_json = response_oracle_value(version);
         // api_key=15, is_request=false
         let java = o.encode(15, version, false, &oracle_json);
-        assert_eq!(
-            rust,
-            java,
+        assert!(
+            rust == java,
             "DescribeGroupsResponse v{version} byte mismatch\n  rust: {}\n  java: {}",
             hex::encode(&rust),
-            hex::encode(&java),
+            hex::encode(&java)
         );
         // Also verify decode roundtrip
         let decoded: DescribeGroupsResponse = rust_decode(&rust, version);
         let re_encoded = rust_encode(&decoded, version);
-        assert_eq!(
-            rust, re_encoded,
+        assert!(
+            rust == re_encoded,
             "DescribeGroupsResponse v{version} roundtrip mismatch after decode"
         );
     }

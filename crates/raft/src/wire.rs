@@ -529,6 +529,7 @@ impl CrabkaInstallSnapshotResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn append_entries_round_trip() {
@@ -554,7 +555,7 @@ mod tests {
         req.encode_v0(&mut out).unwrap();
         let mut cur: &[u8] = &out;
         let decoded = CrabkaAppendEntriesRequest::decode_v0(&mut cur).unwrap();
-        assert_eq!(decoded, req);
+        assert!(decoded == req);
     }
 
     #[test]
@@ -569,7 +570,7 @@ mod tests {
         let mut out = Vec::new();
         req.encode_v0(&mut out).unwrap();
         let mut cur: &[u8] = &out;
-        assert_eq!(CrabkaVoteRequest::decode_v0(&mut cur).unwrap(), req);
+        assert!(CrabkaVoteRequest::decode_v0(&mut cur).unwrap() == req);
     }
 
     #[test]
@@ -584,10 +585,7 @@ mod tests {
         let mut out = Vec::new();
         req.encode_v0(&mut out).unwrap();
         let mut cur: &[u8] = &out;
-        assert_eq!(
-            CrabkaInstallSnapshotRequest::decode_v0(&mut cur).unwrap(),
-            req
-        );
+        assert!(CrabkaInstallSnapshotRequest::decode_v0(&mut cur).unwrap() == req);
 
         let resp = CrabkaInstallSnapshotResponse {
             vote: Bytes::from_static(b"resp-vote"),
@@ -595,10 +593,7 @@ mod tests {
         let mut out = Vec::new();
         resp.encode_v0(&mut out).unwrap();
         let mut cur: &[u8] = &out;
-        assert_eq!(
-            CrabkaInstallSnapshotResponse::decode_v0(&mut cur).unwrap(),
-            resp
-        );
+        assert!(CrabkaInstallSnapshotResponse::decode_v0(&mut cur).unwrap() == resp);
     }
 
     #[test]
@@ -611,7 +606,7 @@ mod tests {
         req.encode_v0(&mut out);
         let mut cur: &[u8] = &out;
         let got = CrabkaMetadataFetchRequest::decode_v0(&mut cur).unwrap();
-        assert_eq!(got, req);
+        assert!(got == req);
     }
 
     #[test]
@@ -627,6 +622,6 @@ mod tests {
         resp.encode_v0(&mut out).unwrap();
         let mut cur: &[u8] = &out;
         let got = CrabkaMetadataFetchResponse::decode_v0(&mut cur).unwrap();
-        assert_eq!(got, resp);
+        assert!(got == resp);
     }
 }

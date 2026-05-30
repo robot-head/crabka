@@ -108,6 +108,7 @@ pub fn partition_keys(movements: &[Movement]) -> Vec<(String, i32)> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+    use assert2::assert;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -246,7 +247,7 @@ pub mod tests {
                 }
             })
             .collect();
-        assert_eq!(submits, vec![2, 1]);
+        assert!(submits == vec![2, 1]);
     }
 
     #[tokio::test]
@@ -267,7 +268,7 @@ pub mod tests {
                 }
             })
             .collect();
-        assert_eq!(ops, vec![ConfigOp::Set, ConfigOp::Delete]);
+        assert!(ops == vec![ConfigOp::Set, ConfigOp::Delete]);
     }
 
     #[test]
@@ -278,6 +279,6 @@ pub mod tests {
             mv("b", 1, vec![1], vec![3]),
         ];
         let keys = partition_keys(&ms);
-        assert_eq!(keys, vec![("a".to_string(), 0), ("b".to_string(), 1)]);
+        assert!(keys == vec![("a".to_string(), 0), ("b".to_string(), 1)]);
     }
 }

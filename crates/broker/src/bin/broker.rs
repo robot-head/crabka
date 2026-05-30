@@ -269,22 +269,23 @@ fn detect_bootstrap_mode(log_dir: &Path) -> BootstrapMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use tempfile::tempdir;
 
     #[test]
     fn detect_bootstrap_when_log_dir_is_empty() {
         let dir = tempdir().unwrap();
-        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+        assert!(detect_bootstrap_mode(dir.path()) == BootstrapMode::Bootstrap);
     }
 
     #[test]
     fn parse_roles_arg_maps_strings() {
-        assert_eq!(
-            parse_roles_arg(&["controller".to_string(), "broker".to_string()]).unwrap(),
-            vec![
-                crabka_broker::config::NodeRole::Controller,
-                crabka_broker::config::NodeRole::Broker
-            ]
+        assert!(
+            parse_roles_arg(&["controller".to_string(), "broker".to_string()]).unwrap()
+                == vec![
+                    crabka_broker::config::NodeRole::Controller,
+                    crabka_broker::config::NodeRole::Broker
+                ]
         );
     }
 
@@ -299,7 +300,7 @@ mod tests {
         // log_dir exists with unrelated content (bootstrap.json from
         // `crabka format`) but no __cluster_metadata/@metadata-0 subdir.
         std::fs::write(dir.path().join("bootstrap.json"), "{}").unwrap();
-        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+        assert!(detect_bootstrap_mode(dir.path()) == BootstrapMode::Bootstrap);
     }
 
     #[test]
@@ -308,7 +309,7 @@ mod tests {
         let meta = dir.path().join("__cluster_metadata").join("@metadata-0");
         std::fs::create_dir_all(&meta).unwrap();
         std::fs::write(meta.join("00000000000000000000.log"), b"segment").unwrap();
-        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Rejoin);
+        assert!(detect_bootstrap_mode(dir.path()) == BootstrapMode::Rejoin);
     }
 
     #[test]
@@ -317,7 +318,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("__cluster_metadata").join("@metadata-0")).unwrap();
         // empty @metadata-0 dir is treated as no state (corner case:
         // crashed first start before any segment was written).
-        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+        assert!(detect_bootstrap_mode(dir.path()) == BootstrapMode::Bootstrap);
     }
 
     #[test]
@@ -326,7 +327,7 @@ mod tests {
         // The outer __cluster_metadata dir exists but the inner
         // @metadata-0 subdir doesn't — should still be Bootstrap.
         std::fs::create_dir_all(dir.path().join("__cluster_metadata")).unwrap();
-        assert_eq!(detect_bootstrap_mode(dir.path()), BootstrapMode::Bootstrap);
+        assert!(detect_bootstrap_mode(dir.path()) == BootstrapMode::Bootstrap);
     }
 
     #[test]
@@ -368,10 +369,7 @@ mod tests {
         use clap::Parser;
 
         let args = Args::try_parse_from(["crabka-broker", "--config-file=/tmp/a.toml"]).unwrap();
-        assert_eq!(
-            args.config_file.as_deref(),
-            Some(std::path::Path::new("/tmp/a.toml"))
-        );
+        assert!(args.config_file.as_deref() == Some(std::path::Path::new("/tmp/a.toml")));
         assert!(args.advertised_listener.is_none());
     }
 }

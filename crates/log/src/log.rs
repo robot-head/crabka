@@ -1064,6 +1064,7 @@ fn parse_control_marker_type(key: &[u8]) -> Option<i16> {
 mod tests {
     use super::*;
     use crate::leader_epoch_checkpoint::EpochEntry;
+    use assert2::assert;
     use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record};
     use tempfile::tempdir;
@@ -1121,9 +1122,9 @@ mod tests {
         let wire = wire.freeze();
         let log_end = log.log_end_offset();
         let r = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
-        assert_eq!(r.start_offset, 0);
-        assert_eq!(r.total, wire.len());
-        assert_eq!(&r.bytes[..], &wire[..]);
+        assert!(r.start_offset == 0);
+        assert!(r.total == wire.len());
+        assert!(&r.bytes[..] == &wire[..]);
         drop(dir);
     }
 
@@ -1162,11 +1163,10 @@ mod tests {
 
         let log_end = log.log_end_offset();
         let r = log.read_raw(0, log_end, 10 * 1024 * 1024).unwrap();
-        assert_eq!(r.start_offset, 0);
-        assert_eq!(r.total, wire.len());
-        assert_eq!(
-            &r.bytes[..],
-            &wire[..],
+        assert!(r.start_offset == 0);
+        assert!(r.total == wire.len());
+        assert!(
+            &r.bytes[..] == &wire[..],
             "raw bytes must be byte-exact across the segment seam"
         );
 
@@ -1177,7 +1177,7 @@ mod tests {
             let b = crabka_protocol::records::RecordBatch::decode(&mut cur).unwrap();
             bases.push(b.base_offset);
         }
-        assert_eq!(bases, expected_bases);
+        assert!(bases == expected_bases);
         drop(dir);
     }
 
@@ -1185,8 +1185,8 @@ mod tests {
     fn open_empty_dir_creates_first_segment() {
         let dir = tempdir().unwrap();
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        assert_eq!(log.log_start_offset(), 0);
-        assert_eq!(log.log_end_offset(), 0);
+        assert!(log.log_start_offset() == 0);
+        assert!(log.log_end_offset() == 0);
         log.close();
     }
 
@@ -1197,7 +1197,7 @@ mod tests {
         // re-implementing the directory-layout convention.
         let dir = tempdir().unwrap();
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        assert_eq!(log.dir(), dir.path());
+        assert!(log.dir() == dir.path());
     }
 
     #[test]
@@ -1215,9 +1215,9 @@ mod tests {
         let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
         let mut b1 = sample_batch(3);
         let mut b2 = sample_batch(2);
-        assert_eq!(log.append(&mut b1).unwrap(), 0);
-        assert_eq!(log.append(&mut b2).unwrap(), 3);
-        assert_eq!(log.log_end_offset(), 5);
+        assert!(log.append(&mut b1).unwrap() == 0);
+        assert!(log.append(&mut b2).unwrap() == 3);
+        assert!(log.log_end_offset() == 5);
     }
 
     #[test]
@@ -1228,13 +1228,13 @@ mod tests {
         // Pretend the caller (a replicator) already knows the leader's
         // assigned offset for this batch is 0.
         log.append_at(&mut b, 0).unwrap();
-        assert_eq!(b.base_offset, 0);
-        assert_eq!(log.log_end_offset(), 3);
+        assert!(b.base_offset == 0);
+        assert!(log.log_end_offset() == 3);
 
         let mut b2 = sample_batch(2);
         log.append_at(&mut b2, 3).unwrap();
-        assert_eq!(b2.base_offset, 3);
-        assert_eq!(log.log_end_offset(), 5);
+        assert!(b2.base_offset == 3);
+        assert!(log.log_end_offset() == 5);
     }
 
     #[test]
@@ -1251,7 +1251,7 @@ mod tests {
             }
         ));
         // Failure must not advance the log.
-        assert_eq!(log.log_end_offset(), 0);
+        assert!(log.log_end_offset() == 0);
     }
 
     #[test]
@@ -1263,8 +1263,8 @@ mod tests {
             log.append(&mut b).unwrap();
         }
         let out = log.read(0, usize::MAX).unwrap();
-        assert_eq!(out.batches.len(), 3);
-        assert_eq!(out.start_offset, 0);
+        assert!(out.batches.len() == 3);
+        assert!(out.start_offset == 0);
     }
 
     #[test]
@@ -1297,10 +1297,10 @@ mod tests {
         let mut b2 = sample_batch(2);
         log.append(&mut b1).unwrap();
         log.append(&mut b2).unwrap();
-        assert_eq!(log.log_end_offset(), 5);
+        assert!(log.log_end_offset() == 5);
         log.truncate_to(3).unwrap();
         // First batch (offsets 0..=2) survives; last_offset == 2, end == 3.
-        assert_eq!(log.log_end_offset(), 3);
+        assert!(log.log_end_offset() == 3);
     }
 
     #[test]
@@ -1311,7 +1311,7 @@ mod tests {
         log.append(&mut b).unwrap();
         let before = log.log_end_offset();
         log.truncate_to(before + 100).unwrap();
-        assert_eq!(log.log_end_offset(), before);
+        assert!(log.log_end_offset() == before);
     }
 
     #[test]
@@ -1334,7 +1334,7 @@ mod tests {
         f.sync_data().unwrap();
         drop(f);
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        assert_eq!(log.log_end_offset(), 5);
+        assert!(log.log_end_offset() == 5);
     }
 
     #[test]
@@ -1347,7 +1347,7 @@ mod tests {
         log.append(&mut b2).unwrap();
         let before = log.log_end_offset();
         log.tick(SystemTime::now()).unwrap();
-        assert_eq!(log.log_end_offset(), before);
+        assert!(log.log_end_offset() == before);
     }
 
     #[test]
@@ -1365,7 +1365,7 @@ mod tests {
         // Advance "now" 30 days into the future.
         let now = SystemTime::now() + Duration::from_hours(30 * 24);
         log.tick(now).unwrap();
-        assert_eq!(log.log_end_offset(), 2);
+        assert!(log.log_end_offset() == 2);
     }
 
     #[test]
@@ -1474,22 +1474,21 @@ mod tests {
         // First, a non-txn batch — LSO advances past it.
         let mut b0 = sample_batch(1);
         log.append(&mut b0).unwrap();
-        assert_eq!(log.lso(), log.log_end_offset());
+        assert!(log.lso() == log.log_end_offset());
 
         // Now an in-flight txn batch — LSO stays.
         let mut b1 = transactional_batch(1000, 0, &["a", "b"]); // pid=1000 epoch=0
         let old_lso = log.lso();
         log.append(&mut b1).unwrap();
-        assert_eq!(
-            log.lso(),
-            old_lso,
+        assert!(
+            log.lso() == old_lso,
             "LSO must not advance while txn in flight"
         );
 
         // Commit marker — LSO catches up.
         let mut commit = commit_marker(1000, 0);
         log.append(&mut commit).unwrap();
-        assert_eq!(log.lso(), log.log_end_offset());
+        assert!(log.lso() == log.log_end_offset());
     }
 
     #[test]
@@ -1504,13 +1503,13 @@ mod tests {
 
         let idx = TxnIndex::open(dir.path().join("00000000000000000000.txnindex")).unwrap();
         let entries = idx.entries();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].producer_id, 1000);
+        assert!(entries.len() == 1);
+        assert!(entries[0].producer_id == 1000);
         // Txn batch was the first append: start_offset = 0.
-        assert_eq!(entries[0].start_offset, 0);
+        assert!(entries[0].start_offset == 0);
         // last_offset = abort marker's base_offset + last_offset_delta = 3 + 0 = 3.
         // (The 3-record txn batch occupies offsets 0-2; the marker lands at offset 3.)
-        assert_eq!(entries[0].last_offset, 3);
+        assert!(entries[0].last_offset == 3);
     }
 
     #[test]
@@ -1529,12 +1528,12 @@ mod tests {
         // Commit producer 1000. LSO must still be held back by 2000.
         let mut c1 = commit_marker(1000, 0);
         log.append(&mut c1).unwrap();
-        assert_eq!(log.lso(), lso_after_open, "LSO held by producer 2000");
+        assert!(log.lso() == lso_after_open, "LSO held by producer 2000");
 
         // Commit producer 2000. LSO advances to log_end_offset.
         let mut c2 = commit_marker(2000, 0);
         log.append(&mut c2).unwrap();
-        assert_eq!(log.lso(), log.log_end_offset());
+        assert!(log.lso() == log.log_end_offset());
     }
 
     fn sample_batch_with_epoch(n: i32, epoch: i32) -> RecordBatch {
@@ -1552,18 +1551,18 @@ mod tests {
         log.append(&mut b).unwrap();
         let mut b2 = sample_batch_with_epoch(2, 1); // 2 records at epoch 1
         log.append(&mut b2).unwrap();
-        assert_eq!(
-            log.epoch_checkpoint().entries(),
-            &[
-                EpochEntry {
-                    epoch: 0,
-                    start_offset: 0
-                },
-                EpochEntry {
-                    epoch: 1,
-                    start_offset: 3
-                }
-            ]
+        assert!(
+            log.epoch_checkpoint().entries()
+                == &[
+                    EpochEntry {
+                        epoch: 0,
+                        start_offset: 0
+                    },
+                    EpochEntry {
+                        epoch: 1,
+                        start_offset: 3
+                    }
+                ]
         );
     }
 
@@ -1582,10 +1581,7 @@ mod tests {
             retention_ms: Some(std::time::Duration::from_mins(2)),
             ..LogConfig::default()
         });
-        assert_eq!(
-            log.config_snapshot().retention_ms,
-            Some(std::time::Duration::from_mins(2))
-        );
+        assert!(log.config_snapshot().retention_ms == Some(std::time::Duration::from_mins(2)));
     }
 
     #[test]
@@ -1610,7 +1606,7 @@ mod tests {
         // be less than 15 if 15 falls inside a sealed segment that we
         // can't drop without losing in-range records. LEO is unaffected.
         assert!(new_start <= 15);
-        assert_eq!(log.log_end_offset(), leo);
+        assert!(log.log_end_offset() == leo);
         // If target landed inside the active segment, log_start advanced
         // exactly to target. Otherwise it advanced to a sealed boundary.
         assert!(log.log_start_offset() >= 0);
@@ -1627,7 +1623,7 @@ mod tests {
         let leo = log.log_end_offset();
         let new_start = log.trim_to_offset(999).expect("trim");
         // Asking to trim past LEO means trim to LEO.
-        assert_eq!(new_start, leo);
+        assert!(new_start == leo);
     }
 
     #[test]
@@ -1647,7 +1643,7 @@ mod tests {
         }
         // Trim to 0 on a fresh log → no change.
         let r = log.trim_to_offset(0).expect("trim");
-        assert_eq!(r, log.log_start_offset());
+        assert!(r == log.log_start_offset());
     }
 
     fn keyed_batch(base: i64, items: &[(i32, &[u8], &[u8])]) -> RecordBatch {
@@ -1682,7 +1678,7 @@ mod tests {
         log.append(&mut b).unwrap();
         // Only the active segment exists; sealed list is empty.
         log.compact().unwrap();
-        assert_eq!(log.log_end_offset(), 1);
+        assert!(log.log_end_offset() == 1);
     }
 
     #[test]
@@ -1710,9 +1706,8 @@ mod tests {
 
         let active_leo_before = log.log_end_offset();
         log.compact().unwrap();
-        assert_eq!(
-            log.log_end_offset(),
-            active_leo_before,
+        assert!(
+            log.log_end_offset() == active_leo_before,
             "compaction must not change LEO"
         );
 
@@ -1751,7 +1746,10 @@ mod tests {
             - 1; // minus the active segment's .log
 
         let exports = log.tierable_segments();
-        assert_eq!(exports.len(), sealed_count, "one export per sealed segment");
+        assert!(
+            exports.len() == sealed_count,
+            "one export per sealed segment"
+        );
 
         let active_base = log.log_end_offset(); // not literally, but exports must be below it
         let mut prev_last = -1;
@@ -1795,7 +1793,7 @@ mod tests {
         // Each sealed segment's last_offset is exactly one below the next
         // segment's base — contiguous coverage with no gaps.
         for pair in exports.windows(2) {
-            assert_eq!(pair[0].last_offset + 1, pair[1].base_offset);
+            assert!(pair[0].last_offset + 1 == pair[1].base_offset);
         }
     }
 
@@ -1847,14 +1845,11 @@ mod tests {
             },
         ];
         // Segment [60, 90] sits entirely in epoch 1.
-        assert_eq!(epochs_for_range(&entries, 60, 90), vec![(1, 60)]);
+        assert!(epochs_for_range(&entries, 60, 90) == vec![(1, 60)]);
         // Segment [40, 60] straddles epoch 0 (->clamped to 40) and epoch 1.
-        assert_eq!(epochs_for_range(&entries, 40, 60), vec![(0, 40), (1, 50)]);
+        assert!(epochs_for_range(&entries, 40, 60) == vec![(0, 40), (1, 50)]);
         // Segment [0, 200] covers all three.
-        assert_eq!(
-            epochs_for_range(&entries, 0, 200),
-            vec![(0, 0), (1, 50), (2, 100)]
-        );
+        assert!(epochs_for_range(&entries, 0, 200) == vec![(0, 0), (1, 50), (2, 100)]);
         // No entries -> empty.
         assert!(epochs_for_range(&[], 0, 100).is_empty());
     }
@@ -1879,7 +1874,7 @@ mod tests {
         let leo1 = log.log_end_offset();
         log.compact().unwrap();
         let leo2 = log.log_end_offset();
-        assert_eq!(leo1, leo2);
+        assert!(leo1 == leo2);
     }
 
     // ---- Local-retention helpers (KIP-405) ----
@@ -1911,7 +1906,7 @@ mod tests {
             let mut b = sample_batch(2);
             log.append(&mut b).unwrap();
         }
-        assert_eq!(log.local_log_start_offset(), log.log_start_offset());
+        assert!(log.local_log_start_offset() == log.log_start_offset());
     }
 
     #[test]
@@ -1937,7 +1932,7 @@ mod tests {
         let active_base_before = log.log_end_offset();
 
         let removed = log.delete_local_segments_through(target).unwrap();
-        assert_eq!(removed, expected_deleted.len());
+        assert!(removed == expected_deleted.len());
 
         // (a) sealed segments below target are gone from the in-memory list.
         let remaining_bases: Vec<i64> = log
@@ -1960,7 +1955,7 @@ mod tests {
         }
 
         // (c) the active segment is untouched.
-        assert_eq!(log.log_end_offset(), active_base_before);
+        assert!(log.log_end_offset() == active_base_before);
     }
 
     #[test]
@@ -1980,9 +1975,8 @@ mod tests {
         let huge_target = leo_before + 1_000_000;
         let _ = log.delete_local_segments_through(huge_target).unwrap();
         assert!(active_log.exists(), "active segment must survive");
-        assert_eq!(
-            log.log_end_offset(),
-            leo_before,
+        assert!(
+            log.log_end_offset() == leo_before,
             "active segment untouched (LEO unchanged)"
         );
         // Sealed-segment pointer should have advanced past everything.
@@ -1996,8 +1990,8 @@ mod tests {
         let exports = log.tierable_segments();
         let target = exports[1].last_offset + 1;
         log.delete_local_segments_through(target).unwrap();
-        assert_eq!(log.local_log_start_offset(), target);
-        assert_eq!(log.log_start_offset(), target);
+        assert!(log.local_log_start_offset() == target);
+        assert!(log.log_start_offset() == target);
     }
 
     #[test]
@@ -2008,13 +2002,13 @@ mod tests {
         let sealed_before = log.tierable_segments().len();
 
         let removed = log.delete_local_segments_through(start_before).unwrap();
-        assert_eq!(removed, 0);
+        assert!(removed == 0);
         let removed_below = log
             .delete_local_segments_through((start_before - 1).max(0))
             .unwrap();
-        assert_eq!(removed_below, 0);
-        assert_eq!(log.log_start_offset(), start_before);
-        assert_eq!(log.tierable_segments().len(), sealed_before);
+        assert!(removed_below == 0);
+        assert!(log.log_start_offset() == start_before);
+        assert!(log.tierable_segments().len() == sealed_before);
     }
 
     #[test]
@@ -2043,9 +2037,8 @@ mod tests {
         let sealed_before = tiered.tierable_segments().len();
         assert!(sealed_before > 0, "test setup must roll multiple segments");
         tiered.tick(far_future).unwrap();
-        assert_eq!(
-            tiered.tierable_segments().len(),
-            sealed_before,
+        assert!(
+            tiered.tierable_segments().len() == sealed_before,
             "tiered topics' retention is the RemoteLogManager's job"
         );
 
@@ -2063,9 +2056,8 @@ mod tests {
         plain.tick(far_future).unwrap();
         // Non-tiered path keeps at least one segment (the active one); every
         // sealed segment is evicted.
-        assert_eq!(
-            plain.tierable_segments().len(),
-            0,
+        assert!(
+            plain.tierable_segments().len() == 0,
             "standard retention deletes all sealed segments"
         );
     }
@@ -2098,18 +2090,18 @@ mod tests {
         // offsets 0..=4 with timestamps 100,200,300,400,500.
         for (i, ts) in [100, 200, 300, 400, 500].into_iter().enumerate() {
             let mut b = ts_batch(ts);
-            assert_eq!(log.append(&mut b).unwrap(), i64::try_from(i).unwrap());
+            assert!(log.append(&mut b).unwrap() == i64::try_from(i).unwrap());
         }
         // before-first → offset 0.
-        assert_eq!(log.offset_for_timestamp(50), Some((0, 100)));
+        assert!(log.offset_for_timestamp(50) == Some((0, 100)));
         // exact match on a sealed segment.
-        assert_eq!(log.offset_for_timestamp(300), Some((2, 300)));
+        assert!(log.offset_for_timestamp(300) == Some((2, 300)));
         // between records → next record up.
-        assert_eq!(log.offset_for_timestamp(350), Some((3, 400)));
+        assert!(log.offset_for_timestamp(350) == Some((3, 400)));
         // landing on the active segment's record.
-        assert_eq!(log.offset_for_timestamp(500), Some((4, 500)));
+        assert!(log.offset_for_timestamp(500) == Some((4, 500)));
         // after-last → None.
-        assert_eq!(log.offset_for_timestamp(600), None);
+        assert!(log.offset_for_timestamp(600) == None);
         log.close();
         drop(dir);
     }
@@ -2118,7 +2110,7 @@ mod tests {
     fn log_offset_for_timestamp_empty_log_is_none() {
         let dir = tempdir().unwrap();
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        assert_eq!(log.offset_for_timestamp(0), None);
+        assert!(log.offset_for_timestamp(0) == None);
         log.close();
         drop(dir);
     }
@@ -2136,7 +2128,7 @@ mod tests {
             let mut b = ts_batch(ts);
             log.append(&mut b).unwrap();
         }
-        assert_eq!(log.offset_of_max_timestamp(), 1);
+        assert!(log.offset_of_max_timestamp() == 1);
         log.close();
         drop(dir);
     }
@@ -2145,8 +2137,8 @@ mod tests {
     fn log_offset_of_max_timestamp_empty_is_log_start() {
         let dir = tempdir().unwrap();
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();
-        assert_eq!(log.offset_of_max_timestamp(), log.log_start_offset());
-        assert_eq!(log.max_timestamp_offset_and_ts(), None);
+        assert!(log.offset_of_max_timestamp() == log.log_start_offset());
+        assert!(log.max_timestamp_offset_and_ts() == None);
         log.close();
         drop(dir);
     }
@@ -2164,7 +2156,7 @@ mod tests {
             log.append(&mut b).unwrap();
         }
         // Max timestamp 300 lives at offset 1.
-        assert_eq!(log.max_timestamp_offset_and_ts(), Some((1, 300)));
+        assert!(log.max_timestamp_offset_and_ts() == Some((1, 300)));
         log.close();
         drop(dir);
     }

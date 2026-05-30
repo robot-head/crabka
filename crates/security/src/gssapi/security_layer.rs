@@ -73,12 +73,13 @@ pub fn decode_offer_layers(bytes: &[u8]) -> Result<SecurityLayer, LayerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn encode_offer_auth_only() {
         // bitmask 0x01 (auth), max recv size 0x10000 (65536)
         let bytes = encode_offer(SecurityLayer::AUTH, 0x1_0000);
-        assert_eq!(bytes, vec![0x01, 0x01, 0x00, 0x00]);
+        assert!(bytes == vec![0x01, 0x01, 0x00, 0x00]);
     }
 
     #[test]
@@ -86,9 +87,9 @@ mod tests {
         // selected 0x01, max size 0x1000, no authzid
         let bytes = [0x01u8, 0x00, 0x10, 0x00];
         let choice = decode_choice(&bytes).unwrap();
-        assert_eq!(choice.selected, SecurityLayer::AUTH);
-        assert_eq!(choice.max_size, 0x1000);
-        assert_eq!(choice.authzid, None);
+        assert!(choice.selected == SecurityLayer::AUTH);
+        assert!(choice.max_size == 0x1000);
+        assert!(choice.authzid == None);
     }
 
     #[test]
@@ -96,7 +97,7 @@ mod tests {
         let mut bytes = vec![0x01u8, 0x00, 0x10, 0x00];
         bytes.extend_from_slice(b"alice");
         let choice = decode_choice(&bytes).unwrap();
-        assert_eq!(choice.authzid.as_deref(), Some("alice"));
+        assert!(choice.authzid.as_deref() == Some("alice"));
     }
 
     #[test]

@@ -268,6 +268,7 @@ fn disk_stats(_dir: &std::path::Path) -> Option<(i64, i64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn filter_all_allows_everything() {
@@ -329,6 +330,6 @@ mod tests {
     #[test]
     fn log_dir_capacity_returns_minus_one_for_missing_path() {
         let phantom = std::path::Path::new("/nonexistent/crabka/test/dir/should/not/exist");
-        assert_eq!(log_dir_capacity(phantom), (-1, -1));
+        assert!(log_dir_capacity(phantom) == (-1, -1));
     }
 }

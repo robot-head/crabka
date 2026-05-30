@@ -1,3 +1,4 @@
+use assert2::assert;
 mod support;
 use support::oracle;
 

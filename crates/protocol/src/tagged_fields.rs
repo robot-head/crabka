@@ -158,6 +158,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn empty_tagged_fields() {
@@ -174,9 +175,9 @@ mod tests {
         let buf = [0x01, 0x05, 0x03, 10, 20, 30];
         let mut cur = &buf[..];
         let unknown = read_tagged_fields(&mut cur, |_, _| Ok(false)).unwrap();
-        assert_eq!(unknown.len(), 1);
-        assert_eq!(unknown.0[0].tag, 5);
-        assert_eq!(unknown.0[0].bytes.as_ref(), &[10, 20, 30]);
+        assert!(unknown.len() == 1);
+        assert!(unknown.0[0].tag == 5);
+        assert!(unknown.0[0].bytes.as_ref() == &[10, 20, 30]);
     }
 
     #[test]
@@ -198,6 +199,6 @@ mod tests {
         let mut out = BytesMut::new();
         w.write(&mut out, &unknown);
         // Expect: count=2, tag=5,len=1,0xBB, tag=10,len=1,0xAA
-        assert_eq!(&out[..], &[0x02, 0x05, 0x01, 0xBB, 0x0A, 0x01, 0xAA]);
+        assert!(&out[..] == &[0x02, 0x05, 0x01, 0xBB, 0x0A, 0x01, 0xAA]);
     }
 }

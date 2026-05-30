@@ -1,6 +1,7 @@
 //! Integration tests for inter-broker mTLS rendering
 //! (broker config-file TLS block + `StatefulSet` mounts + idempotency).
 
+use assert2::assert;
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
@@ -209,9 +210,9 @@ async fn data_plane_tls_listener_anonymous_now_reconciles() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {sbody}"));
-    assert_eq!(valid["status"], "True", "body = {sbody}");
+    assert!(valid["status"] == "True", "body = {sbody}");
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 // ── test 3: StatefulSet mounts all three Secrets ──────────────────────────────
@@ -325,8 +326,8 @@ async fn statefulset_mounts_cluster_ca_broker_tls_clients_ca() {
         .iter()
         .find(|v| v["name"] == "cluster-ca-cert")
         .unwrap_or_else(|| panic!("cluster-ca-cert volume missing; volumes = {volumes:?}"));
-    assert_eq!(
-        cluster_ca_vol["secret"]["secretName"], "c1-cluster-ca-cert",
+    assert!(
+        cluster_ca_vol["secret"]["secretName"] == "c1-cluster-ca-cert",
         "cluster-ca-cert volume must reference c1-cluster-ca-cert; body = {body}"
     );
 
@@ -335,8 +336,8 @@ async fn statefulset_mounts_cluster_ca_broker_tls_clients_ca() {
         .iter()
         .find(|v| v["name"] == "broker-tls")
         .unwrap_or_else(|| panic!("broker-tls volume missing; volumes = {volumes:?}"));
-    assert_eq!(
-        broker_tls_vol["secret"]["secretName"], "c1-kafka-brokers",
+    assert!(
+        broker_tls_vol["secret"]["secretName"] == "c1-kafka-brokers",
         "broker-tls volume must reference c1-kafka-brokers; body = {body}"
     );
 
@@ -345,8 +346,8 @@ async fn statefulset_mounts_cluster_ca_broker_tls_clients_ca() {
         .iter()
         .find(|v| v["name"] == "clients-ca-cert")
         .unwrap_or_else(|| panic!("clients-ca-cert volume missing; volumes = {volumes:?}"));
-    assert_eq!(
-        clients_ca_vol["secret"]["secretName"], "c1-clients-ca-cert",
+    assert!(
+        clients_ca_vol["secret"]["secretName"] == "c1-clients-ca-cert",
         "clients-ca-cert volume must reference c1-clients-ca-cert; body = {body}"
     );
 
@@ -374,7 +375,7 @@ async fn statefulset_mounts_cluster_ca_broker_tls_clients_ca() {
         );
     }
 
-    assert_eq!(state.remaining_rules(), 0);
+    assert!(state.remaining_rules() == 0);
 }
 
 // ── test 4: render is idempotent across reconciles ───────────────────────────
@@ -445,14 +446,13 @@ async fn render_is_idempotent_across_reconciles() {
         .unwrap_or_else(|| panic!("broker-0.toml missing from second CM PATCH; body = {body2}"))
         .to_string();
 
-    assert_eq!(
-        toml1, toml2,
+    assert!(
+        toml1 == toml2,
         "broker-0.toml must be byte-identical across two reconciles with the same spec"
     );
 
-    assert_eq!(
-        state1.remaining_rules(),
-        0,
+    assert!(
+        state1.remaining_rules() == 0,
         "all mock rules must have been consumed"
     );
 }

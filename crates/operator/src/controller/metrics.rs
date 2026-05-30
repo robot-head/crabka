@@ -266,6 +266,7 @@ pub(crate) async fn reconcile_metrics(
 mod tests {
     use super::*;
     use crate::crd::KafkaSpec;
+    use assert2::assert;
 
     fn test_kafka() -> Kafka {
         let mut k = Kafka::new(
@@ -297,20 +298,14 @@ mod tests {
     #[test]
     fn render_pod_monitor_minimal_defaults() {
         let pm = render_pod_monitor(&test_kafka(), &PodMonitorSpec::default()).unwrap();
-        assert_eq!(pm["kind"], "PodMonitor");
+        assert!(pm["kind"] == "PodMonitor");
         let ep = &pm["spec"]["podMetricsEndpoints"][0];
-        assert_eq!(ep["port"], "metrics");
-        assert_eq!(ep["path"], "/metrics");
-        assert_eq!(ep["interval"], "30s");
-        assert_eq!(ep["scrapeTimeout"], "10s");
-        assert_eq!(
-            pm["spec"]["selector"]["matchLabels"]["app.kubernetes.io/name"],
-            "crabka-broker"
-        );
-        assert_eq!(
-            pm["spec"]["selector"]["matchLabels"]["app.kubernetes.io/instance"],
-            "demo"
-        );
+        assert!(ep["port"] == "metrics");
+        assert!(ep["path"] == "/metrics");
+        assert!(ep["interval"] == "30s");
+        assert!(ep["scrapeTimeout"] == "10s");
+        assert!(pm["spec"]["selector"]["matchLabels"]["app.kubernetes.io/name"] == "crabka-broker");
+        assert!(pm["spec"]["selector"]["matchLabels"]["app.kubernetes.io/instance"] == "demo");
     }
 
     #[test]
@@ -321,19 +316,16 @@ mod tests {
             labels: [("team".to_string(), "platform".to_string())].into(),
         };
         let pm = render_pod_monitor(&test_kafka(), &pm_spec).unwrap();
-        assert_eq!(pm["spec"]["podMetricsEndpoints"][0]["interval"], "15s");
-        assert_eq!(pm["spec"]["podMetricsEndpoints"][0]["scrapeTimeout"], "5s");
-        assert_eq!(pm["metadata"]["labels"]["team"], "platform");
-        assert_eq!(
-            pm["metadata"]["labels"]["app.kubernetes.io/name"],
-            "crabka-broker"
-        );
+        assert!(pm["spec"]["podMetricsEndpoints"][0]["interval"] == "15s");
+        assert!(pm["spec"]["podMetricsEndpoints"][0]["scrapeTimeout"] == "5s");
+        assert!(pm["metadata"]["labels"]["team"] == "platform");
+        assert!(pm["metadata"]["labels"]["app.kubernetes.io/name"] == "crabka-broker");
     }
 
     #[test]
     fn render_service_monitor_kind_and_endpoints_key() {
         let sm = render_service_monitor(&test_kafka(), &ServiceMonitorSpec::default()).unwrap();
-        assert_eq!(sm["kind"], "ServiceMonitor");
+        assert!(sm["kind"] == "ServiceMonitor");
         assert!(sm["spec"]["endpoints"].is_array());
         assert!(sm["spec"]["podMetricsEndpoints"].is_null());
     }
@@ -342,13 +334,15 @@ mod tests {
     fn render_metrics_service_is_headless_with_named_port() {
         let svc = render_metrics_service(&test_kafka(), &ServiceMonitorSpec::default()).unwrap();
         let spec = svc.spec.unwrap();
-        assert_eq!(spec.cluster_ip.as_deref(), Some("None"));
+        assert!(spec.cluster_ip.as_deref() == Some("None"));
         let port = &spec.ports.unwrap()[0];
-        assert_eq!(port.name.as_deref(), Some("metrics"));
-        assert_eq!(port.port, METRICS_PORT);
-        assert_eq!(
-            port.target_port.as_ref().unwrap(),
-            &k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String("metrics".into())
+        assert!(port.name.as_deref() == Some("metrics"));
+        assert!(port.port == METRICS_PORT);
+        assert!(
+            port.target_port.as_ref().unwrap()
+                == &k8s_openapi::apimachinery::pkg::util::intstr::IntOrString::String(
+                    "metrics".into()
+                )
         );
     }
 }

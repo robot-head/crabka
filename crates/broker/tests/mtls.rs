@@ -21,6 +21,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::sync::Arc;
 
@@ -223,9 +224,9 @@ async fn mtls_principal_is_cert_dn_and_super_user_bypass_works() {
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
 
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics must succeed for the cert-DN super-user — got {:?}",
         resp.topics[0]
     );

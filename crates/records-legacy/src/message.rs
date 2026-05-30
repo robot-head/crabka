@@ -234,6 +234,7 @@ fn get_nullable_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::BytesMut;
 
     fn fixture_v0() -> Message {
@@ -271,10 +272,10 @@ mod tests {
         let m = fixture_v0();
         let mut buf = BytesMut::new();
         m.encode_into(&mut buf);
-        assert_eq!(buf.len(), m.encoded_len());
+        assert!(buf.len() == m.encoded_len());
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert_eq!(decoded, m);
+        assert!(decoded == m);
     }
 
     #[test]
@@ -282,10 +283,10 @@ mod tests {
         let m = fixture_v1();
         let mut buf = BytesMut::new();
         m.encode_into(&mut buf);
-        assert_eq!(buf.len(), m.encoded_len());
+        assert!(buf.len() == m.encoded_len());
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert_eq!(decoded, m);
+        assert!(decoded == m);
     }
 
     #[test]
@@ -295,7 +296,7 @@ mod tests {
         m.encode_into(&mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert_eq!(decoded, m);
+        assert!(decoded == m);
         assert!(decoded.key.is_none());
         assert!(decoded.value.is_none());
     }
@@ -340,7 +341,7 @@ mod tests {
             CompressionType::Lz4,
         ] {
             let bits = attrs_with_compression(0, c);
-            assert_eq!(compression_from_attrs(bits).unwrap(), c);
+            assert!(compression_from_attrs(bits).unwrap() == c);
         }
     }
 }

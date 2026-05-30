@@ -132,6 +132,7 @@ fn token_to_record(t: &DelegationToken) -> DelegationTokenRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
     use std::collections::HashSet;
@@ -227,10 +228,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_AUTH_DISABLED
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
         controller.cancel().await;
     }
 
@@ -266,7 +264,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         let target = now_ms() + 30_000;
         let slop = 60_000;
         assert!(
@@ -276,7 +274,7 @@ mod tests {
         );
         let img = controller.current_image();
         let stored = img.delegation_token_by_id("tok-1").expect("present");
-        assert_eq!(stored.expiry_timestamp_ms, resp.expiry_timestamp_ms);
+        assert!(stored.expiry_timestamp_ms == resp.expiry_timestamp_ms);
         controller.cancel().await;
     }
 
@@ -312,7 +310,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         // Past sentinel: should be <= now.
         assert!(resp.expiry_timestamp_ms <= now_ms());
         // Token removed from image.
@@ -353,14 +351,11 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED);
         // Token unchanged.
         let img = controller.current_image();
         let stored = img.delegation_token_by_id("tok-3").expect("present");
-        assert_eq!(stored.expiry_timestamp_ms, now + 60_000);
+        assert!(stored.expiry_timestamp_ms == now + 60_000);
         controller.cancel().await;
     }
 
@@ -404,8 +399,8 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert_eq!(
-            resp.error_code, 0,
+        assert!(
+            resp.error_code == 0,
             "super-user must be able to expire any token regardless of owner/renewers"
         );
         // Past-sentinel + tombstoned.
@@ -453,14 +448,11 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert_eq!(
-            resp.error_code,
-            crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED
-        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED);
         // Token unchanged.
         let img = controller.current_image();
         let stored = img.delegation_token_by_id("tok-eve").expect("present");
-        assert_eq!(stored.expiry_timestamp_ms, now + 60_000);
+        assert!(stored.expiry_timestamp_ms == now + 60_000);
         controller.cancel().await;
     }
 }

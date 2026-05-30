@@ -8,6 +8,7 @@
 //! this file with SASL/PLAIN, SASL/SCRAM, and `AlterUserScramCredentials`
 //! cases.
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -255,24 +256,23 @@ async fn metadata_response_carries_listener_endpoints() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         endpoints = handle.self_registration_endpoints().await;
     }
-    assert_eq!(
-        endpoints.len(),
-        2,
+    assert!(
+        endpoints.len() == 2,
         "self-registration must carry one endpoint per configured listener (got {endpoints:?})"
     );
     let mut names: Vec<&str> = endpoints.iter().map(|e| e.name.as_str()).collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["PLAINTEXT", "SSL"]);
+    assert!(names == vec!["PLAINTEXT", "SSL"]);
     let plaintext_ep = endpoints
         .iter()
         .find(|e| e.name == "PLAINTEXT")
         .expect("PLAINTEXT endpoint");
-    assert_eq!(plaintext_ep.protocol, ListenerProtocol::Plaintext);
+    assert!(plaintext_ep.protocol == ListenerProtocol::Plaintext);
     let ssl_ep = endpoints
         .iter()
         .find(|e| e.name == "SSL")
         .expect("SSL endpoint");
-    assert_eq!(ssl_ep.protocol, ListenerProtocol::Ssl);
+    assert!(ssl_ep.protocol == ListenerProtocol::Ssl);
 
     // ── Assertion 2: a Metadata round-trip over the PLAINTEXT listener
     // returns a broker entry. The Kafka v9+ wire format has no
@@ -1119,10 +1119,9 @@ async fn sasl_oauthbearer_invalid_token_two_round_failure() {
         let token = unsecured_jws("admin", now_unix_secs() - 3600);
         let round1 =
             oauthbearer_authenticate(&mut stream, &mut corr, oauthbearer_initial(&token)).await?;
-        assert_eq!(round1.error_code, 0, "round 1 must not close yet");
-        assert_eq!(
-            &round1.auth_bytes[..],
-            br#"{"status":"invalid_token"}"#,
+        assert!(round1.error_code == 0, "round 1 must not close yet");
+        assert!(
+            &round1.auth_bytes[..] == br#"{"status":"invalid_token"}"#,
             "round 1 must carry the RFC 7628 error JSON"
         );
 
@@ -1130,7 +1129,7 @@ async fn sasl_oauthbearer_invalid_token_two_round_failure() {
         let round2 =
             oauthbearer_authenticate(&mut stream, &mut corr, bytes::Bytes::from_static(&[1u8]))
                 .await?;
-        assert_eq!(round2.error_code, 58, "round 2 must fail the connection");
+        assert!(round2.error_code == 58, "round 2 must fail the connection");
         Ok(())
     }
     .await;
@@ -1259,17 +1258,16 @@ async fn sasl_oauthbearer_signed_token_wrong_key_two_round_failure() {
         let token = es256_token(&kp_b, "k1", &claims);
         let round1 =
             oauthbearer_authenticate(&mut stream, &mut corr, oauthbearer_initial(&token)).await?;
-        assert_eq!(round1.error_code, 0, "round 1 must not close yet");
-        assert_eq!(
-            &round1.auth_bytes[..],
-            br#"{"status":"invalid_token"}"#,
+        assert!(round1.error_code == 0, "round 1 must not close yet");
+        assert!(
+            &round1.auth_bytes[..] == br#"{"status":"invalid_token"}"#,
             "round 1 must carry the RFC 7628 error JSON"
         );
 
         let round2 =
             oauthbearer_authenticate(&mut stream, &mut corr, bytes::Bytes::from_static(&[1u8]))
                 .await?;
-        assert_eq!(round2.error_code, 58, "round 2 must fail the connection");
+        assert!(round2.error_code == 58, "round 2 must fail the connection");
         Ok(())
     }
     .await;
@@ -1459,8 +1457,8 @@ async fn oauthbearer_session_capped_by_broker_max_session_lifetime_seconds() {
         .await
         .expect("read should not hang")
         .expect("read should not error");
-    assert_eq!(
-        n, 0,
+    assert!(
+        n == 0,
         "expected EOF after cap-bounded session expiry, got {n} bytes"
     );
 
@@ -1505,7 +1503,7 @@ async fn oauthbearer_session_expires_closes_connection() {
         .await
         .expect("read should not hang")
         .expect("read should not error");
-    assert_eq!(n, 0, "expected EOF after session expiry, got {n} bytes");
+    assert!(n == 0, "expected EOF after session expiry, got {n} bytes");
 
     handle.shutdown().await;
 }
@@ -1590,7 +1588,7 @@ async fn oauthbearer_in_band_reauth_with_different_principal_closes() {
         .await
         .expect("read should not hang")
         .expect("read should not error");
-    assert_eq!(n, 0, "expected EOF after failed re-auth");
+    assert!(n == 0, "expected EOF after failed re-auth");
 
     handle.shutdown().await;
 }
@@ -1642,8 +1640,8 @@ async fn oauthbearer_in_band_reauth_with_different_mechanism_closes() {
     let mut cur: &[u8] = &sh_resp_bytes;
     let sh_resp =
         SaslHandshakeResponse::decode(&mut cur, 1).expect("SaslHandshake decode must succeed");
-    assert_eq!(
-        sh_resp.error_code, 34,
+    assert!(
+        sh_resp.error_code == 34,
         "expected ILLEGAL_SASL_STATE for mechanism switch"
     );
 
@@ -1703,7 +1701,7 @@ async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
         .expect("SaslHandshake round-trip");
     let mut cur: &[u8] = &sh_resp_bytes;
     let sh_resp = SaslHandshakeResponse::decode(&mut cur, 1).unwrap();
-    assert_eq!(sh_resp.error_code, 0, "PLAIN handshake must succeed");
+    assert!(sh_resp.error_code == 0, "PLAIN handshake must succeed");
 
     let mut payload = Vec::new();
     payload.push(0);
@@ -1721,9 +1719,9 @@ async fn plain_listener_session_lifetime_ms_is_zero_and_no_timer() {
         .expect("SaslAuthenticate round-trip");
     let mut cur: &[u8] = &auth_resp_bytes;
     let auth_resp = SaslAuthenticateResponse::decode(&mut cur, 2).unwrap();
-    assert_eq!(auth_resp.error_code, 0, "PLAIN authenticate must succeed");
-    assert_eq!(
-        auth_resp.session_lifetime_ms, 0,
+    assert!(auth_resp.error_code == 0, "PLAIN authenticate must succeed");
+    assert!(
+        auth_resp.session_lifetime_ms == 0,
         "PLAIN listener must report session_lifetime_ms = 0 (no KIP-368 deadline)"
     );
 
@@ -1799,13 +1797,13 @@ async fn alter_scram_creds_super_user_can_provision() {
     let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
         .await
         .expect("PLAIN auth + AUSCR upsertion");
-    assert_eq!(resp.results.len(), 1, "one result row per upsertion");
-    assert_eq!(
-        resp.results[0].error_code, 0,
+    assert!(resp.results.len() == 1, "one result row per upsertion");
+    assert!(
+        resp.results[0].error_code == 0,
         "expected error_code=0, got {:?}",
         resp.results[0]
     );
-    assert_eq!(resp.results[0].user, "alice");
+    assert!(resp.results[0].user == "alice");
 
     // Round-trip: now log in as `alice` over SCRAM, proving the upserted
     // credential actually reached the metadata image. Wait briefly for the
@@ -1870,13 +1868,13 @@ async fn alter_scram_creds_super_user_can_provision_sha256() {
     let resp = drive_alter_user_scram_credentials_as_plain(addr, "admin", b"secret", req)
         .await
         .expect("PLAIN auth + AUSCR upsertion (SHA-256)");
-    assert_eq!(resp.results.len(), 1);
-    assert_eq!(
-        resp.results[0].error_code, 0,
+    assert!(resp.results.len() == 1);
+    assert!(
+        resp.results[0].error_code == 0,
         "expected error_code=0, got {:?}",
         resp.results[0]
     );
-    assert_eq!(resp.results[0].user, "alice");
+    assert!(resp.results[0].user == "alice");
 
     let mut last_err: Option<io::Error> = None;
     for _ in 0..40 {
@@ -1941,10 +1939,9 @@ async fn alter_scram_creds_non_super_user_rejected() {
         .await
         .expect("PLAIN auth + AUSCR (rejected)");
     handle.shutdown().await;
-    assert_eq!(resp.results.len(), 1);
-    assert_eq!(
-        resp.results[0].error_code,
-        31, // CLUSTER_AUTHORIZATION_FAILED
+    assert!(resp.results.len() == 1);
+    assert!(
+        resp.results[0].error_code == 31, // CLUSTER_AUTHORIZATION_FAILED
         "non-super-user must get CLUSTER_AUTHORIZATION_FAILED, got {:?}",
         resp.results[0]
     );
@@ -1989,10 +1986,9 @@ async fn alter_scram_creds_low_iterations_rejected() {
         .await
         .expect("PLAIN auth + AUSCR (rejected)");
     handle.shutdown().await;
-    assert_eq!(resp.results.len(), 1);
-    assert_eq!(
-        resp.results[0].error_code,
-        78, // UNACCEPTABLE_CREDENTIAL (canonical Kafka error code)
+    assert!(resp.results.len() == 1);
+    assert!(
+        resp.results[0].error_code == 78, // UNACCEPTABLE_CREDENTIAL (canonical Kafka error code)
         "iterations < 4096 must get UNACCEPTABLE_CREDENTIAL, got {:?}",
         resp.results[0]
     );
@@ -2040,12 +2036,11 @@ async fn alter_scram_creds_duplicate_resource_rejected() {
         .await
         .expect("PLAIN auth + AUSCR (duplicate)");
     handle.shutdown().await;
-    assert_eq!(resp.results.len(), 2, "one result row per upsertion");
+    assert!(resp.results.len() == 2, "one result row per upsertion");
     // First row may be 0 (accepted) or any validation code; the contract
     // tested here is that the *second* occurrence is the duplicate.
-    assert_eq!(
-        resp.results[1].error_code,
-        84, // DUPLICATE_RESOURCE
+    assert!(
+        resp.results[1].error_code == 84, // DUPLICATE_RESOURCE
         "second occurrence of (user, mech) must get DUPLICATE_RESOURCE, got {:?}",
         resp.results[1]
     );
@@ -2183,8 +2178,8 @@ async fn api_versions_reachable_pre_auth_on_sasl_listener() {
     let av_resp = ApiVersionsResponse::decode(&mut cur, 0)
         .expect("ApiVersionsResponse must decode successfully");
 
-    assert_eq!(
-        av_resp.error_code, 0,
+    assert!(
+        av_resp.error_code == 0,
         "ApiVersions error_code must be 0 on SASL listener pre-auth"
     );
     assert!(
@@ -2298,9 +2293,8 @@ async fn unsupported_mechanism_rejected_but_handshake_retryable() {
     let mut cur: &[u8] = &sh_resp_bytes;
     let sh_resp =
         SaslHandshakeResponse::decode(&mut cur, 1).expect("SaslHandshakeResponse must decode");
-    assert_eq!(
-        sh_resp.error_code,
-        33, // UNSUPPORTED_SASL_MECHANISM
+    assert!(
+        sh_resp.error_code == 33, // UNSUPPORTED_SASL_MECHANISM
         "GSSAPI handshake must return error_code=33, got {:?}",
         sh_resp.error_code
     );
@@ -2324,8 +2318,8 @@ async fn unsupported_mechanism_rejected_but_handshake_retryable() {
     let mut plain_cur: &[u8] = &plain_resp_bytes;
     let plain_resp = SaslHandshakeResponse::decode(&mut plain_cur, 1)
         .expect("SaslHandshakeResponse retry must decode");
-    assert_eq!(
-        plain_resp.error_code, 0,
+    assert!(
+        plain_resp.error_code == 0,
         "PLAIN handshake retry on same connection must return error_code=0"
     );
 
@@ -2498,7 +2492,7 @@ async fn gssapi_handshake_advertised_when_enabled() {
 
     handle.shutdown().await;
 
-    assert_eq!(sh_resp.error_code, 0, "GSSAPI handshake must succeed");
+    assert!(sh_resp.error_code == 0, "GSSAPI handshake must succeed");
     assert!(
         sh_resp.mechanisms.iter().any(|m| m == "GSSAPI"),
         "GSSAPI must be advertised; got {:?}",
@@ -2583,6 +2577,7 @@ async fn gssapi_inter_broker_client_authenticates_from_keytab() {
 
 mod two_broker_sasl {
     use super::*;
+    use assert2::assert;
     use crabka_broker::config::InterBrokerCredentials;
     use crabka_broker::{BootstrapMode, Broker, BrokerHandle};
     use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -2768,7 +2763,7 @@ mod two_broker_sasl {
             })
             .await
             .unwrap();
-        assert_eq!(resp.topics[0].error_code, 0);
+        assert!(resp.topics[0].error_code == 0);
         let topic_id = resp.topics[0].topic_id;
 
         // Wait for the topic to propagate.
@@ -2827,7 +2822,7 @@ mod two_broker_sasl {
             })
             .await
             .unwrap();
-        assert_eq!(prod.responses[0].partition_responses[0].error_code, 0);
+        assert!(prod.responses[0].partition_responses[0].error_code == 0);
 
         // Wait until every broker's local log reaches >= 10. The SASL
         // inter-broker handshake on each follower-fetch round trip is the

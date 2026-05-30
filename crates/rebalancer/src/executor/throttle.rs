@@ -82,6 +82,7 @@ fn stringify(per_topic: &BTreeMap<String, BTreeSet<(i32, i32)>>) -> BTreeMap<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn mv(topic: &str, p: i32, old: Vec<i32>, new: Vec<i32>) -> Movement {
         Movement {
@@ -108,16 +109,10 @@ mod tests {
         // Move partition 0 from broker 1 to broker 2.
         let m = mv("t", 0, vec![1], vec![2]);
         let t = compute_throttle_targets(std::slice::from_ref(&m));
-        assert_eq!(t.leader_brokers, BTreeSet::from([1]));
-        assert_eq!(t.follower_brokers, BTreeSet::from([2]));
-        assert_eq!(
-            t.leader_replicas_per_topic.get("t").map(String::as_str),
-            Some("0:1")
-        );
-        assert_eq!(
-            t.follower_replicas_per_topic.get("t").map(String::as_str),
-            Some("0:2")
-        );
+        assert!(t.leader_brokers == BTreeSet::from([1]));
+        assert!(t.follower_brokers == BTreeSet::from([2]));
+        assert!(t.leader_replicas_per_topic.get("t").map(String::as_str) == Some("0:1"));
+        assert!(t.follower_replicas_per_topic.get("t").map(String::as_str) == Some("0:2"));
     }
 
     #[test]
@@ -125,17 +120,11 @@ mod tests {
         // Replicas [1] → [1, 2]: broker 1 stays, broker 2 is the new follower.
         let m = mv("t", 5, vec![1], vec![1, 2]);
         let t = compute_throttle_targets(std::slice::from_ref(&m));
-        assert_eq!(t.leader_brokers, BTreeSet::from([1]));
-        assert_eq!(t.follower_brokers, BTreeSet::from([2]));
+        assert!(t.leader_brokers == BTreeSet::from([1]));
+        assert!(t.follower_brokers == BTreeSet::from([2]));
         // leader.replication.throttled.replicas covers the partition × source brokers.
-        assert_eq!(
-            t.leader_replicas_per_topic.get("t").map(String::as_str),
-            Some("5:1")
-        );
-        assert_eq!(
-            t.follower_replicas_per_topic.get("t").map(String::as_str),
-            Some("5:2")
-        );
+        assert!(t.leader_replicas_per_topic.get("t").map(String::as_str) == Some("5:1"));
+        assert!(t.follower_replicas_per_topic.get("t").map(String::as_str) == Some("5:2"));
     }
 
     #[test]
@@ -146,31 +135,19 @@ mod tests {
             mv("t2", 0, vec![2], vec![1]),
         ];
         let t = compute_throttle_targets(&ms);
-        assert_eq!(t.leader_brokers, BTreeSet::from([1, 2, 3]));
-        assert_eq!(t.follower_brokers, BTreeSet::from([1, 2]));
+        assert!(t.leader_brokers == BTreeSet::from([1, 2, 3]));
+        assert!(t.follower_brokers == BTreeSet::from([1, 2]));
         // Per-topic strings are sorted by (partition, broker).
-        assert_eq!(
-            t.leader_replicas_per_topic.get("t1").map(String::as_str),
-            Some("0:1,1:1,1:3")
-        );
-        assert_eq!(
-            t.follower_replicas_per_topic.get("t1").map(String::as_str),
-            Some("0:2,1:2")
-        );
-        assert_eq!(
-            t.leader_replicas_per_topic.get("t2").map(String::as_str),
-            Some("0:2")
-        );
-        assert_eq!(
-            t.follower_replicas_per_topic.get("t2").map(String::as_str),
-            Some("0:1")
-        );
+        assert!(t.leader_replicas_per_topic.get("t1").map(String::as_str) == Some("0:1,1:1,1:3"));
+        assert!(t.follower_replicas_per_topic.get("t1").map(String::as_str) == Some("0:2,1:2"));
+        assert!(t.leader_replicas_per_topic.get("t2").map(String::as_str) == Some("0:2"));
+        assert!(t.follower_replicas_per_topic.get("t2").map(String::as_str) == Some("0:1"));
     }
 
     #[test]
     fn output_is_deterministic_across_input_orders() {
         let a = vec![mv("z", 1, vec![3], vec![4]), mv("a", 0, vec![1], vec![2])];
         let b = vec![mv("a", 0, vec![1], vec![2]), mv("z", 1, vec![3], vec![4])];
-        assert_eq!(compute_throttle_targets(&a), compute_throttle_targets(&b));
+        assert!(compute_throttle_targets(&a) == compute_throttle_targets(&b));
     }
 }

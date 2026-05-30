@@ -193,36 +193,37 @@ enum Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn first_failure_warns() {
-        assert_eq!(classify(None, false), ScrapeLogLevel::Warn);
+        assert!(classify(None, false) == ScrapeLogLevel::Warn);
     }
 
     #[test]
     fn ok_to_fail_warns() {
-        assert_eq!(classify(Some(true), false), ScrapeLogLevel::Warn);
+        assert!(classify(Some(true), false) == ScrapeLogLevel::Warn);
     }
 
     #[test]
     fn repeated_failure_is_quiet() {
-        assert_eq!(classify(Some(false), false), ScrapeLogLevel::Debug);
+        assert!(classify(Some(false), false) == ScrapeLogLevel::Debug);
     }
 
     #[test]
     fn recovery_is_info() {
-        assert_eq!(classify(Some(false), true), ScrapeLogLevel::Recovered);
+        assert!(classify(Some(false), true) == ScrapeLogLevel::Recovered);
     }
 
     #[test]
     fn first_success_is_quiet() {
         // No prior failure → no "recovered" log on first scrape.
-        assert_eq!(classify(None, true), ScrapeLogLevel::Debug);
+        assert!(classify(None, true) == ScrapeLogLevel::Debug);
     }
 
     #[test]
     fn ok_to_ok_is_quiet() {
-        assert_eq!(classify(Some(true), true), ScrapeLogLevel::Debug);
+        assert!(classify(Some(true), true) == ScrapeLogLevel::Debug);
     }
 
     #[test]
@@ -236,14 +237,14 @@ mod tests {
             levels.push(classify(prev, current));
             prev = Some(current);
         }
-        assert_eq!(
-            levels,
-            vec![
-                ScrapeLogLevel::Warn,
-                ScrapeLogLevel::Debug,
-                ScrapeLogLevel::Debug,
-                ScrapeLogLevel::Recovered,
-            ]
+        assert!(
+            levels
+                == vec![
+                    ScrapeLogLevel::Warn,
+                    ScrapeLogLevel::Debug,
+                    ScrapeLogLevel::Debug,
+                    ScrapeLogLevel::Recovered,
+                ]
         );
     }
 
@@ -290,7 +291,7 @@ mod tests {
 
         // First tick: scrape both brokers (they'll fail; we don't care).
         scraper.tick_once().await;
-        assert_eq!(scraper.last_ok.len(), 2);
+        assert!(scraper.last_ok.len() == 2);
         assert!(scraper.last_ok.contains_key(&1));
         assert!(scraper.last_ok.contains_key(&2));
 
@@ -310,7 +311,7 @@ mod tests {
 
         scraper.tick_once().await;
         // last_ok should now only contain broker 1.
-        assert_eq!(scraper.last_ok.len(), 1);
+        assert!(scraper.last_ok.len() == 1);
         assert!(scraper.last_ok.contains_key(&1));
         assert!(!scraper.last_ok.contains_key(&2));
     }

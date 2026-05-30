@@ -148,13 +148,14 @@ fn approx_record_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Heade
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn first_append_creates_batch() {
         let mut a = Accumulator::new(1024);
         let _ = a.try_append(None, Some(Bytes::from_static(b"hi")), vec![], 0);
         assert!(a.current.is_some());
-        assert_eq!(a.current.as_ref().unwrap().records.len(), 1);
+        assert!(a.current.as_ref().unwrap().records.len() == 1);
     }
 
     #[test]
@@ -163,9 +164,9 @@ mod tests {
         // Each record is ~20+ bytes; two records exceed 40.
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
         let _ = a.try_append(None, Some(Bytes::from(vec![0u8; 32])), vec![], 0);
-        assert_eq!(a.ready.len(), 1);
+        assert!(a.ready.len() == 1);
         assert!(a.current.is_some());
-        assert_eq!(a.current.as_ref().unwrap().records.len(), 1);
+        assert!(a.current.as_ref().unwrap().records.len() == 1);
     }
 
     #[test]
@@ -174,6 +175,6 @@ mod tests {
         let _ = a.try_append(None, Some(Bytes::from_static(b"x")), vec![], 0);
         a.seal_current();
         assert!(a.current.is_none());
-        assert_eq!(a.ready.len(), 1);
+        assert!(a.ready.len() == 1);
     }
 }

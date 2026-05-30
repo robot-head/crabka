@@ -8,6 +8,7 @@
 //! wrappers in `crates/client-admin/src/log_dirs.rs` get exercised
 //! end-to-end against a live broker.
 
+use assert2::assert;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -52,7 +53,7 @@ async fn admin_log_dirs_alter_then_describe_converges() {
 
     // Initial DescribeLogDirs reports both dirs, no future logs.
     let initial = admin.describe_log_dirs(None).await.expect("describe");
-    assert_eq!(initial.len(), 2, "one result per configured log dir");
+    assert!(initial.len() == 2, "one result per configured log dir");
     for d in &initial {
         assert!(d.error.is_none(), "log dir error: {:?}", d.error);
         for t in &d.topics {
@@ -75,7 +76,7 @@ async fn admin_log_dirs_alter_then_describe_converges() {
         .alter_replica_log_dirs(&assignments)
         .await
         .expect("alter");
-    assert_eq!(outcomes.len(), 2, "one outcome per partition");
+    assert!(outcomes.len() == 2, "one outcome per partition");
     for o in &outcomes {
         assert!(
             o.error.is_none(),
@@ -147,7 +148,7 @@ async fn admin_log_dirs_alter_then_describe_converges() {
         }
     }
     filtered_in_target.sort_unstable();
-    assert_eq!(filtered_in_target, vec![0, 1]);
+    assert!(filtered_in_target == vec![0, 1]);
 
     handle.shutdown().await;
 }

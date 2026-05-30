@@ -724,6 +724,7 @@ fn consume_producer_quota(
 #[cfg(test)]
 mod tests {
     use super::{MIN_INSYNC_REPLICAS, topic_min_insync_replicas};
+    use assert2::assert;
     use crabka_metadata::{
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
@@ -763,23 +764,22 @@ mod tests {
     #[test]
     fn topic_min_isr_defaults_to_one_when_unset() {
         let img = image_with_topic("t", &[1, 2, 3]);
-        assert_eq!(topic_min_insync_replicas(&img, "t"), 1);
+        assert!(topic_min_insync_replicas(&img, "t") == 1);
     }
 
     #[test]
     fn topic_min_isr_reads_override_when_set() {
         let mut img = image_with_topic("t", &[1, 2, 3]);
         set_min_isr(&mut img, "t", 3);
-        assert_eq!(topic_min_insync_replicas(&img, "t"), 3);
+        assert!(topic_min_insync_replicas(&img, "t") == 3);
     }
 
     #[test]
     fn topic_min_isr_default_one_on_unknown_topic() {
         let img = MetadataImage::new(Uuid::nil());
-        assert_eq!(
-            topic_min_insync_replicas(&img, "ghost"),
-            1,
-            "missing topic_config must default to 1, not crash",
+        assert!(
+            topic_min_insync_replicas(&img, "ghost") == 1,
+            "missing topic_config must default to 1, not crash"
         );
     }
 
@@ -792,10 +792,9 @@ mod tests {
             topic: "t".into(),
             overrides: o,
         }));
-        assert_eq!(
-            topic_min_insync_replicas(&img, "t"),
-            1,
-            "unparseable value must fall back to permissive default 1",
+        assert!(
+            topic_min_insync_replicas(&img, "t") == 1,
+            "unparseable value must fall back to permissive default 1"
         );
     }
 
@@ -810,7 +809,7 @@ mod tests {
             topic: "t".into(),
             overrides: o,
         }));
-        assert_eq!(topic_min_insync_replicas(&img, "t"), 1);
+        assert!(topic_min_insync_replicas(&img, "t") == 1);
     }
 
     #[test]
@@ -841,9 +840,8 @@ mod tests {
         // No tuple match for client_id="other"; no (user=alice)-only quota exists.
         let buckets2 = crate::quota::QuotaBuckets::new();
         let delay_other = super::consume_producer_quota(&img, &buckets2, "alice", "other", 4096);
-        assert_eq!(
-            delay_other,
-            std::time::Duration::ZERO,
+        assert!(
+            delay_other == std::time::Duration::ZERO,
             "non-matching client_id should not throttle; got {delay_other:?}"
         );
     }

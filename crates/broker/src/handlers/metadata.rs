@@ -275,14 +275,15 @@ fn parse_host_port(addr: &str) -> (String, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn parse_host_port_ok() {
-        assert_eq!(parse_host_port("foo:1234"), ("foo".into(), 1234));
+        assert!(parse_host_port("foo:1234") == ("foo".into(), 1234));
     }
 
     #[test]
     fn parse_host_port_falls_back() {
-        assert_eq!(parse_host_port("not-an-addr"), ("localhost".into(), 9092));
+        assert!(parse_host_port("not-an-addr") == ("localhost".into(), 9092));
     }
 }

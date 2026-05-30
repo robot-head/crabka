@@ -520,6 +520,7 @@ async fn run_consumer(
 mod tests {
     use super::*;
     use crate::scenario::{Acks, Compression, FailoverSpec, LoadMode, ModeTag};
+    use assert2::assert;
 
     fn cfg(broker_count: u32) -> DriverConfig {
         DriverConfig {
@@ -565,12 +566,12 @@ mod tests {
         let s = scenario(1);
         let c = cfg(1);
         let out = empty_output(&s, &c, 42, vec!["a-note".into()], vec!["an-error".into()]);
-        assert_eq!(out.wallclock_start_unix_ms, 42);
-        assert_eq!(out.wallclock_end_unix_ms, 42);
-        assert_eq!(out.topology.broker_count, 1);
-        assert_eq!(out.notes, vec!["a-note"]);
-        assert_eq!(out.errors, vec!["an-error"]);
-        assert_eq!(out.first_ack_ms, 0);
+        assert!(out.wallclock_start_unix_ms == 42);
+        assert!(out.wallclock_end_unix_ms == 42);
+        assert!(out.topology.broker_count == 1);
+        assert!(out.notes == vec!["a-note"]);
+        assert!(out.errors == vec!["an-error"]);
+        assert!(out.first_ack_ms == 0);
         assert!(out.disturbance.is_none());
     }
 
@@ -579,9 +580,9 @@ mod tests {
     // without ambiguity.
     #[test]
     fn state_constants_are_distinct() {
-        assert_ne!(STATE_RUN, STATE_MEASURING);
-        assert_ne!(STATE_MEASURING, STATE_STOP);
-        assert_ne!(STATE_RUN, STATE_STOP);
+        assert!(STATE_RUN != STATE_MEASURING);
+        assert!(STATE_MEASURING != STATE_STOP);
+        assert!(STATE_RUN != STATE_STOP);
     }
 
     #[tokio::test(start_paused = true)]
@@ -589,7 +590,7 @@ mod tests {
         let mut s = scenario(3);
         s.mode_tag = ModeTag::Cluster;
         let out = run(s, cfg(1)).await.expect("run returned");
-        assert_eq!(out.throughput.msgs_produced, 0);
+        assert!(out.throughput.msgs_produced == 0);
         assert!(out.notes.iter().any(|n| n.contains("topology-mismatch")));
     }
 

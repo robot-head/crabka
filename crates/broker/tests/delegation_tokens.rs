@@ -51,6 +51,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 
@@ -519,13 +520,13 @@ async fn delegation_token_lifecycle_end_to_end() {
                 create_resp.token_requester_principal_name,
             ));
         }
-        assert_eq!(create_resp.principal_type, "User");
-        assert_eq!(create_resp.principal_name, "alice");
-        assert_eq!(create_resp.token_requester_principal_type, "User");
-        assert_eq!(create_resp.token_requester_principal_name, "alice");
+        assert!(create_resp.principal_type == "User");
+        assert!(create_resp.principal_name == "alice");
+        assert!(create_resp.token_requester_principal_type == "User");
+        assert!(create_resp.token_requester_principal_name == "alice");
         assert!(!create_resp.token_id.is_empty(), "token_id must be set");
         // HMAC-SHA-256 → 32 raw bytes.
-        assert_eq!(create_resp.hmac.len(), 32, "HMAC length must be 32 bytes");
+        assert!(create_resp.hmac.len() == 32, "HMAC length must be 32 bytes");
         assert!(create_resp.expiry_timestamp_ms > create_resp.issue_timestamp_ms);
 
         let token_id = create_resp.token_id.clone();
@@ -545,15 +546,14 @@ async fn delegation_token_lifecycle_end_to_end() {
         // node's image — every subsequent step reads it back via the same
         // controller, so the visibility window is tiny but non-zero.
         let img_token = wait_for_token(&handle, &token_id).await;
-        assert_eq!(img_token.owner.principal_type, "User");
-        assert_eq!(img_token.owner.name, "alice");
-        assert_eq!(
-            img_token.renewers.len(),
-            1,
+        assert!(img_token.owner.principal_type == "User");
+        assert!(img_token.owner.name == "alice");
+        assert!(
+            img_token.renewers.len() == 1,
             "renewers must carry exactly the requested entry"
         );
-        assert_eq!(img_token.renewers[0].principal_type, "User");
-        assert_eq!(img_token.renewers[0].name, "bob");
+        assert!(img_token.renewers[0].principal_type == "User");
+        assert!(img_token.renewers[0].name == "bob");
 
         // ── (c) Open a second connection and SASL/SCRAM-SHA-256 authenticate
         //         with username=token_id, password=base64(hmac). KIP-48
@@ -585,11 +585,11 @@ async fn delegation_token_lifecycle_end_to_end() {
         )
         .await
         .map_err(|e| format!("CreateDelegationToken(token-auth): {e}"))?;
-        assert_eq!(
-            create_via_token.error_code, DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
+        assert!(
+            create_via_token.error_code == DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
             "token-authed Create must return DELEGATION_TOKEN_REQUEST_NOT_ALLOWED (64); \
              got {} — principal override may have regressed",
-            create_via_token.error_code,
+            create_via_token.error_code
         );
 
         // ── (e) Third connection: bob (a listed renewer) calls Renew.
@@ -615,10 +615,10 @@ async fn delegation_token_lifecycle_end_to_end() {
         )
         .await
         .map_err(|e| format!("RenewDelegationToken(bob): {e}"))?;
-        assert_eq!(
-            renew_resp.error_code, 0,
+        assert!(
+            renew_resp.error_code == 0,
             "Renew by listed renewer must succeed; got {}",
-            renew_resp.error_code,
+            renew_resp.error_code
         );
         // KIP-48: with the fix, Renew strictly extends the expiry past
         // its initial value, capped at `max_timestamp_ms`.
@@ -653,20 +653,19 @@ async fn delegation_token_lifecycle_end_to_end() {
         )
         .await
         .map_err(|e| format!("DescribeDelegationToken(alice): {e}"))?;
-        assert_eq!(
-            describe_resp.error_code, 0,
+        assert!(
+            describe_resp.error_code == 0,
             "Describe must succeed; got {}",
-            describe_resp.error_code,
+            describe_resp.error_code
         );
-        assert_eq!(
-            describe_resp.tokens.len(),
-            1,
+        assert!(
+            describe_resp.tokens.len() == 1,
             "alice must see exactly her one token; got {} entries",
-            describe_resp.tokens.len(),
+            describe_resp.tokens.len()
         );
-        assert_eq!(describe_resp.tokens[0].token_id, token_id);
-        assert_eq!(describe_resp.tokens[0].principal_type, "User");
-        assert_eq!(describe_resp.tokens[0].principal_name, "alice");
+        assert!(describe_resp.tokens[0].token_id == token_id);
+        assert!(describe_resp.tokens[0].principal_type == "User");
+        assert!(describe_resp.tokens[0].principal_name == "alice");
 
         // ── (g) alice expires the token (negative period = immediate delete).
         let expire_resp = send_expire_delegation_token(
@@ -680,10 +679,10 @@ async fn delegation_token_lifecycle_end_to_end() {
         )
         .await
         .map_err(|e| format!("ExpireDelegationToken(alice): {e}"))?;
-        assert_eq!(
-            expire_resp.error_code, 0,
+        assert!(
+            expire_resp.error_code == 0,
             "Expire must succeed; got {}",
-            expire_resp.error_code,
+            expire_resp.error_code
         );
 
         // Drop the still-open connections we used for the wire dance —
@@ -806,12 +805,12 @@ async fn act_as_super_user_mints_token_owned_by_target() {
                 create_resp.token_requester_principal_name,
             ));
         }
-        assert_eq!(create_resp.principal_type, "User");
-        assert_eq!(create_resp.principal_name, "alice");
-        assert_eq!(create_resp.token_requester_principal_type, "User");
-        assert_eq!(create_resp.token_requester_principal_name, "admin");
+        assert!(create_resp.principal_type == "User");
+        assert!(create_resp.principal_name == "alice");
+        assert!(create_resp.token_requester_principal_type == "User");
+        assert!(create_resp.token_requester_principal_name == "admin");
         assert!(!create_resp.token_id.is_empty(), "token_id must be set");
-        assert_eq!(create_resp.hmac.len(), 32, "HMAC length must be 32 bytes");
+        assert!(create_resp.hmac.len() == 32, "HMAC length must be 32 bytes");
 
         let token_id = create_resp.token_id.clone();
         let hmac_bytes = create_resp.hmac.clone();
@@ -820,8 +819,8 @@ async fn act_as_super_user_mints_token_owned_by_target() {
         // image. Belt-and-suspenders — the SCRAM token-fallback lookup in
         // step (3) reads from the same image.
         let img_token = wait_for_token(&handle, &token_id).await;
-        assert_eq!(img_token.owner.principal_type, "User");
-        assert_eq!(img_token.owner.name, "alice");
+        assert!(img_token.owner.principal_type == "User");
+        assert!(img_token.owner.name == "alice");
 
         // (3) Open a second connection; SASL/SCRAM-SHA-256 with username =
         // token_id, password = base64(hmac). The token-fallback path
@@ -847,11 +846,11 @@ async fn act_as_super_user_mints_token_owned_by_target() {
         )
         .await
         .map_err(|e| format!("CreateDelegationToken(token-auth): {e}"))?;
-        assert_eq!(
-            create_via_token.error_code, DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
+        assert!(
+            create_via_token.error_code == DELEGATION_TOKEN_REQUEST_NOT_ALLOWED,
             "token-authed Create must return DELEGATION_TOKEN_REQUEST_NOT_ALLOWED (64); \
              got {}",
-            create_via_token.error_code,
+            create_via_token.error_code
         );
 
         drop(admin);
@@ -891,11 +890,11 @@ async fn act_as_non_super_user_rejected_with_authorization_failed() {
         let resp = send_create_delegation_token(&mut alice, 100, &create_req)
             .await
             .map_err(|e| format!("CreateDelegationToken(alice act-as bob): {e}"))?;
-        assert_eq!(
-            resp.error_code, DELEGATION_TOKEN_AUTHORIZATION_FAILED,
+        assert!(
+            resp.error_code == DELEGATION_TOKEN_AUTHORIZATION_FAILED,
             "non-super-user act-as must be rejected with \
              DELEGATION_TOKEN_AUTHORIZATION_FAILED (65); got {}",
-            resp.error_code,
+            resp.error_code
         );
 
         drop(alice);
@@ -962,7 +961,7 @@ async fn super_user_can_renew_other_owners_token() {
                 create_resp.error_code,
             ));
         }
-        assert_eq!(create_resp.principal_name, "alice");
+        assert!(create_resp.principal_name == "alice");
 
         let token_id = create_resp.token_id.clone();
         let hmac_bytes = create_resp.hmac.clone();
@@ -975,7 +974,7 @@ async fn super_user_can_renew_other_owners_token() {
 
         // Wait for the V1DelegationToken record to apply on this node's image.
         let img_token = wait_for_token(&handle, &token_id).await;
-        assert_eq!(img_token.owner.name, "alice");
+        assert!(img_token.owner.name == "alice");
         assert!(
             img_token.renewers.is_empty(),
             "no renewers were specified, so admin is neither owner NOR renewer"
@@ -996,11 +995,11 @@ async fn super_user_can_renew_other_owners_token() {
         )
         .await
         .map_err(|e| format!("RenewDelegationToken(admin super-user): {e}"))?;
-        assert_eq!(
-            renew_resp.error_code, 0,
+        assert!(
+            renew_resp.error_code == 0,
             "super-user Renew of another owner's token must succeed; got {} \
              (super-user bypass regressed)",
-            renew_resp.error_code,
+            renew_resp.error_code
         );
         assert!(
             renew_resp.expiry_timestamp_ms > initial_expiry_ms,
@@ -1026,11 +1025,11 @@ async fn super_user_can_renew_other_owners_token() {
         )
         .await
         .map_err(|e| format!("ExpireDelegationToken(admin super-user): {e}"))?;
-        assert_eq!(
-            expire_resp.error_code, 0,
+        assert!(
+            expire_resp.error_code == 0,
             "super-user Expire of another owner's token must succeed; got {} \
              (super-user bypass regressed)",
-            expire_resp.error_code,
+            expire_resp.error_code
         );
 
         // Tombstone should propagate.

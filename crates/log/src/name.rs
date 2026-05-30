@@ -50,15 +50,16 @@ pub fn leader_epoch_checkpoint_path(dir: &Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     macro_rules! offset_case {
         ($name:ident, $offset:expr, $expected_filename:expr) => {
             #[test]
             fn $name() {
                 let formatted = format_base_offset($offset);
-                assert_eq!(formatted, $expected_filename);
+                assert!(formatted == $expected_filename);
                 let parsed = parse_log_filename(&format!("{formatted}.log")).unwrap();
-                assert_eq!(parsed, $offset);
+                assert!(parsed == $offset);
             }
         };
     }

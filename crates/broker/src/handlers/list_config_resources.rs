@@ -152,6 +152,7 @@ fn collect_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use uuid::Uuid;
 
@@ -195,35 +196,35 @@ mod tests {
         let out = collect_resources(&img, 1, &[]);
         // 2 topics + 2 brokers + 0 client_metrics = 4 entries, sorted by
         // (type, name): topics (type 2) before brokers (type 4).
-        assert_eq!(out.len(), 4);
-        assert_eq!(out[0].resource_type, RESOURCE_TYPE_TOPIC);
-        assert_eq!(out[0].resource_name, "t-a");
-        assert_eq!(out[1].resource_type, RESOURCE_TYPE_TOPIC);
-        assert_eq!(out[1].resource_name, "t-b");
-        assert_eq!(out[2].resource_type, RESOURCE_TYPE_BROKER);
-        assert_eq!(out[2].resource_name, "1");
-        assert_eq!(out[3].resource_type, RESOURCE_TYPE_BROKER);
-        assert_eq!(out[3].resource_name, "2");
+        assert!(out.len() == 4);
+        assert!(out[0].resource_type == RESOURCE_TYPE_TOPIC);
+        assert!(out[0].resource_name == "t-a");
+        assert!(out[1].resource_type == RESOURCE_TYPE_TOPIC);
+        assert!(out[1].resource_name == "t-b");
+        assert!(out[2].resource_type == RESOURCE_TYPE_BROKER);
+        assert!(out[2].resource_name == "1");
+        assert!(out[3].resource_type == RESOURCE_TYPE_BROKER);
+        assert!(out[3].resource_name == "2");
     }
 
     #[test]
     fn v1_explicit_topic_only_filter_skips_brokers() {
         let img = image_with_topics_and_brokers(&["t-a"], &[1, 2]);
         let out = collect_resources(&img, 1, &[RESOURCE_TYPE_TOPIC]);
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].resource_type, RESOURCE_TYPE_TOPIC);
-        assert_eq!(out[0].resource_name, "t-a");
+        assert!(out.len() == 1);
+        assert!(out[0].resource_type == RESOURCE_TYPE_TOPIC);
+        assert!(out[0].resource_name == "t-a");
     }
 
     #[test]
     fn v1_explicit_broker_only_filter_skips_topics() {
         let img = image_with_topics_and_brokers(&["t-a", "t-b"], &[5, 7]);
         let out = collect_resources(&img, 1, &[RESOURCE_TYPE_BROKER]);
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].resource_type, RESOURCE_TYPE_BROKER);
-        assert_eq!(out[0].resource_name, "5");
-        assert_eq!(out[1].resource_type, RESOURCE_TYPE_BROKER);
-        assert_eq!(out[1].resource_name, "7");
+        assert!(out.len() == 2);
+        assert!(out[0].resource_type == RESOURCE_TYPE_BROKER);
+        assert!(out[0].resource_name == "5");
+        assert!(out[1].resource_type == RESOURCE_TYPE_BROKER);
+        assert!(out[1].resource_name == "7");
     }
 
     #[test]
@@ -259,9 +260,9 @@ mod tests {
                 RESOURCE_TYPE_BROKER,
             ],
         );
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].resource_type, RESOURCE_TYPE_TOPIC);
-        assert_eq!(out[1].resource_type, RESOURCE_TYPE_BROKER);
+        assert!(out.len() == 2);
+        assert!(out[0].resource_type == RESOURCE_TYPE_TOPIC);
+        assert!(out[1].resource_type == RESOURCE_TYPE_BROKER);
     }
 
     #[test]
@@ -271,6 +272,6 @@ mod tests {
         // Topics sorted lexicographically, brokers sorted lexicographically
         // by id-as-string.
         let names: Vec<&str> = out.iter().map(|r| r.resource_name.as_str()).collect();
-        assert_eq!(names, vec!["a-early", "z-late", "1", "10"]);
+        assert!(names == vec!["a-early", "z-late", "1", "10"]);
     }
 }

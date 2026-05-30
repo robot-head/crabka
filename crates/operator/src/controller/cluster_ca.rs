@@ -1378,6 +1378,7 @@ pub(crate) async fn emit_event(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_security::ca::{generate_clients_ca, generate_cluster_ca, issue_user_cert};
 
     /// A CA generated with `validity_days = 30` must have `notAfter` within
@@ -1432,6 +1433,7 @@ mod tests {
 #[cfg(test)]
 mod reissue_tests {
     use super::compute_san_digest;
+    use assert2::assert;
     use crabka_security::ca::SubjectAltName;
 
     #[test]
@@ -1440,7 +1442,7 @@ mod reissue_tests {
         let no_extras = compute_san_digest(&base, &[]);
         let with_extras =
             compute_san_digest(&base, &[SubjectAltName::Dns("broker-0.example.com".into())]);
-        assert_ne!(no_extras, with_extras);
+        assert!(no_extras != with_extras);
     }
 
     #[test]
@@ -1453,7 +1455,7 @@ mod reissue_tests {
             SubjectAltName::Dns("b.example.com".into()),
             SubjectAltName::Dns("a.example.com".into()),
         ];
-        assert_eq!(compute_san_digest(&a, &[]), compute_san_digest(&b, &[]));
+        assert!(compute_san_digest(&a, &[]) == compute_san_digest(&b, &[]));
     }
 
     #[test]
@@ -1462,8 +1464,8 @@ mod reissue_tests {
         let extras = vec![SubjectAltName::Dns("internal.svc".into())];
         let single = compute_san_digest(&base, &[]);
         let with_dup_extra = compute_san_digest(&base, &extras);
-        assert_eq!(
-            single, with_dup_extra,
+        assert!(
+            single == with_dup_extra,
             "duplicate extras should not change digest"
         );
     }
@@ -1471,6 +1473,7 @@ mod reissue_tests {
 
 #[cfg(test)]
 mod san_tests {
+    use assert2::assert;
     use crabka_security::ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert};
     use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::PemObject;
@@ -1550,14 +1553,15 @@ mod san_tests {
         )
         .unwrap();
         let parsed = parse_cert_sans(&leaf.cert_pem);
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0], "DNS:internal.svc");
+        assert!(parsed.len() == 1);
+        assert!(parsed[0] == "DNS:internal.svc");
     }
 }
 
 #[cfg(test)]
 mod rotation_tests {
     use super::*;
+    use assert2::assert;
     use crabka_security::ca::{generate_cluster_ca, renew_cluster_ca};
 
     fn ca_cert(cn: &str, days: u32) -> String {
@@ -1597,11 +1601,11 @@ mod rotation_tests {
         let b = ca_cert("b", 365);
         let bundle = format!("{a}{b}");
         let blocks = split_pem_certs(&bundle);
-        assert_eq!(blocks.len(), 2);
+        assert!(blocks.len() == 2);
         assert!(blocks[0].contains("BEGIN CERTIFICATE"));
         // join is the concatenation of normalized blocks; re-splitting is stable.
         let rejoined = join_bundle(&blocks);
-        assert_eq!(split_pem_certs(&rejoined).len(), 2);
+        assert!(split_pem_certs(&rejoined).len() == 2);
     }
 
     #[test]
@@ -1609,7 +1613,7 @@ mod rotation_tests {
         let a = normalize_block(&ca_cert("a", 365));
         let b = normalize_block(&ca_cert("b", 365));
         let out = dedup_blocks(&[a.clone(), b.clone(), a.clone()]);
-        assert_eq!(out, vec![a, b]);
+        assert!(out == vec![a, b]);
     }
 
     #[test]
@@ -1620,7 +1624,7 @@ mod rotation_tests {
         // 0) is never dropped.
         let now = OffsetDateTime::now_utc() + time::Duration::days(100);
         let out = prune_expired(&[signing.clone(), trust], now);
-        assert_eq!(out, vec![signing]);
+        assert!(out == vec![signing]);
     }
 
     #[test]
@@ -1630,7 +1634,7 @@ mod rotation_tests {
         let stale = normalize_block(&ca_cert("stale", 20));
         let now = OffsetDateTime::now_utc() + time::Duration::days(100);
         let out = prune_expired(&[signing.clone(), fresh.clone(), stale], now);
-        assert_eq!(out, vec![signing, fresh]);
+        assert!(out == vec![signing, fresh]);
     }
 
     // --- planner: BYO -------------------------------------------------------
@@ -1642,10 +1646,7 @@ mod rotation_tests {
             "k",
             CaPhase::Idle,
         );
-        assert_eq!(
-            plan_ca_rotation(&s, &inputs(false, WhichCa::Cluster)),
-            CaRotationPlan::NoOp
-        );
+        assert!(plan_ca_rotation(&s, &inputs(false, WhichCa::Cluster)) == CaRotationPlan::NoOp);
     }
 
     #[test]
@@ -1657,16 +1658,10 @@ mod rotation_tests {
         );
         let mut inp = inputs(false, WhichCa::Cluster);
         inp.force_replace_key = true;
-        assert_eq!(
-            plan_ca_rotation(&s, &inp),
-            CaRotationPlan::Refuse(RefuseReason::Byo)
-        );
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::Refuse(RefuseReason::Byo));
         let mut inp2 = inputs(false, WhichCa::Cluster);
         inp2.force_renew = true;
-        assert_eq!(
-            plan_ca_rotation(&s, &inp2),
-            CaRotationPlan::Refuse(RefuseReason::Byo)
-        );
+        assert!(plan_ca_rotation(&s, &inp2) == CaRotationPlan::Refuse(RefuseReason::Byo));
     }
 
     // --- planner: idle ------------------------------------------------------
@@ -1678,10 +1673,7 @@ mod rotation_tests {
             "k",
             CaPhase::Idle,
         );
-        assert_eq!(
-            plan_ca_rotation(&s, &inputs(true, WhichCa::Cluster)),
-            CaRotationPlan::NoOp
-        );
+        assert!(plan_ca_rotation(&s, &inputs(true, WhichCa::Cluster)) == CaRotationPlan::NoOp);
     }
 
     #[test]
@@ -1692,9 +1684,9 @@ mod rotation_tests {
             "k",
             CaPhase::Idle,
         );
-        assert_eq!(
-            plan_ca_rotation(&s, &inputs(true, WhichCa::Cluster)),
-            CaRotationPlan::RenewCertSameKey
+        assert!(
+            plan_ca_rotation(&s, &inputs(true, WhichCa::Cluster))
+                == CaRotationPlan::RenewCertSameKey
         );
     }
 
@@ -1707,7 +1699,7 @@ mod rotation_tests {
         );
         let mut inp = inputs(true, WhichCa::Cluster);
         inp.force_renew = true;
-        assert_eq!(plan_ca_rotation(&s, &inp), CaRotationPlan::RenewCertSameKey);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::RenewCertSameKey);
     }
 
     #[test]
@@ -1719,7 +1711,7 @@ mod rotation_tests {
         );
         let mut inp = inputs(true, WhichCa::Cluster);
         inp.force_replace_key = true;
-        assert_eq!(plan_ca_rotation(&s, &inp), CaRotationPlan::StartKeyReplace);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::StartKeyReplace);
     }
 
     #[test]
@@ -1731,9 +1723,8 @@ mod rotation_tests {
         );
         let mut inp = inputs(true, WhichCa::Clients);
         inp.force_replace_key = true;
-        assert_eq!(
-            plan_ca_rotation(&s, &inp),
-            CaRotationPlan::Refuse(RefuseReason::ClientsCaKeyReplace)
+        assert!(
+            plan_ca_rotation(&s, &inp) == CaRotationPlan::Refuse(RefuseReason::ClientsCaKeyReplace)
         );
     }
 
@@ -1745,7 +1736,7 @@ mod rotation_tests {
         let mut inp = inputs(true, WhichCa::Cluster);
         // 100 days out: signing still valid (not due), trust anchor expired.
         inp.now = OffsetDateTime::now_utc() + time::Duration::days(100);
-        assert_eq!(plan_ca_rotation(&s, &inp), CaRotationPlan::PruneOldTrust);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PruneOldTrust);
     }
 
     // --- planner: staged phases --------------------------------------------
@@ -1759,9 +1750,9 @@ mod rotation_tests {
         );
         let mut inp = inputs(true, WhichCa::Cluster);
         inp.rollout_converged = false;
-        assert_eq!(plan_ca_rotation(&s, &inp), CaRotationPlan::NoOp);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
         inp.rollout_converged = true;
-        assert_eq!(plan_ca_rotation(&s, &inp), CaRotationPlan::PromoteNewKey);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PromoteNewKey);
     }
 
     #[test]
@@ -1773,9 +1764,9 @@ mod rotation_tests {
         );
         let mut inp = inputs(true, WhichCa::Cluster);
         inp.rollout_converged = false;
-        assert_eq!(plan_ca_rotation(&s, &inp), CaRotationPlan::NoOp);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
         inp.rollout_converged = true;
-        assert_eq!(plan_ca_rotation(&s, &inp), CaRotationPlan::PruneOldTrust);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::PruneOldTrust);
     }
 
     #[test]
@@ -1789,7 +1780,7 @@ mod rotation_tests {
         let mut inp = inputs(true, WhichCa::Cluster);
         inp.force_replace_key = true;
         inp.rollout_converged = false;
-        assert_eq!(plan_ca_rotation(&s, &inp), CaRotationPlan::NoOp);
+        assert!(plan_ca_rotation(&s, &inp) == CaRotationPlan::NoOp);
     }
 
     // --- same-key renewal preserves leaf chaining ---------------------------

@@ -14,6 +14,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -62,7 +63,7 @@ async fn create_topic(p: &support::InProcess, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "{name} create: {resp:?}");
+    assert!(resp.topics[0].error_code == 0, "{name} create: {resp:?}");
 }
 
 async fn init_producer(p: &support::InProcess) -> (i64, i16) {
@@ -114,12 +115,15 @@ async fn empty_partition_returns_no_active_producers() {
         .await
         .expect("DescribeProducers");
 
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(resp.topics[0].name, "fresh");
-    assert_eq!(resp.topics[0].partitions.len(), 1);
+    assert!(resp.topics.len() == 1);
+    assert!(resp.topics[0].name == "fresh");
+    assert!(resp.topics[0].partitions.len() == 1);
     let part = &resp.topics[0].partitions[0];
-    assert_eq!(part.error_code, 0, "fresh partition must succeed: {part:?}");
-    assert_eq!(part.partition_index, 0);
+    assert!(
+        part.error_code == 0,
+        "fresh partition must succeed: {part:?}"
+    );
+    assert!(part.partition_index == 0);
     assert!(
         part.active_producers.is_empty(),
         "no produce has happened — list must be empty: {:?}",
@@ -157,7 +161,7 @@ async fn after_idempotent_produce_describe_returns_the_producer() {
         })
         .await
         .expect("Produce");
-    assert_eq!(pr.responses[0].partition_responses[0].error_code, 0);
+    assert!(pr.responses[0].partition_responses[0].error_code == 0);
 
     let resp = p
         .client
@@ -172,25 +176,24 @@ async fn after_idempotent_produce_describe_returns_the_producer() {
         .await
         .expect("DescribeProducers");
 
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(resp.topics[0].partitions.len(), 1);
+    assert!(resp.topics.len() == 1);
+    assert!(resp.topics[0].partitions.len() == 1);
     let part = &resp.topics[0].partitions[0];
-    assert_eq!(part.error_code, 0, "{part:?}");
-    assert_eq!(
-        part.active_producers.len(),
-        1,
+    assert!(part.error_code == 0, "{part:?}");
+    assert!(
+        part.active_producers.len() == 1,
         "expected exactly one tracked producer, got {:?}",
-        part.active_producers,
+        part.active_producers
     );
     let producer = &part.active_producers[0];
-    assert_eq!(producer.producer_id, pid);
-    assert_eq!(producer.producer_epoch, i32::from(epoch));
+    assert!(producer.producer_id == pid);
+    assert!(producer.producer_epoch == i32::from(epoch));
     // base_seq=0, last_offset_delta=n-1=2 → last_sequence = 2.
-    assert_eq!(producer.last_sequence, 2);
+    assert!(producer.last_sequence == 2);
     // Crabka doesn't yet wire per-partition txn bookkeeping; sentinels
     // stay at -1.
-    assert_eq!(producer.coordinator_epoch, -1);
-    assert_eq!(producer.current_txn_start_offset, -1);
+    assert!(producer.coordinator_epoch == -1);
+    assert!(producer.current_txn_start_offset == -1);
 
     p.broker.shutdown().await;
 }
@@ -203,9 +206,9 @@ async fn multiple_producers_on_same_partition_all_surfaced() {
 
     let (pid_a, epoch_a) = init_producer(&p).await;
     let (pid_b, epoch_b) = init_producer(&p).await;
-    assert_ne!(
-        pid_a, pid_b,
-        "InitProducerId must return distinct ids on back-to-back calls",
+    assert!(
+        pid_a != pid_b,
+        "InitProducerId must return distinct ids on back-to-back calls"
     );
 
     for (pid, epoch) in [(pid_a, epoch_a), (pid_b, epoch_b)] {
@@ -228,7 +231,7 @@ async fn multiple_producers_on_same_partition_all_surfaced() {
             })
             .await
             .expect("Produce");
-        assert_eq!(pr.responses[0].partition_responses[0].error_code, 0);
+        assert!(pr.responses[0].partition_responses[0].error_code == 0);
     }
 
     let resp = p
@@ -245,7 +248,10 @@ async fn multiple_producers_on_same_partition_all_surfaced() {
         .expect("DescribeProducers");
 
     let producers = &resp.topics[0].partitions[0].active_producers;
-    assert_eq!(producers.len(), 2, "expected both producers: {producers:?}");
+    assert!(
+        producers.len() == 2,
+        "expected both producers: {producers:?}"
+    );
     let seen: std::collections::HashSet<i64> = producers.iter().map(|p| p.producer_id).collect();
     assert!(seen.contains(&pid_a) && seen.contains(&pid_b));
 
@@ -269,12 +275,12 @@ async fn unknown_topic_returns_unknown_topic_or_partition() {
         .await
         .expect("DescribeProducers");
 
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(resp.topics[0].partitions.len(), 2);
+    assert!(resp.topics.len() == 1);
+    assert!(resp.topics[0].partitions.len() == 2);
     for part in &resp.topics[0].partitions {
-        assert_eq!(
-            part.error_code, 3,
-            "unknown topic must surface UNKNOWN_TOPIC_OR_PARTITION (3) per partition, got {part:?}",
+        assert!(
+            part.error_code == 3,
+            "unknown topic must surface UNKNOWN_TOPIC_OR_PARTITION (3) per partition, got {part:?}"
         );
         assert!(part.active_producers.is_empty());
     }
@@ -301,21 +307,21 @@ async fn out_of_range_partition_returns_unknown_topic_or_partition() {
         .await
         .expect("DescribeProducers");
 
-    assert_eq!(resp.topics[0].partitions.len(), 2);
+    assert!(resp.topics[0].partitions.len() == 2);
     // Partition 0 exists → error_code 0.
     let p0 = resp.topics[0]
         .partitions
         .iter()
         .find(|p| p.partition_index == 0)
         .expect("p0");
-    assert_eq!(p0.error_code, 0, "{p0:?}");
+    assert!(p0.error_code == 0, "{p0:?}");
     // Partition 5 doesn't → UNKNOWN_TOPIC_OR_PARTITION.
     let p5 = resp.topics[0]
         .partitions
         .iter()
         .find(|p| p.partition_index == 5)
         .expect("p5");
-    assert_eq!(p5.error_code, 3, "{p5:?}");
+    assert!(p5.error_code == 3, "{p5:?}");
 
     p.broker.shutdown().await;
 }

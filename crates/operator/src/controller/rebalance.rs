@@ -510,6 +510,7 @@ mod tests {
     use super::*;
     use crate::crd::{KafkaCondition, KafkaRebalanceSpec, KafkaRebalanceStatus};
     use crate::rebalancer_client::ProposalSummary;
+    use assert2::assert;
 
     fn cr(name: &str) -> KafkaRebalance {
         let mut k = KafkaRebalance::new(name, KafkaRebalanceSpec::default());
@@ -539,49 +540,41 @@ mod tests {
 
     #[test]
     fn decide_new_creates_proposal() {
-        assert_eq!(
-            decide(RebalanceState::New, None, false),
-            RebalanceAction::CreateProposal
-        );
+        assert!(decide(RebalanceState::New, None, false) == RebalanceAction::CreateProposal);
     }
 
     #[test]
     fn decide_proposal_ready_idles_without_command() {
-        assert_eq!(
-            decide(RebalanceState::ProposalReady, None, true),
-            RebalanceAction::Idle
-        );
+        assert!(decide(RebalanceState::ProposalReady, None, true) == RebalanceAction::Idle);
     }
 
     #[test]
     fn decide_approve_executes_when_ready_with_session() {
-        assert_eq!(
+        assert!(
             decide(
                 RebalanceState::ProposalReady,
                 Some(RebalanceCommand::Approve),
                 true
-            ),
-            RebalanceAction::Execute
+            ) == RebalanceAction::Execute
         );
     }
 
     #[test]
     fn decide_approve_ignored_without_session() {
-        assert_eq!(
+        assert!(
             decide(
                 RebalanceState::ProposalReady,
                 Some(RebalanceCommand::Approve),
                 false
-            ),
-            RebalanceAction::Idle
+            ) == RebalanceAction::Idle
         );
     }
 
     #[test]
     fn decide_approve_ignored_when_not_ready() {
-        assert_eq!(
-            decide(RebalanceState::Ready, Some(RebalanceCommand::Approve), true),
-            RebalanceAction::Idle
+        assert!(
+            decide(RebalanceState::Ready, Some(RebalanceCommand::Approve), true)
+                == RebalanceAction::Idle
         );
     }
 
@@ -594,9 +587,9 @@ mod tests {
             RebalanceState::Stopped,
             RebalanceState::Rebalancing,
         ] {
-            assert_eq!(
-                decide(st, Some(RebalanceCommand::Refresh), true),
-                RebalanceAction::CreateProposal,
+            assert!(
+                decide(st, Some(RebalanceCommand::Refresh), true)
+                    == RebalanceAction::CreateProposal,
                 "refresh from {st:?}"
             );
         }
@@ -604,37 +597,31 @@ mod tests {
 
     #[test]
     fn decide_stop_cancels_only_while_rebalancing() {
-        assert_eq!(
+        assert!(
             decide(
                 RebalanceState::Rebalancing,
                 Some(RebalanceCommand::Stop),
                 true
-            ),
-            RebalanceAction::Cancel
+            ) == RebalanceAction::Cancel
         );
-        assert_eq!(
+        assert!(
             decide(
                 RebalanceState::ProposalReady,
                 Some(RebalanceCommand::Stop),
                 true
-            ),
-            RebalanceAction::Idle
+            ) == RebalanceAction::Idle
         );
     }
 
     #[test]
     fn decide_rebalancing_polls_when_session_present() {
-        assert_eq!(
-            decide(RebalanceState::Rebalancing, None, true),
-            RebalanceAction::PollExecution
-        );
+        assert!(decide(RebalanceState::Rebalancing, None, true) == RebalanceAction::PollExecution);
     }
 
     #[test]
     fn decide_rebalancing_without_session_recomputes() {
-        assert_eq!(
-            decide(RebalanceState::Rebalancing, None, false),
-            RebalanceAction::CreateProposal
+        assert!(
+            decide(RebalanceState::Rebalancing, None, false) == RebalanceAction::CreateProposal
         );
     }
 
@@ -643,26 +630,26 @@ mod tests {
     #[test]
     fn create_computed_becomes_proposal_ready() {
         let o = Outcome::from_create(&proposal("p1", ProposalStatus::Computed));
-        assert_eq!(o.state, RebalanceState::ProposalReady);
-        assert_eq!(o.new_session.as_deref(), Some("p1"));
+        assert!(o.state == RebalanceState::ProposalReady);
+        assert!(o.new_session.as_deref() == Some("p1"));
         assert!(o.advance_generation);
         let opt = o.new_optimization.unwrap();
-        assert_eq!(opt.replica_movements, 3);
-        assert_eq!(opt.goals, vec!["RackAware"]);
+        assert!(opt.replica_movements == 3);
+        assert!(opt.goals == vec!["RackAware"]);
     }
 
     #[test]
     fn poll_executing_stays_rebalancing_with_short_requeue() {
         let o = Outcome::from_execute_or_poll(&proposal("p", ProposalStatus::Executing));
-        assert_eq!(o.state, RebalanceState::Rebalancing);
-        assert_eq!(o.requeue, POLL_INTERVAL);
+        assert!(o.state == RebalanceState::Rebalancing);
+        assert!(o.requeue == POLL_INTERVAL);
         assert!(o.new_session.is_none(), "poll must not rewrite session");
     }
 
     #[test]
     fn poll_completed_becomes_ready() {
         let o = Outcome::from_execute_or_poll(&proposal("p", ProposalStatus::Completed));
-        assert_eq!(o.state, RebalanceState::Ready);
+        assert!(o.state == RebalanceState::Ready);
     }
 
     #[test]
@@ -670,21 +657,21 @@ mod tests {
         let mut p = proposal("p", ProposalStatus::Failed);
         p.failure_reason = Some("broker 2 down".into());
         let o = Outcome::from_execute_or_poll(&p);
-        assert_eq!(o.state, RebalanceState::NotReady);
-        assert_eq!(o.message, "broker 2 down");
+        assert!(o.state == RebalanceState::NotReady);
+        assert!(o.message == "broker 2 down");
     }
 
     #[test]
     fn cancel_becomes_stopped() {
         let o = Outcome::from_cancel(&proposal("p", ProposalStatus::Cancelled));
-        assert_eq!(o.state, RebalanceState::Stopped);
+        assert!(o.state == RebalanceState::Stopped);
     }
 
     // ----- current_state ----------------------------------------------
 
     #[test]
     fn current_state_defaults_to_new() {
-        assert_eq!(current_state(&cr("x")), RebalanceState::New);
+        assert!(current_state(&cr("x")) == RebalanceState::New);
     }
 
     #[test]
@@ -700,7 +687,7 @@ mod tests {
             }],
             ..Default::default()
         });
-        assert_eq!(current_state(&k), RebalanceState::Rebalancing);
+        assert!(current_state(&k) == RebalanceState::Rebalancing);
     }
 
     #[test]
@@ -716,7 +703,7 @@ mod tests {
             }],
             ..Default::default()
         });
-        assert_eq!(current_state(&k), RebalanceState::New);
+        assert!(current_state(&k) == RebalanceState::New);
     }
 
     // ----- read_command -----------------------------------------------
@@ -729,7 +716,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        assert_eq!(read_command(&k), Some(RebalanceCommand::Approve));
+        assert!(read_command(&k) == Some(RebalanceCommand::Approve));
     }
 
     #[test]
@@ -740,7 +727,7 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        assert_eq!(read_command(&k), None);
+        assert!(read_command(&k) == None);
     }
 
     // ----- resolve_endpoint -------------------------------------------
@@ -749,10 +736,7 @@ mod tests {
     fn resolve_endpoint_prefers_spec() {
         let mut k = cr("x");
         k.spec.endpoint = Some("http://explicit:9300".into());
-        assert_eq!(
-            resolve_endpoint(&k, "kafka").as_deref(),
-            Some("http://explicit:9300")
-        );
+        assert!(resolve_endpoint(&k, "kafka").as_deref() == Some("http://explicit:9300"));
     }
 
     #[test]
@@ -763,14 +747,14 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        assert_eq!(
-            resolve_endpoint(&k, "kafka").as_deref(),
-            Some("http://demo-rebalancer.kafka.svc.cluster.local:9300")
+        assert!(
+            resolve_endpoint(&k, "kafka").as_deref()
+                == Some("http://demo-rebalancer.kafka.svc.cluster.local:9300")
         );
     }
 
     #[test]
     fn resolve_endpoint_none_without_spec_or_label() {
-        assert_eq!(resolve_endpoint(&cr("x"), "kafka"), None);
+        assert!(resolve_endpoint(&cr("x"), "kafka") == None);
     }
 }

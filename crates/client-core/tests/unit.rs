@@ -10,6 +10,7 @@
 // Suppressing here keeps comments readable without cluttering them.
 #![allow(clippy::doc_markdown)]
 
+use assert2::assert;
 use std::time::Duration;
 
 use bytes::BytesMut;
@@ -95,7 +96,7 @@ fn metadata_response_with_throttle(version: i16, throttle_time_ms: i32) -> Vec<u
 async fn connect_negotiates_api_versions() {
     let mock = MockBroker::start(|api_key, _version, _corr_id, _body| {
         // Only the bootstrap ApiVersions call is expected here.
-        assert_eq!(api_key, api_versions_request::API_KEY);
+        assert!(api_key == api_versions_request::API_KEY);
         Some(api_versions_response_v0())
     })
     .await;
@@ -106,15 +107,9 @@ async fn connect_negotiates_api_versions() {
 
     assert!(!conn.versions().is_empty());
     // The mock advertised api_key 18 min=0 max=3.
-    assert_eq!(
-        conn.versions().broker_range(api_versions_request::API_KEY),
-        Some((0, 3))
-    );
+    assert!(conn.versions().broker_range(api_versions_request::API_KEY) == Some((0, 3)));
     // The mock advertised api_key 3 min=0 max=12.
-    assert_eq!(
-        conn.versions().broker_range(metadata_request_mod::API_KEY),
-        Some((0, 12))
-    );
+    assert!(conn.versions().broker_range(metadata_request_mod::API_KEY) == Some((0, 12)));
 
     conn.close();
     mock.stop();
@@ -232,9 +227,8 @@ async fn concurrent_sends_get_correct_responses() {
         r3.throttle_time_ms,
     ];
     seen.sort_unstable();
-    assert_eq!(
-        seen,
-        [0, 1, 2],
+    assert!(
+        seen == [0, 1, 2],
         "each concurrent send must get a distinct response"
     );
 
@@ -295,7 +289,10 @@ async fn client_refresh_metadata_populates_pool() {
         .unwrap();
 
     let metadata = client.refresh_metadata().await.unwrap();
-    assert_eq!(metadata.brokers.len(), 2, "expected 2 brokers in metadata");
+    assert!(
+        metadata.brokers.len() == 2,
+        "expected 2 brokers in metadata"
+    );
 
     // After refresh the pool knows broker 1 and 2's addresses. We can't
     // actually connect to those ports (the mock isn't listening there), but

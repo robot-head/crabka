@@ -70,6 +70,7 @@ impl QuotaBuckets {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn key(user: &str) -> EntityKey {
         vec![("user".into(), Some(user.into()))]
@@ -79,8 +80,8 @@ mod tests {
     fn get_or_create_returns_new_bucket_first_time() {
         let buckets = QuotaBuckets::new();
         let b = buckets.get_or_create("producer_byte_rate", &key("alice"), 1024);
-        assert_eq!(b.rate(), 1024);
-        assert_eq!(buckets.len(), 1);
+        assert!(b.rate() == 1024);
+        assert!(buckets.len() == 1);
     }
 
     #[test]
@@ -90,8 +91,8 @@ mod tests {
         let b2 = buckets.get_or_create("producer_byte_rate", &key("alice"), 4096);
         // Same Arc — initial_rate on second call is ignored.
         assert!(Arc::ptr_eq(&b1, &b2));
-        assert_eq!(b1.rate(), 1024);
-        assert_eq!(buckets.len(), 1);
+        assert!(b1.rate() == 1024);
+        assert!(buckets.len() == 1);
     }
 
     #[test]
@@ -99,7 +100,7 @@ mod tests {
         let buckets = QuotaBuckets::new();
         let _ = buckets.get_or_create("producer_byte_rate", &key("alice"), 1024);
         let _ = buckets.get_or_create("consumer_byte_rate", &key("alice"), 2048);
-        assert_eq!(buckets.len(), 2);
+        assert!(buckets.len() == 2);
     }
 
     #[test]
@@ -107,6 +108,6 @@ mod tests {
         let buckets = QuotaBuckets::new();
         let _ = buckets.get_or_create("producer_byte_rate", &key("alice"), 1024);
         let _ = buckets.get_or_create("producer_byte_rate", &key("bob"), 2048);
-        assert_eq!(buckets.len(), 2);
+        assert!(buckets.len() == 2);
     }
 }

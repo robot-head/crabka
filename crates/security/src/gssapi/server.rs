@@ -101,6 +101,7 @@ impl GssapiServerExchange {
 mod tests {
     use super::*;
     use crate::gssapi::{AcceptStep, GssAcceptor, GssError};
+    use assert2::assert;
 
     /// Fake that establishes after one token and echoes wrap/unwrap as identity.
     struct FakeAcceptor {
@@ -138,14 +139,14 @@ mod tests {
             ServerStep::Done { .. } => panic!("expected offer"),
         };
         // offer is wrapped (identity here): bitmask 0x01 + 3-byte size
-        assert_eq!(offer[0], 0x01);
+        assert!(offer[0] == 0x01);
 
         // Round 3: client choice (auth, size, authzid "alice") -> done.
         let mut choice = vec![0x01u8, 0x00, 0x10, 0x00];
         choice.extend_from_slice(b"alice");
         let r3 = ex.step(&choice).unwrap();
         match r3 {
-            ServerStep::Done { principal } => assert_eq!(principal, "alice@REALM"),
+            ServerStep::Done { principal } => assert!(principal == "alice@REALM"),
             ServerStep::Challenge(_) => panic!("expected Done"),
         }
     }

@@ -142,6 +142,7 @@ pub(crate) async fn handle(
 mod tests {
     use super::*;
     use crate::txn::state::TopicPartition;
+    use assert2::assert;
 
     fn entry() -> TxnEntry {
         let mut e = TxnEntry::new_empty("tx".into(), 100, 0, 60_000, 1_000);
@@ -165,11 +166,11 @@ mod tests {
         let e = entry();
         let t = topics_for(&e);
         // alphabetical topics
-        assert_eq!(t.len(), 2);
-        assert_eq!(t[0].topic, "a");
-        assert_eq!(t[0].partitions, vec![1]);
-        assert_eq!(t[1].topic, "b");
+        assert!(t.len() == 2);
+        assert!(t[0].topic == "a");
+        assert!(t[0].partitions == vec![1]);
+        assert!(t[1].topic == "b");
         // ascending partitions
-        assert_eq!(t[1].partitions, vec![0, 2]);
+        assert!(t[1].partitions == vec![0, 2]);
     }
 }

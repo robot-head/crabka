@@ -15,6 +15,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::time::Duration;
 
@@ -94,7 +95,7 @@ async fn create_topic(addr: std::net::SocketAddr) {
         .unwrap();
     let mut cur: &[u8] = &resp;
     let r = CreateTopicsResponse::decode(&mut cur, CREATE_TOPICS_VERSION).unwrap();
-    assert_eq!(r.topics[0].error_code, 0, "create: {:?}", r.topics[0]);
+    assert!(r.topics[0].error_code == 0, "create: {:?}", r.topics[0]);
 }
 
 async fn produce_one(addr: std::net::SocketAddr) -> u64 {
@@ -136,7 +137,7 @@ async fn produce_one(addr: std::net::SocketAddr) -> u64 {
         .into_iter()
         .next()
         .expect("one partition in resp");
-    assert_eq!(part.error_code, 0, "produce: {part:?}");
+    assert!(part.error_code == 0, "produce: {part:?}");
     body.len() as u64
 }
 
@@ -166,7 +167,7 @@ async fn fetch_one(addr: std::net::SocketAddr) {
         .unwrap();
     let mut cur: &[u8] = &resp;
     let r = FetchResponse::decode(&mut cur, FETCH_VERSION).unwrap();
-    assert_eq!(r.error_code, 0, "fetch top-level: {r:?}");
+    assert!(r.error_code == 0, "fetch top-level: {r:?}");
 }
 
 async fn scrape(addr: std::net::SocketAddr) -> String {

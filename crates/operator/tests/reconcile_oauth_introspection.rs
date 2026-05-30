@@ -15,6 +15,7 @@
 //! end-to-end, plus the integration-level pod-template mount via the
 //! pool reconciler.
 
+use assert2::assert;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -375,21 +376,24 @@ async fn oauth_introspection_managed_pod_template_mounts_secret_with_projected_i
         .iter()
         .find(|v| v["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret volume present; body = {body}"));
-    assert_eq!(
-        intro_vol["secret"]["secretName"], SOURCE_SECRET_NAME,
-        "volume sources the user's Secret directly; body = {body}",
+    assert!(
+        intro_vol["secret"]["secretName"] == SOURCE_SECRET_NAME,
+        "volume sources the user's Secret directly; body = {body}"
     );
     let items = intro_vol["secret"]["items"]
         .as_array()
         .unwrap_or_else(|| panic!("projected items present; body = {body}"));
-    assert_eq!(items.len(), 1, "exactly one projected item; body = {body}");
-    assert_eq!(
-        items[0]["key"], SOURCE_KEY,
-        "items[0].key must be the user's source key; body = {body}",
+    assert!(
+        items.len() == 1,
+        "exactly one projected item; body = {body}"
     );
-    assert_eq!(
-        items[0]["path"], "client-secret",
-        "items[0].path must be the fixed broker filename; body = {body}",
+    assert!(
+        items[0]["key"] == SOURCE_KEY,
+        "items[0].key must be the user's source key; body = {body}"
+    );
+    assert!(
+        items[0]["path"] == "client-secret",
+        "items[0].path must be the fixed broker filename; body = {body}"
     );
 }
 
@@ -468,9 +472,9 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
         .iter()
         .find(|v| v["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret volume present; body = {body}"));
-    assert_eq!(
-        intro_vol["secret"]["secretName"], SOURCE_SECRET_NAME,
-        "managed mount sources the user's Secret; body = {body}",
+    assert!(
+        intro_vol["secret"]["secretName"] == SOURCE_SECRET_NAME,
+        "managed mount sources the user's Secret; body = {body}"
     );
 
     // VolumeMount on the broker container at the canonical path.
@@ -484,13 +488,13 @@ async fn statefulset_mounts_oauth_introspection_secret_when_introspection_mode()
         .iter()
         .find(|m| m["name"] == "oauth-introspection-secret")
         .unwrap_or_else(|| panic!("oauth-introspection-secret mount present; body = {body}"));
-    assert_eq!(
-        intro_mount["mountPath"], "/etc/crabka/oauth-introspection",
-        "canonical broker mount path (T3 contract); body = {body}",
+    assert!(
+        intro_mount["mountPath"] == "/etc/crabka/oauth-introspection",
+        "canonical broker mount path (T3 contract); body = {body}"
     );
-    assert_eq!(
-        intro_mount["readOnly"], true,
-        "introspection mount must be readOnly; body = {body}",
+    assert!(
+        intro_mount["readOnly"] == true,
+        "introspection mount must be readOnly; body = {body}"
     );
 }
 

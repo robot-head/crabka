@@ -96,6 +96,7 @@ impl Goal for LeaderDistribution {
 mod tests {
     use super::*;
     use crate::model::BrokerView;
+    use assert2::assert;
 
     fn ctx() -> GoalContext {
         GoalContext {
@@ -163,9 +164,9 @@ mod tests {
         let mvs = LeaderDistribution.propose(&s, &ctx());
         assert!(!mvs.is_empty());
         for m in &mvs {
-            assert_eq!(m.old_replicas, m.new_replicas, "leader-only move");
-            assert_eq!(m.old_leader, 1);
-            assert_eq!(m.new_leader, 2);
+            assert!(m.old_replicas == m.new_replicas, "leader-only move");
+            assert!(m.old_leader == 1);
+            assert!(m.new_leader == 2);
         }
     }
 
@@ -185,7 +186,7 @@ mod tests {
         let mvs = LeaderDistribution.propose(&s, &ctx());
         // No movement may target broker 3 as new_leader.
         for m in &mvs {
-            assert_ne!(m.new_leader, 3, "broker 3 isn't in any replica set");
+            assert!(m.new_leader != 3, "broker 3 isn't in any replica set");
         }
     }
 }

@@ -13,6 +13,7 @@
 //! 3. `unthrottled_ip_unaffected` — PLAINTEXT; no quota; open 5 connections;
 //!    assert wall <500ms.
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 
@@ -309,7 +310,7 @@ async fn drive_describe_client_quotas_sasl(
     let resp = DescribeClientQuotasResponse::decode(&mut cur, VERSION)
         .expect("decode DescribeClientQuotasResponse");
 
-    assert_eq!(resp.error_code, 0, "DescribeClientQuotas top-level error");
+    assert!(resp.error_code == 0, "DescribeClientQuotas top-level error");
 
     resp.entries
         .unwrap_or_default()
@@ -348,7 +349,7 @@ async fn ip_quota_alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert_eq!(alter_resp[0].1, 0, "alter should succeed");
+    assert!(alter_resp[0].1 == 0, "alter should succeed");
 
     // Poll the image until the quota is visible.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -374,14 +375,14 @@ async fn ip_quota_alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert_eq!(desc.len(), 1);
-    assert_eq!(
+    assert!(desc.len() == 1);
+    assert!(
         desc[0]
             .1
             .iter()
             .find(|(k, _)| k == "connection_creation_rate")
-            .map(|(_, v)| *v),
-        Some(2.0)
+            .map(|(_, v)| *v)
+            == Some(2.0)
     );
 }
 

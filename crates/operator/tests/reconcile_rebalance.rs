@@ -4,6 +4,7 @@
 //! `crabka-rebalancer` (the `FakeRebalancerClient`) and assert both the
 //! Connect-RPC sequence and the kube-side status / annotation patches.
 
+use assert2::assert;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -107,16 +108,13 @@ async fn new_rebalance_creates_proposal() {
     kr.spec.goals = Some(vec!["RackAware".into()]);
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
-    assert_eq!(
-        fake.calls(),
-        vec![RebalCall::CreateProposal(vec!["RackAware".into()])]
-    );
+    assert!(fake.calls() == vec![RebalCall::CreateProposal(vec!["RackAware".into()])]);
 
     let body = status_patch_body(&state.take_observed(), "demo");
-    assert_eq!(body["status"]["conditions"][0]["type"], "ProposalReady");
-    assert_eq!(body["status"]["sessionId"], "p-new");
-    assert_eq!(body["status"]["optimizationResult"]["replicaMovements"], 2);
-    assert_eq!(body["status"]["observedGeneration"], 1);
+    assert!(body["status"]["conditions"][0]["type"] == "ProposalReady");
+    assert!(body["status"]["sessionId"] == "p-new");
+    assert!(body["status"]["optimizationResult"]["replicaMovements"] == 2);
+    assert!(body["status"]["observedGeneration"] == 1);
 }
 
 /// `approve` on a `ProposalReady` proposal → `ExecuteProposal` (with the
@@ -136,12 +134,12 @@ async fn approve_executes_and_enters_rebalancing() {
     let kr = annotate(kr, "approve");
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
-    assert_eq!(
-        fake.calls(),
-        vec![RebalCall::ExecuteProposal {
-            id: "p1".into(),
-            throttle: Some(52_428_800),
-        }]
+    assert!(
+        fake.calls()
+            == vec![RebalCall::ExecuteProposal {
+                id: "p1".into(),
+                throttle: Some(52_428_800),
+            }]
     );
 
     let observed = state.take_observed();
@@ -160,9 +158,9 @@ async fn approve_executes_and_enters_rebalancing() {
     );
 
     let body = status_patch_body(&observed, "demo");
-    assert_eq!(body["status"]["conditions"][0]["type"], "Rebalancing");
+    assert!(body["status"]["conditions"][0]["type"] == "Rebalancing");
     // Session carried forward through the execute pass.
-    assert_eq!(body["status"]["sessionId"], "p1");
+    assert!(body["status"]["sessionId"] == "p1");
 }
 
 /// Polling an in-flight execution that has completed → `Ready`.
@@ -179,10 +177,10 @@ async fn poll_completes_to_ready() {
     let kr = with_state(rebalance("demo"), "Rebalancing", Some("p1"));
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
-    assert_eq!(fake.calls(), vec![RebalCall::GetProposal("p1".into())]);
+    assert!(fake.calls() == vec![RebalCall::GetProposal("p1".into())]);
     let body = status_patch_body(&state.take_observed(), "demo");
-    assert_eq!(body["status"]["conditions"][0]["type"], "Ready");
-    assert_eq!(body["status"]["sessionId"], "p1");
+    assert!(body["status"]["conditions"][0]["type"] == "Ready");
+    assert!(body["status"]["sessionId"] == "p1");
 }
 
 /// `stop` while `Rebalancing` → `CancelExecution` → `Stopped`.
@@ -202,9 +200,9 @@ async fn stop_cancels_to_stopped() {
     );
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
-    assert_eq!(fake.calls(), vec![RebalCall::CancelExecution("p1".into())]);
+    assert!(fake.calls() == vec![RebalCall::CancelExecution("p1".into())]);
     let body = status_patch_body(&state.take_observed(), "demo");
-    assert_eq!(body["status"]["conditions"][0]["type"], "Stopped");
+    assert!(body["status"]["conditions"][0]["type"] == "Stopped");
 }
 
 /// A failed execution surfaces `NotReady` with the broker's reason.
@@ -221,11 +219,8 @@ async fn poll_failure_surfaces_not_ready() {
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
     let body = status_patch_body(&state.take_observed(), "demo");
-    assert_eq!(body["status"]["conditions"][0]["type"], "NotReady");
-    assert_eq!(
-        body["status"]["conditions"][0]["message"],
-        "broker 3 unreachable"
-    );
+    assert!(body["status"]["conditions"][0]["type"] == "NotReady");
+    assert!(body["status"]["conditions"][0]["message"] == "broker 3 unreachable");
 }
 
 /// No `spec.endpoint` and no `crabka.io/cluster` label → `NotReady` with
@@ -241,8 +236,8 @@ async fn missing_endpoint_sets_not_ready() {
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
     let body = status_patch_body(&state.take_observed(), "demo");
-    assert_eq!(body["status"]["conditions"][0]["type"], "NotReady");
-    assert_eq!(body["status"]["conditions"][0]["reason"], "MissingEndpoint");
+    assert!(body["status"]["conditions"][0]["type"] == "NotReady");
+    assert!(body["status"]["conditions"][0]["reason"] == "MissingEndpoint");
 }
 
 /// A transport error leaves the status untouched (no kube writes) so the
@@ -262,7 +257,7 @@ async fn transport_error_leaves_status_untouched() {
     let kr = rebalance("demo");
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
-    assert_eq!(fake.calls(), vec![RebalCall::CreateProposal(vec![])]);
+    assert!(fake.calls() == vec![RebalCall::CreateProposal(vec![])]);
     assert!(
         state.take_observed().is_empty(),
         "transport error must not issue any kube requests"

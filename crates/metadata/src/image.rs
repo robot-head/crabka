@@ -690,6 +690,7 @@ mod tests {
         DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, QuotaEntity,
         ScramCredentialRecord,
     };
+    use assert2::assert;
 
     fn img() -> MetadataImage {
         MetadataImage::new(Uuid::nil())
@@ -699,7 +700,7 @@ mod tests {
     fn fresh_image_has_no_features_and_unknown_epoch() {
         let m = img();
         assert!(m.finalized_features().is_empty());
-        assert_eq!(m.finalized_features_epoch(), -1);
+        assert!(m.finalized_features_epoch() == -1);
     }
 
     #[test]
@@ -709,15 +710,15 @@ mod tests {
             name: "metadata.version".into(),
             level: 1,
         }));
-        assert_eq!(m.finalized_features().get("metadata.version"), Some(&1));
-        assert_eq!(m.finalized_features_epoch(), 0);
+        assert!(m.finalized_features().get("metadata.version") == Some(&1));
+        assert!(m.finalized_features_epoch() == 0);
 
         // A second apply bumps the epoch again (monotonic).
         m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: "metadata.version".into(),
             level: 1,
         }));
-        assert_eq!(m.finalized_features_epoch(), 1);
+        assert!(m.finalized_features_epoch() == 1);
     }
 
     #[test]
@@ -733,7 +734,7 @@ mod tests {
         }));
         assert!(m.finalized_features().get("metadata.version").is_none());
         // Epoch still advanced — it is monotonic, not a count of live features.
-        assert_eq!(m.finalized_features_epoch(), 1);
+        assert!(m.finalized_features_epoch() == 1);
     }
 
     #[test]
@@ -746,7 +747,7 @@ mod tests {
             partitions: 3,
             replication_factor: 2,
         }));
-        assert_eq!(MetadataImage::from_records(cid, &image.to_records()), image);
+        assert!(MetadataImage::from_records(cid, &image.to_records()) == image);
     }
 
     /// Exercises every stored variant the image can hold (the 9
@@ -985,7 +986,7 @@ mod tests {
         ));
 
         let rebuilt = MetadataImage::from_records(cid, &image.to_records());
-        assert_eq!(rebuilt, image);
+        assert!(rebuilt == image);
     }
 
     fn topic(name: &str, partitions: i32) -> MetadataRecord {
@@ -1028,12 +1029,12 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
         }));
-        assert_eq!(m.partitions_of("t").count(), 2);
+        assert!(m.partitions_of("t").count() == 2);
         m.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
             name: "t".into(),
         }));
         assert!(m.topic("t").is_none());
-        assert_eq!(m.partitions_of("t").count(), 0);
+        assert!(m.partitions_of("t").count() == 0);
     }
 
     #[test]
@@ -1113,7 +1114,7 @@ mod tests {
         });
         m.apply(&b);
         m.apply(&b);
-        assert_eq!(m.brokers().count(), 1);
+        assert!(m.brokers().count() == 1);
     }
 
     #[test]
@@ -1128,7 +1129,7 @@ mod tests {
                 overrides: overrides.clone(),
             },
         ));
-        assert_eq!(m.topic_config("t"), Some(&overrides));
+        assert!(m.topic_config("t") == Some(&overrides));
     }
 
     #[test]
@@ -1156,7 +1157,7 @@ mod tests {
         ));
 
         // segment.bytes is GONE — last-write-wins is authoritative.
-        assert_eq!(m.topic_config("t"), Some(&second));
+        assert!(m.topic_config("t") == Some(&second));
     }
 
     #[test]
@@ -1201,7 +1202,7 @@ mod tests {
         }));
         let got = m.scram_credential("alice", crabka_security::SaslMechanism::ScramSha512);
         assert!(got.is_some());
-        assert_eq!(got.unwrap().iterations, 4096);
+        assert!(got.unwrap().iterations == 4096);
     }
 
     #[test]
@@ -1225,8 +1226,8 @@ mod tests {
             iterations: 8192,
         }));
         let got = m.scram_credential("alice", mech).unwrap();
-        assert_eq!(got.iterations, 8192);
-        assert_eq!(got.salt, vec![9; 16]);
+        assert!(got.iterations == 8192);
+        assert!(got.salt == vec![9; 16]);
     }
 
     #[test]
@@ -1279,8 +1280,8 @@ mod tests {
         let mut m = img();
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
         let mut hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits.pop().unwrap().resource_name, "foo");
+        assert!(hits.len() == 1);
+        assert!(hits.pop().unwrap().resource_name == "foo");
     }
 
     #[test]
@@ -1288,8 +1289,8 @@ mod tests {
         let mut m = img();
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
         let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "team-foo").collect();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].resource_name, "team-");
+        assert!(hits.len() == 1);
+        assert!(hits[0].resource_name == "team-");
         // Non-matching resource: empty.
         let none: Vec<_> = m.matching_acls(ResourceType::Topic, "other").collect();
         assert!(none.is_empty());
@@ -1302,8 +1303,8 @@ mod tests {
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
         let hits_foo: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
         let hits_team: Vec<_> = m.matching_acls(ResourceType::Topic, "team-x").collect();
-        assert_eq!(hits_foo.len(), 1);
-        assert_eq!(hits_team.len(), 1);
+        assert!(hits_foo.len() == 1);
+        assert!(hits_team.len() == 1);
     }
 
     #[test]
@@ -1319,8 +1320,8 @@ mod tests {
         m.apply(&MetadataRecord::V1DeleteAccessControlEntry(filter));
         let hits_foo: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
         let hits_team: Vec<_> = m.matching_acls(ResourceType::Topic, "team-x").collect();
-        assert_eq!(hits_foo.len(), 0); // literal removed
-        assert_eq!(hits_team.len(), 1); // prefixed survives
+        assert!(hits_foo.len() == 0); // literal removed
+        assert!(hits_team.len() == 1); // prefixed survives
     }
 
     #[test]
@@ -1333,7 +1334,7 @@ mod tests {
         };
         m.apply(&MetadataRecord::V1DeleteAccessControlEntry(filter));
         let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
-        assert_eq!(hits.len(), 1);
+        assert!(hits.len() == 1);
     }
 
     #[test]
@@ -1341,7 +1342,7 @@ mod tests {
         let mut m = img();
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
-        assert_eq!(m.all_acls().count(), 2);
+        assert!(m.all_acls().count() == 2);
     }
 
     #[test]
@@ -1372,10 +1373,10 @@ mod tests {
             removing_replicas: vec![],
         }));
         // 3 partitions for "t" + 1 for "u" = 4, one walk, no per-topic filter.
-        assert_eq!(m.all_partitions().count(), 4);
-        assert_eq!(
-            m.all_partitions().count(),
-            m.partitions_of("t").count() + m.partitions_of("u").count()
+        assert!(m.all_partitions().count() == 4);
+        assert!(
+            m.all_partitions().count()
+                == m.partitions_of("t").count() + m.partitions_of("u").count()
         );
     }
 
@@ -1398,7 +1399,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
         }));
-        assert_eq!(img.reassignments_in_flight().count(), 0);
+        assert!(img.reassignments_in_flight().count() == 0);
     }
 
     #[test]
@@ -1421,8 +1422,8 @@ mod tests {
             removing_replicas: vec![],
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].adding_replicas, vec![4]);
+        assert!(rows.len() == 1);
+        assert!(rows[0].adding_replicas == vec![4]);
     }
 
     #[test]
@@ -1445,8 +1446,8 @@ mod tests {
             removing_replicas: vec![3],
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].removing_replicas, vec![3]);
+        assert!(rows.len() == 1);
+        assert!(rows[0].removing_replicas == vec![3]);
     }
 
     #[test]
@@ -1470,7 +1471,7 @@ mod tests {
                 removing_replicas: vec![],
             }));
         }
-        assert_eq!(img.reassignments_in_flight().count(), 2);
+        assert!(img.reassignments_in_flight().count() == 2);
     }
 
     #[test]
@@ -1482,10 +1483,7 @@ mod tests {
             config_value: Some("2048".into()),
         }));
         let bc = img.broker_config(1).expect("broker config");
-        assert_eq!(
-            bc.get("leader.replication.throttled.rate"),
-            Some(&"2048".to_string())
-        );
+        assert!(bc.get("leader.replication.throttled.rate") == Some(&"2048".to_string()));
     }
 
     #[test]
@@ -1513,10 +1511,7 @@ mod tests {
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         }));
-        assert_eq!(
-            img.broker_throttle_rate(1, ThrottleKind::Leader),
-            Some(2048)
-        );
+        assert!(img.broker_throttle_rate(1, ThrottleKind::Leader) == Some(2048));
     }
 
     #[test]
@@ -1556,7 +1551,7 @@ mod tests {
             .client_quotas()
             .get(&key)
             .expect("entry under canonical key");
-        assert_eq!(configs.get("producer_byte_rate"), Some(&1024.0));
+        assert!(configs.get("producer_byte_rate") == Some(&1024.0));
     }
 
     #[test]
@@ -1605,8 +1600,8 @@ mod tests {
             ("client-id".to_string(), Some("app1".to_string())),
         ];
         let canon = canonicalize_entity(input);
-        assert_eq!(canon[0].0, "client-id");
-        assert_eq!(canon[1].0, "user");
+        assert!(canon[0].0 == "client-id");
+        assert!(canon[1].0 == "user");
     }
 
     #[test]
@@ -1630,7 +1625,7 @@ mod tests {
         }));
         let mut users = img.scram_credentials_users();
         users.sort();
-        assert_eq!(users, vec!["alice".to_string(), "bob".to_string()]);
+        assert!(users == vec!["alice".to_string(), "bob".to_string()]);
     }
 
     fn principal(pt: &str, name: &str) -> KafkaPrincipal {
@@ -1664,14 +1659,14 @@ mod tests {
 
         img.apply(&dt_record("tok-1", alice.clone(), 5_000, vec![]));
         let got = img.delegation_token_by_id("tok-1").expect("token present");
-        assert_eq!(got.expiry_timestamp_ms, 5_000);
-        assert_eq!(got.owner, alice);
+        assert!(got.expiry_timestamp_ms == 5_000);
+        assert!(got.owner == alice);
 
         // Same token_id, different expiry — replace, not duplicate.
         img.apply(&dt_record("tok-1", alice.clone(), 7_500, vec![]));
         let got = img.delegation_token_by_id("tok-1").expect("token present");
-        assert_eq!(got.expiry_timestamp_ms, 7_500);
-        assert_eq!(img.all_delegation_tokens().count(), 1);
+        assert!(got.expiry_timestamp_ms == 7_500);
+        assert!(img.all_delegation_tokens().count() == 1);
     }
 
     #[test]
@@ -1688,7 +1683,7 @@ mod tests {
             },
         ));
         assert!(img.delegation_token_by_id("tok-1").is_none());
-        assert_eq!(img.all_delegation_tokens().count(), 0);
+        assert!(img.all_delegation_tokens().count() == 0);
     }
 
     #[test]
@@ -1721,11 +1716,11 @@ mod tests {
         let found_a = img
             .delegation_token_by_hmac(&hmac_a)
             .expect("hmac_a present");
-        assert_eq!(found_a.token_id, "tok-a");
+        assert!(found_a.token_id == "tok-a");
         let found_b = img
             .delegation_token_by_hmac(&hmac_b)
             .expect("hmac_b present");
-        assert_eq!(found_b.token_id, "tok-b");
+        assert!(found_b.token_id == "tok-b");
         assert!(img.delegation_token_by_hmac(&[0xCC; 32]).is_none());
     }
 
@@ -1740,19 +1735,19 @@ mod tests {
         img.apply(&dt_record("b-1", bob.clone(), 7_000, vec![]));
 
         let alice_tokens = img.delegation_tokens_by_owner(&alice);
-        assert_eq!(alice_tokens.len(), 2);
+        assert!(alice_tokens.len() == 2);
         assert!(alice_tokens.iter().all(|t| t.owner == alice));
 
         let bob_tokens = img.delegation_tokens_by_owner(&bob);
-        assert_eq!(bob_tokens.len(), 1);
-        assert_eq!(bob_tokens[0].token_id, "b-1");
+        assert!(bob_tokens.len() == 1);
+        assert!(bob_tokens[0].token_id == "b-1");
 
         // visible_to: bob owns b-1 and is renewer on a-2 → 2 tokens.
         let bob_visible = img.delegation_tokens_visible_to(&bob);
-        assert_eq!(bob_visible.len(), 2);
+        assert!(bob_visible.len() == 2);
         let mut ids: Vec<&str> = bob_visible.iter().map(|t| t.token_id.as_str()).collect();
         ids.sort_unstable();
-        assert_eq!(ids, vec!["a-2", "b-1"]);
+        assert!(ids == vec!["a-2", "b-1"]);
     }
 
     #[test]
@@ -1769,7 +1764,7 @@ mod tests {
                 kraft_version: crate::voters::KRaftVersionRange::default(),
             }]),
         }));
-        assert_eq!(image.kraft_version(), 1);
+        assert!(image.kraft_version() == 1);
         assert!(image.voters().contains(1));
     }
 
@@ -1785,9 +1780,9 @@ mod tests {
             iterations: 8192,
         }));
         let pairs = img.scram_credentials_for_user("alice");
-        assert_eq!(pairs.len(), 1);
-        assert_eq!(pairs[0].0, SaslMechanism::ScramSha512);
-        assert_eq!(pairs[0].1, 8192);
+        assert!(pairs.len() == 1);
+        assert!(pairs[0].0 == SaslMechanism::ScramSha512);
+        assert!(pairs[0].1 == 8192);
         assert!(img.scram_credentials_for_user("ghost").is_empty());
     }
 
@@ -1795,19 +1790,19 @@ mod tests {
     fn finalized_metadata_version_reads_feature_map() {
         use crate::records::FeatureLevelRecord;
         let mut m = img();
-        assert_eq!(m.finalized_metadata_version(), None);
+        assert!(m.finalized_metadata_version() == None);
         m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: "metadata.version".into(),
             level: 19,
         }));
-        assert_eq!(m.finalized_metadata_version(), Some(19));
+        assert!(m.finalized_metadata_version() == Some(19));
     }
 
     #[test]
     fn min_required_metadata_version_baseline_is_min() {
         use crate::metadata_version::METADATA_VERSION_MIN;
         let m = img();
-        assert_eq!(m.min_required_metadata_version(), METADATA_VERSION_MIN);
+        assert!(m.min_required_metadata_version() == METADATA_VERSION_MIN);
     }
 
     #[test]
@@ -1825,7 +1820,7 @@ mod tests {
                 iterations: 4096,
             },
         ));
-        assert_eq!(m.min_required_metadata_version(), SCRAM_MIN_LEVEL);
+        assert!(m.min_required_metadata_version() == SCRAM_MIN_LEVEL);
         m.apply(&MetadataRecord::V1DelegationToken(
             crate::records::DelegationTokenRecord {
                 token_id: "t1".into(),
@@ -1840,9 +1835,6 @@ mod tests {
                 renewers: vec![],
             },
         ));
-        assert_eq!(
-            m.min_required_metadata_version(),
-            DELEGATION_TOKEN_MIN_LEVEL
-        );
+        assert!(m.min_required_metadata_version() == DELEGATION_TOKEN_MIN_LEVEL);
     }
 }

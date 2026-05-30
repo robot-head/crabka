@@ -2,6 +2,7 @@
 // min/max-version roundtrip. Relocated here from the hand-written wrapper as
 // part of making wrappers uniformly generated.
 
+use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::owned::request_header::{MAX_VERSION, MIN_VERSION, RequestHeader};
 use crabka_protocol::{Decode, Encode, UnknownTaggedFields};
@@ -17,11 +18,11 @@ fn owned_request_header_null_client_id_roundtrips() {
     };
     let mut buf = BytesMut::new();
     hdr.encode(&mut buf, MAX_VERSION).unwrap();
-    assert_eq!(hdr.encoded_len(MAX_VERSION), buf.len());
+    assert!(hdr.encoded_len(MAX_VERSION) == buf.len());
     let mut cur = &buf[..];
     let decoded = RequestHeader::decode(&mut cur, MAX_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert_eq!(decoded.client_id, None);
+    assert!(decoded.client_id == None);
 }
 
 #[test]
@@ -35,11 +36,11 @@ fn owned_request_header_min_version_roundtrips() {
     };
     let mut buf = BytesMut::new();
     hdr.encode(&mut buf, MIN_VERSION).unwrap();
-    assert_eq!(hdr.encoded_len(MIN_VERSION), buf.len());
+    assert!(hdr.encoded_len(MIN_VERSION) == buf.len());
     let mut cur = &buf[..];
     let decoded = RequestHeader::decode(&mut cur, MIN_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert_eq!(decoded, hdr);
+    assert!(decoded == hdr);
 }
 
 #[test]
@@ -53,9 +54,9 @@ fn owned_request_header_max_version_roundtrips() {
     };
     let mut buf = BytesMut::new();
     hdr.encode(&mut buf, MAX_VERSION).unwrap();
-    assert_eq!(hdr.encoded_len(MAX_VERSION), buf.len());
+    assert!(hdr.encoded_len(MAX_VERSION) == buf.len());
     let mut cur = &buf[..];
     let decoded = RequestHeader::decode(&mut cur, MAX_VERSION).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert_eq!(decoded, hdr);
+    assert!(decoded == hdr);
 }

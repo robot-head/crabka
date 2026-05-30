@@ -9,6 +9,7 @@
 //! broker-config `ConfigMap` PATCH (`<cluster>-broker-config`, data key
 //! `broker-<id>.toml`) on a real reconcile.
 
+use assert2::assert;
 use std::sync::Arc;
 
 use crabka_operator::controller::kafka::reconcile;
@@ -140,8 +141,8 @@ async fn kafka_with_opa_authorization_renders_correct_broker_toml() {
     let opa = a
         .opa
         .expect("FileConfig.authorization.opa must be Some for type = \"opa\"");
-    assert_eq!(opa.url, "http://opa:8181/v1/data/k/a");
-    assert_eq!(a.super_users, vec!["ANONYMOUS".to_string()]);
+    assert!(opa.url == "http://opa:8181/v1/data/k/a");
+    assert!(a.super_users == vec!["ANONYMOUS".to_string()]);
 }
 
 // ── test 2: type: simple round-trips super_users ─────────────────────────────
@@ -196,5 +197,5 @@ async fn kafka_with_simple_authorization_super_users_round_trip() {
         a.opa.is_none(),
         "FileConfig.authorization.opa must be None for type = \"simple\""
     );
-    assert_eq!(a.super_users, vec!["User:admin".to_string()]);
+    assert!(a.super_users == vec!["User:admin".to_string()]);
 }

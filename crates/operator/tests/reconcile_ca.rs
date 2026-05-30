@@ -9,6 +9,7 @@
 //!   6. `byo_mode_without_pre_existing_secrets_errors_gracefully`
 //!   7. `reconciler_does_not_renew_valid_leaf_certs`
 
+use assert2::assert;
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -256,13 +257,12 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
                     || u.contains("-kafka-brokers"))
         })
         .collect();
-    assert_eq!(
-        ca_patches.len(),
-        5,
+    assert!(
+        ca_patches.len() == 5,
         "expected 5 CA-related PATCH calls (2 cluster-ca, 2 clients-ca, 1 keystore), \
          got {}: {:?}",
         ca_patches.len(),
-        ca_patches,
+        ca_patches
     );
 
     // cluster-ca key + cert PATCHes present
@@ -318,18 +318,17 @@ async fn default_flow_creates_cluster_ca_clients_ca_and_broker_keystore() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
-    assert_eq!(cluster_ca_cond["status"], "True", "body = {body}");
-    assert_eq!(cluster_ca_cond["reason"], "CaReady", "body = {body}");
+    assert!(cluster_ca_cond["status"] == "True", "body = {body}");
+    assert!(cluster_ca_cond["reason"] == "CaReady", "body = {body}");
     let clients_ca_cond = conds
         .iter()
         .find(|c| c["type"] == "ClientsCaReady")
         .unwrap_or_else(|| panic!("ClientsCaReady condition missing, body = {body}"));
-    assert_eq!(clients_ca_cond["status"], "True", "body = {body}");
-    assert_eq!(clients_ca_cond["reason"], "CaReady", "body = {body}");
+    assert!(clients_ca_cond["status"] == "True", "body = {body}");
+    assert!(clients_ca_cond["reason"] == "CaReady", "body = {body}");
 
-    assert_eq!(
-        state.remaining_rules(),
-        0,
+    assert!(
+        state.remaining_rules() == 0,
         "all preloaded rules must have been consumed"
     );
 }
@@ -500,22 +499,21 @@ async fn byo_mode_adopts_pre_existing_secrets_does_not_overwrite() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
-    assert_eq!(
-        cluster_ca_cond["status"], "True",
+    assert!(
+        cluster_ca_cond["status"] == "True",
         "BYO present: ClusterCaReady must be True, body = {body}"
     );
     let clients_ca_cond = conds
         .iter()
         .find(|c| c["type"] == "ClientsCaReady")
         .unwrap_or_else(|| panic!("ClientsCaReady condition missing, body = {body}"));
-    assert_eq!(
-        clients_ca_cond["status"], "True",
+    assert!(
+        clients_ca_cond["status"] == "True",
         "BYO present: ClientsCaReady must be True, body = {body}"
     );
 
-    assert_eq!(
-        state.remaining_rules(),
-        0,
+    assert!(
+        state.remaining_rules() == 0,
         "all preloaded rules must have been consumed"
     );
 }
@@ -635,18 +633,17 @@ async fn byo_mode_without_pre_existing_secrets_errors_gracefully() {
         .iter()
         .find(|c| c["type"] == "ClusterCaReady")
         .unwrap_or_else(|| panic!("ClusterCaReady condition missing, body = {body}"));
-    assert_eq!(
-        cluster_ca_cond["status"], "False",
+    assert!(
+        cluster_ca_cond["status"] == "False",
         "ByoCaMissing: ClusterCaReady must be False, body = {body}"
     );
-    assert_eq!(
-        cluster_ca_cond["reason"], "ByoCaMissing",
+    assert!(
+        cluster_ca_cond["reason"] == "ByoCaMissing",
         "ByoCaMissing: reason must be ByoCaMissing, body = {body}"
     );
 
-    assert_eq!(
-        state.remaining_rules(),
-        0,
+    assert!(
+        state.remaining_rules() == 0,
         "all preloaded rules must have been consumed"
     );
 }
@@ -873,9 +870,9 @@ async fn reconciler_does_not_renew_valid_leaf_certs() {
     let patched_bytes = base64::engine::general_purpose::STANDARD
         .decode(patched_crt)
         .expect("0.crt is base64");
-    assert_eq!(
-        patched_bytes, original_bytes,
-        "reconciler must not replace an existing leaf cert; cert bytes must be identical",
+    assert!(
+        patched_bytes == original_bytes,
+        "reconciler must not replace an existing leaf cert; cert bytes must be identical"
     );
 
     // Confirm no CA PATCHes happened (CAs were reused from existing Secrets).
@@ -890,9 +887,8 @@ async fn reconciler_does_not_renew_valid_leaf_certs() {
         "reconciler must not PATCH CA Secrets when they already exist: {ca_patches:?}",
     );
 
-    assert_eq!(
-        state.remaining_rules(),
-        0,
+    assert!(
+        state.remaining_rules() == 0,
         "all preloaded rules must have been consumed"
     );
 }
@@ -1100,12 +1096,11 @@ async fn broker_leaf_certs_chain_to_cluster_ca() {
         .expect("cluster CA PEM decodes to X509Certificate");
 
     // (2) Issuer of leaf == subject of cluster CA.
-    assert_eq!(
-        leaf.issuer(),
-        ca.subject(),
+    assert!(
+        leaf.issuer() == ca.subject(),
         "leaf issuer DN must match cluster CA subject DN; leaf issuer = {}, ca subject = {}",
         leaf.issuer(),
-        ca.subject(),
+        ca.subject()
     );
 
     // (3) Signature chain-to-root.
@@ -1154,9 +1149,8 @@ async fn broker_leaf_certs_chain_to_cluster_ca() {
         san_ext.general_names,
     );
 
-    assert_eq!(
-        state.remaining_rules(),
-        0,
+    assert!(
+        state.remaining_rules() == 0,
         "all preloaded rules must have been consumed"
     );
 }
@@ -1339,8 +1333,8 @@ async fn scale_up_adds_entries_does_not_reissue_existing() {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(crt_b64)
             .expect("base64");
-        assert_eq!(
-            bytes, original_certs[&id],
+        assert!(
+            bytes == original_certs[&id],
             "broker {id} cert must be byte-identical (reuse path), not reissued"
         );
     }
@@ -1367,9 +1361,8 @@ async fn scale_up_adds_entries_does_not_reissue_existing() {
     leaf.verify_signature(Some(ca.public_key()))
         .expect("new leaf must chain to cluster CA");
 
-    assert_eq!(
-        state.remaining_rules(),
-        0,
+    assert!(
+        state.remaining_rules() == 0,
         "all preloaded rules must have been consumed"
     );
 }
@@ -1542,9 +1535,9 @@ async fn scale_down_prunes_entries() {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(crt_b64)
             .expect("base64");
-        assert_eq!(
-            bytes, original_certs[&id],
-            "broker {id} cert must be byte-identical after scale-down (reuse path)",
+        assert!(
+            bytes == original_certs[&id],
+            "broker {id} cert must be byte-identical after scale-down (reuse path)"
         );
     }
 
@@ -1557,9 +1550,8 @@ async fn scale_down_prunes_entries() {
         );
     }
 
-    assert_eq!(
-        state.remaining_rules(),
-        0,
+    assert!(
+        state.remaining_rules() == 0,
         "all preloaded rules must have been consumed"
     );
 }

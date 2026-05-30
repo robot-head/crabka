@@ -234,6 +234,7 @@ async fn expiration_ticker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn get_or_create_is_idempotent() {
@@ -261,7 +262,7 @@ mod tests {
         let mgr = GroupManager::new();
         let _ = mgr.get_or_create("g1");
         let snap = mgr.describe_group("g1").await.expect("known");
-        assert_eq!(snap.group_id, "g1");
+        assert!(snap.group_id == "g1");
         assert!(snap.members.is_empty());
     }
 
@@ -277,6 +278,6 @@ mod tests {
     async fn delete_group_unknown_is_err() {
         let mgr = GroupManager::new();
         let err = mgr.delete_group("ghost").await.unwrap_err();
-        assert_eq!(err, DeleteGroupError::NotFound);
+        assert!(err == DeleteGroupError::NotFound);
     }
 }

@@ -222,6 +222,7 @@ pub fn get_compact_nullable_bytes_owned<B: Buf>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::BytesMut;
 
     #[test]
@@ -229,18 +230,18 @@ mod tests {
         let mut buf = BytesMut::new();
         put_string(&mut buf, "kafka");
         // INT16(5) + bytes
-        assert_eq!(&buf[..], &[0x00, 0x05, b'k', b'a', b'f', b'k', b'a']);
+        assert!(&buf[..] == &[0x00, 0x05, b'k', b'a', b'f', b'k', b'a']);
         let mut cur = &buf[..];
-        assert_eq!(get_string_owned(&mut cur).unwrap(), "kafka");
+        assert!(get_string_owned(&mut cur).unwrap() == "kafka");
     }
 
     #[test]
     fn nullable_string_null() {
         let mut buf = BytesMut::new();
         put_nullable_string(&mut buf, None);
-        assert_eq!(&buf[..], &[0xFF, 0xFF]);
+        assert!(&buf[..] == &[0xFF, 0xFF]);
         let mut cur = &buf[..];
-        assert_eq!(get_nullable_string_owned(&mut cur).unwrap(), None);
+        assert!(get_nullable_string_owned(&mut cur).unwrap() == None);
     }
 
     #[test]
@@ -248,27 +249,27 @@ mod tests {
         let mut buf = BytesMut::new();
         put_compact_string(&mut buf, "kafka");
         // UVARINT(6) + bytes
-        assert_eq!(&buf[..], &[0x06, b'k', b'a', b'f', b'k', b'a']);
+        assert!(&buf[..] == &[0x06, b'k', b'a', b'f', b'k', b'a']);
         let mut cur = &buf[..];
-        assert_eq!(get_compact_string_owned(&mut cur).unwrap(), "kafka");
+        assert!(get_compact_string_owned(&mut cur).unwrap() == "kafka");
     }
 
     #[test]
     fn compact_nullable_string_null() {
         let mut buf = BytesMut::new();
         put_compact_nullable_string(&mut buf, None);
-        assert_eq!(&buf[..], &[0x00]);
+        assert!(&buf[..] == &[0x00]);
         let mut cur = &buf[..];
-        assert_eq!(get_compact_nullable_string_owned(&mut cur).unwrap(), None);
+        assert!(get_compact_nullable_string_owned(&mut cur).unwrap() == None);
     }
 
     #[test]
     fn empty_compact_string() {
         let mut buf = BytesMut::new();
         put_compact_string(&mut buf, "");
-        assert_eq!(&buf[..], &[0x01]); // length = 1 means "0 bytes"
+        assert!(&buf[..] == &[0x01]); // length = 1 means "0 bytes"
         let mut cur = &buf[..];
-        assert_eq!(get_compact_string_owned(&mut cur).unwrap(), "");
+        assert!(get_compact_string_owned(&mut cur).unwrap() == "");
     }
 
     #[test]
@@ -277,7 +278,7 @@ mod tests {
         put_bytes(&mut buf, &[1, 2, 3]);
         let mut cur = &buf[..];
         let out = get_bytes_owned(&mut cur).unwrap();
-        assert_eq!(out.as_ref(), &[1, 2, 3]);
+        assert!(out.as_ref() == &[1, 2, 3]);
     }
 
     #[test]

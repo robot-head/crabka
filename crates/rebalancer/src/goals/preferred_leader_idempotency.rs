@@ -66,6 +66,7 @@ impl Goal for PreferredLeaderIdempotency {
 mod tests {
     use super::*;
     use crate::model::{BrokerView, PartitionView};
+    use assert2::assert;
 
     fn state(parts: Vec<PartitionView>, alive_brokers: Vec<i32>) -> ClusterState {
         ClusterState {
@@ -123,10 +124,10 @@ mod tests {
             vec![1, 2, 3],
         );
         let mvs = PreferredLeaderIdempotency.propose(&s, &ctx());
-        assert_eq!(mvs.len(), 1);
-        assert_eq!(mvs[0].new_leader, 1);
-        assert_eq!(mvs[0].old_leader, 2);
-        assert_eq!(mvs[0].old_replicas, mvs[0].new_replicas);
+        assert!(mvs.len() == 1);
+        assert!(mvs[0].new_leader == 1);
+        assert!(mvs[0].old_leader == 2);
+        assert!(mvs[0].old_replicas == mvs[0].new_replicas);
     }
 
     #[test]

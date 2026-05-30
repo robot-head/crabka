@@ -9,6 +9,7 @@
 //! integration tests exercise the Secret-touching code paths and the
 //! status-condition wiring end-to-end.
 
+use assert2::assert;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -224,9 +225,9 @@ async fn oauth_trust_creates_managed_secret_from_concatenated_pems() {
     expected.extend_from_slice(FAKE_PEM_1);
     expected.push(b'\n');
     expected.extend_from_slice(FAKE_PEM_2);
-    assert_eq!(
-        bundle, expected,
-        "managed ca.crt must be PEM1 + '\\n' + PEM2",
+    assert!(
+        bundle == expected,
+        "managed ca.crt must be PEM1 + '\\n' + PEM2"
     );
 }
 
@@ -347,7 +348,7 @@ async fn oauth_trust_managed_secret_updates_when_source_changes() {
     reconcile_kafka(Arc::new(kafka_a), ctx_a).await.unwrap();
     let observed_a = state_a.take_observed();
     let bundle_a = extract_managed_ca_crt(&observed_a, "c6-oauth-jwks-trust");
-    assert_eq!(bundle_a, PEM_A);
+    assert!(bundle_a == PEM_A);
 
     // ── pass 2: source value B (fresh mock, rotated source) ───────────
     let items = vec![fake_pool_list_item("brokers", "n6", "c6", 1, 1)];
@@ -363,11 +364,11 @@ async fn oauth_trust_managed_secret_updates_when_source_changes() {
     reconcile_kafka(Arc::new(kafka_b), ctx_b).await.unwrap();
     let observed_b = state_b.take_observed();
     let bundle_b = extract_managed_ca_crt(&observed_b, "c6-oauth-jwks-trust");
-    assert_eq!(bundle_b, PEM_B);
+    assert!(bundle_b == PEM_B);
 
-    assert_ne!(
-        bundle_a, bundle_b,
-        "rotated source must produce a rotated managed bundle",
+    assert!(
+        bundle_a != bundle_b,
+        "rotated source must produce a rotated managed bundle"
     );
 }
 
@@ -471,9 +472,9 @@ async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
         .iter()
         .find(|v| v["name"] == "oauth-jwks-trust")
         .unwrap_or_else(|| panic!("oauth-jwks-trust volume present; body = {body}"));
-    assert_eq!(
-        trust_vol["secret"]["secretName"], "c7-oauth-jwks-trust",
-        "managed Secret name; body = {body}",
+    assert!(
+        trust_vol["secret"]["secretName"] == "c7-oauth-jwks-trust",
+        "managed Secret name; body = {body}"
     );
 
     // VolumeMount on the broker container.
@@ -491,13 +492,13 @@ async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
         .iter()
         .find(|m| m["name"] == "oauth-jwks-trust")
         .unwrap_or_else(|| panic!("oauth-jwks-trust mount present; body = {body}"));
-    assert_eq!(
-        trust_mount["mountPath"], "/etc/crabka/oauth-jwks-trust",
-        "mount path contract; body = {body}",
+    assert!(
+        trust_mount["mountPath"] == "/etc/crabka/oauth-jwks-trust",
+        "mount path contract; body = {body}"
     );
-    assert_eq!(
-        trust_mount["readOnly"], true,
-        "trust mount must be readOnly; body = {body}",
+    assert!(
+        trust_mount["readOnly"] == true,
+        "trust mount must be readOnly; body = {body}"
     );
 }
 

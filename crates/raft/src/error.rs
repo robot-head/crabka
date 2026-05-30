@@ -57,6 +57,7 @@ pub enum RaftError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn display_not_leader_with_id() {

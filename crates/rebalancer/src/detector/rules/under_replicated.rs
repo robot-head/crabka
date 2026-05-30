@@ -113,6 +113,7 @@ impl Rule for UnderReplicatedPartitions {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use std::time::Duration;
 
     use super::*;
@@ -209,7 +210,7 @@ mod tests {
         hist.push(&mid);
         let ctx = ctx(&now_snap, &hist, &cfg, &usages, &capacities, 200_000);
         let hits = UnderReplicatedPartitions.evaluate(&ctx);
-        assert_eq!(hits.len(), 1);
+        assert!(hits.len() == 1);
         assert!(matches!(hits[0].severity, AnomalySeverity::Critical));
     }
 
@@ -233,7 +234,7 @@ mod tests {
         hist.push(&mid);
         let ctx = ctx(&now_snap, &hist, &cfg, &usages, &capacities, 200_000);
         let hits = UnderReplicatedPartitions.evaluate(&ctx);
-        assert_eq!(hits.len(), 1);
+        assert!(hits.len() == 1);
         assert!(matches!(hits[0].severity, AnomalySeverity::Warning));
     }
 

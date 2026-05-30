@@ -135,6 +135,7 @@ impl LeaderEpochCheckpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use tempfile::TempDir;
 
     fn fresh() -> (TempDir, PathBuf) {
@@ -152,7 +153,7 @@ mod tests {
         c.append(2, 100).unwrap();
 
         let s = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(s, "0\n3\n0 0\n1 50\n2 100\n");
+        assert!(s == "0\n3\n0 0\n1 50\n2 100\n");
     }
 
     #[test]
@@ -164,7 +165,7 @@ mod tests {
         }
         let mut c2 = LeaderEpochCheckpoint::open(path).unwrap();
         c2.append(1, 50).unwrap();
-        assert_eq!(c2.entries().len(), 2);
+        assert!(c2.entries().len() == 2);
     }
 
     #[test]
@@ -173,12 +174,12 @@ mod tests {
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         c.append(0, 0).unwrap();
         c.append(0, 999).unwrap(); // ignored; epoch 0 already recorded
-        assert_eq!(
-            c.entries(),
-            &[EpochEntry {
-                epoch: 0,
-                start_offset: 0
-            }]
+        assert!(
+            c.entries()
+                == &[EpochEntry {
+                    epoch: 0,
+                    start_offset: 0
+                }]
         );
     }
 
@@ -188,7 +189,7 @@ mod tests {
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         c.append(0, 0).unwrap();
         c.append(1, 50).unwrap();
-        assert_eq!(c.end_offset_for_epoch(1, 100), 100);
+        assert!(c.end_offset_for_epoch(1, 100) == 100);
     }
 
     #[test]
@@ -198,8 +199,8 @@ mod tests {
         c.append(0, 0).unwrap();
         c.append(1, 50).unwrap();
         c.append(2, 100).unwrap();
-        assert_eq!(c.end_offset_for_epoch(0, 200), 50);
-        assert_eq!(c.end_offset_for_epoch(1, 200), 100);
+        assert!(c.end_offset_for_epoch(0, 200) == 50);
+        assert!(c.end_offset_for_epoch(1, 200) == 100);
     }
 
     #[test]
@@ -207,7 +208,7 @@ mod tests {
         let (_d, path) = fresh();
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         c.append(0, 0).unwrap();
-        assert_eq!(c.end_offset_for_epoch(7, 200), -1);
+        assert!(c.end_offset_for_epoch(7, 200) == -1);
     }
 
     #[test]
@@ -215,6 +216,6 @@ mod tests {
         let (_d, path) = fresh();
         let c = LeaderEpochCheckpoint::open(path).unwrap();
         assert!(c.entries().is_empty());
-        assert_eq!(c.latest_epoch(), None);
+        assert!(c.latest_epoch() == None);
     }
 }

@@ -170,6 +170,7 @@ pub fn diff_user_quotas(current: &UserQuotaConfig, desired: &UserQuotaConfig) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn diff_no_change_returns_empty() {
@@ -186,7 +187,7 @@ mod tests {
         d.insert("producer_byte_rate".into(), 1_048_576.0);
         d.insert("request_percentage".into(), 25.0);
         let ops = diff_user_quotas(&c, &d);
-        assert_eq!(ops.len(), 2);
+        assert!(ops.len() == 2);
         assert!(ops.iter().any(|op| matches!(op, QuotaOp::Set { key, value }
             if key == "producer_byte_rate" && (*value - 1_048_576.0).abs() < f64::EPSILON)));
         assert!(ops.iter().any(|op| matches!(op, QuotaOp::Set { key, value }
@@ -201,9 +202,8 @@ mod tests {
         let mut d = UserQuotaConfig::new();
         d.insert("producer_byte_rate".into(), 1.0);
         let ops = diff_user_quotas(&c, &d);
-        assert_eq!(
-            ops,
-            vec![QuotaOp::Remove {
+        assert!(
+            ops == vec![QuotaOp::Remove {
                 key: "consumer_byte_rate".into()
             }]
         );
@@ -216,9 +216,8 @@ mod tests {
         let mut d = UserQuotaConfig::new();
         d.insert("producer_byte_rate".into(), 2.0);
         let ops = diff_user_quotas(&c, &d);
-        assert_eq!(
-            ops,
-            vec![QuotaOp::Set {
+        assert!(
+            ops == vec![QuotaOp::Set {
                 key: "producer_byte_rate".into(),
                 value: 2.0,
             }]
@@ -235,7 +234,7 @@ mod tests {
         d.insert("request_percentage".into(), 25.0); // add
         // consumer_byte_rate dropped
         let ops = diff_user_quotas(&c, &d);
-        assert_eq!(ops.len(), 3);
+        assert!(ops.len() == 3);
         assert!(ops.contains(&QuotaOp::Set {
             key: "producer_byte_rate".into(),
             value: 5.0,
@@ -256,7 +255,7 @@ mod tests {
             value: 1.0,
         };
         let w = op_to_wire(&op);
-        assert_eq!(w.key, "producer_byte_rate");
+        assert!(w.key == "producer_byte_rate");
         assert!((w.value - 1.0).abs() < f64::EPSILON);
         assert!(!w.remove);
     }
@@ -267,7 +266,7 @@ mod tests {
             key: "producer_byte_rate".into(),
         };
         let w = op_to_wire(&op);
-        assert_eq!(w.key, "producer_byte_rate");
+        assert!(w.key == "producer_byte_rate");
         assert!(w.value.to_bits() == 0.0_f64.to_bits());
         assert!(w.remove);
     }

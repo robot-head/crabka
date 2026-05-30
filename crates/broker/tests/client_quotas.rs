@@ -35,6 +35,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -249,9 +250,9 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
         "CreateTopics({topic}) must succeed: {:?}",
         resp.topics[0].error_message
     );
@@ -400,7 +401,7 @@ async fn drive_describe_client_quotas_sasl(
     let resp = DescribeClientQuotasResponse::decode(&mut cur, VERSION)
         .expect("decode DescribeClientQuotasResponse");
 
-    assert_eq!(resp.error_code, 0, "DescribeClientQuotas top-level error");
+    assert!(resp.error_code == 0, "DescribeClientQuotas top-level error");
 
     resp.entries
         .unwrap_or_default()
@@ -588,9 +589,9 @@ async fn alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert_eq!(alter_resp.len(), 1, "one entry in response");
-    assert_eq!(
-        alter_resp[0].1, 0,
+    assert!(alter_resp.len() == 1, "one entry in response");
+    assert!(
+        alter_resp[0].1 == 0,
         "alter should succeed; error_code={}",
         alter_resp[0].1
     );
@@ -635,9 +636,8 @@ async fn alter_then_describe_round_trip() {
                 .find(|(k, _)| k == "producer_byte_rate")
                 .map(|(_, v)| *v)
         });
-    assert_eq!(
-        pbr,
-        Some(1024.0),
+    assert!(
+        pbr == Some(1024.0),
         "expected producer_byte_rate=1024 from describe; got {desc:?}"
     );
 
@@ -679,7 +679,7 @@ async fn producer_byte_rate_throttles_produce() {
         false,
     )
     .await;
-    assert_eq!(alter_resp[0].1, 0, "alter quota must succeed");
+    assert!(alter_resp[0].1 == 0, "alter quota must succeed");
 
     // Wait for the quota to appear in the image before producing.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -723,8 +723,8 @@ async fn producer_byte_rate_throttles_produce() {
     };
 
     let part = &resp.responses[0].partition_responses[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "produce must succeed, error_code={}",
         part.error_code
     );
@@ -766,7 +766,10 @@ async fn consumer_byte_rate_throttles_fetch() {
         false,
     )
     .await;
-    assert_eq!(alter_resp[0].1, 0, "alter consumer_byte_rate must succeed");
+    assert!(
+        alter_resp[0].1 == 0,
+        "alter consumer_byte_rate must succeed"
+    );
 
     // Wait for the quota to appear in the image.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -790,8 +793,8 @@ async fn consumer_byte_rate_throttles_fetch() {
     let produce_resp =
         drive_produce_sasl(addr, "admin", b"admin-secret", "throttle-fetch", 1024, 8).await;
     let part = &produce_resp.responses[0].partition_responses[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "admin produce must succeed, error_code={}",
         part.error_code
     );
@@ -857,7 +860,7 @@ async fn user_specific_overrides_user_default() {
         false,
     )
     .await;
-    assert_eq!(alter_default[0].1, 0, "alter default quota must succeed");
+    assert!(alter_default[0].1 == 0, "alter default quota must succeed");
 
     // Set tight user-specific quota (user=alice) producer_byte_rate=128.
     let alter_alice = drive_alter_client_quotas_sasl(
@@ -871,7 +874,7 @@ async fn user_specific_overrides_user_default() {
         false,
     )
     .await;
-    assert_eq!(alter_alice[0].1, 0, "alter alice quota must succeed");
+    assert!(alter_alice[0].1 == 0, "alter alice quota must succeed");
 
     // Wait for both quotas to appear in the image.
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -923,8 +926,8 @@ async fn user_specific_overrides_user_default() {
     };
 
     let part = &resp.responses[0].partition_responses[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "produce must succeed, error_code={}",
         part.error_code
     );

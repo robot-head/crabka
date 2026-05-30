@@ -30,6 +30,7 @@
 //! Windows-gated like the other multi-node transactional tests (openraft +
 //! tokio scheduling races on the hosted Windows runner).
 
+use assert2::assert;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -280,9 +281,8 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
 
     let leaders = partition_leaders(&admin).await;
     let distinct: std::collections::BTreeSet<i32> = leaders.iter().map(|&(_, l)| l).collect();
-    assert_eq!(
-        distinct.len(),
-        2,
+    assert!(
+        distinct.len() == 2,
         "expected partition leadership split across both brokers, got {leaders:?}"
     );
 
@@ -323,7 +323,7 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
         })
         .await
         .expect("init producer id");
-    assert_eq!(init.error_code, 0, "InitProducerId failed: {init:?}");
+    assert!(init.error_code == 0, "InitProducerId failed: {init:?}");
     let (pid, epoch) = (init.producer_id, init.producer_epoch);
 
     // AddPartitionsToTxn for the remote-led partition. Fill both the v4+
@@ -352,8 +352,8 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
         })
         .await
         .expect("add partitions to txn");
-    assert_eq!(
-        add.error_code, 0,
+    assert!(
+        add.error_code == 0,
         "AddPartitionsToTxn top-level error: {add:?}"
     );
 
@@ -371,8 +371,8 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
         })
         .await
         .expect("end txn");
-    assert_eq!(
-        end.error_code, 0,
+    assert!(
+        end.error_code == 0,
         "EndTxn must succeed: remote marker fan-out over SASL inter-broker (error_code={})",
         end.error_code
     );

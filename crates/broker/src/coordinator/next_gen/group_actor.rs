@@ -852,6 +852,7 @@ async fn flush_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     use crate::coordinator::next_gen::NextGenCoordinator;
     use crate::coordinator::next_gen::config::NextGenConfig;
@@ -907,11 +908,10 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         let batches = log.batches().await;
-        assert_eq!(
-            batches.len(),
-            1,
+        assert!(
+            batches.len() == 1,
             "first join should write exactly one batch"
         );
         // Minimum: k3 (group metadata) + k5 (member metadata) + k8 (current).
@@ -940,18 +940,16 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert_eq!(resp.error_code, 0, "client-id first-join must succeed");
-        assert_eq!(
-            resp.member_id.as_deref(),
-            Some("client-uuid-1"),
+        assert!(resp.error_code == 0, "client-id first-join must succeed");
+        assert!(
+            resp.member_id.as_deref() == Some("client-uuid-1"),
             "response must echo the client-supplied member id"
         );
         assert!(resp.member_epoch >= 1, "epoch must advance off 0 on join");
         // The client-id first-join takes the same flush path as the empty-id case
         // and persists exactly one batch.
-        assert_eq!(
-            log.batches().await.len(),
-            1,
+        assert!(
+            log.batches().await.len() == 1,
             "client-id first join writes exactly one batch"
         );
     }
@@ -978,7 +976,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(rx.await.unwrap().error_code, 0);
+        assert!(rx.await.unwrap().error_code == 0);
 
         // Same id re-sending epoch 0 is now a known member at a higher epoch →
         // stale, not a re-join.
@@ -999,7 +997,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(rx.await.unwrap().error_code, codes::STALE_MEMBER_EPOCH);
+        assert!(rx.await.unwrap().error_code == codes::STALE_MEMBER_EPOCH);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1046,8 +1044,8 @@ mod tests {
             .unwrap();
         let _ = rx.await.unwrap();
         let batches_after_steady = log.batches().await.len();
-        assert_eq!(
-            batches_after_steady, batches_after_join,
+        assert!(
+            batches_after_steady == batches_after_join,
             "steady-state heartbeat should not write"
         );
     }
@@ -1093,7 +1091,7 @@ mod tests {
             .unwrap();
         let _ = rx.await.unwrap();
         let batches = log.batches().await;
-        assert_eq!(batches.len(), pre_leave + 1);
+        assert!(batches.len() == pre_leave + 1);
         let leave_batch = &batches[batches.len() - 1];
         assert!(
             leave_batch.records.iter().any(|r| r.value.is_none()),
@@ -1124,7 +1122,7 @@ mod tests {
             })
             .await;
         let resp = rx.await.unwrap();
-        assert_eq!(resp.error_code, codes::COORDINATOR_LOAD_IN_PROGRESS);
+        assert!(resp.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
 
         // Wait briefly for the actor to drain.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1168,10 +1166,10 @@ mod tests {
             ..Default::default()
         };
         let batch = p.into_batch("g", 0);
-        assert_eq!(batch.records.len(), 3);
+        assert!(batch.records.len() == 3);
         let deltas: Vec<i32> = batch.records.iter().map(|r| r.offset_delta).collect();
-        assert_eq!(deltas, vec![0, 1, 2]);
-        assert_eq!(batch.last_offset_delta, 2);
+        assert!(deltas == vec![0, 1, 2]);
+        assert!(batch.last_offset_delta == 2);
     }
 
     #[test]
@@ -1181,7 +1179,7 @@ mod tests {
             ..Default::default()
         };
         let batch = p.into_batch("g", 0);
-        assert_eq!(batch.records.len(), 1);
+        assert!(batch.records.len() == 1);
         assert!(batch.records[0].value.is_none());
     }
 
@@ -1237,9 +1235,8 @@ mod tests {
             state.members.is_empty(),
             "expired member must have been evicted"
         );
-        assert_eq!(
-            state.group_epoch,
-            epoch_before + 1,
+        assert!(
+            state.group_epoch == epoch_before + 1,
             "a single eviction must advance the group epoch by exactly 1"
         );
     }
@@ -1281,7 +1278,7 @@ mod tests {
         state.members.insert("m1".into(), m);
 
         let picked = pick_assignor(&state, &config);
-        assert_eq!(picked.name(), "uniform");
+        assert!(picked.name() == "uniform");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1317,7 +1314,7 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert_eq!(resp.error_code, 0);
+        assert!(resp.error_code == 0);
         assert!(
             calls.load(Ordering::SeqCst) >= 1,
             "custom assignor must be invoked at least once",

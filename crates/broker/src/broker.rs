@@ -2516,6 +2516,7 @@ async fn accept_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use tempfile::tempdir;
 
     #[test]
@@ -2559,7 +2560,10 @@ mod tests {
         ];
         expected.sort_unstable();
         expected.dedup();
-        assert_eq!(got, expected, "p2 (node 7 not a replica) must be excluded");
+        assert!(
+            got == expected,
+            "p2 (node 7 not a replica) must be excluded"
+        );
     }
 
     #[tokio::test]
@@ -2567,7 +2571,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
         let handle = Broker::start(config).await.unwrap();
-        assert_ne!(handle.listen_addr().port(), 0);
+        assert!(handle.listen_addr().port() != 0);
         handle.shutdown().await;
     }
 

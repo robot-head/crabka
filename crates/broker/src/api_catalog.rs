@@ -174,6 +174,7 @@ fn admin_apis() -> Vec<ApiVersion> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn supported_apis_is_nonempty_and_sane() {

@@ -80,6 +80,7 @@ fn swap_triple(dir: &Path, base: i64, ext: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use tempfile::tempdir;
 
     fn touch(path: &std::path::Path) {

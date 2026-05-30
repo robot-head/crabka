@@ -32,6 +32,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use tempfile::tempdir;
 
     #[test]

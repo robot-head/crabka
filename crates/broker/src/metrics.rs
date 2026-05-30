@@ -846,6 +846,7 @@ impl Default for BrokerMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[tokio::test]
     async fn registry_has_broker_prefix_and_all_metrics() {
@@ -941,8 +942,8 @@ mod tests {
         };
         // Pre-condition: no entry for the label yet.
         m.record_fetch("t", 0);
-        assert_eq!(m.topic_fetch_requests.get_or_create(&lbl).get(), 1);
-        assert_eq!(m.topic_bytes_out.get_or_create(&lbl).get(), 0);
+        assert!(m.topic_fetch_requests.get_or_create(&lbl).get() == 1);
+        assert!(m.topic_bytes_out.get_or_create(&lbl).get() == 0);
     }
 
     #[test]
@@ -953,8 +954,8 @@ mod tests {
         };
         m.record_produce("t", 1024);
         m.record_produce("t", 2048);
-        assert_eq!(m.topic_produce_requests.get_or_create(&lbl).get(), 2);
-        assert_eq!(m.topic_bytes_in.get_or_create(&lbl).get(), 3072);
+        assert!(m.topic_produce_requests.get_or_create(&lbl).get() == 2);
+        assert!(m.topic_bytes_in.get_or_create(&lbl).get() == 3072);
     }
 
     #[test]
@@ -971,7 +972,7 @@ mod tests {
         // 0, not a phantom series.
         m.record_produce_messages("t", 3);
         m.record_produce_messages("t", 7);
-        assert_eq!(m.topic_messages_in.get_or_create(&lbl).get(), 10);
+        assert!(m.topic_messages_in.get_or_create(&lbl).get() == 10);
     }
 
     #[test]
@@ -992,15 +993,15 @@ mod tests {
         m.record_authentication("SCRAM-SHA-256", true);
         m.record_authentication("Unknown", false);
         // PLAIN: 2 successes, 1 failure.
-        assert_eq!(m.successful_authentication.get_or_create(&plain).get(), 2);
-        assert_eq!(m.failed_authentication.get_or_create(&plain).get(), 1);
+        assert!(m.successful_authentication.get_or_create(&plain).get() == 2);
+        assert!(m.failed_authentication.get_or_create(&plain).get() == 1);
         // SCRAM-SHA-256: 1 success, 0 failures (must not lazily
         // allocate a failure entry from the success bump).
-        assert_eq!(m.successful_authentication.get_or_create(&scram).get(), 1);
+        assert!(m.successful_authentication.get_or_create(&scram).get() == 1);
         // ILLEGAL_SASL_STATE: 0 successes, 1 failure under the
         // `Unknown` sentinel.
-        assert_eq!(m.failed_authentication.get_or_create(&unknown).get(), 1);
-        assert_eq!(m.successful_authentication.get_or_create(&unknown).get(), 0,);
+        assert!(m.failed_authentication.get_or_create(&unknown).get() == 1);
+        assert!(m.successful_authentication.get_or_create(&unknown).get() == 0);
     }
 
     #[test]
@@ -1025,14 +1026,11 @@ mod tests {
             topic: "t".into(),
             partition: 1,
         };
-        assert_eq!(m.partition_bytes_in.get_or_create(&lbl_p0).get(), 1024);
-        assert_eq!(m.partition_bytes_in.get_or_create(&lbl_p1).get(), 512);
-        assert_eq!(m.partition_bytes_out.get_or_create(&lbl_p0).get(), 2048);
-        assert_eq!(m.partition_cpu_micros.get_or_create(&lbl_p0).get(), 500);
-        assert_eq!(
-            m.partition_disk_bytes.get_or_create(&lbl_p0).get(),
-            1_000_000
-        );
+        assert!(m.partition_bytes_in.get_or_create(&lbl_p0).get() == 1024);
+        assert!(m.partition_bytes_in.get_or_create(&lbl_p1).get() == 512);
+        assert!(m.partition_bytes_out.get_or_create(&lbl_p0).get() == 2048);
+        assert!(m.partition_cpu_micros.get_or_create(&lbl_p0).get() == 500);
+        assert!(m.partition_disk_bytes.get_or_create(&lbl_p0).get() == 1_000_000);
     }
 
     #[test]
@@ -1053,16 +1051,13 @@ mod tests {
         let bad = TopicLabel {
             topic: "t-bad".into(),
         };
-        assert_eq!(
-            m.topic_failed_produce_requests.get_or_create(&good).get(),
-            2
-        );
-        assert_eq!(m.topic_failed_produce_requests.get_or_create(&bad).get(), 1);
-        assert_eq!(m.topic_failed_fetch_requests.get_or_create(&good).get(), 1);
+        assert!(m.topic_failed_produce_requests.get_or_create(&good).get() == 2);
+        assert!(m.topic_failed_produce_requests.get_or_create(&bad).get() == 1);
+        assert!(m.topic_failed_fetch_requests.get_or_create(&good).get() == 1);
         // t-bad never saw a failed fetch — series is materialized by
         // `get_or_create` at read time but its value is 0, which is
         // what `rate(failed_fetch{topic="t-bad"}[1m])` should compute.
-        assert_eq!(m.topic_failed_fetch_requests.get_or_create(&bad).get(), 0);
+        assert!(m.topic_failed_fetch_requests.get_or_create(&bad).get() == 0);
     }
 
     #[test]
@@ -1075,8 +1070,8 @@ mod tests {
             partition: 0,
         };
         // Counters still exist (get_or_create creates them) but at 0.
-        assert_eq!(m.partition_bytes_in.get_or_create(&lbl).get(), 0);
-        assert_eq!(m.partition_bytes_out.get_or_create(&lbl).get(), 0);
+        assert!(m.partition_bytes_in.get_or_create(&lbl).get() == 0);
+        assert!(m.partition_bytes_out.get_or_create(&lbl).get() == 0);
     }
 
     #[test]
@@ -1088,7 +1083,7 @@ mod tests {
             partition: 0,
         };
         // Helper short-circuits at 0; the label entry isn't created.
-        assert_eq!(m.partition_cpu_micros.get_or_create(&lbl).get(), 0);
+        assert!(m.partition_cpu_micros.get_or_create(&lbl).get() == 0);
     }
 
     #[test]
@@ -1096,11 +1091,11 @@ mod tests {
         let m = BrokerMetrics::new();
         // Default for a fresh broker (in-memory placeholder, or no
         // tiered-storage at all) is `0`.
-        assert_eq!(m.tiered_storage_rlmm_topic_backed.get(), 0);
+        assert!(m.tiered_storage_rlmm_topic_backed.get() == 0);
         // The bootstrap task bumps it to `1` after a successful
         // SwappableRlmm swap.
         m.tiered_storage_rlmm_topic_backed.set(1);
-        assert_eq!(m.tiered_storage_rlmm_topic_backed.get(), 1);
+        assert!(m.tiered_storage_rlmm_topic_backed.get() == 1);
     }
 
     #[test]
@@ -1119,19 +1114,10 @@ mod tests {
         let payments = TopicLabel {
             topic: "payments".into(),
         };
-        assert_eq!(
-            m.produce_message_conversions.get_or_create(&orders).get(),
-            2
-        );
-        assert_eq!(
-            m.produce_message_conversions.get_or_create(&payments).get(),
-            1
-        );
-        assert_eq!(m.fetch_message_conversions.get_or_create(&orders).get(), 1);
-        assert_eq!(
-            m.fetch_message_conversions.get_or_create(&payments).get(),
-            2
-        );
+        assert!(m.produce_message_conversions.get_or_create(&orders).get() == 2);
+        assert!(m.produce_message_conversions.get_or_create(&payments).get() == 1);
+        assert!(m.fetch_message_conversions.get_or_create(&orders).get() == 1);
+        assert!(m.fetch_message_conversions.get_or_create(&payments).get() == 2);
     }
 
     #[test]
@@ -1151,13 +1137,13 @@ mod tests {
         let unknown = ApiKeyLabel {
             api_key: "Unknown".into(),
         };
-        assert_eq!(m.unsupported_api_requests.get_or_create(&produce).get(), 1);
-        assert_eq!(m.unsupported_api_requests.get_or_create(&unknown).get(), 1);
+        assert!(m.unsupported_api_requests.get_or_create(&produce).get() == 1);
+        assert!(m.unsupported_api_requests.get_or_create(&unknown).get() == 1);
         // `record_unsupported_api_request` does NOT also bump
         // `api_requests`; the dispatcher already did that for the
         // request in question via `record_api_request`.
-        assert_eq!(m.api_requests.get_or_create(&produce).get(), 0);
-        assert_eq!(m.api_requests.get_or_create(&unknown).get(), 0);
+        assert!(m.api_requests.get_or_create(&produce).get() == 0);
+        assert!(m.api_requests.get_or_create(&unknown).get() == 0);
     }
 
     #[test]
@@ -1178,9 +1164,9 @@ mod tests {
         let unknown = ApiKeyLabel {
             api_key: "Unknown".into(),
         };
-        assert_eq!(m.api_requests.get_or_create(&produce).get(), 2);
-        assert_eq!(m.api_requests.get_or_create(&fetch).get(), 1);
-        assert_eq!(m.api_requests.get_or_create(&unknown).get(), 1);
+        assert!(m.api_requests.get_or_create(&produce).get() == 2);
+        assert!(m.api_requests.get_or_create(&fetch).get() == 1);
+        assert!(m.api_requests.get_or_create(&unknown).get() == 1);
     }
 
     #[test]
@@ -1203,9 +1189,9 @@ mod tests {
             topic: "orders".into(),
             partition: 4,
         };
-        assert_eq!(m.replication_bytes_in.get_or_create(&lbl3).get(), 4_000);
-        assert_eq!(m.replication_bytes_in.get_or_create(&lbl4).get(), 100);
-        assert_eq!(m.replication_bytes_out.get_or_create(&lbl3).get(), 4_000);
-        assert_eq!(m.replication_bytes_out.get_or_create(&lbl4).get(), 0);
+        assert!(m.replication_bytes_in.get_or_create(&lbl3).get() == 4_000);
+        assert!(m.replication_bytes_in.get_or_create(&lbl4).get() == 100);
+        assert!(m.replication_bytes_out.get_or_create(&lbl3).get() == 4_000);
+        assert!(m.replication_bytes_out.get_or_create(&lbl4).get() == 0);
     }
 }

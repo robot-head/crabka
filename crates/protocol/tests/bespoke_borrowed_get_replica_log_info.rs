@@ -4,6 +4,7 @@
 // coverage here — the generated min/max wrapper tests only exercise default
 // (empty) messages and skip the nested-element loops and nullable-string path.
 
+use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::borrowed::get_replica_log_info_request::{
     GetReplicaLogInfoRequest, MAX_VERSION, MIN_VERSION, TopicPartitions,
@@ -28,13 +29,13 @@ fn borrowed_request_populated_roundtrip() {
         };
         let mut buf = BytesMut::new();
         req.encode(&mut buf, v).unwrap();
-        assert_eq!(req.encoded_len(v), buf.len());
+        assert!(req.encoded_len(v) == buf.len());
         let frozen = buf.freeze();
         let mut cur = &frozen[..];
         let decoded = GetReplicaLogInfoRequest::decode_borrow(&mut cur, v).unwrap();
         assert!(cur.is_empty(), "decoder left trailing bytes");
-        assert_eq!(decoded.broker_id, 7);
-        assert_eq!(decoded.topic_partitions[0].partitions, vec![0, 3, 5]);
+        assert!(decoded.broker_id == 7);
+        assert!(decoded.topic_partitions[0].partitions == vec![0, 3, 5]);
     }
 }
 
@@ -71,14 +72,14 @@ fn borrowed_response_populated_roundtrip() {
     let v = 0;
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, v).unwrap();
-    assert_eq!(resp.encoded_len(v), buf.len());
+    assert!(resp.encoded_len(v) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = GetReplicaLogInfoResponse::decode_borrow(&mut cur, v).unwrap();
     assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert_eq!(decoded.broker_epoch, 42);
+    assert!(decoded.broker_epoch == 42);
     let plis = &decoded.topic_partition_log_info_list[0].partition_log_info;
-    assert_eq!(plis.len(), 2);
-    assert_eq!(plis[0].error_message, None);
-    assert_eq!(plis[1].error_message, Some("not leader"));
+    assert!(plis.len() == 2);
+    assert!(plis[0].error_message == None);
+    assert!(plis[1].error_message == Some("not leader"));
 }

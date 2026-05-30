@@ -16,6 +16,7 @@
 
 #![cfg(not(target_os = "windows"))]
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -56,7 +57,7 @@ async fn create_topic(p: &support::InProcess, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "{name} create: {resp:?}");
+    assert!(resp.topics[0].error_code == 0, "{name} create: {resp:?}");
 }
 
 #[tokio::test]
@@ -85,18 +86,18 @@ async fn named_request_returns_listed_topics_with_partitions() {
         .await
         .expect("DescribeTopicPartitions");
 
-    assert_eq!(resp.topics.len(), 2);
+    assert!(resp.topics.len() == 2);
     // Named-request order preserves the request order.
-    assert_eq!(resp.topics[0].name.as_deref(), Some("alpha"));
-    assert_eq!(resp.topics[0].error_code, 0);
-    assert_eq!(resp.topics[0].partitions.len(), 2);
+    assert!(resp.topics[0].name.as_deref() == Some("alpha"));
+    assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].partitions.len() == 2);
     for (i, part) in resp.topics[0].partitions.iter().enumerate() {
-        assert_eq!(part.error_code, 0);
-        assert_eq!(part.partition_index, i32::try_from(i).unwrap());
-        assert_eq!(part.leader_id, 1);
+        assert!(part.error_code == 0);
+        assert!(part.partition_index == i32::try_from(i).unwrap());
+        assert!(part.leader_id == 1);
     }
-    assert_eq!(resp.topics[1].name.as_deref(), Some("beta"));
-    assert_eq!(resp.topics[1].partitions.len(), 1);
+    assert!(resp.topics[1].name.as_deref() == Some("beta"));
+    assert!(resp.topics[1].partitions.len() == 1);
 
     // No truncation expected — every partition fits under the default
     // 2000-partition budget.
@@ -139,7 +140,7 @@ async fn fetch_all_returns_topics_in_alphabetical_order() {
         .copied()
         .filter(|n| !n.starts_with("__"))
         .collect();
-    assert_eq!(user_topics, vec!["alpha", "beta", "gamma"]);
+    assert!(user_topics == vec!["alpha", "beta", "gamma"]);
 
     p.broker.shutdown().await;
 }
@@ -168,15 +169,15 @@ async fn unknown_topic_in_named_request_returns_error_row() {
         })
         .await
         .expect("DescribeTopicPartitions");
-    assert_eq!(resp.topics.len(), 2);
+    assert!(resp.topics.len() == 2);
     // Unknown topic row carries UNKNOWN_TOPIC_OR_PARTITION (3).
-    assert_eq!(resp.topics[0].name.as_deref(), Some("ghost"));
-    assert_eq!(resp.topics[0].error_code, 3);
+    assert!(resp.topics[0].name.as_deref() == Some("ghost"));
+    assert!(resp.topics[0].error_code == 3);
     assert!(resp.topics[0].partitions.is_empty());
     // Known sibling still served on the same response.
-    assert_eq!(resp.topics[1].name.as_deref(), Some("real-topic"));
-    assert_eq!(resp.topics[1].error_code, 0);
-    assert_eq!(resp.topics[1].partitions.len(), 1);
+    assert!(resp.topics[1].name.as_deref() == Some("real-topic"));
+    assert!(resp.topics[1].error_code == 0);
+    assert!(resp.topics[1].partitions.len() == 1);
 
     p.broker.shutdown().await;
 }
@@ -210,9 +211,9 @@ async fn internal_topics_carry_is_internal_flag() {
             n,
             "__consumer_offsets" | "__transaction_state" | "__remote_log_metadata"
         );
-        assert_eq!(
-            row.is_internal, expect_internal,
-            "is_internal mismatch for {n}: {row:?}",
+        assert!(
+            row.is_internal == expect_internal,
+            "is_internal mismatch for {n}: {row:?}"
         );
     }
 
@@ -243,20 +244,18 @@ async fn elr_lists_are_empty_not_null_for_jvm_3_8_admin_compatibility() {
         .await
         .expect("DescribeTopicPartitions");
 
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(resp.topics[0].partitions.len(), 1);
+    assert!(resp.topics.len() == 1);
+    assert!(resp.topics[0].partitions.len() == 1);
     let part = &resp.topics[0].partitions[0];
     // MUST be Some(_), not None. Both fields stay as empty vecs so the
     // JVM 3.8 admin client's unconditional `.stream()` call doesn't NPE.
-    assert_eq!(
-        part.eligible_leader_replicas.as_deref(),
-        Some(&[][..]),
-        "eligible_leader_replicas must be empty list, not null",
+    assert!(
+        part.eligible_leader_replicas.as_deref() == Some(&[][..]),
+        "eligible_leader_replicas must be empty list, not null"
     );
-    assert_eq!(
-        part.last_known_elr.as_deref(),
-        Some(&[][..]),
-        "last_known_elr must be empty list, not null",
+    assert!(
+        part.last_known_elr.as_deref() == Some(&[][..]),
+        "last_known_elr must be empty list, not null"
     );
 
     p.broker.shutdown().await;
@@ -281,15 +280,15 @@ async fn topic_authorized_operations_populated_for_super_user() {
         .await
         .expect("DescribeTopicPartitions");
 
-    assert_eq!(resp.topics.len(), 1);
+    assert!(resp.topics.len() == 1);
     let row = &resp.topics[0];
-    assert_eq!(row.error_code, 0);
+    assert!(row.error_code == 0);
     // `support::start` uses `AllowAllAuthorizer` by default, so every
     // supported topic operation is authorized → full mask.
-    assert_eq!(
-        row.topic_authorized_operations, TOPIC_FULL_MASK,
+    assert!(
+        row.topic_authorized_operations == TOPIC_FULL_MASK,
         "expected full topic mask, got 0b{:b}",
-        row.topic_authorized_operations,
+        row.topic_authorized_operations
     );
 
     p.broker.shutdown().await;
@@ -316,12 +315,12 @@ async fn pagination_caps_response_at_partition_limit_and_returns_next_cursor() {
         .await
         .expect("DescribeTopicPartitions");
 
-    assert_eq!(resp.topics.len(), 1);
-    assert_eq!(resp.topics[0].name.as_deref(), Some("big"));
-    assert_eq!(resp.topics[0].partitions.len(), 3);
+    assert!(resp.topics.len() == 1);
+    assert!(resp.topics[0].name.as_deref() == Some("big"));
+    assert!(resp.topics[0].partitions.len() == 3);
     let cursor = resp.next_cursor.expect("next_cursor must be set");
-    assert_eq!(cursor.topic_name, "big");
-    assert_eq!(cursor.partition_index, 3);
+    assert!(cursor.topic_name == "big");
+    assert!(cursor.partition_index == 3);
 
     // Resume from the cursor — should return partitions 3 and 4 only.
     let resp2 = p
@@ -341,13 +340,13 @@ async fn pagination_caps_response_at_partition_limit_and_returns_next_cursor() {
         })
         .await
         .expect("DescribeTopicPartitions (resume)");
-    assert_eq!(resp2.topics.len(), 1);
+    assert!(resp2.topics.len() == 1);
     let parts: Vec<i32> = resp2.topics[0]
         .partitions
         .iter()
         .map(|p| p.partition_index)
         .collect();
-    assert_eq!(parts, vec![3, 4]);
+    assert!(parts == vec![3, 4]);
     assert!(
         resp2.next_cursor.is_none(),
         "no more data should remain after the resume: {:?}",

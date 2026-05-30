@@ -1,3 +1,4 @@
+use assert2::assert;
 mod support;
 use support::oracle;
 
@@ -63,18 +64,17 @@ fn produce_request_default_byte_equal_every_version() {
         let oracle_json = request_oracle_value(version);
         // api_key=0, is_request=true
         let java = o.encode(0, version, true, &oracle_json);
-        assert_eq!(
-            rust,
-            java,
+        assert!(
+            rust == java,
             "ProduceRequest v{version} byte mismatch\n  rust: {}\n  java: {}",
             hex::encode(&rust),
-            hex::encode(&java),
+            hex::encode(&java)
         );
         // Also verify decode roundtrip
         let decoded: ProduceRequest = rust_decode(&rust, version);
         let re_encoded = rust_encode(&decoded, version);
-        assert_eq!(
-            rust, re_encoded,
+        assert!(
+            rust == re_encoded,
             "ProduceRequest v{version} roundtrip mismatch after decode"
         );
     }
@@ -90,18 +90,17 @@ fn produce_response_default_byte_equal_every_version() {
         let oracle_json = response_oracle_value(version);
         // api_key=0, is_request=false
         let java = o.encode(0, version, false, &oracle_json);
-        assert_eq!(
-            rust,
-            java,
+        assert!(
+            rust == java,
             "ProduceResponse v{version} byte mismatch\n  rust: {}\n  java: {}",
             hex::encode(&rust),
-            hex::encode(&java),
+            hex::encode(&java)
         );
         // Also verify decode roundtrip
         let decoded: ProduceResponse = rust_decode(&rust, version);
         let re_encoded = rust_encode(&decoded, version);
-        assert_eq!(
-            rust, re_encoded,
+        assert!(
+            rust == re_encoded,
             "ProduceResponse v{version} roundtrip mismatch after decode"
         );
     }

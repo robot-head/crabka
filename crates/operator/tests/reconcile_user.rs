@@ -1,5 +1,6 @@
 //! Reconcile-level tests for the `KafkaUser` controller.
 
+use assert2::assert;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -291,17 +292,17 @@ async fn first_reconcile_provisions_scram_and_acls() {
             _ => None,
         })
         .expect("CreateAcls must have been issued");
-    assert_eq!(create.len(), 2, "two ops fan out into two ACL entries");
+    assert!(create.len() == 2, "two ops fan out into two ACL entries");
     let ops: Vec<AclOperation> = create.iter().map(|e| e.operation).collect();
     assert!(ops.contains(&AclOperation::Read));
     assert!(ops.contains(&AclOperation::Describe));
     for e in &create {
-        assert_eq!(e.resource_type, ResourceType::Topic);
-        assert_eq!(e.resource_name, "orders");
-        assert_eq!(e.pattern_type, PatternType::Literal);
-        assert_eq!(e.principal, "User:alice");
-        assert_eq!(e.host, "*");
-        assert_eq!(e.permission_type, PermissionType::Allow);
+        assert!(e.resource_type == ResourceType::Topic);
+        assert!(e.resource_name == "orders");
+        assert!(e.pattern_type == PatternType::Literal);
+        assert!(e.principal == "User:alice");
+        assert!(e.host == "*");
+        assert!(e.permission_type == PermissionType::Allow);
     }
 
     // Status patch lands Ready=True.
@@ -314,11 +315,11 @@ async fn first_reconcile_provisions_scram_and_acls() {
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert_eq!(body["status"]["conditions"][0]["status"], "True");
-    assert_eq!(body["status"]["conditions"][0]["reason"], "Ready");
-    assert_eq!(body["status"]["username"], USER);
-    assert_eq!(body["status"]["secret"], USER);
-    assert_eq!(body["status"]["scramSha512"], true);
+    assert!(body["status"]["conditions"][0]["status"] == "True");
+    assert!(body["status"]["conditions"][0]["reason"] == "Ready");
+    assert!(body["status"]["username"] == USER);
+    assert!(body["status"]["secret"] == USER);
+    assert!(body["status"]["scramSha512"] == true);
 }
 
 /// Reconcile with existing matching ACLs → no `CreateAcls` /
@@ -437,8 +438,8 @@ async fn deletes_orphan_acls() {
             _ => None,
         })
         .expect("DeleteAcls must have been issued");
-    assert_eq!(delete.len(), 1);
-    assert_eq!(delete[0].resource_name.as_deref(), Some("secrets"));
+    assert!(delete.len() == 1);
+    assert!(delete[0].resource_name.as_deref() == Some("secrets"));
 
     // The reconciler scoped the delete by every axis (no broad filter
     // collapsing into "delete everything for this principal").
@@ -511,7 +512,7 @@ async fn omitted_quotas_skips_broker_call() {
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert_eq!(body["status"]["quotasInSync"], false);
+    assert!(body["status"]["quotasInSync"] == false);
 }
 
 /// spec.quotas declares per-user limits, broker has nothing →
@@ -554,7 +555,10 @@ async fn first_reconcile_sets_declared_quotas() {
         .expect("AlterUserQuotas must have been issued");
     let (ops, validate_only) = alter;
     assert!(!validate_only, "production reconcile must commit");
-    assert_eq!(ops.len(), 4, "every set field becomes one Set op: {ops:?}");
+    assert!(
+        ops.len() == 4,
+        "every set field becomes one Set op: {ops:?}"
+    );
     for key in [
         "producer_byte_rate",
         "consumer_byte_rate",
@@ -578,7 +582,7 @@ async fn first_reconcile_sets_declared_quotas() {
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert_eq!(body["status"]["quotasInSync"], true);
+    assert!(body["status"]["quotasInSync"] == true);
 }
 
 /// broker matches spec exactly → no `AlterClientQuotas` is
@@ -653,7 +657,7 @@ async fn drift_remove_path_emits_remove_op() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert_eq!(ops.len(), 1, "only one drift op expected: {ops:?}");
+    assert!(ops.len() == 1, "only one drift op expected: {ops:?}");
     assert!(matches!(
         &ops[0],
         QuotaOp::Remove { key } if key == "consumer_byte_rate"
@@ -691,7 +695,7 @@ async fn empty_quotas_object_tombstones_everything() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert_eq!(ops.len(), 2, "two existing keys tombstoned: {ops:?}");
+    assert!(ops.len() == 2, "two existing keys tombstoned: {ops:?}");
     assert!(
         ops.iter().all(|op| matches!(op, QuotaOp::Remove { .. })),
         "every op must be a Remove: {ops:?}",
@@ -813,11 +817,11 @@ async fn first_reconcile_tls_provisions_certs_and_acls() {
             _ => None,
         })
         .expect("CreateAcls must have been issued");
-    assert_eq!(create.len(), 1);
-    assert_eq!(create[0].principal, "User:CN=alice");
-    assert_eq!(create[0].resource_type, ResourceType::Topic);
-    assert_eq!(create[0].resource_name, "orders");
-    assert_eq!(create[0].operation, AclOperation::Read);
+    assert!(create.len() == 1);
+    assert!(create[0].principal == "User:CN=alice");
+    assert!(create[0].resource_type == ResourceType::Topic);
+    assert!(create[0].resource_name == "orders");
+    assert!(create[0].operation == AclOperation::Read);
 
     // Verify all four PATCH paths landed.
     let observed = state.take_observed();
@@ -985,10 +989,9 @@ async fn tls_reconcile_reissues_cert_near_expiry() {
         })
         .map(|r| r.uri().to_string())
         .collect();
-    assert_eq!(
-        secret_patches.len(),
-        1,
-        "near-expiry cert must be reissued exactly once: {secret_patches:?}",
+    assert!(
+        secret_patches.len() == 1,
+        "near-expiry cert must be reissued exactly once: {secret_patches:?}"
     );
 }
 
@@ -1038,10 +1041,9 @@ async fn tls_finalizer_filters_acls_by_dn() {
         })
         .expect("DeleteAcls must have been issued");
     assert!(!filters.is_empty(), "at least one filter expected");
-    assert_eq!(
-        filters[0].principal.as_deref(),
-        Some("User:CN=alice"),
-        "TLS finalizer must filter by CN= principal: {filters:?}",
+    assert!(
+        filters[0].principal.as_deref() == Some("User:CN=alice"),
+        "TLS finalizer must filter by CN= principal: {filters:?}"
     );
 }
 
@@ -1136,7 +1138,10 @@ async fn tls_user_with_quotas_alters_quotas_by_dn() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert_eq!(username, "CN=alice", "must be keyed by DN, got {username}");
+    assert!(
+        username == "CN=alice",
+        "must be keyed by DN, got {username}"
+    );
     assert!(
         ops.iter().any(|op| matches!(
             op,

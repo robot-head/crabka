@@ -92,6 +92,7 @@ pub(crate) fn down_convert_payload_for_fetch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::Bytes;
     use crabka_protocol::records::{Attributes, Record, RecordBatch};
 
@@ -128,7 +129,7 @@ mod tests {
         let result = down_convert_for_fetch(&batch, 5).unwrap();
         let payload = result.expect("should have Some payload");
         match payload {
-            RecordsPayload::V2(v) => assert_eq!(v, vec![batch]),
+            RecordsPayload::V2(v) => assert!(v == vec![batch]),
             RecordsPayload::Raw(_) | RecordsPayload::Legacy(_) => {
                 panic!("expected V2 for version >= 4")
             }
@@ -180,8 +181,8 @@ mod tests {
             bytes.len()
         );
         let attrs = bytes[17] & 0x07;
-        assert_eq!(
-            attrs, 2,
+        assert!(
+            attrs == 2,
             "expected snappy codec (2) in wrapper message attributes, got {attrs}"
         );
     }
@@ -200,9 +201,9 @@ mod tests {
         };
         let mut cur: &[u8] = &bytes;
         let recs = decode_message_set(&mut cur, bytes.len()).unwrap();
-        assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].key.as_deref(), Some(b"hello".as_ref()));
-        assert_eq!(recs[0].value.as_deref(), Some(b"world".as_ref()));
+        assert!(recs.len() == 1);
+        assert!(recs[0].key.as_deref() == Some(b"hello".as_ref()));
+        assert!(recs[0].value.as_deref() == Some(b"world".as_ref()));
     }
 
     /// version 0 uses `Magic::V0` (no timestamps)
@@ -222,7 +223,7 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let recs = decode_message_set(&mut cur, bytes.len()).unwrap();
         // v0 has no timestamps; all timestamps are None
-        assert_eq!(recs[0].timestamp, None, "v0 should have no timestamps");
+        assert!(recs[0].timestamp == None, "v0 should have no timestamps");
     }
 
     /// payload-level conversion concatenates each batch's legacy `MessageSet`
@@ -239,6 +240,6 @@ mod tests {
         };
         let mut cur: &[u8] = &bytes;
         let recs = crabka_records_legacy::decode_message_set(&mut cur, bytes.len()).unwrap();
-        assert_eq!(recs.len(), 2);
+        assert!(recs.len() == 2);
     }
 }

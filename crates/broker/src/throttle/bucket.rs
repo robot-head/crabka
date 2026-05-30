@@ -100,26 +100,27 @@ impl Default for ThrottleState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::time::Duration;
 
     #[test]
     fn zero_rate_grants_full_request() {
         let b = TokenBucket::new();
-        assert_eq!(b.try_consume(1024), 1024);
+        assert!(b.try_consume(1024) == 1024);
     }
 
     #[test]
     fn first_consume_under_rate_succeeds() {
         let b = TokenBucket::new();
         b.set_rate(1024);
-        assert_eq!(b.try_consume(512), 512);
+        assert!(b.try_consume(512) == 512);
     }
 
     #[test]
     fn consume_drains_bucket() {
         let b = TokenBucket::new();
         b.set_rate(1024);
-        assert_eq!(b.try_consume(1024), 1024);
+        assert!(b.try_consume(1024) == 1024);
         // Immediately after, available is ~0 (no time elapsed).
         let g = b.try_consume(1024);
         assert!(g < 100, "expected near-zero grant, got {g}");
@@ -156,6 +157,6 @@ mod tests {
         b.set_rate(1024);
         b.try_consume(1024); // drain
         b.set_rate(2048);
-        assert_eq!(b.try_consume(2048), 2048); // fresh capacity
+        assert!(b.try_consume(2048) == 2048); // fresh capacity
     }
 }

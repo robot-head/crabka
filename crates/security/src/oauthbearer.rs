@@ -836,6 +836,7 @@ fn merge_userinfo_over_introspection(introspection: &mut Value, userinfo: Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use jsonpath_rust::parser::parse_json_path;
 
     fn jws(header: &str, claims: &str) -> String {
@@ -882,8 +883,8 @@ mod tests {
     #[test]
     fn parse_happy_path_empty_authzid() {
         let r = parse_client_initial_response(&client_resp("tok.en.")).unwrap();
-        assert_eq!(r.token, "tok.en.");
-        assert_eq!(r.authzid, None);
+        assert!(r.token == "tok.en.");
+        assert!(r.authzid == None);
     }
 
     #[test]
@@ -891,35 +892,26 @@ mod tests {
         let bytes =
             b"n,a=alice,\x01host=example.com\x01auth=Bearer abc\x01port=443\x01\x01".to_vec();
         let r = parse_client_initial_response(&bytes).unwrap();
-        assert_eq!(r.token, "abc");
-        assert_eq!(r.authzid, Some("alice".to_string()));
+        assert!(r.token == "abc");
+        assert!(r.authzid == Some("alice".to_string()));
     }
 
     #[test]
     fn parse_rejects_missing_auth_kvpair() {
         let bytes = b"n,,\x01host=example.com\x01\x01".to_vec();
-        assert_eq!(
-            parse_client_initial_response(&bytes),
-            Err(AuthError::MalformedMessage)
-        );
+        assert!(parse_client_initial_response(&bytes) == Err(AuthError::MalformedMessage));
     }
 
     #[test]
     fn parse_rejects_missing_bearer_prefix() {
         let bytes = b"n,,\x01auth=Basic abc\x01\x01".to_vec();
-        assert_eq!(
-            parse_client_initial_response(&bytes),
-            Err(AuthError::MalformedMessage)
-        );
+        assert!(parse_client_initial_response(&bytes) == Err(AuthError::MalformedMessage));
     }
 
     #[test]
     fn parse_rejects_bad_gs2_header() {
         let bytes = b"z,,\x01auth=Bearer abc\x01\x01".to_vec();
-        assert_eq!(
-            parse_client_initial_response(&bytes),
-            Err(AuthError::MalformedMessage)
-        );
+        assert!(parse_client_initial_response(&bytes) == Err(AuthError::MalformedMessage));
     }
 
     #[test]
@@ -928,8 +920,8 @@ mod tests {
         let now = 1_000_000_000_000;
         let token = unsecured("admin", 999_999_000, 1_000_000_900); // seconds
         let outcome = v.validate(&token, now).unwrap();
-        assert_eq!(outcome.principal.name, "admin");
-        assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
+        assert!(outcome.principal.name == "admin");
+        assert!(outcome.principal.auth_method == AuthMethod::SaslOAuthBearer);
     }
 
     #[test]
@@ -940,8 +932,8 @@ mod tests {
         let token = unsecured("alice", 999, exp_secs);
         let v = UnsecuredJwsValidator::default();
         let outcome = v.validate(&token, now_ms).expect("token valid");
-        assert_eq!(outcome.principal.name, "alice");
-        assert_eq!(outcome.expires_at_ms, Some(exp_secs * 1000));
+        assert!(outcome.principal.name == "alice");
+        assert!(outcome.expires_at_ms == Some(exp_secs * 1000));
     }
 
     #[test]
@@ -952,7 +944,7 @@ mod tests {
         };
         let now = 2_000_000_000_000;
         let token = unsecured("admin", 1_000_000_000, 1_000_000_100);
-        assert_eq!(v.validate(&token, now), Err(AuthError::InvalidToken));
+        assert!(v.validate(&token, now) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -964,7 +956,7 @@ mod tests {
         let now = 1_000_000_000_000;
         // iat far in the future, exp even further.
         let token = unsecured("admin", 5_000_000_000, 5_000_000_100);
-        assert_eq!(v.validate(&token, now), Err(AuthError::InvalidToken));
+        assert!(v.validate(&token, now) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -978,27 +970,21 @@ mod tests {
             B64URL.encode(b"{\"sub\":\"admin\",\"exp\":1000000900}"),
             B64URL.encode(b"sig")
         );
-        assert_eq!(v.validate(&token, now), Err(AuthError::InvalidToken));
+        assert!(v.validate(&token, now) == Err(AuthError::InvalidToken));
     }
 
     #[test]
     fn validate_rejects_missing_exp() {
         let v = UnsecuredJwsValidator::default();
         let token = jws("{\"alg\":\"none\"}", "{\"sub\":\"admin\"}");
-        assert_eq!(
-            v.validate(&token, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     #[test]
     fn validate_rejects_missing_principal_claim() {
         let v = UnsecuredJwsValidator::default();
         let token = jws("{\"alg\":\"none\"}", "{\"exp\":5000000000}");
-        assert_eq!(
-            v.validate(&token, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     // ---- custom_claim_check (JsonPath) + valid_token_type ---
@@ -1017,7 +1003,7 @@ mod tests {
             ..Default::default()
         };
         let result = v.validate(&token, now_ms);
-        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
+        assert!(result.unwrap_err() == AuthError::InvalidToken);
     }
 
     #[test]
@@ -1034,7 +1020,7 @@ mod tests {
             ..Default::default()
         };
         let outcome = v.validate(&token, now_ms).expect("valid token");
-        assert_eq!(outcome.principal.name, "alice");
+        assert!(outcome.principal.name == "alice");
     }
 
     #[test]
@@ -1051,7 +1037,7 @@ mod tests {
             ..Default::default()
         };
         let result = v.validate(&token, now_ms);
-        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
+        assert!(result.unwrap_err() == AuthError::InvalidToken);
     }
 
     #[test]
@@ -1099,7 +1085,7 @@ mod tests {
             ..Default::default()
         };
         let outcome = v.validate(&token, now_ms).expect("valid");
-        assert_eq!(outcome.principal.name, "alice"); // primary, no prefix
+        assert!(outcome.principal.name == "alice"); // primary, no prefix
     }
 
     #[test]
@@ -1116,7 +1102,7 @@ mod tests {
             ..Default::default()
         };
         let outcome = v.validate(&token, now_ms).expect("valid");
-        assert_eq!(outcome.principal.name, "svc1"); // fallback, no prefix
+        assert!(outcome.principal.name == "svc1"); // fallback, no prefix
     }
 
     #[test]
@@ -1133,7 +1119,7 @@ mod tests {
             ..Default::default()
         };
         let outcome = v.validate(&token, now_ms).expect("valid");
-        assert_eq!(outcome.principal.name, "service-account-svc1");
+        assert!(outcome.principal.name == "service-account-svc1");
     }
 
     #[test]
@@ -1149,7 +1135,7 @@ mod tests {
             fallback_user_name_claim: Some("client_id".into()),
             ..Default::default()
         };
-        assert_eq!(v.validate(&token, now_ms), Err(AuthError::InvalidToken));
+        assert!(v.validate(&token, now_ms) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -1169,10 +1155,7 @@ mod tests {
             ..Default::default()
         };
         let outcome = v.validate(&token, now_ms).expect("valid");
-        assert_eq!(
-            outcome.principal.groups,
-            vec!["admin".to_string(), "ops".to_string()]
-        );
+        assert!(outcome.principal.groups == vec!["admin".to_string(), "ops".to_string()]);
     }
 
     #[test]
@@ -1193,9 +1176,9 @@ mod tests {
             ..Default::default()
         };
         let outcome = v.validate(&token, now_ms).expect("valid");
-        assert_eq!(
-            outcome.principal.groups,
-            vec!["admin".to_string(), "ops".to_string(), "kafka".to_string()]
+        assert!(
+            outcome.principal.groups
+                == vec!["admin".to_string(), "ops".to_string(), "kafka".to_string()]
         );
     }
 
@@ -1216,10 +1199,7 @@ mod tests {
             ..Default::default()
         };
         let outcome = v.validate(&token, now_ms).expect("valid");
-        assert_eq!(
-            outcome.principal.groups,
-            vec!["admin".to_string(), "ops".to_string()]
-        );
+        assert!(outcome.principal.groups == vec!["admin".to_string(), "ops".to_string()]);
     }
 
     #[test]
@@ -1236,7 +1216,7 @@ mod tests {
         );
         let v = UnsecuredJwsValidator::default(); // no groups_claim
         let outcome = v.validate(&token, now_ms).expect("valid");
-        assert_eq!(outcome.principal.groups, Vec::<String>::new());
+        assert!(outcome.principal.groups == Vec::<String>::new());
     }
 
     #[test]
@@ -1255,7 +1235,7 @@ mod tests {
             ..Default::default()
         };
         let outcome = v.validate(&token, now_ms).expect("valid");
-        assert_eq!(outcome.principal.groups, Vec::<String>::new());
+        assert!(outcome.principal.groups == Vec::<String>::new());
     }
 
     #[test]
@@ -1269,12 +1249,12 @@ mod tests {
             "{\"client_id\":\"svc-1\",\"exp\":5000000000}",
         );
         let outcome = v.validate(&token, 1_000_000_000_000).unwrap();
-        assert_eq!(outcome.principal.name, "svc-1");
+        assert!(outcome.principal.name == "svc-1");
     }
 
     #[test]
     fn invalid_token_json_is_rfc7628_shape() {
-        assert_eq!(invalid_token_json(), "{\"status\":\"invalid_token\"}");
+        assert!(invalid_token_json() == "{\"status\":\"invalid_token\"}");
     }
 
     // ---- SignedJwsValidator -------------------------------------
@@ -1292,8 +1272,8 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", "{\"sub\":\"admin\",\"exp\":9999999999}");
         let (v, _h) = signed(&jwks);
         let outcome = v.validate(&token, 1_000_000_000_000).unwrap();
-        assert_eq!(outcome.principal.name, "admin");
-        assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
+        assert!(outcome.principal.name == "admin");
+        assert!(outcome.principal.auth_method == AuthMethod::SaslOAuthBearer);
     }
 
     #[test]
@@ -1303,8 +1283,8 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
         let (v, _h) = signed(&jwks);
         let outcome = v.validate(&token, now_ms).expect("token valid");
-        assert_eq!(outcome.principal.name, "alice");
-        assert_eq!(outcome.expires_at_ms, Some(exp_secs * 1000));
+        assert!(outcome.principal.name == "alice");
+        assert!(outcome.expires_at_ms == Some(exp_secs * 1000));
     }
 
     #[test]
@@ -1314,10 +1294,7 @@ mod tests {
         let (_token, jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
         let (v, _h) = signed(&jwks);
         let unsecured = jws("{\"alg\":\"none\"}", "{\"sub\":\"a\",\"exp\":9999999999}");
-        assert_eq!(
-            v.validate(&unsecured, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v.validate(&unsecured, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -1326,10 +1303,7 @@ mod tests {
         let (mut v, _h) = signed(&jwks);
         v.allowable_clock_skew_ms = 0;
         // now (ms) far past exp (1000 s).
-        assert_eq!(
-            v.validate(&token, 5_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v.validate(&token, 5_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -1341,10 +1315,7 @@ mod tests {
         let (mut v, _h) = signed(&jwks);
         v.allowable_clock_skew_ms = 0;
         // now = 1e12 ms = 1e9 s, which is before nbf (5e9 s).
-        assert_eq!(
-            v.validate(&token, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -1357,10 +1328,7 @@ mod tests {
         v.valid_issuer = Some("https://idp".to_string());
         assert!(v.validate(&token, 1_000_000_000_000).is_ok());
         v.valid_issuer = Some("https://other".to_string());
-        assert_eq!(
-            v.validate(&token, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -1368,10 +1336,7 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
         let (mut v, _h) = signed(&jwks);
         v.valid_issuer = Some("https://idp".to_string());
-        assert_eq!(
-            v.validate(&token, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -1394,10 +1359,7 @@ mod tests {
             mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999,\"aud\":\"web\"}");
         let (mut v3, _h3) = signed(&jwks3);
         v3.expected_audience = Some("kafka".to_string());
-        assert_eq!(
-            v3.validate(&tok_bad, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v3.validate(&tok_bad, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     // ---- SignedJwsValidator custom_claim_check + valid_token_type
@@ -1411,7 +1373,7 @@ mod tests {
         let (mut v, _h) = signed(&jwks);
         v.custom_claim_check = Some(parse_jp("$.scope[?@ == 'kafka.admin']"));
         let result = v.validate(&token, 1_000_000_000_000);
-        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
+        assert!(result.unwrap_err() == AuthError::InvalidToken);
     }
 
     #[test]
@@ -1423,7 +1385,7 @@ mod tests {
         let (mut v, _h) = signed(&jwks);
         v.custom_claim_check = Some(parse_jp("$.scope[?@ == 'kafka.admin']"));
         let outcome = v.validate(&token, 1_000_000_000_000).expect("valid token");
-        assert_eq!(outcome.principal.name, "alice");
+        assert!(outcome.principal.name == "alice");
     }
 
     #[test]
@@ -1435,7 +1397,7 @@ mod tests {
         let (mut v, _h) = signed(&jwks);
         v.valid_token_type = Some("JWT".into());
         let result = v.validate(&token, 1_000_000_000_000);
-        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
+        assert!(result.unwrap_err() == AuthError::InvalidToken);
     }
 
     #[test]
@@ -1464,10 +1426,7 @@ mod tests {
     fn signed_rejects_missing_principal() {
         let (token, jwks) = mint_rs256("k1", "{\"exp\":9999999999}");
         let (v, _h) = signed(&jwks);
-        assert_eq!(
-            v.validate(&token, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -1475,12 +1434,12 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", "{\"client_id\":\"svc-1\",\"exp\":9999999999}");
         let (mut v, _h) = signed(&jwks);
         v.principal_claim_name = "client_id".to_string();
-        assert_eq!(
+        assert!(
             v.validate(&token, 1_000_000_000_000)
                 .unwrap()
                 .principal
-                .name,
-            "svc-1"
+                .name
+                == "svc-1"
         );
     }
 
@@ -1496,16 +1455,13 @@ mod tests {
         // verifies; a token under the new key does. Same validator instance.
         let (token_b, jwks_b) = mint_es256("k1", "{\"sub\":\"b\",\"exp\":9999999999}");
         handle.store(Jwks::from_json(&jwks_b, false).unwrap());
-        assert_eq!(
-            v.validate(&token_a, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
-        assert_eq!(
+        assert!(v.validate(&token_a, 1_000_000_000_000) == Err(AuthError::InvalidToken));
+        assert!(
             v.validate(&token_b, 1_000_000_000_000)
                 .unwrap()
                 .principal
-                .name,
-            "b"
+                .name
+                == "b"
         );
     }
 
@@ -1513,10 +1469,7 @@ mod tests {
     fn signed_rejects_when_keyset_empty() {
         let (token, _jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":9999999999}");
         let v = SignedJwsValidator::new(JwksHandle::default());
-        assert_eq!(
-            v.validate(&token, 1_000_000_000_000),
-            Err(AuthError::InvalidToken)
-        );
+        assert!(v.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
 
     // ---- signed-validator parity --------------------------------
@@ -1533,7 +1486,7 @@ mod tests {
         v.fallback_user_name_claim = Some("client_id".into());
         v.fallback_user_name_prefix = Some("service-account-".into());
         let outcome = v.validate(&token, 1_000_000_000_000).expect("valid");
-        assert_eq!(outcome.principal.name, "service-account-svc1");
+        assert!(outcome.principal.name == "service-account-svc1");
     }
 
     #[test]
@@ -1545,10 +1498,7 @@ mod tests {
         let (mut v, _h) = signed(&jwks);
         v.groups_claim = Some(parse_jp("$.groups"));
         let outcome = v.validate(&token, 1_000_000_000_000).expect("valid");
-        assert_eq!(
-            outcome.principal.groups,
-            vec!["admin".to_string(), "ops".to_string()]
-        );
+        assert!(outcome.principal.groups == vec!["admin".to_string(), "ops".to_string()]);
     }
 
     // ---- cache expiry + signal-on-verify-failure ----------------
@@ -1580,7 +1530,7 @@ mod tests {
         // Last fetch 2s ago; expiry threshold 1s ⇒ expired.
         let (mut v, _rx) = signed_with_handles(&jwks, now_ms - 2_000);
         v.expiry_ms = Some(1_000);
-        assert_eq!(v.validate(&token, now_ms), Err(AuthError::InvalidToken));
+        assert!(v.validate(&token, now_ms) == Err(AuthError::InvalidToken));
     }
 
     #[test]
@@ -1592,7 +1542,7 @@ mod tests {
         let (mut v, _rx) = signed_with_handles(&jwks, now_ms - 500);
         v.expiry_ms = Some(1_000);
         let outcome = v.validate(&token, now_ms).expect("valid");
-        assert_eq!(outcome.principal.name, "alice");
+        assert!(outcome.principal.name == "alice");
     }
 
     #[test]
@@ -1635,7 +1585,7 @@ mod tests {
         let mismatched_jwks =
             r#"{"keys":[{"kty":"RSA","kid":"other","n":"AQAB","e":"AQAB"}]}"#.to_string();
         let (v, mut rx) = signed_with_handles(&mismatched_jwks, now_ms);
-        assert_eq!(v.validate(&token, now_ms), Err(AuthError::InvalidToken));
+        assert!(v.validate(&token, now_ms) == Err(AuthError::InvalidToken));
         assert!(
             rx.try_recv().is_ok(),
             "validator should signal refresh on verify failure",
@@ -1668,14 +1618,14 @@ mod tests {
         let (sv, _h) = signed(&jwks);
         let signed_enum = OAuthBearerValidator::Signed(sv);
         assert!(signed_enum.jwks_handle().is_some());
-        assert_eq!(
+        assert!(
             signed_enum
                 .validate(&token, 1_000_000_000_000)
                 .await
                 .unwrap()
                 .principal
-                .name,
-            "x"
+                .name
+                == "x"
         );
     }
 
@@ -1699,6 +1649,7 @@ mod tests {
 mod introspection_tests {
     use super::*;
     use crate::{AuthError, AuthMethod};
+    use assert2::assert;
     use jsonpath_rust::parser::parse_json_path;
     use serde_json::{Value, json};
     use std::collections::HashMap;
@@ -1780,8 +1731,8 @@ mod introspection_tests {
         );
         let v = validator(mock.clone());
         let outcome = v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(outcome.principal.name, "alice");
-        assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
+        assert!(outcome.principal.name == "alice");
+        assert!(outcome.principal.auth_method == AuthMethod::SaslOAuthBearer);
     }
 
     #[tokio::test]
@@ -1837,7 +1788,7 @@ mod introspection_tests {
         let mut v = validator(mock.clone());
         v.custom_claim_check = Some(parse_jp("$.scope[?@ == 'kafka.admin']"));
         let result = v.validate("tok", NOW_MS).await;
-        assert_eq!(result.unwrap_err(), AuthError::InvalidToken);
+        assert!(result.unwrap_err() == AuthError::InvalidToken);
     }
 
     #[tokio::test]
@@ -1855,7 +1806,7 @@ mod introspection_tests {
         let mut v = validator(mock.clone());
         v.custom_claim_check = Some(parse_jp("$.scope[?@ == 'kafka.admin']"));
         let outcome = v.validate("tok", NOW_MS).await.expect("valid");
-        assert_eq!(outcome.principal.name, "alice");
+        assert!(outcome.principal.name == "alice");
     }
 
     #[tokio::test]
@@ -1876,7 +1827,7 @@ mod introspection_tests {
         );
         let v = validator(mock.clone());
         let outcome = v.validate("tok", NOW_MS).await.expect("valid");
-        assert_eq!(outcome.principal.name, "alice");
+        assert!(outcome.principal.name == "alice");
     }
 
     #[tokio::test]
@@ -1901,7 +1852,7 @@ mod introspection_tests {
         v.call_userinfo = true;
         v.principal_claim_name = "preferred_username".into();
         let outcome = v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(outcome.principal.name, "userinfo-name");
+        assert!(outcome.principal.name == "userinfo-name");
     }
 
     #[tokio::test]
@@ -1915,8 +1866,8 @@ mod introspection_tests {
         let mut v = validator(mock.clone());
         v.call_userinfo = true;
         let outcome = v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(
-            outcome.principal.name, "alice",
+        assert!(
+            outcome.principal.name == "alice",
             "sub from introspection wins over userinfo"
         );
     }
@@ -1932,7 +1883,7 @@ mod introspection_tests {
         mock.set_userinfo("tok", Ok(Some(json!({"preferred_username": "ignored"}))));
         let v = validator(mock.clone()); // call_userinfo: false (default)
         let outcome = v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(outcome.principal.name, "alice");
+        assert!(outcome.principal.name == "alice");
     }
 
     #[tokio::test]
@@ -1958,10 +1909,7 @@ mod introspection_tests {
             Ok(json!({"active": true, "sub": "sub-name", "exp": NOW_MS/1000 + 60})),
         );
         let v = validator(mock.clone());
-        assert_eq!(
-            v.validate("tok", NOW_MS).await.unwrap().principal.name,
-            "sub-name"
-        );
+        assert!(v.validate("tok", NOW_MS).await.unwrap().principal.name == "sub-name");
     }
 
     #[tokio::test]
@@ -1978,10 +1926,7 @@ mod introspection_tests {
         );
         let mut v = validator(mock.clone());
         v.principal_claim_name = "client_id".into();
-        assert_eq!(
-            v.validate("tok", NOW_MS).await.unwrap().principal.name,
-            "my-client"
-        );
+        assert!(v.validate("tok", NOW_MS).await.unwrap().principal.name == "my-client");
     }
 
     #[tokio::test]
@@ -1994,7 +1939,7 @@ mod introspection_tests {
         let v = validator(mock.clone());
         let enum_v = OAuthBearerValidator::Introspection(v);
         let outcome = enum_v.validate("tok", NOW_MS).await.unwrap();
-        assert_eq!(outcome.principal.name, "alice");
+        assert!(outcome.principal.name == "alice");
     }
 
     #[tokio::test]
@@ -2016,8 +1961,8 @@ mod introspection_tests {
             .validate("opaque-token", now_ms)
             .await
             .expect("token valid");
-        assert_eq!(outcome.principal.name, "alice");
-        assert_eq!(outcome.expires_at_ms, Some(exp_secs * 1000));
+        assert!(outcome.principal.name == "alice");
+        assert!(outcome.expires_at_ms == Some(exp_secs * 1000));
     }
 
     // ---- introspection parity -----------------------------------
@@ -2039,9 +1984,6 @@ mod introspection_tests {
         let mut v = validator(mock.clone());
         v.groups_claim = Some(parse_jp("$.groups"));
         let outcome = v.validate("opaque-token", now_ms).await.expect("valid");
-        assert_eq!(
-            outcome.principal.groups,
-            vec!["admin".to_string(), "ops".to_string()]
-        );
+        assert!(outcome.principal.groups == vec!["admin".to_string(), "ops".to_string()]);
     }
 }

@@ -3,6 +3,7 @@
 //! complete batches and drop the fragment, rather than failing the whole
 //! response decode and stalling the consumer.
 
+use assert2::assert;
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::owned::fetch_response::{
     FetchResponse, FetchableTopicResponse, PartitionData,
@@ -57,6 +58,6 @@ fn fetch_response_with_truncated_trailing_batch_decodes_complete_batches() {
 
     let part = &decoded.responses[0].partitions[0];
     let batches = part.records.as_ref().unwrap().as_v2().expect("v2");
-    assert_eq!(batches.len(), 1, "complete batch kept, fragment dropped");
-    assert_eq!(batches[0].base_offset, 0);
+    assert!(batches.len() == 1, "complete batch kept, fragment dropped");
+    assert!(batches[0].base_offset == 0);
 }

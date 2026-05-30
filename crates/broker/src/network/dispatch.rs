@@ -2902,6 +2902,7 @@ fn encode_response(api_key: i16, correlation_id: i32, body_flexible: bool, body:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn parse_header_v1_no_flexible() {
@@ -2913,7 +2914,7 @@ mod tests {
         buf.put_i16(2);
         buf.put_slice(b"hi");
         let (k, v, c, body) = parse_request_header(&buf).unwrap();
-        assert_eq!((k, v, c, body.len()), (3, 8, 42, 0));
+        assert!((k, v, c, body.len()) == (3, 8, 42, 0));
     }
 
     #[test]
@@ -2927,7 +2928,7 @@ mod tests {
         buf.put_slice(b"x");
         buf.put_u8(0); // tagged-fields byte
         let (k, v, c, body) = parse_request_header(&buf).unwrap();
-        assert_eq!((k, v, c, body.len()), (18, 3, 1, 0));
+        assert!((k, v, c, body.len()) == (18, 3, 1, 0));
     }
 
     #[test]
@@ -2937,7 +2938,7 @@ mod tests {
         let body = [0u8, 0u8]; // error_code=0
         let out = encode_response(API_VERSIONS_KEY, 7, true, &body);
         // 4 byte corr_id + body, no tagged byte.
-        assert_eq!(out.len(), 4 + body.len());
+        assert!(out.len() == 4 + body.len());
     }
 
     #[test]
@@ -2947,7 +2948,7 @@ mod tests {
         buf.put_i16(18);
         buf.put_i16(3);
         buf.put_i32(1);
-        assert_eq!(peek_api_key(&buf).unwrap(), 18);
+        assert!(peek_api_key(&buf).unwrap() == 18);
     }
 
     #[test]
@@ -2960,8 +2961,8 @@ mod tests {
     fn encode_response_other_flexible_inserts_tagged_byte() {
         let body = [0u8, 0u8];
         let out = encode_response(3, 7, true, &body);
-        assert_eq!(out.len(), 5 + body.len());
-        assert_eq!(out[4], 0); // tagged byte
+        assert!(out.len() == 5 + body.len());
+        assert!(out[4] == 0); // tagged byte
     }
 
     /// KIP-853 RPCs (80/81/82) route through the inline-intercept path,
@@ -2975,7 +2976,7 @@ mod tests {
             buf.put_i16(api_key);
             buf.put_i16(0); // version 0
             buf.put_i32(1); // corr_id
-            assert_eq!(peek_api_key(&buf).unwrap(), api_key);
+            assert!(peek_api_key(&buf).unwrap() == api_key);
             assert!(
                 handler_body_flexible(api_key, 0),
                 "api_key {api_key} is flexible from v0"

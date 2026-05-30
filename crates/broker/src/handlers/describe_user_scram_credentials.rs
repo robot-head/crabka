@@ -129,6 +129,7 @@ fn encode_response<R: Encode>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use crabka_metadata::{MetadataRecord, ScramCredentialRecord};
 
     fn img_with_scram(users: &[(&str, SaslMechanism, u32)]) -> MetadataImage {
@@ -201,7 +202,7 @@ mod tests {
                 ("bob", SaslMechanism::ScramSha512, 8192),
             ],
         );
-        assert_eq!(resp.results.len(), 2);
+        assert!(resp.results.len() == 2);
         let users: Vec<&str> = resp.results.iter().map(|r| r.user.as_str()).collect();
         assert!(users.contains(&"alice") && users.contains(&"bob"));
     }
@@ -215,10 +216,10 @@ mod tests {
                 ("bob", SaslMechanism::ScramSha512, 8192),
             ],
         );
-        assert_eq!(resp.results.len(), 1);
-        assert_eq!(resp.results[0].user, "alice");
-        assert_eq!(resp.results[0].credential_infos.len(), 1);
-        assert_eq!(resp.results[0].credential_infos[0].iterations, 4096);
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].user == "alice");
+        assert!(resp.results[0].credential_infos.len() == 1);
+        assert!(resp.results[0].credential_infos[0].iterations == 4096);
     }
 
     #[test]
@@ -227,15 +228,15 @@ mod tests {
             Some(vec!["ghost".into()]),
             &[("alice", SaslMechanism::ScramSha512, 4096)],
         );
-        assert_eq!(resp.results.len(), 1);
-        assert_eq!(resp.results[0].user, "ghost");
-        assert_eq!(resp.results[0].error_code, RESOURCE_NOT_FOUND_USER);
+        assert!(resp.results.len() == 1);
+        assert!(resp.results[0].user == "ghost");
+        assert!(resp.results[0].error_code == RESOURCE_NOT_FOUND_USER);
     }
 
     #[test]
     fn sasl_mechanism_byte_mapping() {
-        assert_eq!(sasl_mechanism_to_byte(SaslMechanism::ScramSha256), 1);
-        assert_eq!(sasl_mechanism_to_byte(SaslMechanism::ScramSha512), 2);
-        assert_eq!(sasl_mechanism_to_byte(SaslMechanism::Plain), 0);
+        assert!(sasl_mechanism_to_byte(SaslMechanism::ScramSha256) == 1);
+        assert!(sasl_mechanism_to_byte(SaslMechanism::ScramSha512) == 2);
+        assert!(sasl_mechanism_to_byte(SaslMechanism::Plain) == 0);
     }
 }

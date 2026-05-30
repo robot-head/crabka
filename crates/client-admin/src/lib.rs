@@ -469,17 +469,18 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn kafka_error_name_known_codes() {
-        assert_eq!(kafka_error_name(0), "NONE");
-        assert_eq!(kafka_error_name(36), "TOPIC_ALREADY_EXISTS");
-        assert_eq!(kafka_error_name(41), "NOT_CONTROLLER");
+        assert!(kafka_error_name(0) == "NONE");
+        assert!(kafka_error_name(36) == "TOPIC_ALREADY_EXISTS");
+        assert!(kafka_error_name(41) == "NOT_CONTROLLER");
     }
 
     #[test]
     fn kafka_error_name_unknown_returns_unknown() {
-        assert_eq!(kafka_error_name(9999), "UNKNOWN");
+        assert!(kafka_error_name(9999) == "UNKNOWN");
     }
 
     #[tokio::test]

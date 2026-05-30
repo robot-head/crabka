@@ -10,6 +10,7 @@
 #![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
+use assert2::assert;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -103,13 +104,12 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics.len(),
-        1,
+    assert!(
+        resp.topics.len() == 1,
         "expected exactly one topic result, got {resp:?}"
     );
-    assert_eq!(
-        resp.topics[0].error_code, 0,
+    assert!(
+        resp.topics[0].error_code == 0,
         "create_topic({name}) failed: {resp:?}"
     );
 }
@@ -227,8 +227,8 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     // GetState — must reflect the topics we just created.
     let gs =
         unwrap_ok(handlers::get_state(Extension(state.clone()), req(pb::GetStateRequest {})).await);
-    assert_eq!(gs.brokers.len(), 1, "single-broker cluster");
-    assert_eq!(gs.brokers[0].id, 1, "broker id matches for_tests config");
+    assert!(gs.brokers.len() == 1, "single-broker cluster");
+    assert!(gs.brokers[0].id == 1, "broker id matches for_tests config");
     let topic_names: std::collections::BTreeSet<String> =
         gs.topics.iter().map(|t| t.name.clone()).collect();
     for t in &["topic-a", "topic-b", "topic-c"] {
@@ -245,7 +245,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         .filter(|t| ["topic-a", "topic-b", "topic-c"].contains(&t.name.as_str()))
         .map(|t| t.partitions.len())
         .sum();
-    assert_eq!(user_partitions, 12, "expected 12 user-topic partitions");
+    assert!(user_partitions == 12, "expected 12 user-topic partitions");
 
     // CreateProposal — balanced single-broker cluster → empty movements.
     let proposal = unwrap_ok(
@@ -261,17 +261,16 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         proposal.movements
     );
     assert!(!proposal.id.is_empty(), "proposal must have an id");
-    assert_eq!(
-        proposal.status,
-        i32::from(pb::ProposalStatus::Computed),
+    assert!(
+        proposal.status == i32::from(pb::ProposalStatus::Computed),
         "fresh proposal must be Computed"
     );
     let summary = proposal
         .summary
         .as_ref()
         .expect("proposal must carry a summary");
-    assert_eq!(summary.replica_movements, 0);
-    assert_eq!(summary.leader_movements, 0);
+    assert!(summary.replica_movements == 0);
+    assert!(summary.leader_movements == 0);
 
     // GetProposal — round-trips by id.
     let fetched = unwrap_ok(
@@ -283,7 +282,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert_eq!(fetched.id, proposal.id);
+    assert!(fetched.id == proposal.id);
 
     // ListProposals — the one we just stored shows up.
     let listed = unwrap_ok(
@@ -293,12 +292,11 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert_eq!(
-        listed.proposals.len(),
-        1,
+    assert!(
+        listed.proposals.len() == 1,
         "expected the single proposal in the list"
     );
-    assert_eq!(listed.proposals[0].id, proposal.id);
+    assert!(listed.proposals[0].id == proposal.id);
 
     // DryRunProposal — empty proposal → 0 bytes moved estimate.
     let dry = unwrap_ok(
@@ -310,8 +308,8 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert_eq!(dry.id, proposal.id);
-    assert_eq!(dry.estimated_bytes_moved, 0);
+    assert!(dry.id == proposal.id);
+    assert!(dry.estimated_bytes_moved == 0);
 
     // GetProposal on a missing id → NotFound.
     let missing = unwrap_err(
@@ -323,7 +321,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert_eq!(missing.code(), Code::NotFound);
+    assert!(missing.code() == Code::NotFound);
 
     // DryRunProposal on a missing id → NotFound.
     let missing_dry = unwrap_err(
@@ -335,7 +333,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert_eq!(missing_dry.code(), Code::NotFound);
+    assert!(missing_dry.code() == Code::NotFound);
 
     // CreateProposal with an unknown goal name → InvalidArgument.
     let bad_goal = unwrap_err(
@@ -347,7 +345,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert_eq!(bad_goal.code(), Code::InvalidArgument);
+    assert!(bad_goal.code() == Code::InvalidArgument);
 
     // ExecuteProposal on a no-movements proposal → FailedPrecondition.
     // The 43b handler refuses to start an execution with an empty plan.
@@ -361,7 +359,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert_eq!(exec.code(), Code::FailedPrecondition);
+    assert!(exec.code() == Code::FailedPrecondition);
 
     // OpenMetrics: the registry that `/metrics` would scrape contains
     // all three spec-promised metrics with the `crabka_rebalancer_`
@@ -400,7 +398,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
     let gs = unwrap_err(
         handlers::get_state(Extension(state.clone()), req(pb::GetStateRequest {})).await,
     );
-    assert_eq!(gs.code(), Code::Unavailable);
+    assert!(gs.code() == Code::Unavailable);
 
     // CreateProposal also reads the snapshot → Unavailable.
     let cp = unwrap_err(
@@ -410,7 +408,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
         )
         .await,
     );
-    assert_eq!(cp.code(), Code::Unavailable);
+    assert!(cp.code() == Code::Unavailable);
 
     // ListProposals doesn't need a snapshot; it should return an empty
     // list rather than erroring.
@@ -440,7 +438,7 @@ async fn get_state_returns_unavailable_before_first_snapshot() {
         )
         .await,
     );
-    assert_eq!(exec.code(), Code::NotFound);
+    assert!(exec.code() == Code::NotFound);
 }
 
 /// Execute a proposal end-to-end against a single-broker Crabka.
@@ -766,14 +764,13 @@ async fn rack_aware_eliminates_same_rack_collisions() {
     };
 
     let mvs: Vec<Movement> = RackAware.propose(&state, &ctx);
-    assert_eq!(
-        mvs.len(),
-        1,
+    assert!(
+        mvs.len() == 1,
         "expected exactly one RackAware movement, got {mvs:?}"
     );
     let m = &mvs[0];
-    assert_eq!(m.topic, "t");
-    assert_eq!(m.partition, 0);
+    assert!(m.topic == "t");
+    assert!(m.partition == 0);
     assert!(
         !m.new_replicas.contains(&1) || !m.new_replicas.contains(&2),
         "movement must remove one of the rack-A brokers; got {m:?}"
@@ -1068,7 +1065,7 @@ async fn anomaly_store_persists_and_get_anomalies_returns_it() {
     )
     .await
     .expect("get_anomalies handler returned Err");
-    assert_eq!(resp.0.anomalies.len(), 2);
+    assert!(resp.0.anomalies.len() == 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1126,12 +1123,11 @@ async fn auto_trigger_skipped_when_executor_in_flight() {
         .await
         .expect("maybe_trigger should not error on a gate-skip path");
 
-    assert_eq!(
-        state.store.list(0).len(),
-        0,
+    assert!(
+        state.store.list(0).len() == 0,
         "no proposal should be inserted when an execution is in flight"
     );
-    assert_eq!(metrics.auto_trigger_skipped_executing.get(), 1);
+    assert!(metrics.auto_trigger_skipped_executing.get() == 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

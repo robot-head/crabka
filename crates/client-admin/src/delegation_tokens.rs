@@ -212,6 +212,7 @@ fn broker_err(api: &'static str, code: i16, message: Option<String>) -> AdminErr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use bytes::Bytes;
     use crabka_protocol::owned::describe_delegation_token_response::{
         DescribeDelegationTokenResponse, DescribedDelegationToken, DescribedDelegationTokenRenewer,
@@ -233,16 +234,16 @@ mod tests {
             &["User:bob".to_string(), "carol".to_string()],
             60_000,
         );
-        assert_eq!(req.owner_principal_type.as_deref(), Some("User"));
-        assert_eq!(req.owner_principal_name.as_deref(), Some("alice"));
-        assert_eq!(req.max_lifetime_ms, 60_000);
-        assert_eq!(req.renewers.len(), 2);
+        assert!(req.owner_principal_type.as_deref() == Some("User"));
+        assert!(req.owner_principal_name.as_deref() == Some("alice"));
+        assert!(req.max_lifetime_ms == 60_000);
+        assert!(req.renewers.len() == 2);
         // "User:bob" → type=User, name=bob
-        assert_eq!(req.renewers[0].principal_type, "User");
-        assert_eq!(req.renewers[0].principal_name, "bob");
+        assert!(req.renewers[0].principal_type == "User");
+        assert!(req.renewers[0].principal_name == "bob");
         // "carol" → default type=User, name=carol
-        assert_eq!(req.renewers[1].principal_type, "User");
-        assert_eq!(req.renewers[1].principal_name, "carol");
+        assert!(req.renewers[1].principal_type == "User");
+        assert!(req.renewers[1].principal_name == "carol");
     }
 
     // ── build_renew_delegation_token / build_expire_delegation_token ─
@@ -252,8 +253,8 @@ mod tests {
     #[test]
     fn build_renew_uses_minus_one_for_broker_default() {
         let req = build_renew_delegation_token(b"\x01\x02\x03");
-        assert_eq!(req.hmac.as_ref(), &[0x01, 0x02, 0x03]);
-        assert_eq!(req.renew_period_ms, -1);
+        assert!(req.hmac.as_ref() == &[0x01, 0x02, 0x03]);
+        assert!(req.renew_period_ms == -1);
     }
 
     /// Expire-immediately is signaled by `expiry_time_period_ms = -1`;
@@ -261,8 +262,8 @@ mod tests {
     #[test]
     fn build_expire_uses_minus_one_for_immediate_tombstone() {
         let req = build_expire_delegation_token(b"\xaa\xbb");
-        assert_eq!(req.hmac.as_ref(), &[0xaa, 0xbb]);
-        assert_eq!(req.expiry_time_period_ms, -1);
+        assert!(req.hmac.as_ref() == &[0xaa, 0xbb]);
+        assert!(req.expiry_time_period_ms == -1);
     }
 
     // ── build_describe_owner_filter ──────────────────────────────────
@@ -271,15 +272,15 @@ mod tests {
     fn build_describe_owner_filter_sets_single_entry() {
         let req = build_describe_owner_filter("User:alice");
         let owners = req.owners.as_ref().expect("owners filter populated");
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].principal_type, "User");
-        assert_eq!(owners[0].principal_name, "alice");
+        assert!(owners.len() == 1);
+        assert!(owners[0].principal_type == "User");
+        assert!(owners[0].principal_name == "alice");
 
         // Bare-name default-type=User path.
         let req2 = build_describe_owner_filter("solo");
         let owners2 = req2.owners.as_ref().unwrap();
-        assert_eq!(owners2[0].principal_type, "User");
-        assert_eq!(owners2[0].principal_name, "solo");
+        assert!(owners2[0].principal_type == "User");
+        assert!(owners2[0].principal_name == "solo");
     }
 
     // ── parse_describe_delegation_tokens ─────────────────────────────
@@ -310,18 +311,18 @@ mod tests {
             ..Default::default()
         };
         let out = parse_describe_delegation_tokens(resp).expect("ok response");
-        assert_eq!(out.len(), 1);
+        assert!(out.len() == 1);
         let t = &out[0];
-        assert_eq!(t.token_id, "tok-1");
-        assert_eq!(t.owner.principal_type, "User");
-        assert_eq!(t.owner.name, "alice");
-        assert_eq!(t.hmac, vec![0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(t.issue_timestamp_ms, 1_000);
-        assert_eq!(t.expiry_timestamp_ms, 2_000);
-        assert_eq!(t.max_timestamp_ms, 9_000);
-        assert_eq!(t.renewers.len(), 1);
-        assert_eq!(t.renewers[0].principal_type, "User");
-        assert_eq!(t.renewers[0].name, "bob");
+        assert!(t.token_id == "tok-1");
+        assert!(t.owner.principal_type == "User");
+        assert!(t.owner.name == "alice");
+        assert!(t.hmac == vec![0xde, 0xad, 0xbe, 0xef]);
+        assert!(t.issue_timestamp_ms == 1_000);
+        assert!(t.expiry_timestamp_ms == 2_000);
+        assert!(t.max_timestamp_ms == 9_000);
+        assert!(t.renewers.len() == 1);
+        assert!(t.renewers[0].principal_type == "User");
+        assert!(t.renewers[0].name == "bob");
     }
 
     // ── broker_err ─────────────────────────────────────────────────────
@@ -345,14 +346,14 @@ mod tests {
                 name,
                 message,
             } => {
-                assert_eq!(api, "CreateDelegationToken");
-                assert_eq!(code, 65);
+                assert!(api == "CreateDelegationToken");
+                assert!(code == 65);
                 // 65 is not in `kafka_error_name`'s match table yet, so
                 // it falls through to "UNKNOWN" — locking that behavior
                 // so a later edit to the table doesn't silently change
                 // the surfaced name.
-                assert_eq!(name, "UNKNOWN");
-                assert_eq!(message.as_deref(), Some("not super-user"));
+                assert!(name == "UNKNOWN");
+                assert!(message.as_deref() == Some("not super-user"));
             }
             other => panic!("expected AdminError::Broker, got {other:?}"),
         }
@@ -370,8 +371,8 @@ mod tests {
         let err = parse_describe_delegation_tokens(resp).unwrap_err();
         match err {
             AdminError::Broker { api, code, .. } => {
-                assert_eq!(api, "DescribeDelegationToken");
-                assert_eq!(code, 61);
+                assert!(api == "DescribeDelegationToken");
+                assert!(code == 61);
             }
             other => panic!("expected AdminError::Broker, got {other:?}"),
         }

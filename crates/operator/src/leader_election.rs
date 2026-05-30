@@ -115,6 +115,7 @@ fn is_expired(lease: &Lease) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     fn lease_with(holder: &str, renew: jiff::Timestamp) -> Lease {
         Lease {

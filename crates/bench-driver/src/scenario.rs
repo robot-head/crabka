@@ -264,34 +264,35 @@ pub struct RunOutput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
 
     #[test]
     fn stack_broker_pod_regex_distinguishes_stacks() {
-        assert_eq!(Stack::Crabka.broker_pod_regex(), "^demo-brokers-");
-        assert_eq!(Stack::Kafka.broker_pod_regex(), "^demo-kafka-");
+        assert!(Stack::Crabka.broker_pod_regex() == "^demo-brokers-");
+        assert!(Stack::Kafka.broker_pod_regex() == "^demo-kafka-");
     }
 
     #[test]
     fn acks_map_to_producer_enum() {
         use crabka_client_producer::Acks as P;
-        assert_eq!(Acks::None.into_producer(), P::Zero);
-        assert_eq!(Acks::Leader.into_producer(), P::One);
-        assert_eq!(Acks::All.into_producer(), P::All);
+        assert!(Acks::None.into_producer() == P::Zero);
+        assert!(Acks::Leader.into_producer() == P::One);
+        assert!(Acks::All.into_producer() == P::All);
     }
 
     #[test]
     fn compression_maps_to_producer_enum() {
         use crabka_client_producer::Compression as PC;
-        assert_eq!(Compression::None.into_producer(), PC::None);
-        assert_eq!(Compression::Gzip.into_producer(), PC::Gzip);
-        assert_eq!(Compression::Snappy.into_producer(), PC::Snappy);
-        assert_eq!(Compression::Lz4.into_producer(), PC::Lz4);
-        assert_eq!(Compression::Zstd.into_producer(), PC::Zstd);
+        assert!(Compression::None.into_producer() == PC::None);
+        assert!(Compression::Gzip.into_producer() == PC::Gzip);
+        assert!(Compression::Snappy.into_producer() == PC::Snappy);
+        assert!(Compression::Lz4.into_producer() == PC::Lz4);
+        assert!(Compression::Zstd.into_producer() == PC::Zstd);
     }
 
     #[test]
     fn compression_default_is_none() {
-        assert_eq!(Compression::default(), Compression::None);
+        assert!(Compression::default() == Compression::None);
     }
 
     #[test]
@@ -314,8 +315,8 @@ duration_s: 60
 warmup_s: 10
 ";
         let s: Scenario = serde_yaml::from_str(y).expect("parse");
-        assert_eq!(s.name, "small-msg-saturate");
-        assert_eq!(s.partitions, 6);
+        assert!(s.name == "small-msg-saturate");
+        assert!(s.partitions == 6);
         assert!(matches!(s.mode, LoadMode::Saturate));
     }
 
@@ -378,7 +379,7 @@ mode:
         };
         let s = serde_json::to_string(&out).unwrap();
         let back: RunOutput = serde_json::from_str(&s).unwrap();
-        assert_eq!(back.scenario.name, "x");
-        assert_eq!(back.notes, vec!["test"]);
+        assert!(back.scenario.name == "x");
+        assert!(back.notes == vec!["test"]);
     }
 }

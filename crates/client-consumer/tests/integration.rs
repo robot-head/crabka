@@ -7,6 +7,7 @@
 //! runtime can't drive both the broker's accept loop and the test body
 //! when the test makes synchronous-style blocking calls into the broker.
 
+use assert2::assert;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -115,7 +116,7 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
+    assert!(cr.topics[0].error_code == 0, "create_topic failed: {cr:?}");
 }
 
 /// Produce records to a specific partition index (the plain `produce` helper
@@ -168,7 +169,7 @@ async fn create_topic(client: &Client, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(cr.topics[0].error_code, 0, "create_topic failed: {cr:?}");
+    assert!(cr.topics[0].error_code == 0, "create_topic failed: {cr:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -209,7 +210,7 @@ async fn rust_producer_to_rust_consumer_through_group() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
     }
-    assert_eq!(seen, vec!["a", "b", "c"]);
+    assert!(seen == vec!["a", "b", "c"]);
 
     consumer.commit_sync().await.unwrap();
     consumer.close().await.unwrap();
@@ -256,7 +257,7 @@ async fn offsets_survive_broker_restart() {
                 .unwrap()
                 .len();
         }
-        assert_eq!(seen, 3);
+        assert!(seen == 3);
         consumer.commit_sync().await.unwrap();
         consumer.close().await.unwrap();
         broker.shutdown().await;
@@ -387,9 +388,8 @@ async fn eager_rebalance_reacquires_and_primes() {
             }
         }
     }
-    assert_eq!(
-        second.len(),
-        2,
+    assert!(
+        second.len() == 2,
         "m1 delivered both second-wave records after re-acquiring: {second:?}"
     );
 

@@ -8,6 +8,7 @@
 
 #![allow(clippy::too_many_lines)]
 
+use assert2::assert;
 mod support;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -101,8 +102,8 @@ async fn create_topic(client: &crabka_client_core::Client, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        cr.topics[0].error_code, 0,
+    assert!(
+        cr.topics[0].error_code == 0,
         "CreateTopics error: {}",
         cr.topics[0].error_code
     );
@@ -163,8 +164,8 @@ async fn produce_batch(addr: std::net::SocketAddr, topic: &str, batch: RecordBat
     let produce_resp =
         ProduceResponse::decode(&mut cur, PRODUCE_VERSION).expect("decode ProduceResponse v9");
     let part_resp = &produce_resp.responses[0].partition_responses[0];
-    assert_eq!(
-        part_resp.error_code, 0,
+    assert!(
+        part_resp.error_code == 0,
         "produce error: {}",
         part_resp.error_code
     );
@@ -229,8 +230,8 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        cr.topics[0].error_code, 0,
+    assert!(
+        cr.topics[0].error_code == 0,
         "CreateTopics error: {}",
         cr.topics[0].error_code
     );
@@ -265,14 +266,13 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
     let fetch_resp =
         LegacyFetchResponse::decode(&mut cur, 3).expect("decode LegacyFetchResponse v3");
 
-    assert_eq!(
-        fetch_resp.responses.len(),
-        1,
+    assert!(
+        fetch_resp.responses.len() == 1,
         "expected 1 topic in fetch response"
     );
     let part = &fetch_resp.responses[0].partitions[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "fetch partition error: {}",
         part.error_code
     );
@@ -291,30 +291,25 @@ async fn fetch_v3_downconverts_v2_batch_to_v0_messageset() {
     let mut ms_cur: &[u8] = &legacy_bytes;
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len()).expect("decode_message_set");
 
-    assert_eq!(
-        recs.len(),
-        2,
+    assert!(
+        recs.len() == 2,
         "expected 2 records in MessageSet; got {}",
         recs.len()
     );
-    assert_eq!(
-        recs[0].key.as_deref(),
-        Some(b"key0".as_ref()),
+    assert!(
+        recs[0].key.as_deref() == Some(b"key0".as_ref()),
         "record 0 key mismatch"
     );
-    assert_eq!(
-        recs[0].value.as_deref(),
-        Some(b"val0".as_ref()),
+    assert!(
+        recs[0].value.as_deref() == Some(b"val0".as_ref()),
         "record 0 value mismatch"
     );
-    assert_eq!(
-        recs[1].key.as_deref(),
-        Some(b"key1".as_ref()),
+    assert!(
+        recs[1].key.as_deref() == Some(b"key1".as_ref()),
         "record 1 key mismatch"
     );
-    assert_eq!(
-        recs[1].value.as_deref(),
-        Some(b"val1".as_ref()),
+    assert!(
+        recs[1].value.as_deref() == Some(b"val1".as_ref()),
         "record 1 value mismatch"
     );
 
@@ -340,8 +335,8 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        cr.topics[0].error_code, 0,
+    assert!(
+        cr.topics[0].error_code == 0,
         "CreateTopics error: {}",
         cr.topics[0].error_code
     );
@@ -376,8 +371,8 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
         LegacyFetchResponse::decode(&mut cur, 3).expect("decode LegacyFetchResponse v3");
 
     let part = &fetch_resp.responses[0].partitions[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "fetch partition error: {}",
         part.error_code
     );
@@ -401,8 +396,8 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
         legacy_bytes.len()
     );
     let codec = legacy_bytes[17] & 0x07;
-    assert_eq!(
-        codec, 2,
+    assert!(
+        codec == 2,
         "expected snappy codec id (2) in wrapper message attributes, got {codec}"
     );
 
@@ -410,19 +405,16 @@ async fn fetch_v3_recompresses_zstd_as_snappy() {
     let mut ms_cur: &[u8] = &legacy_bytes;
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len())
         .expect("decode_message_set on snappy-recompressed payload");
-    assert_eq!(
-        recs.len(),
-        50,
+    assert!(
+        recs.len() == 50,
         "expected 50 records after snappy decompression"
     );
-    assert_eq!(
-        recs[0].key.as_deref(),
-        Some(b"key-0000".as_ref()),
+    assert!(
+        recs[0].key.as_deref() == Some(b"key-0000".as_ref()),
         "first record key mismatch"
     );
-    assert_eq!(
-        recs[49].key.as_deref(),
-        Some(b"key-0049".as_ref()),
+    assert!(
+        recs[49].key.as_deref() == Some(b"key-0049".as_ref()),
         "last record key mismatch"
     );
 
@@ -462,8 +454,8 @@ async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
         LegacyFetchResponse::decode(&mut cur, 0).expect("decode LegacyFetchResponse v0");
 
     let part = &fetch_resp.responses[0].partitions[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "fetch partition error: {}",
         part.error_code
     );
@@ -478,15 +470,15 @@ async fn fetch_v0_downconverts_to_magic_v0_without_timestamps() {
     // MessageSet layout: offset(8) + message_size(4) + crc(4) + magic(1).
     // The magic byte sits at index 16 and must be 0 for a v0 MessageSet.
     assert!(legacy_bytes.len() > 16, "legacy bytes too short");
-    assert_eq!(legacy_bytes[16], 0, "expected v0 MessageSet magic byte 0");
+    assert!(legacy_bytes[16] == 0, "expected v0 MessageSet magic byte 0");
 
     let mut ms_cur: &[u8] = &legacy_bytes;
     let recs = decode_message_set(&mut ms_cur, legacy_bytes.len()).expect("decode_message_set");
-    assert_eq!(recs.len(), 1, "expected 1 record");
-    assert_eq!(recs[0].key.as_deref(), Some(b"k".as_ref()));
-    assert_eq!(recs[0].value.as_deref(), Some(b"v".as_ref()));
-    assert_eq!(
-        recs[0].timestamp, None,
+    assert!(recs.len() == 1, "expected 1 record");
+    assert!(recs[0].key.as_deref() == Some(b"k".as_ref()));
+    assert!(recs[0].value.as_deref() == Some(b"v".as_ref()));
+    assert!(
+        recs[0].timestamp == None,
         "v0 MessageSet must carry no timestamp"
     );
 
@@ -526,8 +518,8 @@ async fn fetch_v3_drops_control_batch() {
         LegacyFetchResponse::decode(&mut cur, 3).expect("decode LegacyFetchResponse v3");
 
     let part = &fetch_resp.responses[0].partitions[0];
-    assert_eq!(
-        part.error_code, 0,
+    assert!(
+        part.error_code == 0,
         "fetch partition error: {}",
         part.error_code
     );

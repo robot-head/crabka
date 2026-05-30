@@ -723,6 +723,7 @@ async fn pump_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use assert2::assert;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -898,9 +899,9 @@ mod tests {
             .remote_log_segment_metadata(&tp(), 0, 42)
             .unwrap()
             .expect("segment found");
-        assert_eq!(got.remote_log_segment_id().id, Uuid::from_u128(10));
-        assert_eq!(got.custom_metadata(), Some(&CustomMetadata(vec![7])));
-        assert_eq!(m.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(99));
+        assert!(got.remote_log_segment_id().id == Uuid::from_u128(10));
+        assert!(got.custom_metadata() == Some(&CustomMetadata(vec![7])));
+        assert!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
         m.shutdown();
     }
 
@@ -914,7 +915,7 @@ mod tests {
         let err = on_blocking(move || m2.add_remote_log_segment_metadata(bad).unwrap_err()).await;
         assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
         // Eager rejection means nothing was published.
-        assert_eq!(log.high_water_marks().await.unwrap(), vec![0; 2]);
+        assert!(log.high_water_marks().await.unwrap() == vec![0; 2]);
         m.shutdown();
     }
 
@@ -943,12 +944,12 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        assert_eq!(b.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(99));
+        assert!(b.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
         let got = b
             .remote_log_segment_metadata(&tp(), 0, 50)
             .unwrap()
             .unwrap();
-        assert_eq!(got.remote_log_segment_id().id, Uuid::from_u128(10));
+        assert!(got.remote_log_segment_id().id == Uuid::from_u128(10));
 
         a.shutdown();
         b.shutdown();
@@ -977,10 +978,10 @@ mod tests {
         // replays the full history before the read below.
         let fresh = start_manager_all(log).await;
         let listed = fresh.list_remote_log_segments(&tp()).unwrap();
-        assert_eq!(listed.len(), 3);
-        assert_eq!(listed[0].start_offset(), 0);
-        assert_eq!(listed[2].end_offset(), 299);
-        assert_eq!(fresh.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(299));
+        assert!(listed.len() == 3);
+        assert!(listed[0].start_offset() == 0);
+        assert!(listed[2].end_offset() == 299);
+        assert!(fresh.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(299));
         fresh.shutdown();
     }
 
@@ -1045,8 +1046,8 @@ mod tests {
             "committed >= last applied offset"
         );
         // The dump contains the finished segment.
-        assert_eq!(snap.dump.partitions.len(), 1);
-        assert_eq!(snap.dump.partitions[0].segments.len(), 1);
+        assert!(snap.dump.partitions.len() == 1);
+        assert!(snap.dump.partitions[0].segments.len() == 1);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1105,8 +1106,8 @@ mod tests {
             .find(|s| s.partition == p)
             .map(|s| s.start_offset)
             .unwrap();
-        assert_eq!(orders_start, committed + 1, "resume from N+1, not 0");
-        assert_eq!(resumed_committed[idx], committed);
+        assert!(orders_start == committed + 1, "resume from N+1, not 0");
+        assert!(resumed_committed[idx] == committed);
 
         // Second lifetime against the SAME log + dir: must resume, not replay.
         let fresh = TopicBasedRemoteLogMetadataManager::start(
@@ -1119,7 +1120,7 @@ mod tests {
         .unwrap();
         // The manager exposes the same committed offset via its canonical
         // accessor (what 48q's reconciler will read).
-        assert_eq!(fresh.committed_offset(p), committed);
+        assert!(fresh.committed_offset(p) == committed);
         // Assign every partition and wait for catch-up so the gated read
         // methods delegate to the (snapshot-seeded) inner cache. The orders
         // partition has no backlog past `committed`, so it is ready as soon
@@ -1136,11 +1137,11 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
         let post_cache = fresh.list_remote_log_segments(&tp()).unwrap();
-        assert_eq!(
-            post_cache, pre_cache,
+        assert!(
+            post_cache == pre_cache,
             "post-load cache equals pre-restart cache"
         );
-        assert_eq!(fresh.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(299));
+        assert!(fresh.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(299));
         fresh.shutdown();
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1176,17 +1177,17 @@ mod tests {
         // Assign it. add() must enqueue a PartitionStart for `mp`, and the
         // pump catches up; once applied >= HWM-1 the read returns Some.
         m.reconcile_assignment(&[mp]).await;
-        assert_eq!(m.assigned_metadata_partitions(), vec![mp]);
+        assert!(m.assigned_metadata_partitions() == vec![mp]);
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             match m.remote_log_segment_metadata(&tp(), 0, 42) {
                 Ok(Some(md)) => {
-                    assert_eq!(md.remote_log_segment_id().id, Uuid::from_u128(10));
+                    assert!(md.remote_log_segment_id().id == Uuid::from_u128(10));
                     break;
                 }
                 Err(RemoteStorageError::NotReady { partition }) => {
-                    assert_eq!(partition, mp, "NotReady names the catching-up partition");
+                    assert!(partition == mp, "NotReady names the catching-up partition");
                     assert!(
                         std::time::Instant::now() < deadline,
                         "metadata partition never became ready"
@@ -1213,8 +1214,8 @@ mod tests {
         let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(2);
         let m = start_manager(log).await;
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        assert_eq!(m.remote_log_segment_metadata(&other, 0, 0).unwrap(), None);
-        assert_eq!(m.highest_offset_for_epoch(&other, 0).unwrap(), None);
+        assert!(m.remote_log_segment_metadata(&other, 0, 0).unwrap() == None);
+        assert!(m.highest_offset_for_epoch(&other, 0).unwrap() == None);
         assert!(m.list_remote_log_segments(&other).unwrap().is_empty());
         m.shutdown();
     }
@@ -1231,8 +1232,8 @@ mod tests {
         let tp_b = TopicIdPartition::new(topic_id, "orders", 1);
         let mp_a = metadata_partition_for(&tp_a, n);
         let mp_b = metadata_partition_for(&tp_b, n);
-        assert_ne!(
-            mp_a, mp_b,
+        assert!(
+            mp_a != mp_b,
             "test needs the two partitions in distinct buckets"
         );
 
@@ -1274,8 +1275,8 @@ mod tests {
         a.reconcile_assignment(&[mp_a]).await;
         b.reconcile_assignment(&[mp_b]).await;
 
-        assert_eq!(a.assigned_metadata_partitions(), vec![mp_a]);
-        assert_eq!(b.assigned_metadata_partitions(), vec![mp_b]);
+        assert!(a.assigned_metadata_partitions() == vec![mp_a]);
+        assert!(b.assigned_metadata_partitions() == vec![mp_b]);
         // Disjoint shares.
         assert!(
             a.assigned_metadata_partitions()
@@ -1345,9 +1346,8 @@ mod tests {
         // Add → catch up → exactly one segment.
         m.reconcile_assignment(&[mp]).await;
         wait_ready(&m, &tp()).await;
-        assert_eq!(
-            m.list_remote_log_segments(&tp()).unwrap().len(),
-            1,
+        assert!(
+            m.list_remote_log_segments(&tp()).unwrap().len() == 1,
             "one segment after first assignment"
         );
 
@@ -1362,14 +1362,13 @@ mod tests {
         wait_ready(&m, &tp()).await;
 
         let listed = m.list_remote_log_segments(&tp()).unwrap();
-        assert_eq!(
-            listed.len(),
-            1,
+        assert!(
+            listed.len() == 1,
             "remove + re-add must not duplicate the segment, got {listed:?}"
         );
-        assert_eq!(listed[0].remote_log_segment_id().id, Uuid::from_u128(10));
+        assert!(listed[0].remote_log_segment_id().id == Uuid::from_u128(10));
         // The finished state survived (no half-applied duplicate update).
-        assert_eq!(m.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(99));
+        assert!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
 
         m.shutdown();
     }
@@ -1409,9 +1408,8 @@ mod tests {
         // target so the gate returns NotReady, not Ok(None).
         flaky.set_fail_hwm(true);
         m.reconcile_assignment(&[mp]).await;
-        assert_eq!(
-            m.assigned_metadata_partitions(),
-            vec![mp],
+        assert!(
+            m.assigned_metadata_partitions() == vec![mp],
             "partition is assigned even though HWM is unknown (broker owns it)"
         );
 
@@ -1421,12 +1419,12 @@ mod tests {
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
         while std::time::Instant::now() < deadline {
             match m.remote_log_segment_metadata(&tp(), 0, 42) {
-                Err(RemoteStorageError::NotReady { partition }) => assert_eq!(partition, mp),
+                Err(RemoteStorageError::NotReady { partition }) => assert!(partition == mp),
                 other => panic!("HWM-unknown partition must read NotReady, got {other:?}"),
             }
             // The list path is gated the same way.
             match m.list_remote_log_segments(&tp()) {
-                Err(RemoteStorageError::NotReady { partition }) => assert_eq!(partition, mp),
+                Err(RemoteStorageError::NotReady { partition }) => assert!(partition == mp),
                 other => panic!("HWM-unknown partition list must be NotReady, got {other:?}"),
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1442,11 +1440,11 @@ mod tests {
         loop {
             match m.remote_log_segment_metadata(&tp(), 0, 42) {
                 Ok(Some(md)) => {
-                    assert_eq!(md.remote_log_segment_id().id, Uuid::from_u128(10));
+                    assert!(md.remote_log_segment_id().id == Uuid::from_u128(10));
                     break;
                 }
                 Err(RemoteStorageError::NotReady { partition }) => {
-                    assert_eq!(partition, mp);
+                    assert!(partition == mp);
                     assert!(
                         std::time::Instant::now() < deadline,
                         "partition never became ready after HWM recovered"
@@ -1457,8 +1455,8 @@ mod tests {
             }
         }
         // The list path is now Ready too.
-        assert_eq!(m.list_remote_log_segments(&tp()).unwrap().len(), 1);
-        assert_eq!(m.highest_offset_for_epoch(&tp(), 0).unwrap(), Some(99));
+        assert!(m.list_remote_log_segments(&tp()).unwrap().len() == 1);
+        assert!(m.highest_offset_for_epoch(&tp(), 0).unwrap() == Some(99));
 
         m.shutdown();
     }

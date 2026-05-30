@@ -21,6 +21,7 @@ mod tests {
         fetch_request::FetchRequest, fetch_response::FetchResponse,
         produce_request::ProduceRequest, produce_response::ProduceResponse,
     };
+    use assert2::assert;
 
     #[test]
     fn produce_request_legacy_to_canonical_defaults_transactional_id_to_none() {
@@ -31,8 +32,8 @@ mod tests {
             ..Default::default()
         };
         let canonical: ProduceRequest = legacy.into();
-        assert_eq!(canonical.acks, 1);
-        assert_eq!(canonical.timeout_ms, 30_000);
+        assert!(canonical.acks == 1);
+        assert!(canonical.timeout_ms == 30_000);
         assert!(canonical.transactional_id.is_none());
     }
 
@@ -44,7 +45,7 @@ mod tests {
             ..Default::default()
         };
         let legacy: kafka_3_6_2::owned::produce_response::ProduceResponse = canonical.into();
-        assert_eq!(legacy.throttle_time_ms, 17);
+        assert!(legacy.throttle_time_ms == 17);
     }
 
     #[test]
@@ -55,8 +56,8 @@ mod tests {
             ..Default::default()
         };
         let canonical: FetchRequest = legacy.into();
-        assert_eq!(canonical.max_wait_ms, 500);
-        assert_eq!(canonical.min_bytes, 1);
+        assert!(canonical.max_wait_ms == 500);
+        assert!(canonical.min_bytes == 1);
         assert!(canonical.cluster_id.is_none());
     }
 
@@ -70,6 +71,6 @@ mod tests {
             ..Default::default()
         };
         let legacy: kafka_3_6_2::owned::fetch_response::FetchResponse = canonical.into();
-        assert_eq!(legacy.throttle_time_ms, 42);
+        assert!(legacy.throttle_time_ms == 42);
     }
 }

@@ -227,6 +227,7 @@ fn pick_swap(
 mod tests {
     use super::*;
     use crate::model::BrokerView;
+    use assert2::assert;
 
     fn ctx() -> GoalContext {
         GoalContext {
@@ -290,10 +291,10 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 2], 1)];
         let s = state_with(parts, brokers);
         let mvs = RackAware.propose(&s, &ctx());
-        assert_eq!(mvs.len(), 1, "exactly one movement for one collision");
+        assert!(mvs.len() == 1, "exactly one movement for one collision");
         let m = &mvs[0];
-        assert_eq!(m.old_replicas, vec![1, 2]);
-        assert_eq!(m.new_replicas, vec![1, 3]);
+        assert!(m.old_replicas == vec![1, 2]);
+        assert!(m.new_replicas == vec![1, 3]);
     }
 
     #[test]
@@ -307,9 +308,9 @@ mod tests {
         let parts = vec![part("t", 0, vec![1, 2], 1), part("t", 1, vec![1, 2], 1)];
         let s = state_with(parts, brokers);
         let mvs = RackAware.propose(&s, &ctx());
-        assert_eq!(mvs.len(), 2, "one movement per partition");
+        assert!(mvs.len() == 2, "one movement per partition");
         for m in &mvs {
-            assert_eq!(m.old_replicas, vec![1, 2]);
+            assert!(m.old_replicas == vec![1, 2]);
             assert!(!m.new_replicas.contains(&2), "broker 2 must move out");
         }
     }
