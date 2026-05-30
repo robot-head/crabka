@@ -1716,4 +1716,196 @@ mod tests {
             "custom assignor must be invoked at least once",
         );
     }
+
+    // ── classic actor arms + coordinator admin surface (64d-B) ──────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_admin_surface_and_immediate_join() {
+        use crabka_protocol::owned::join_group_request::JoinGroupRequest;
+        let (coord, _log) = make_coordinator();
+        let handle = coord.get_or_create_classic("g").expect("classic actor");
+
+        // Empty member_id → immediate MEMBER_ID_REQUIRED (no member added).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicJoin {
+                req: JoinGroupRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    protocol_type: "consumer".into(),
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let r = rx.await.unwrap();
+        assert!(r.error_code == codes::MEMBER_ID_REQUIRED);
+
+        // ClassicInspect → empty view.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicInspect { reply: tx })
+            .await
+            .unwrap();
+        let view = rx.await.unwrap();
+        assert!(view.group_id == "g" && view.members.is_empty());
+
+        // Admin surface lists/describes the classic group, then deletes it (empty).
+        let listed = coord.list_groups().await;
+        assert!(listed.iter().any(|s| s.group_id == "g"));
+        assert!(coord.describe_group("g").await.is_some());
+        assert!(coord.delete_group("g").await.is_ok());
+        assert!(coord.describe_group("g").await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_offset_validate_heartbeat_arms() {
+        use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
+
+        use super::super::classic_state::OffsetEntry;
+        let (coord, _log) = make_coordinator();
+        let handle = coord.get_or_create_classic("g").expect("classic actor");
+
+        // UpdateCommitted then FetchCommitted round-trips on the kind-agnostic Group.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::UpdateCommitted {
+                entries: vec![(
+                    ("t".to_string(), 0),
+                    OffsetEntry {
+                        offset: 42,
+                        leader_epoch: 1,
+                        metadata: String::new(),
+                        commit_timestamp_ms: 0,
+                    },
+                )],
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::FetchCommitted { reply: tx })
+            .await
+            .unwrap();
+        let committed = rx.await.unwrap();
+        assert!(committed.get(&("t".to_string(), 0)).unwrap().offset == 42);
+
+        // Classic offset-commit validate: a simple consumer (no member/instance)
+        // is allowed.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicValidateCommit {
+                member_id: String::new(),
+                group_instance_id: None,
+                generation_id: -1,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().is_none());
+
+        // Classic Heartbeat for an unknown member on an empty group.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicHeartbeat {
+                req: HeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: "ghost".into(),
+                    generation_id: 0,
+                    ..Default::default()
+                },
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap() == codes::UNKNOWN_MEMBER_ID);
+
+        // RemoveCommitted clears the entry.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::RemoveCommitted {
+                keys: vec![("t".to_string(), 0)],
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::FetchCommitted { reply: tx })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_seed_hydrates_group_and_blocks_delete_when_nonempty() {
+        use std::time::Duration;
+
+        use super::super::classic_state::{Group as ClassicState, Member, OffsetEntry};
+        use super::super::group::{Group, GroupKind};
+        let (coord, _log) = make_coordinator();
+
+        let mut cs = ClassicState::new("g");
+        cs.add_member(Member::new(
+            "m1",
+            "client",
+            "127.0.0.1",
+            Duration::from_secs(30),
+            Duration::from_mins(1),
+            vec![("range".into(), bytes::Bytes::new())],
+        ));
+        let group = Box::new(Group {
+            group_id: "g".into(),
+            kind: GroupKind::Classic(cs),
+            committed_offsets: [(
+                ("t".to_string(), 0),
+                OffsetEntry {
+                    offset: 7,
+                    leader_epoch: 0,
+                    metadata: String::new(),
+                    commit_timestamp_ms: 0,
+                },
+            )]
+            .into(),
+        });
+        coord.seed_classic("g", group);
+
+        // Seeded committed offsets and member are visible.
+        let handle = coord.find("g").expect("seeded actor");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::FetchCommitted { reply: tx })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().get(&("t".to_string(), 0)).unwrap().offset == 7);
+        // Non-empty group cannot be deleted.
+        assert!(
+            coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::NonEmpty)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cross_protocol_get_or_create_returns_none() {
+        let (coord, _log) = make_coordinator();
+        // Consumer owns "c" → a classic get-or-create is refused.
+        let _ = coord.get_or_create_consumer("c").expect("consumer actor");
+        assert!(coord.get_or_create_classic("c").is_none());
+        // Classic owns "k" → a consumer get-or-create is refused.
+        let _ = coord.get_or_create_classic("k").expect("classic actor");
+        assert!(coord.get_or_create_consumer("k").is_none());
+    }
 }
