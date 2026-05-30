@@ -6,10 +6,8 @@ use crate::primitives::fixed::{get_u16, put_u16};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,8 +40,16 @@ impl<'a> Endpoint<'a> {
 impl<'a> Encode for Endpoint<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
-        if version >= 0 { if flex { put_compact_string(buf, self.host) } else { put_string(buf, self.host) } }
-        if version >= 0 { put_u16(buf, self.port) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.host)
+            } else {
+                put_string(buf, self.host)
+            }
+        }
+        if version >= 0 {
+            put_u16(buf, self.port)
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -53,8 +59,16 @@ impl<'a> Encode for Endpoint<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 0;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.host) } else { string_len(self.host) }; }
-        if version >= 0 { n += 2; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.host)
+            } else {
+                string_len(self.host)
+            };
+        }
+        if version >= 0 {
+            n += 2;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -67,12 +81,18 @@ impl<'de> DecodeBorrow<'de> for Endpoint<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 0;
         let mut out = Self::default();
-        if version >= 0 { out.host = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.port = get_u16(buf)?; }
+        if version >= 0 {
+            out.host = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.port = get_u16(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
@@ -83,8 +103,12 @@ impl<'a> Endpoint<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.host = "x"; }
-        if version >= 0 { m.port = 1u16; }
+        if version >= 0 {
+            m.host = "x";
+        }
+        if version >= 0 {
+            m.port = 1u16;
+        }
         m
     }
 }

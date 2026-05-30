@@ -2,14 +2,14 @@
 
 use bytes::BufMut;
 
-use crate::primitives::fixed::{get_bool, get_i16, get_i32, get_i64, get_i8, put_bool, put_i16, put_i32, put_i64, put_i8};
+use crate::primitives::fixed::{
+    get_bool, get_i8, get_i16, get_i32, get_i64, put_bool, put_i8, put_i16, put_i32, put_i64,
+};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 27;
@@ -18,14 +18,15 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 1;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteTxnMarkersRequest<'a> {
     pub markers: Vec<WritableTxnMarker<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for WriteTxnMarkersRequest<'a> {
     fn default() -> Self {
         Self {
@@ -34,7 +35,6 @@ impl<'a> Default for WriteTxnMarkersRequest<'a> {
         }
     }
 }
-
 impl<'a> WriteTxnMarkersRequest<'a> {
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_request::WriteTxnMarkersRequest {
         crate::owned::write_txn_markers_request::WriteTxnMarkersRequest {
@@ -43,14 +43,23 @@ impl<'a> WriteTxnMarkersRequest<'a> {
         }
     }
 }
-
 impl<'a> Encode for WriteTxnMarkersRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.markers).len(), flex); for it in &self.markers { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.markers).len(), flex);
+                for it in &self.markers {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -60,7 +69,17 @@ impl<'a> Encode for WriteTxnMarkersRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.markers).len(), flex); let body: usize = (self.markers).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.markers).len(), flex);
+                let body: usize = (self.markers)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -68,34 +87,43 @@ impl<'a> Encode for WriteTxnMarkersRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for WriteTxnMarkersRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.markers = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(WritableTxnMarker::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.markers = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(WritableTxnMarker::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> WriteTxnMarkersRequest<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.markers = vec![WritableTxnMarker::populated(version)]; }
+        if version >= 0 {
+            m.markers = vec![WritableTxnMarker::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritableTxnMarker<'a> {
     pub producer_id: i64,
@@ -106,7 +134,6 @@ pub struct WritableTxnMarker<'a> {
     pub transaction_version: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for WritableTxnMarker<'a> {
     fn default() -> Self {
         Self {
@@ -120,7 +147,6 @@ impl<'a> Default for WritableTxnMarker<'a> {
         }
     }
 }
-
 impl<'a> WritableTxnMarker<'a> {
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_request::WritableTxnMarker {
         crate::owned::write_txn_markers_request::WritableTxnMarker {
@@ -134,16 +160,32 @@ impl<'a> WritableTxnMarker<'a> {
         }
     }
 }
-
 impl<'a> Encode for WritableTxnMarker<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { put_i64(buf, self.producer_id) }
-        if version >= 0 { put_i16(buf, self.producer_epoch) }
-        if version >= 0 { put_bool(buf, self.transaction_result) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topics).len(), flex); for it in &self.topics { it.encode(buf, version)?; } } }
-        if version >= 0 { put_i32(buf, self.coordinator_epoch) }
-        if version >= 2 { put_i8(buf, self.transaction_version) }
+        if version >= 0 {
+            put_i64(buf, self.producer_id)
+        }
+        if version >= 0 {
+            put_i16(buf, self.producer_epoch)
+        }
+        if version >= 0 {
+            put_bool(buf, self.transaction_result)
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
+                for it in &self.topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.coordinator_epoch)
+        }
+        if version >= 2 {
+            put_i8(buf, self.transaction_version)
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -153,12 +195,29 @@ impl<'a> Encode for WritableTxnMarker<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += 1; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex); let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += 4; }
-        if version >= 2 { n += 1; }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += 1;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 2 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -166,48 +225,73 @@ impl<'a> Encode for WritableTxnMarker<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for WritableTxnMarker<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.producer_id = get_i64(buf)?; }
-        if version >= 0 { out.producer_epoch = get_i16(buf)?; }
-        if version >= 0 { out.transaction_result = get_bool(buf)?; }
-        if version >= 0 { out.topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(WritableTxnMarkerTopic::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.coordinator_epoch = get_i32(buf)?; }
-        if version >= 2 { out.transaction_version = get_i8(buf)?; }
+        if version >= 0 {
+            out.producer_id = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.producer_epoch = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.transaction_result = get_bool(buf)?;
+        }
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(WritableTxnMarkerTopic::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.coordinator_epoch = get_i32(buf)?;
+        }
+        if version >= 2 {
+            out.transaction_version = get_i8(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> WritableTxnMarker<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.producer_id = 1i64; }
-        if version >= 0 { m.producer_epoch = 1i16; }
-        if version >= 0 { m.transaction_result = true; }
-        if version >= 0 { m.topics = vec![WritableTxnMarkerTopic::populated(version)]; }
-        if version >= 0 { m.coordinator_epoch = 1i32; }
-        if version >= 2 { m.transaction_version = 1i8; }
+        if version >= 0 {
+            m.producer_id = 1i64;
+        }
+        if version >= 0 {
+            m.producer_epoch = 1i16;
+        }
+        if version >= 0 {
+            m.transaction_result = true;
+        }
+        if version >= 0 {
+            m.topics = vec![WritableTxnMarkerTopic::populated(version)];
+        }
+        if version >= 0 {
+            m.coordinator_epoch = 1i32;
+        }
+        if version >= 2 {
+            m.transaction_version = 1i8;
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WritableTxnMarkerTopic<'a> {
     pub name: &'a str,
     pub partition_indexes: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for WritableTxnMarkerTopic<'a> {
     fn default() -> Self {
         Self {
@@ -217,7 +301,6 @@ impl<'a> Default for WritableTxnMarkerTopic<'a> {
         }
     }
 }
-
 impl<'a> WritableTxnMarkerTopic<'a> {
     pub fn to_owned(&self) -> crate::owned::write_txn_markers_request::WritableTxnMarkerTopic {
         crate::owned::write_txn_markers_request::WritableTxnMarkerTopic {
@@ -227,12 +310,24 @@ impl<'a> WritableTxnMarkerTopic<'a> {
         }
     }
 }
-
 impl<'a> Encode for WritableTxnMarkerTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partition_indexes).len(), flex); for it in &self.partition_indexes { put_i32(buf, *it); } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.name)
+            } else {
+                put_string(buf, self.name)
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partition_indexes).len(), flex);
+                for it in &self.partition_indexes {
+                    put_i32(buf, *it);
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -242,8 +337,23 @@ impl<'a> Encode for WritableTxnMarkerTopic<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partition_indexes).len(), flex); let body: usize = (self.partition_indexes).iter().map(|_| 4).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.partition_indexes).len(),
+                    flex,
+                );
+                let body: usize = (self.partition_indexes).iter().map(|_| 4).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -251,29 +361,44 @@ impl<'a> Encode for WritableTxnMarkerTopic<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for WritableTxnMarkerTopic<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.partition_indexes = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i32(buf)?); } v }; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.partition_indexes = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i32(buf)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> WritableTxnMarkerTopic<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x"; }
-        if version >= 0 { m.partition_indexes = vec![1i32]; }
+        if version >= 0 {
+            m.name = "x";
+        }
+        if version >= 0 {
+            m.partition_indexes = vec![1i32];
+        }
         m
     }
 }

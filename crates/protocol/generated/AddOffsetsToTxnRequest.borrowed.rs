@@ -6,10 +6,8 @@ use crate::primitives::fixed::{get_i16, get_i64, put_i16, put_i64};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 25;
@@ -18,7 +16,9 @@ pub const MAX_VERSION: i16 = 4;
 pub const FLEXIBLE_MIN: i16 = 3;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddOffsetsToTxnRequest<'a> {
@@ -28,7 +28,6 @@ pub struct AddOffsetsToTxnRequest<'a> {
     pub group_id: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for AddOffsetsToTxnRequest<'a> {
     fn default() -> Self {
         Self {
@@ -40,7 +39,6 @@ impl<'a> Default for AddOffsetsToTxnRequest<'a> {
         }
     }
 }
-
 impl<'a> AddOffsetsToTxnRequest<'a> {
     pub fn to_owned(&self) -> crate::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest {
         crate::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest {
@@ -52,17 +50,35 @@ impl<'a> AddOffsetsToTxnRequest<'a> {
         }
     }
 }
-
 impl<'a> Encode for AddOffsetsToTxnRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { if flex { put_compact_string(buf, self.transactional_id) } else { put_string(buf, self.transactional_id) } }
-        if version >= 0 { put_i64(buf, self.producer_id) }
-        if version >= 0 { put_i16(buf, self.producer_epoch) }
-        if version >= 0 { if flex { put_compact_string(buf, self.group_id) } else { put_string(buf, self.group_id) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.transactional_id)
+            } else {
+                put_string(buf, self.transactional_id)
+            }
+        }
+        if version >= 0 {
+            put_i64(buf, self.producer_id)
+        }
+        if version >= 0 {
+            put_i16(buf, self.producer_epoch)
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.group_id)
+            } else {
+                put_string(buf, self.group_id)
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -72,10 +88,26 @@ impl<'a> Encode for AddOffsetsToTxnRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.transactional_id) } else { string_len(self.transactional_id) }; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += if flex { compact_string_len(self.group_id) } else { string_len(self.group_id) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.transactional_id)
+            } else {
+                string_len(self.transactional_id)
+            };
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.group_id)
+            } else {
+                string_len(self.group_id)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -83,36 +115,59 @@ impl<'a> Encode for AddOffsetsToTxnRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for AddOffsetsToTxnRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.transactional_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.producer_id = get_i64(buf)?; }
-        if version >= 0 { out.producer_epoch = get_i16(buf)?; }
-        if version >= 0 { out.group_id = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
+        if version >= 0 {
+            out.transactional_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.producer_id = get_i64(buf)?;
+        }
+        if version >= 0 {
+            out.producer_epoch = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.group_id = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> AddOffsetsToTxnRequest<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.transactional_id = "x"; }
-        if version >= 0 { m.producer_id = 1i64; }
-        if version >= 0 { m.producer_epoch = 1i16; }
-        if version >= 0 { m.group_id = "x"; }
+        if version >= 0 {
+            m.transactional_id = "x";
+        }
+        if version >= 0 {
+            m.producer_id = 1i64;
+        }
+        if version >= 0 {
+            m.producer_epoch = 1i16;
+        }
+        if version >= 0 {
+            m.group_id = "x";
+        }
         m
     }
 }

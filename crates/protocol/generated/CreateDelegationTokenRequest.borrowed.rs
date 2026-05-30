@@ -5,14 +5,13 @@ use bytes::BufMut;
 use crate::primitives::fixed::{get_i64, put_i64};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 38;
@@ -21,7 +20,9 @@ pub const MAX_VERSION: i16 = 3;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateDelegationTokenRequest<'a> {
@@ -31,7 +32,6 @@ pub struct CreateDelegationTokenRequest<'a> {
     pub max_lifetime_ms: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for CreateDelegationTokenRequest<'a> {
     fn default() -> Self {
         Self {
@@ -43,9 +43,10 @@ impl<'a> Default for CreateDelegationTokenRequest<'a> {
         }
     }
 }
-
 impl<'a> CreateDelegationTokenRequest<'a> {
-    pub fn to_owned(&self) -> crate::owned::create_delegation_token_request::CreateDelegationTokenRequest {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::create_delegation_token_request::CreateDelegationTokenRequest {
         crate::owned::create_delegation_token_request::CreateDelegationTokenRequest {
             owner_principal_type: (self.owner_principal_type).map(|s| s.to_string()),
             owner_principal_name: (self.owner_principal_name).map(|s| s.to_string()),
@@ -55,17 +56,40 @@ impl<'a> CreateDelegationTokenRequest<'a> {
         }
     }
 }
-
 impl<'a> Encode for CreateDelegationTokenRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 3 { if flex { put_compact_nullable_string(buf, self.owner_principal_type) } else { put_nullable_string(buf, self.owner_principal_type) } }
-        if version >= 3 { if flex { put_compact_nullable_string(buf, self.owner_principal_name) } else { put_nullable_string(buf, self.owner_principal_name) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.renewers).len(), flex); for it in &self.renewers { it.encode(buf, version)?; } } }
-        if version >= 0 { put_i64(buf, self.max_lifetime_ms) }
+        if version >= 3 {
+            if flex {
+                put_compact_nullable_string(buf, self.owner_principal_type)
+            } else {
+                put_nullable_string(buf, self.owner_principal_type)
+            }
+        }
+        if version >= 3 {
+            if flex {
+                put_compact_nullable_string(buf, self.owner_principal_name)
+            } else {
+                put_nullable_string(buf, self.owner_principal_name)
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.renewers).len(), flex);
+                for it in &self.renewers {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            put_i64(buf, self.max_lifetime_ms)
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -75,10 +99,34 @@ impl<'a> Encode for CreateDelegationTokenRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 3 { n += if flex { compact_nullable_string_len(self.owner_principal_type) } else { nullable_string_len(self.owner_principal_type) }; }
-        if version >= 3 { n += if flex { compact_nullable_string_len(self.owner_principal_name) } else { nullable_string_len(self.owner_principal_name) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.renewers).len(), flex); let body: usize = (self.renewers).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += 8; }
+        if version >= 3 {
+            n += if flex {
+                compact_nullable_string_len(self.owner_principal_type)
+            } else {
+                nullable_string_len(self.owner_principal_type)
+            };
+        }
+        if version >= 3 {
+            n += if flex {
+                compact_nullable_string_len(self.owner_principal_name)
+            } else {
+                nullable_string_len(self.owner_principal_name)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.renewers).len(), flex);
+                let body: usize = (self.renewers)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += 8;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -86,47 +134,75 @@ impl<'a> Encode for CreateDelegationTokenRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for CreateDelegationTokenRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 3 { out.owner_principal_type = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 3 { out.owner_principal_name = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
-        if version >= 0 { out.renewers = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(CreatableRenewers::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.max_lifetime_ms = get_i64(buf)?; }
+        if version >= 3 {
+            out.owner_principal_type = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 3 {
+            out.owner_principal_name = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.renewers = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(CreatableRenewers::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.max_lifetime_ms = get_i64(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> CreateDelegationTokenRequest<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 3 { m.owner_principal_type = Some("x"); }
-        if version >= 3 { m.owner_principal_name = Some("x"); }
-        if version >= 0 { m.renewers = vec![CreatableRenewers::populated(version)]; }
-        if version >= 0 { m.max_lifetime_ms = 1i64; }
+        if version >= 3 {
+            m.owner_principal_type = Some("x");
+        }
+        if version >= 3 {
+            m.owner_principal_name = Some("x");
+        }
+        if version >= 0 {
+            m.renewers = vec![CreatableRenewers::populated(version)];
+        }
+        if version >= 0 {
+            m.max_lifetime_ms = 1i64;
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableRenewers<'a> {
     pub principal_type: &'a str,
     pub principal_name: &'a str,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for CreatableRenewers<'a> {
     fn default() -> Self {
         Self {
@@ -136,7 +212,6 @@ impl<'a> Default for CreatableRenewers<'a> {
         }
     }
 }
-
 impl<'a> CreatableRenewers<'a> {
     pub fn to_owned(&self) -> crate::owned::create_delegation_token_request::CreatableRenewers {
         crate::owned::create_delegation_token_request::CreatableRenewers {
@@ -146,12 +221,23 @@ impl<'a> CreatableRenewers<'a> {
         }
     }
 }
-
 impl<'a> Encode for CreatableRenewers<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { if flex { put_compact_string(buf, self.principal_type) } else { put_string(buf, self.principal_type) } }
-        if version >= 0 { if flex { put_compact_string(buf, self.principal_name) } else { put_string(buf, self.principal_name) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.principal_type)
+            } else {
+                put_string(buf, self.principal_type)
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.principal_name)
+            } else {
+                put_string(buf, self.principal_name)
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -161,8 +247,20 @@ impl<'a> Encode for CreatableRenewers<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.principal_type) } else { string_len(self.principal_type) }; }
-        if version >= 0 { n += if flex { compact_string_len(self.principal_name) } else { string_len(self.principal_name) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.principal_type)
+            } else {
+                string_len(self.principal_type)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.principal_name)
+            } else {
+                string_len(self.principal_name)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -170,29 +268,41 @@ impl<'a> Encode for CreatableRenewers<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for CreatableRenewers<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.principal_type = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.principal_name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
+        if version >= 0 {
+            out.principal_type = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.principal_name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> CreatableRenewers<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.principal_type = "x"; }
-        if version >= 0 { m.principal_name = "x"; }
+        if version >= 0 {
+            m.principal_type = "x";
+        }
+        if version >= 0 {
+            m.principal_name = "x";
+        }
         m
     }
 }

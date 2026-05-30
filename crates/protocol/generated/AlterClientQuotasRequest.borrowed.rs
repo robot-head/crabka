@@ -5,14 +5,13 @@ use bytes::BufMut;
 use crate::primitives::fixed::{get_bool, get_f64, put_bool, put_f64};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 49;
@@ -21,7 +20,9 @@ pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 1;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlterClientQuotasRequest<'a> {
@@ -29,7 +30,6 @@ pub struct AlterClientQuotasRequest<'a> {
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for AlterClientQuotasRequest<'a> {
     fn default() -> Self {
         Self {
@@ -39,7 +39,6 @@ impl<'a> Default for AlterClientQuotasRequest<'a> {
         }
     }
 }
-
 impl<'a> AlterClientQuotasRequest<'a> {
     pub fn to_owned(&self) -> crate::owned::alter_client_quotas_request::AlterClientQuotasRequest {
         crate::owned::alter_client_quotas_request::AlterClientQuotasRequest {
@@ -49,15 +48,26 @@ impl<'a> AlterClientQuotasRequest<'a> {
         }
     }
 }
-
 impl<'a> Encode for AlterClientQuotasRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.entries).len(), flex); for it in &self.entries { it.encode(buf, version)?; } } }
-        if version >= 0 { put_bool(buf, self.validate_only) }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.entries).len(), flex);
+                for it in &self.entries {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            put_bool(buf, self.validate_only)
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -67,8 +77,20 @@ impl<'a> Encode for AlterClientQuotasRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.entries).len(), flex); let body: usize = (self.entries).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.entries).len(), flex);
+                let body: usize = (self.entries)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -76,43 +98,55 @@ impl<'a> Encode for AlterClientQuotasRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for AlterClientQuotasRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.entries = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(EntryData::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.validate_only = get_bool(buf)?; }
+        if version >= 0 {
+            out.entries = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(EntryData::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.validate_only = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> AlterClientQuotasRequest<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.entries = vec![EntryData::populated(version)]; }
-        if version >= 0 { m.validate_only = true; }
+        if version >= 0 {
+            m.entries = vec![EntryData::populated(version)];
+        }
+        if version >= 0 {
+            m.validate_only = true;
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntryData<'a> {
     pub entity: Vec<EntityData<'a>>,
     pub ops: Vec<OpData<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for EntryData<'a> {
     fn default() -> Self {
         Self {
@@ -122,7 +156,6 @@ impl<'a> Default for EntryData<'a> {
         }
     }
 }
-
 impl<'a> EntryData<'a> {
     pub fn to_owned(&self) -> crate::owned::alter_client_quotas_request::EntryData {
         crate::owned::alter_client_quotas_request::EntryData {
@@ -132,12 +165,25 @@ impl<'a> EntryData<'a> {
         }
     }
 }
-
 impl<'a> Encode for EntryData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.entity).len(), flex); for it in &self.entity { it.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.ops).len(), flex); for it in &self.ops { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.entity).len(), flex);
+                for it in &self.entity {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.ops).len(), flex);
+                for it in &self.ops {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -147,8 +193,21 @@ impl<'a> Encode for EntryData<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.entity).len(), flex); let body: usize = (self.entity).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.ops).len(), flex); let body: usize = (self.ops).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.entity).len(), flex);
+                let body: usize = (self.entity).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix = crate::primitives::array::array_len_prefix_len((self.ops).len(), flex);
+                let body: usize = (self.ops).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -156,40 +215,56 @@ impl<'a> Encode for EntryData<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for EntryData<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.entity = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(EntityData::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.ops = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(OpData::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.entity = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(EntityData::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.ops = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(OpData::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> EntryData<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.entity = vec![EntityData::populated(version)]; }
-        if version >= 0 { m.ops = vec![OpData::populated(version)]; }
+        if version >= 0 {
+            m.entity = vec![EntityData::populated(version)];
+        }
+        if version >= 0 {
+            m.ops = vec![OpData::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntityData<'a> {
     pub entity_type: &'a str,
     pub entity_name: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for EntityData<'a> {
     fn default() -> Self {
         Self {
@@ -199,7 +274,6 @@ impl<'a> Default for EntityData<'a> {
         }
     }
 }
-
 impl<'a> EntityData<'a> {
     pub fn to_owned(&self) -> crate::owned::alter_client_quotas_request::EntityData {
         crate::owned::alter_client_quotas_request::EntityData {
@@ -209,12 +283,23 @@ impl<'a> EntityData<'a> {
         }
     }
 }
-
 impl<'a> Encode for EntityData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { if flex { put_compact_string(buf, self.entity_type) } else { put_string(buf, self.entity_type) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.entity_name) } else { put_nullable_string(buf, self.entity_name) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.entity_type)
+            } else {
+                put_string(buf, self.entity_type)
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.entity_name)
+            } else {
+                put_nullable_string(buf, self.entity_name)
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -224,8 +309,20 @@ impl<'a> Encode for EntityData<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.entity_type) } else { string_len(self.entity_type) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.entity_name) } else { nullable_string_len(self.entity_name) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.entity_type)
+            } else {
+                string_len(self.entity_type)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.entity_name)
+            } else {
+                nullable_string_len(self.entity_name)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -233,33 +330,44 @@ impl<'a> Encode for EntityData<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for EntityData<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.entity_type = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.entity_name = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
+        if version >= 0 {
+            out.entity_type = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.entity_name = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> EntityData<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.entity_type = "x"; }
-        if version >= 0 { m.entity_name = Some("x"); }
+        if version >= 0 {
+            m.entity_type = "x";
+        }
+        if version >= 0 {
+            m.entity_name = Some("x");
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpData<'a> {
     pub key: &'a str,
@@ -267,7 +375,6 @@ pub struct OpData<'a> {
     pub remove: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for OpData<'a> {
     fn default() -> Self {
         Self {
@@ -278,7 +385,6 @@ impl<'a> Default for OpData<'a> {
         }
     }
 }
-
 impl<'a> OpData<'a> {
     pub fn to_owned(&self) -> crate::owned::alter_client_quotas_request::OpData {
         crate::owned::alter_client_quotas_request::OpData {
@@ -289,13 +395,22 @@ impl<'a> OpData<'a> {
         }
     }
 }
-
 impl<'a> Encode for OpData<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
-        if version >= 0 { if flex { put_compact_string(buf, self.key) } else { put_string(buf, self.key) } }
-        if version >= 0 { put_f64(buf, self.value) }
-        if version >= 0 { put_bool(buf, self.remove) }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.key)
+            } else {
+                put_string(buf, self.key)
+            }
+        }
+        if version >= 0 {
+            put_f64(buf, self.value)
+        }
+        if version >= 0 {
+            put_bool(buf, self.remove)
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -305,9 +420,19 @@ impl<'a> Encode for OpData<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 1;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.key) } else { string_len(self.key) }; }
-        if version >= 0 { n += 8; }
-        if version >= 0 { n += 1; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.key)
+            } else {
+                string_len(self.key)
+            };
+        }
+        if version >= 0 {
+            n += 8;
+        }
+        if version >= 0 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -315,31 +440,43 @@ impl<'a> Encode for OpData<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for OpData<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 1;
         let mut out = Self::default();
-        if version >= 0 { out.key = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.value = get_f64(buf)?; }
-        if version >= 0 { out.remove = get_bool(buf)?; }
+        if version >= 0 {
+            out.key = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.value = get_f64(buf)?;
+        }
+        if version >= 0 {
+            out.remove = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> OpData<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.key = "x"; }
-        if version >= 0 { m.value = 1.0f64; }
-        if version >= 0 { m.remove = true; }
+        if version >= 0 {
+            m.key = "x";
+        }
+        if version >= 0 {
+            m.value = 1.0f64;
+        }
+        if version >= 0 {
+            m.remove = true;
+        }
         m
     }
 }

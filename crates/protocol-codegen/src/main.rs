@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crabka_protocol_codegen::{emit, ir, name_conv, validate};
+use crabka_protocol_codegen::{emit, fmt, ir, name_conv, validate};
 
 fn parse_args() -> (PathBuf, PathBuf, Option<String>) {
     let mut positional: Vec<String> = Vec::new();
@@ -43,8 +43,18 @@ enum RunError {
     Emit(#[from] emit::EmitError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Fmt(#[from] fmt::FmtError),
     #[error("schemas/VERSION must contain a `sha:` line")]
     MissingSha,
+}
+
+/// Format generated Rust source through rustfmt, then write it. The quote-based
+/// emitters return unformatted token text; rustfmt is the secondary processing
+/// step that turns it into the canonical committed form.
+fn write_rs(path: impl AsRef<Path>, body: &str) -> Result<(), RunError> {
+    std::fs::write(path, fmt::rustfmt(body)?)?;
+    Ok(())
 }
 
 fn read_schemas_sha(schemas: &std::path::Path) -> Result<String, RunError> {
@@ -144,10 +154,10 @@ fn run(
         if !should_emit(s) {
             continue;
         }
-        let owned_em = emit::owned::emit(s, &schemas_sha)?;
-        let borrowed_em = emit::borrowed::emit(s, &schemas_sha, namespace)?;
-        std::fs::write(out.join(format!("{}.owned.rs", s.name)), &owned_em.primary)?;
-        std::fs::write(
+        let owned_em = emit::owned_quote::emit(s, &schemas_sha)?;
+        let borrowed_em = emit::borrowed_quote::emit(s, &schemas_sha, namespace)?;
+        write_rs(out.join(format!("{}.owned.rs", s.name)), &owned_em.primary)?;
+        write_rs(
             out.join(format!("{}.borrowed.rs", s.name)),
             &borrowed_em.primary,
         )?;
@@ -157,7 +167,7 @@ fn run(
             std::fs::create_dir_all(&common_owned_dir)?;
         }
         for (cs_name, body) in &owned_em.commons {
-            std::fs::write(common_owned_dir.join(format!("{cs_name}.owned.rs")), body)?;
+            write_rs(common_owned_dir.join(format!("{cs_name}.owned.rs")), body)?;
             all_common_owned.insert(cs_name.clone());
             count += 1;
         }
@@ -165,7 +175,7 @@ fn run(
             std::fs::create_dir_all(&common_borrowed_dir)?;
         }
         for (cs_name, body) in &borrowed_em.commons {
-            std::fs::write(
+            write_rs(
                 common_borrowed_dir.join(format!("{cs_name}.borrowed.rs")),
                 body,
             )?;

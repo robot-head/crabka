@@ -5,14 +5,13 @@ use bytes::BufMut;
 use crate::primitives::fixed::{get_bool, get_i16, get_i32, put_bool, put_i16, put_i32};
 use crate::primitives::string_bytes::{
     compact_nullable_string_len, compact_string_len, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string,
-    string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::primitives::string_bytes_borrowed::{
     get_compact_nullable_string_borrowed, get_compact_string_borrowed,
     get_nullable_string_borrowed, get_string_borrowed,
 };
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 19;
@@ -21,7 +20,9 @@ pub const MAX_VERSION: i16 = 7;
 pub const FLEXIBLE_MIN: i16 = 5;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateTopicsRequest<'a> {
@@ -30,7 +31,6 @@ pub struct CreateTopicsRequest<'a> {
     pub validate_only: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for CreateTopicsRequest<'a> {
     fn default() -> Self {
         Self {
@@ -41,7 +41,6 @@ impl<'a> Default for CreateTopicsRequest<'a> {
         }
     }
 }
-
 impl<'a> CreateTopicsRequest<'a> {
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreateTopicsRequest {
         crate::owned::create_topics_request::CreateTopicsRequest {
@@ -52,16 +51,29 @@ impl<'a> CreateTopicsRequest<'a> {
         }
     }
 }
-
 impl<'a> Encode for CreateTopicsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topics).len(), flex); for it in &self.topics { it.encode(buf, version)?; } } }
-        if version >= 0 { put_i32(buf, self.timeout_ms) }
-        if version >= 1 { put_bool(buf, self.validate_only) }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
+                for it in &self.topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.timeout_ms)
+        }
+        if version >= 1 {
+            put_bool(buf, self.validate_only)
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -71,9 +83,20 @@ impl<'a> Encode for CreateTopicsRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex); let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += 4; }
-        if version >= 1 { n += 1; }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 1 {
+            n += 1;
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -81,38 +104,55 @@ impl<'a> Encode for CreateTopicsRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for CreateTopicsRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(CreatableTopic::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.timeout_ms = get_i32(buf)?; }
-        if version >= 1 { out.validate_only = get_bool(buf)?; }
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(CreatableTopic::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.timeout_ms = get_i32(buf)?;
+        }
+        if version >= 1 {
+            out.validate_only = get_bool(buf)?;
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> CreateTopicsRequest<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.topics = vec![CreatableTopic::populated(version)]; }
-        if version >= 0 { m.timeout_ms = 1i32; }
-        if version >= 1 { m.validate_only = true; }
+        if version >= 0 {
+            m.topics = vec![CreatableTopic::populated(version)];
+        }
+        if version >= 0 {
+            m.timeout_ms = 1i32;
+        }
+        if version >= 1 {
+            m.validate_only = true;
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableTopic<'a> {
     pub name: &'a str,
@@ -122,7 +162,6 @@ pub struct CreatableTopic<'a> {
     pub configs: Vec<CreatableTopicConfig<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for CreatableTopic<'a> {
     fn default() -> Self {
         Self {
@@ -135,7 +174,6 @@ impl<'a> Default for CreatableTopic<'a> {
         }
     }
 }
-
 impl<'a> CreatableTopic<'a> {
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreatableTopic {
         crate::owned::create_topics_request::CreatableTopic {
@@ -148,15 +186,38 @@ impl<'a> CreatableTopic<'a> {
         }
     }
 }
-
 impl<'a> Encode for CreatableTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
-        if version >= 0 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 0 { put_i32(buf, self.num_partitions) }
-        if version >= 0 { put_i16(buf, self.replication_factor) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.assignments).len(), flex); for it in &self.assignments { it.encode(buf, version)?; } } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.configs).len(), flex); for it in &self.configs { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.name)
+            } else {
+                put_string(buf, self.name)
+            }
+        }
+        if version >= 0 {
+            put_i32(buf, self.num_partitions)
+        }
+        if version >= 0 {
+            put_i16(buf, self.replication_factor)
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.assignments).len(), flex);
+                for it in &self.assignments {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.configs).len(), flex);
+                for it in &self.configs {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -166,11 +227,41 @@ impl<'a> Encode for CreatableTopic<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 5;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += 2; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.assignments).len(), flex); let body: usize = (self.assignments).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.configs).len(), flex); let body: usize = (self.configs).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += 2;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.assignments).len(), flex);
+                let body: usize = (self.assignments)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.configs).len(), flex);
+                let body: usize = (self.configs)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -178,46 +269,78 @@ impl<'a> Encode for CreatableTopic<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for CreatableTopic<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.num_partitions = get_i32(buf)?; }
-        if version >= 0 { out.replication_factor = get_i16(buf)?; }
-        if version >= 0 { out.assignments = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(CreatableReplicaAssignment::decode_borrow(buf, version)?); } v }; }
-        if version >= 0 { out.configs = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(CreatableTopicConfig::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.num_partitions = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.replication_factor = get_i16(buf)?;
+        }
+        if version >= 0 {
+            out.assignments = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(CreatableReplicaAssignment::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
+        if version >= 0 {
+            out.configs = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(CreatableTopicConfig::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> CreatableTopic<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x"; }
-        if version >= 0 { m.num_partitions = 1i32; }
-        if version >= 0 { m.replication_factor = 1i16; }
-        if version >= 0 { m.assignments = vec![CreatableReplicaAssignment::populated(version)]; }
-        if version >= 0 { m.configs = vec![CreatableTopicConfig::populated(version)]; }
+        if version >= 0 {
+            m.name = "x";
+        }
+        if version >= 0 {
+            m.num_partitions = 1i32;
+        }
+        if version >= 0 {
+            m.replication_factor = 1i16;
+        }
+        if version >= 0 {
+            m.assignments = vec![CreatableReplicaAssignment::populated(version)];
+        }
+        if version >= 0 {
+            m.configs = vec![CreatableTopicConfig::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableReplicaAssignment {
     pub partition_index: i32,
     pub broker_ids: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl Default for CreatableReplicaAssignment {
     fn default() -> Self {
         Self {
@@ -227,7 +350,6 @@ impl Default for CreatableReplicaAssignment {
         }
     }
 }
-
 impl CreatableReplicaAssignment {
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreatableReplicaAssignment {
         crate::owned::create_topics_request::CreatableReplicaAssignment {
@@ -237,12 +359,20 @@ impl CreatableReplicaAssignment {
         }
     }
 }
-
 impl Encode for CreatableReplicaAssignment {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
-        if version >= 0 { put_i32(buf, self.partition_index) }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.broker_ids).len(), flex); for it in &self.broker_ids { put_i32(buf, *it); } } }
+        if version >= 0 {
+            put_i32(buf, self.partition_index)
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.broker_ids).len(), flex);
+                for it in &self.broker_ids {
+                    put_i32(buf, *it);
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -252,8 +382,17 @@ impl Encode for CreatableReplicaAssignment {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 5;
         let mut n: usize = 0;
-        if version >= 0 { n += 4; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.broker_ids).len(), flex); let body: usize = (self.broker_ids).iter().map(|_| 4).sum(); prefix + body }; }
+        if version >= 0 {
+            n += 4;
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.broker_ids).len(), flex);
+                let body: usize = (self.broker_ids).iter().map(|_| 4).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -261,40 +400,49 @@ impl Encode for CreatableReplicaAssignment {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for CreatableReplicaAssignment {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
-        if version >= 0 { out.partition_index = get_i32(buf)?; }
-        if version >= 0 { out.broker_ids = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i32(buf)?); } v }; }
+        if version >= 0 {
+            out.partition_index = get_i32(buf)?;
+        }
+        if version >= 0 {
+            out.broker_ids = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i32(buf)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl CreatableReplicaAssignment {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.partition_index = 1i32; }
-        if version >= 0 { m.broker_ids = vec![1i32]; }
+        if version >= 0 {
+            m.partition_index = 1i32;
+        }
+        if version >= 0 {
+            m.broker_ids = vec![1i32];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreatableTopicConfig<'a> {
     pub name: &'a str,
     pub value: Option<&'a str>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for CreatableTopicConfig<'a> {
     fn default() -> Self {
         Self {
@@ -304,7 +452,6 @@ impl<'a> Default for CreatableTopicConfig<'a> {
         }
     }
 }
-
 impl<'a> CreatableTopicConfig<'a> {
     pub fn to_owned(&self) -> crate::owned::create_topics_request::CreatableTopicConfig {
         crate::owned::create_topics_request::CreatableTopicConfig {
@@ -314,12 +461,23 @@ impl<'a> CreatableTopicConfig<'a> {
         }
     }
 }
-
 impl<'a> Encode for CreatableTopicConfig<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 5;
-        if version >= 0 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 0 { if flex { put_compact_nullable_string(buf, self.value) } else { put_nullable_string(buf, self.value) } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.name)
+            } else {
+                put_string(buf, self.name)
+            }
+        }
+        if version >= 0 {
+            if flex {
+                put_compact_nullable_string(buf, self.value)
+            } else {
+                put_nullable_string(buf, self.value)
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -329,8 +487,20 @@ impl<'a> Encode for CreatableTopicConfig<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 5;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 0 { n += if flex { compact_nullable_string_len(self.value) } else { nullable_string_len(self.value) }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 0 {
+            n += if flex {
+                compact_nullable_string_len(self.value)
+            } else {
+                nullable_string_len(self.value)
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -338,29 +508,41 @@ impl<'a> Encode for CreatableTopicConfig<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for CreatableTopicConfig<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 5;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.value = if flex { get_compact_nullable_string_borrowed(buf)? } else { get_nullable_string_borrowed(buf)? }; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.value = if flex {
+                get_compact_nullable_string_borrowed(buf)?
+            } else {
+                get_nullable_string_borrowed(buf)?
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> CreatableTopicConfig<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x"; }
-        if version >= 0 { m.value = Some("x"); }
+        if version >= 0 {
+            m.name = "x";
+        }
+        if version >= 0 {
+            m.value = Some("x");
+        }
         m
     }
 }

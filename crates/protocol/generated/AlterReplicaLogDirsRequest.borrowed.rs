@@ -6,10 +6,8 @@ use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
     compact_string_len, put_compact_string, put_string, string_len,
 };
-use crate::primitives::string_bytes_borrowed::{
-    get_compact_string_borrowed, get_string_borrowed,
-};
-use crate::tagged_fields::{read_tagged_fields, tagged_fields_len, WriteTaggedFields};
+use crate::primitives::string_bytes_borrowed::{get_compact_string_borrowed, get_string_borrowed};
+use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 
 pub const API_KEY: i16 = 34;
@@ -18,14 +16,15 @@ pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 
 #[inline]
-fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+fn is_flexible(version: i16) -> bool {
+    version >= FLEXIBLE_MIN
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterReplicaLogDirsRequest<'a> {
     pub dirs: Vec<AlterReplicaLogDir<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for AlterReplicaLogDirsRequest<'a> {
     fn default() -> Self {
         Self {
@@ -34,23 +33,33 @@ impl<'a> Default for AlterReplicaLogDirsRequest<'a> {
         }
     }
 }
-
 impl<'a> AlterReplicaLogDirsRequest<'a> {
-    pub fn to_owned(&self) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest {
         crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirsRequest {
             dirs: (self.dirs).iter().map(|it| it.to_owned()).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
 }
-
 impl<'a> Encode for AlterReplicaLogDirsRequest<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.dirs).len(), flex); for it in &self.dirs { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.dirs).len(), flex);
+                for it in &self.dirs {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -60,7 +69,14 @@ impl<'a> Encode for AlterReplicaLogDirsRequest<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = is_flexible(version);
         let mut n: usize = 0;
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.dirs).len(), flex); let body: usize = (self.dirs).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.dirs).len(), flex);
+                let body: usize = (self.dirs).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -68,41 +84,49 @@ impl<'a> Encode for AlterReplicaLogDirsRequest<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for AlterReplicaLogDirsRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 { out.dirs = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(AlterReplicaLogDir::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.dirs = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(AlterReplicaLogDir::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> AlterReplicaLogDirsRequest<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.dirs = vec![AlterReplicaLogDir::populated(version)]; }
+        if version >= 0 {
+            m.dirs = vec![AlterReplicaLogDir::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterReplicaLogDir<'a> {
     pub path: &'a str,
     pub topics: Vec<AlterReplicaLogDirTopic<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for AlterReplicaLogDir<'a> {
     fn default() -> Self {
         Self {
@@ -112,7 +136,6 @@ impl<'a> Default for AlterReplicaLogDir<'a> {
         }
     }
 }
-
 impl<'a> AlterReplicaLogDir<'a> {
     pub fn to_owned(&self) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDir {
         crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDir {
@@ -122,12 +145,24 @@ impl<'a> AlterReplicaLogDir<'a> {
         }
     }
 }
-
 impl<'a> Encode for AlterReplicaLogDir<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { if flex { put_compact_string(buf, self.path) } else { put_string(buf, self.path) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.topics).len(), flex); for it in &self.topics { it.encode(buf, version)?; } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.path)
+            } else {
+                put_string(buf, self.path)
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.topics).len(), flex);
+                for it in &self.topics {
+                    it.encode(buf, version)?;
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -137,8 +172,21 @@ impl<'a> Encode for AlterReplicaLogDir<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.path) } else { string_len(self.path) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex); let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.path)
+            } else {
+                string_len(self.path)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -146,40 +194,53 @@ impl<'a> Encode for AlterReplicaLogDir<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for AlterReplicaLogDir<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.path = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.topics = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(AlterReplicaLogDirTopic::decode_borrow(buf, version)?); } v }; }
+        if version >= 0 {
+            out.path = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.topics = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(AlterReplicaLogDirTopic::decode_borrow(buf, version)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> AlterReplicaLogDir<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.path = "x"; }
-        if version >= 0 { m.topics = vec![AlterReplicaLogDirTopic::populated(version)]; }
+        if version >= 0 {
+            m.path = "x";
+        }
+        if version >= 0 {
+            m.topics = vec![AlterReplicaLogDirTopic::populated(version)];
+        }
         m
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AlterReplicaLogDirTopic<'a> {
     pub name: &'a str,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-
 impl<'a> Default for AlterReplicaLogDirTopic<'a> {
     fn default() -> Self {
         Self {
@@ -189,9 +250,10 @@ impl<'a> Default for AlterReplicaLogDirTopic<'a> {
         }
     }
 }
-
 impl<'a> AlterReplicaLogDirTopic<'a> {
-    pub fn to_owned(&self) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirTopic {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirTopic {
         crate::owned::alter_replica_log_dirs_request::AlterReplicaLogDirTopic {
             name: (self.name).to_string(),
             partitions: (self.partitions).clone(),
@@ -199,12 +261,24 @@ impl<'a> AlterReplicaLogDirTopic<'a> {
         }
     }
 }
-
 impl<'a> Encode for AlterReplicaLogDirTopic<'a> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
-        if version >= 0 { if flex { put_compact_string(buf, self.name) } else { put_string(buf, self.name) } }
-        if version >= 0 { { crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex); for it in &self.partitions { put_i32(buf, *it); } } }
+        if version >= 0 {
+            if flex {
+                put_compact_string(buf, self.name)
+            } else {
+                put_string(buf, self.name)
+            }
+        }
+        if version >= 0 {
+            {
+                crate::primitives::array::put_array_len(buf, (self.partitions).len(), flex);
+                for it in &self.partitions {
+                    put_i32(buf, *it);
+                }
+            }
+        }
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
@@ -214,8 +288,21 @@ impl<'a> Encode for AlterReplicaLogDirTopic<'a> {
     fn encoded_len(&self, version: i16) -> usize {
         let flex = version >= 2;
         let mut n: usize = 0;
-        if version >= 0 { n += if flex { compact_string_len(self.name) } else { string_len(self.name) }; }
-        if version >= 0 { n += { let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex); let body: usize = (self.partitions).iter().map(|_| 4).sum(); prefix + body }; }
+        if version >= 0 {
+            n += if flex {
+                compact_string_len(self.name)
+            } else {
+                string_len(self.name)
+            };
+        }
+        if version >= 0 {
+            n += {
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions).iter().map(|_| 4).sum();
+                prefix + body
+            };
+        }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
             n += tagged_fields_len(&known_pairs, &self.unknown_tagged_fields);
@@ -223,29 +310,44 @@ impl<'a> Encode for AlterReplicaLogDirTopic<'a> {
         n
     }
 }
-
 impl<'de> DecodeBorrow<'de> for AlterReplicaLogDirTopic<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         let flex = version >= 2;
         let mut out = Self::default();
-        if version >= 0 { out.name = if flex { get_compact_string_borrowed(buf)? } else { get_string_borrowed(buf)? }; }
-        if version >= 0 { out.partitions = { let n = crate::primitives::array::get_array_len(buf, flex)?; let mut v = Vec::with_capacity(n); for _ in 0..n { v.push(get_i32(buf)?); } v }; }
+        if version >= 0 {
+            out.name = if flex {
+                get_compact_string_borrowed(buf)?
+            } else {
+                get_string_borrowed(buf)?
+            };
+        }
+        if version >= 0 {
+            out.partitions = {
+                let n = crate::primitives::array::get_array_len(buf, flex)?;
+                let mut v = Vec::with_capacity(n);
+                for _ in 0..n {
+                    v.push(get_i32(buf)?);
+                }
+                v
+            };
+        }
         if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| {
-                Ok(false)
-            })?;
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
         Ok(out)
     }
 }
-
 #[cfg(test)]
 impl<'a> AlterReplicaLogDirTopic<'a> {
     #[must_use]
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
-        if version >= 0 { m.name = "x"; }
-        if version >= 0 { m.partitions = vec![1i32]; }
+        if version >= 0 {
+            m.name = "x";
+        }
+        if version >= 0 {
+            m.partitions = vec![1i32];
+        }
         m
     }
 }
