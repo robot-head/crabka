@@ -281,7 +281,7 @@ default-features = false
 version = "0.3"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.group]
-version = "=0.14.0-pre.0"
+version = "=0.14.0-pre.1"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.p256]
 version = "=0.14.0-rc.9"
