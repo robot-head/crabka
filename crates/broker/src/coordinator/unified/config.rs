@@ -98,7 +98,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::coordinator::next_gen::assignor::{Assignment, MemberSubscription, TopicMetadata};
+    use crate::coordinator::unified::assignor::{Assignment, MemberSubscription, TopicMetadata};
 
     #[derive(Debug)]
     struct TestAssignor(&'static str);

@@ -1320,16 +1320,16 @@ impl Broker {
 
         // Group coordinator bootstrap.
         let group_manager = Arc::new(crate::coordinator::GroupManager::new());
-        let offsets_log: std::sync::Arc<dyn crate::coordinator::next_gen::offsets_log::OffsetsLog> =
+        let offsets_log: std::sync::Arc<dyn crate::coordinator::unified::offsets_log::OffsetsLog> =
             std::sync::Arc::new(
-                crate::coordinator::next_gen::offsets_log::ProductionOffsetsLog::new(
+                crate::coordinator::unified::offsets_log::ProductionOffsetsLog::new(
                     partitions.clone(),
                 ),
             );
         let next_gen_coord =
-            std::sync::Arc::new(crate::coordinator::next_gen::NextGenCoordinator::new(
+            std::sync::Arc::new(crate::coordinator::unified::GroupCoordinator::new(
                 config.next_gen_consumer_group.clone(),
-                std::sync::Arc::new(crate::coordinator::next_gen::ImageMetadataProvider {
+                std::sync::Arc::new(crate::coordinator::unified::ImageMetadataProvider {
                     controller: controller.clone(),
                 }),
                 offsets_log,

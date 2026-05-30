@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crabka_protocol::primitives::uuid::Uuid;
 
 use super::assignor::{Assignor, MemberSubscription, TopicMetadata};
-use crate::coordinator::next_gen::group_state::{GroupState, MemberState};
+use crate::coordinator::unified::consumer_state::{GroupState, MemberState};
 
 #[derive(Debug, Clone, Default)]
 pub struct ReconcileInput {
@@ -107,8 +107,8 @@ pub fn membership_topic_ids(group: &GroupState, input: &ReconcileInput) -> HashS
 mod tests {
     use super::super::assignor::UniformAssignor;
     use super::*;
-    use crate::coordinator::next_gen::group_state::MemberState;
-    use crate::coordinator::next_gen::persistence::MemberAssignmentState;
+    use crate::coordinator::unified::consumer_state::MemberState;
+    use crate::coordinator::unified::persistence_next_gen::MemberAssignmentState;
     use assert2::assert;
     use std::time::{Duration, Instant};
 

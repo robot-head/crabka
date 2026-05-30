@@ -17,7 +17,7 @@
 // `GroupManager`; until then these aliases give the unified surface its types
 // without churning the still-live classic/next-gen call sites.
 pub(crate) use crate::coordinator::group::Group as ClassicState;
-pub(crate) use crate::coordinator::next_gen::group_state::GroupState as ConsumerState;
+pub(crate) use crate::coordinator::unified::consumer_state::GroupState as ConsumerState;
 
 /// Which protocol a [`Group`]'s members speak. The variant carries that
 /// protocol's full state machine.

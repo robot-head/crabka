@@ -104,6 +104,7 @@ pub struct GroupMetadataValue {
 
 impl GroupMetadataValue {
     #[must_use]
+    #[allow(clippy::trivially_copy_pass_by_ref)] // wire-encode API mirrors the other *Value::encode signatures
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);
@@ -187,6 +188,7 @@ pub struct TargetAssignmentMetadataValue {
 
 impl TargetAssignmentMetadataValue {
     #[must_use]
+    #[allow(clippy::trivially_copy_pass_by_ref)] // wire-encode API mirrors the other *Value::encode signatures
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
         buf.put_i16(0);

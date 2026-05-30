@@ -1,5 +1,5 @@
 //! Per-group state for KIP-848 next-gen consumer groups. Owned by exactly
-//! one `group_actor::GroupActor` task; never shared.
+//! one `actor::GroupActor` task; never shared.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -8,7 +8,7 @@ use regex::Regex;
 
 use crabka_protocol::primitives::uuid::Uuid;
 
-use super::persistence::MemberAssignmentState;
+use super::persistence_next_gen::MemberAssignmentState;
 
 #[derive(Debug, Clone)]
 pub struct MemberState {
@@ -40,6 +40,8 @@ pub struct MemberState {
     /// Public only so cross-module struct literals can initialize it to
     /// `None`; treat it as private and mutate exclusively via
     /// [`MemberState::set_regex`] / [`MemberState::sync_regex_cache`].
+    #[allow(clippy::option_option)]
+    // outer = "regex field present?", inner = "compiled successfully?"
     pub compiled_regex: Option<Option<Regex>>,
     pub server_assignor: Option<String>,
     pub rebalance_timeout: Duration,

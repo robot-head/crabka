@@ -18,9 +18,9 @@ use crabka_protocol::primitives::uuid::Uuid;
 use crate::codes;
 
 use super::config::NextGenConfig;
-use super::group_state::{GroupState, MemberState};
+use super::consumer_state::{GroupState, MemberState};
 use super::offsets_log::OffsetsLog;
-use super::persistence::MemberAssignmentState;
+use super::persistence_next_gen::MemberAssignmentState;
 use super::reconciler::{self, ReconcileInput};
 
 #[derive(Debug)]
@@ -73,7 +73,7 @@ impl GroupActorHandle {
         config: Arc<NextGenConfig>,
         metadata_provider: Arc<dyn MetadataProvider>,
         offsets_log: Arc<dyn OffsetsLog>,
-        coordinator: Arc<super::NextGenCoordinator>,
+        coordinator: Arc<super::GroupCoordinator>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(64);
         let task = tokio::spawn(actor_loop(
@@ -97,7 +97,7 @@ async fn actor_loop(
     config: Arc<NextGenConfig>,
     metadata: Arc<dyn MetadataProvider>,
     offsets_log: Arc<dyn OffsetsLog>,
-    coordinator: Arc<super::NextGenCoordinator>,
+    coordinator: Arc<super::GroupCoordinator>,
     mut rx: mpsc::Receiver<GroupActorMessage>,
 ) {
     let mut state = GroupState::new(group_id);
@@ -175,7 +175,7 @@ async fn handle_session_tick(
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
     offsets_log: &dyn OffsetsLog,
-    coordinator: &super::NextGenCoordinator,
+    coordinator: &super::GroupCoordinator,
 ) -> Result<(), crate::error::BrokerError> {
     let evicted = state.evict_expired(Instant::now(), config.session_timeout);
     if evicted.is_empty() {
@@ -260,11 +260,11 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
 }
 
 async fn handle_heartbeat(
-    state: &mut super::group_state::GroupState,
+    state: &mut super::consumer_state::GroupState,
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
     offsets_log: &dyn OffsetsLog,
-    coordinator: &super::NextGenCoordinator,
+    coordinator: &super::GroupCoordinator,
     req: &ConsumerGroupHeartbeatRequest,
     client_host: &str,
 ) -> Result<ConsumerGroupHeartbeatResponse, crate::error::BrokerError> {
@@ -341,7 +341,7 @@ async fn handle_heartbeat(
 /// Apply steady-state member updates and run reconciliation.
 /// Returns `true` if any change occurred that requires a log write.
 fn update_member_state(
-    state: &mut super::group_state::GroupState,
+    state: &mut super::consumer_state::GroupState,
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
     req: &ConsumerGroupHeartbeatRequest,
@@ -396,10 +396,10 @@ fn update_member_state(
 
 /// Handle a leave-group heartbeat (`member_epoch == -1`).
 async fn handle_leave(
-    state: &mut super::group_state::GroupState,
+    state: &mut super::consumer_state::GroupState,
     config: &NextGenConfig,
     offsets_log: &dyn OffsetsLog,
-    coordinator: &super::NextGenCoordinator,
+    coordinator: &super::GroupCoordinator,
     req: &ConsumerGroupHeartbeatRequest,
     now_ms: i64,
 ) -> Result<ConsumerGroupHeartbeatResponse, crate::error::BrokerError> {
@@ -581,7 +581,7 @@ fn build_describe(state: &GroupState) -> DescribeView {
 use bytes::Bytes;
 use crabka_protocol::records::{Record, RecordBatch};
 
-use super::persistence::{
+use super::persistence_next_gen::{
     CurrentMemberAssignmentValue, GroupMetadataValue, MemberMetadataValue, NextGenKey,
     TargetAssignmentMemberValue, TargetAssignmentMetadataValue, encode_key,
 };
@@ -679,12 +679,12 @@ impl PendingRecords {
 // fresh `GroupSeed` on every persisted heartbeat, even when only one member
 // changed. An incremental cache update — applying just the affected-member
 // delta computed by `snapshot_pending_after_change` — would avoid the
-// full-group re-clone, but `NextGenCoordinator::update_cache` (mod.rs) only
+// full-group re-clone, but `GroupCoordinator::update_cache` (mod.rs) only
 // exposes a whole-seed replace and `GroupSeed` is consumed wholesale by
 // replay/scrub. Adding a delta-apply API would ripple into mod.rs, which is
 // out of scope here; left as the remaining full-clone for a follow-up.
-pub(crate) fn snapshot_seed(state: &super::group_state::GroupState) -> super::GroupSeed {
-    use crate::coordinator::next_gen::persistence as p;
+pub(crate) fn snapshot_seed(state: &super::consumer_state::GroupState) -> super::GroupSeed {
+    use crate::coordinator::unified::persistence_next_gen as p;
     let mut members = std::collections::HashMap::new();
     let mut target_per_member = std::collections::HashMap::new();
     let mut current_per_member = std::collections::HashMap::new();
@@ -757,10 +757,10 @@ fn chrono_now_ms() -> i64 {
 /// listed `affected_members`. Always includes the current group epoch
 /// and (if non-zero) target epoch.
 fn snapshot_pending_after_change(
-    state: &super::group_state::GroupState,
+    state: &super::consumer_state::GroupState,
     affected_members: &[String],
 ) -> PendingRecords {
-    use crate::coordinator::next_gen::persistence as p;
+    use crate::coordinator::unified::persistence_next_gen as p;
     let mut pending = PendingRecords {
         group_metadata: Some(p::GroupMetadataValue {
             epoch: state.group_epoch,
@@ -832,10 +832,10 @@ fn snapshot_pending_after_change(
 }
 
 async fn flush_pending(
-    state: &super::group_state::GroupState,
+    state: &super::consumer_state::GroupState,
     pending: PendingRecords,
     offsets_log: &dyn OffsetsLog,
-    coordinator: &super::NextGenCoordinator,
+    coordinator: &super::GroupCoordinator,
     now_ms: i64,
 ) -> Result<(), crate::error::BrokerError> {
     if pending.is_empty() {
@@ -854,10 +854,10 @@ mod tests {
     use super::*;
     use assert2::assert;
 
-    use crate::coordinator::next_gen::NextGenCoordinator;
-    use crate::coordinator::next_gen::config::NextGenConfig;
-    use crate::coordinator::next_gen::offsets_log::fake::InMemoryOffsetsLog;
-    use crate::coordinator::next_gen::reconciler::ReconcileInput;
+    use crate::coordinator::unified::GroupCoordinator;
+    use crate::coordinator::unified::config::NextGenConfig;
+    use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
+    use crate::coordinator::unified::reconciler::ReconcileInput;
     use std::sync::Arc;
 
     #[derive(Debug)]
@@ -876,9 +876,9 @@ mod tests {
         })
     }
 
-    fn make_coordinator() -> (Arc<NextGenCoordinator>, Arc<InMemoryOffsetsLog>) {
+    fn make_coordinator() -> (Arc<GroupCoordinator>, Arc<InMemoryOffsetsLog>) {
         let log = Arc::new(InMemoryOffsetsLog::default());
-        let coord = Arc::new(NextGenCoordinator::new(
+        let coord = Arc::new(GroupCoordinator::new(
             NextGenConfig::default(),
             empty_metadata(),
             log.clone(),
@@ -1189,7 +1189,7 @@ mod tests {
     /// reconciler (`reconcile_if_dirty`) as the sole bump.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn single_eviction_advances_epoch_by_one() {
-        use crate::coordinator::next_gen::group_state::GroupState;
+        use crate::coordinator::unified::consumer_state::GroupState;
 
         let (coord, log) = make_coordinator();
         // Tiny session timeout so a member whose `last_seen` is a few ms in
@@ -1245,7 +1245,7 @@ mod tests {
     // custom assignor registry
     // ---------------------------------------------------------------------
 
-    use crate::coordinator::next_gen::assignor::{
+    use crate::coordinator::unified::assignor::{
         Assignment, Assignor, MemberSubscription, TopicMetadata,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1267,7 +1267,7 @@ mod tests {
     #[test]
     fn pick_assignor_skips_unregistered_member_preference() {
         let config = NextGenConfig::default();
-        let mut state = crate::coordinator::next_gen::group_state::GroupState::new("g");
+        let mut state = crate::coordinator::unified::consumer_state::GroupState::new("g");
         let mut m = build_member(
             "m1",
             &ConsumerGroupHeartbeatRequest::default(),
@@ -1292,7 +1292,7 @@ mod tests {
             .unwrap();
 
         let log = Arc::new(InMemoryOffsetsLog::default());
-        let coord = Arc::new(NextGenCoordinator::new(config, empty_metadata(), log));
+        let coord = Arc::new(GroupCoordinator::new(config, empty_metadata(), log));
         let handle = coord.get_or_create("g");
 
         let (tx, rx) = tokio::sync::oneshot::channel();

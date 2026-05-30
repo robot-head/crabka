@@ -1,6 +1,6 @@
 //! `ConsumerGroupHeartbeat` (`api_key` 68) — KIP-848 next-gen consumer
 //! group protocol. Routes the request to the per-group actor in
-//! `NextGenCoordinator`.
+//! `GroupCoordinator`.
 
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
@@ -12,8 +12,8 @@ use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::next_gen::GroupType;
-use crate::coordinator::next_gen::group_actor::GroupActorMessage;
+use crate::coordinator::unified::GroupType;
+use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
 pub(crate) fn handle(

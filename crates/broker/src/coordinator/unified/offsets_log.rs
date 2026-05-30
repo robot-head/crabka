@@ -18,7 +18,7 @@ pub trait OffsetsLog: Send + Sync + std::fmt::Debug {
 }
 
 /// Resolves `__consumer_offsets-0` at every `append` call. The partition
-/// is registered by bootstrap *after* `NextGenCoordinator` is constructed,
+/// is registered by bootstrap *after* `GroupCoordinator` is constructed,
 /// so a snapshot taken at construction time would be permanently empty.
 #[derive(Debug)]
 pub(crate) struct ProductionOffsetsLog {
