@@ -28,6 +28,7 @@
     clippy::borrow_deref_ref,
     clippy::explicit_auto_deref,
     clippy::unnecessary_semicolon,
+    clippy::semicolon_if_nothing_returned,
     unused_imports,
     unused_variables
 )]

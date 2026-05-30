@@ -56,6 +56,7 @@ pub fn allow_header() -> &'static str {
         "    clippy::borrow_deref_ref,\n",
         "    clippy::explicit_auto_deref,\n",
         "    clippy::unnecessary_semicolon,\n",
+        "    clippy::semicolon_if_nothing_returned,\n",
         "    unused_imports,\n",
         "    unused_variables\n",
         ")]",
