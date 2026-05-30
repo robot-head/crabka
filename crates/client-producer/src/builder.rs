@@ -53,12 +53,14 @@ impl Producer {
         }
         let acks = if enable_idempotence { Acks::All } else { acks };
 
-        // 1. Build inner client.
+        // 1. Build inner client. `security` is cloned (not moved) so it can be
+        //    retained on the `Producer` and reused for the secondary
+        //    coordinator connections opened by the transactional path.
         let client = Client::builder()
             .bootstrap(bootstrap)
             .client_id(client_id.clone())
             .request_timeout(request_timeout)
-            .maybe_security(security)
+            .maybe_security(security.clone())
             .build()
             .await?;
 
@@ -119,6 +121,7 @@ impl Producer {
         Ok(Producer {
             client,
             client_id,
+            security,
             producer_id,
             producer_epoch,
             acks,

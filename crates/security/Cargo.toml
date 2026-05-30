@@ -47,10 +47,8 @@ tokio = { workspace = true, features = ["sync"] }
 #
 # NOTE (spike finding): sspi 0.21 -> picky-krb 0.12.3 hard-pins
 # pbkdf2 =0.13.0-rc.10, which is why the workspace pbkdf2 pin was moved to that
-# RC. And sspi 0.21's client AS-exchange has an MIT-KDC interop bug (AS-REP
-# enc-part APPLICATION tag 26 rejected); see
-# docs/superpowers/specs/2026-05-28-gssapi-sspi-findings.md for the one-line fix
-# the provider task (Task 5) must apply (fork / vendor / upstream).
+# RC. The version below is satisfied by our sspi fork, wired in via
+# `[patch.crates-io]` in the workspace Cargo.toml (Devolutions/sspi-rs#681).
 sspi = { version = "0.21", default-features = false, features = ["network_client", "ring"] }
 
 [dev-dependencies]
