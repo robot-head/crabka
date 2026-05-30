@@ -7,7 +7,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_protocol::ProtocolError;
 use crabka_protocol::primitives::uuid::Uuid;
 
-use crate::coordinator::persistence::{
+use crate::coordinator::unified::persistence::{
     get_bytes, get_i16, get_i32, get_nullable_string, get_string, put_bytes, put_nullable_string,
     put_string,
 };

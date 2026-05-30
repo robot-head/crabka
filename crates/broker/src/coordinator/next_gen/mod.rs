@@ -1,12 +1,10 @@
 //! KIP-848 next-gen consumer group protocol coordinator.
 
-pub mod assignor;
-pub mod config;
 pub mod group_actor;
 pub mod group_state;
-pub mod offsets_log;
-pub mod persistence;
-pub mod reconciler;
+
+pub use crate::coordinator::unified::persistence_next_gen as persistence;
+pub use crate::coordinator::unified::{assignor, config, offsets_log, reconciler};
 
 use std::sync::Arc;
 

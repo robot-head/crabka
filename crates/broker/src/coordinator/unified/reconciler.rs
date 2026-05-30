@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use crabka_protocol::primitives::uuid::Uuid;
 
 use super::assignor::{Assignor, MemberSubscription, TopicMetadata};
-use super::group_state::{GroupState, MemberState};
+use crate::coordinator::next_gen::group_state::{GroupState, MemberState};
 
 #[derive(Debug, Clone, Default)]
 pub struct ReconcileInput {

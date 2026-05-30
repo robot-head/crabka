@@ -7,7 +7,10 @@
 pub(crate) mod bootstrap;
 pub(crate) mod group;
 pub mod next_gen;
-pub(crate) mod persistence;
+pub(crate) mod unified;
+pub(crate) mod persistence {
+    pub(crate) use crate::coordinator::unified::persistence::*;
+}
 
 use std::sync::Arc;
 use std::time::Duration;
