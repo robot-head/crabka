@@ -1,0 +1,140 @@
+//! KIP-584 feature framework. A [`Feature`] owns the *versioning facts* of one
+//! cluster feature — supported range, per-release default, downgrade floor,
+//! KIP-1022 dependencies, optional level name. The static [`feature_registry`]
+//! is the single source of truth consumed by `ApiVersions`, `UpdateFeatures`,
+//! `crabka format` bootstrap, and the Raft range guards. Behavioral *gating*
+//! (rejecting RPCs below a level) lives in the broker handlers that read the
+//! finalized level from the image — not here.
+
+use crate::MetadataImage;
+
+/// One versioned cluster feature (KIP-584).
+pub trait Feature: Sync {
+    /// KIP-584 feature name, e.g. `"metadata.version"`.
+    fn name(&self) -> &'static str;
+
+    /// Inclusive `[min, max]` supported level range. Advertised in
+    /// `ApiVersions.supported_features` and accepted by `UpdateFeatures`.
+    fn supported_range(&self) -> (i16, i16);
+
+    /// The level finalized at `crabka format` given the bootstrap
+    /// `metadata.version` level (the resolved `--release-version`). Kafka
+    /// derives every feature's default from the release this way.
+    fn default_level(&self, bootstrap_mv: i16) -> i16;
+
+    /// Lowest level the live image permits finalizing/downgrading to — the
+    /// "unsafe downgrade" floor. Defaults to the supported min (no live-state
+    /// constraint).
+    fn min_required_floor(&self, _image: &MetadataImage) -> i16 {
+        self.supported_range().0
+    }
+
+    /// KIP-1022 dependencies: `(other_feature, min_level)` pairs that must be
+    /// finalized at `>= min_level` before THIS feature may be finalized at
+    /// `level`. Empty by default.
+    fn dependencies(&self, _level: i16) -> &'static [(&'static str, i16)] {
+        &[]
+    }
+
+    /// Optional Kafka level name (e.g. metadata.version's `"3.7-IV4"`).
+    /// `None` for plain integer features.
+    fn level_name(&self, _level: i16) -> Option<&'static str> {
+        None
+    }
+}
+
+/// `metadata.version` (KIP-584 / KIP-778). Range, string table, and the
+/// SCRAM/delegation-token floor are reused from [`crate::metadata_version`].
+pub struct MetadataVersionFeature;
+
+impl Feature for MetadataVersionFeature {
+    fn name(&self) -> &'static str {
+        crate::metadata_version::METADATA_VERSION_FEATURE
+    }
+    fn supported_range(&self) -> (i16, i16) {
+        (
+            crate::metadata_version::METADATA_VERSION_MIN,
+            crate::metadata_version::METADATA_VERSION_MAX,
+        )
+    }
+    fn default_level(&self, bootstrap_mv: i16) -> i16 {
+        // For metadata.version the release string IS the metadata.version, so
+        // the default is the bootstrap level itself, clamped into range.
+        bootstrap_mv.clamp(
+            crate::metadata_version::METADATA_VERSION_MIN,
+            crate::metadata_version::METADATA_VERSION_MAX,
+        )
+    }
+    fn min_required_floor(&self, image: &MetadataImage) -> i16 {
+        image.min_required_metadata_version()
+    }
+    fn level_name(&self, level: i16) -> Option<&'static str> {
+        crate::metadata_version::from_feature_level(level)
+            .map(crate::metadata_version::MetadataVersion::ivn)
+    }
+}
+
+/// All features this broker supports finalizing. Single source of truth.
+#[must_use]
+pub fn feature_registry() -> &'static [&'static dyn Feature] {
+    const REGISTRY: &[&dyn Feature] = &[&MetadataVersionFeature];
+    REGISTRY
+}
+
+/// Look up a registered feature by name.
+#[must_use]
+pub fn feature(name: &str) -> Option<&'static dyn Feature> {
+    feature_registry()
+        .iter()
+        .copied()
+        .find(|f| f.name() == name)
+}
+
+/// True if `level` is within the registered feature's supported range.
+/// `false` for an unknown feature (nothing supports that level).
+#[must_use]
+pub fn is_supported_level(name: &str, level: i16) -> bool {
+    feature(name).is_some_and(|f| {
+        let (min, max) = f.supported_range();
+        (min..=max).contains(&level)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    #[test]
+    fn registry_contains_metadata_version() {
+        let f = feature("metadata.version").expect("registered");
+        assert!(f.supported_range() == (7, 25));
+        assert!(feature("not.a.feature").is_none());
+    }
+
+    #[test]
+    fn metadata_version_default_is_the_bootstrap_level_clamped() {
+        let f = feature("metadata.version").unwrap();
+        assert!(f.default_level(25) == 25);
+        assert!(f.default_level(7) == 7);
+        assert!(f.default_level(99) == 25); // clamped to MAX
+        assert!(f.default_level(1) == 7); // clamped to MIN
+    }
+
+    #[test]
+    fn is_supported_level_checks_range() {
+        assert!(is_supported_level("metadata.version", 7));
+        assert!(is_supported_level("metadata.version", 25));
+        assert!(!is_supported_level("metadata.version", 6));
+        assert!(!is_supported_level("metadata.version", 26));
+        assert!(!is_supported_level("not.a.feature", 1));
+    }
+
+    #[test]
+    fn metadata_version_level_name() {
+        let f = feature("metadata.version").unwrap();
+        assert!(f.level_name(25) == Some("4.0-IV3"));
+        assert!(f.level_name(7) == Some("3.3-IV3"));
+        assert!(f.level_name(99).is_none());
+    }
+}
