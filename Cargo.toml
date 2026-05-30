@@ -27,7 +27,7 @@ jsonpath-rust = "1.0"
 proptest = "1"
 # Expressive test assertions: `assert!(a == b)` / `check!(..)` with
 # captured-expression diagnostics. Used for all test assertions workspace-wide.
-assert2 = "0.3"
+assert2 = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 serde = { version = "1", features = ["derive"] }
