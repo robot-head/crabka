@@ -88,6 +88,39 @@ Crabka pulls clearly ahead is everything around the throughput:
 > earlier write-only reports because both stacks now carry a fully active
 > consumer (previously Kafka's consumer read nothing) on the shared box.
 
+## How low can the JVM go?
+
+The memory gap above is measured against Kafka's default `-Xms1G -Xmx1G`
+— is that just an unfairly fat default? To check, we reran
+`local-1kb-saturate` against Kafka with progressively smaller heaps
+(`-Xmx = -Xms`), same box, same driver. Crabka holds this exact workload
+in **24 MiB**.
+
+| Kafka heap | boots? | producer msgs/s | p99 ack | p99.9 ack | broker RSS | verdict |
+|---|:--:|--:|--:|--:|--:|---|
+| 1024 MiB (default) | ✅ | 8 215 | 0.49 ms | 1.3 ms | 1 031 MiB | competitive |
+| 512 MiB | ✅ | 8 396 | 0.44 ms | 0.9 ms | 723 MiB | competitive |
+| 256 MiB | ✅ | 8 380 | 0.45 ms | 2.5 ms | **489 MiB** | competitive, tail fraying |
+| 224 MiB | ✅ | 8 061 | 0.49 ms | 4.6 ms | 457 MiB | borderline |
+| 192 MiB | ⚠️ | 7 607 | **0.78 ms** | 6.4 ms | 442 MiB | runs, no longer competitive |
+| ≤ 160 MiB | ❌ | — | — | — | — | OOM at startup |
+
+- **Throughput survives down to ~256 MiB heap** (~490 MiB RSS) — Kafka's
+  footprint isn't all default-heap fat; you can quarter the heap with
+  little throughput loss.
+- **Latency degrades before throughput does.** By 224–192 MiB, G1 pauses
+  push p99 ack to ~2× Crabka's and worst-case ack to ~40 ms (Crabka stays
+  ~3 ms), while broker CPU climbs ~20 % on identical work — that extra CPU
+  is GC.
+- **The hard floor is ~176–192 MiB just to boot.** At ≤160 MiB the KRaft
+  broker dies during startup with `java.lang.OutOfMemoryError: Java heap
+  space` in `LogManager` / `MetadataLoader`; it never serves a request.
+- **Even squeezed to its minimum, the JVM is ~18–20× Crabka.** The minimum
+  viable heap (~192–256 MiB) still resides in ~440–490 MiB, because RSS
+  also carries the JVM's non-heap floor — metaspace, code cache, thread
+  stacks, direct buffers — which alone is ~200 MiB, larger than Crabka's
+  entire process. The gap is structural, not a tuning default.
+
 ## Methodology notes
 
 - Crabka's broker is pinned to `RUST_LOG=warn` so per-request logging

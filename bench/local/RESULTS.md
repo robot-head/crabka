@@ -94,6 +94,33 @@ reads back every produced record from **both** brokers:
 
 This is the comparison that was impossible before the interop fixes.
 
+## How low can the JVM go?
+
+The memory gap is measured against Kafka's default `-Xms1G -Xmx1G`. To
+check it isn't just a fat default, we reran `local-1kb-saturate` against
+Kafka with shrinking heaps (`-Xmx = -Xms`), same box, same driver. Crabka
+holds this workload in **24 MiB**.
+
+| Kafka heap | boots? | producer msgs/s | p99 ack | p99.9 ack | broker RSS | verdict |
+|---|:--:|--:|--:|--:|--:|---|
+| 1024 MiB (default) | ✅ | 8 215 | 0.49 ms | 1.3 ms | 1 031 MiB | competitive |
+| 512 MiB | ✅ | 8 396 | 0.44 ms | 0.9 ms | 723 MiB | competitive |
+| 256 MiB | ✅ | 8 380 | 0.45 ms | 2.5 ms | 489 MiB | competitive, tail fraying |
+| 224 MiB | ✅ | 8 061 | 0.49 ms | 4.6 ms | 457 MiB | borderline |
+| 192 MiB | ⚠️ | 7 607 | 0.78 ms | 6.4 ms | 442 MiB | runs, not competitive |
+| ≤ 160 MiB | ❌ | — | — | — | — | OOM at startup |
+
+- Throughput survives to ~256 MiB heap (~490 MiB RSS); tail latency
+  degrades earlier (224–192 MiB: p99 ~2× Crabka, max ~40 ms, +20 % CPU on
+  GC).
+- Hard floor ~176–192 MiB just to boot — at ≤160 MiB the KRaft broker
+  OOMs during startup (`OutOfMemoryError: Java heap space` in
+  `LogManager`/`MetadataLoader`) and never serves a request.
+- Minimum viable JVM (~440–490 MiB RSS) is still ~18–20× Crabka's 24 MiB;
+  the JVM's non-heap floor (metaspace, code cache, stacks, direct
+  buffers) alone (~200 MiB) exceeds Crabka's whole process. The gap is
+  structural.
+
 ## Interop status (crabka *client* vs a real Kafka broker)
 
 The three client-side gaps that earlier runs surfaced are now closed:
