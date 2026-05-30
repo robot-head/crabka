@@ -1,11 +1,16 @@
-//! Per-group tokio actor. Owns `GroupState` for one next-gen consumer
-//! group. Heartbeats are mpsc messages; responses go back via oneshot
-//! channels.
+//! Per-group tokio actor. Owns one unified [`Group`] — either the classic
+//! 5-state machine or the next-gen epoch machine. Next-gen heartbeats are
+//! non-parking mpsc messages with `oneshot` replies; classic
+//! `JoinGroup`/`SyncGroup` parking is re-expressed as a park/wake message
+//! protocol where the actor holds the reply `oneshot::Sender` in a parked
+//! registry and resolves it at the rebalance boundary (the rebalance-deadline
+//! timer, an all-members-joined early-complete, or the leader's `SyncGroup`).
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
@@ -13,18 +18,37 @@ use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeart
 use crabka_protocol::owned::consumer_group_heartbeat_response::{
     Assignment as RespAssignment, ConsumerGroupHeartbeatResponse,
 };
+use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
+use crabka_protocol::owned::join_group_request::JoinGroupRequest;
+use crabka_protocol::owned::leave_group_request::LeaveGroupRequest;
+use crabka_protocol::owned::leave_group_response::MemberResponse;
+use crabka_protocol::owned::sync_group_request::SyncGroupRequest;
 use crabka_protocol::primitives::uuid::Uuid;
 
 use crate::codes;
+use crate::coordinator::{GroupSnapshot, MemberSnapshot};
 
+use super::classic_ops;
+use super::classic_state::{Group as ClassicState, GroupState as ClassicGroupState, OffsetEntry};
 use super::config::NextGenConfig;
 use super::consumer_state::{GroupState, MemberState};
+use super::group::Group;
 use super::offsets_log::OffsetsLog;
 use super::persistence_next_gen::MemberAssignmentState;
 use super::reconciler::{self, ReconcileInput};
 
+/// Which protocol an actor's [`Group`] speaks. Fixed at spawn; exposed on the
+/// handle so the coordinator can route/reject cross-protocol RPCs and filter
+/// admin views without messaging the actor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupKindTag {
+    Classic,
+    Consumer,
+}
+
 #[derive(Debug)]
 pub enum GroupActorMessage {
+    // ── next-gen consumer protocol (non-parking) ──
     Heartbeat {
         request: ConsumerGroupHeartbeatRequest,
         client_host: String,
@@ -38,8 +62,133 @@ pub enum GroupActorMessage {
     Describe {
         reply: oneshot::Sender<DescribeView>,
     },
+
+    // ── classic protocol (parking) ──
+    ClassicJoin {
+        req: JoinGroupRequest,
+        client_host: String,
+        reply: oneshot::Sender<JoinResult>,
+    },
+    ClassicSync {
+        req: SyncGroupRequest,
+        reply: oneshot::Sender<SyncResult>,
+    },
+    ClassicHeartbeat {
+        req: HeartbeatRequest,
+        reply: oneshot::Sender<i16>,
+    },
+    ClassicLeave {
+        req: LeaveGroupRequest,
+        version: i16,
+        reply: oneshot::Sender<Vec<MemberResponse>>,
+    },
+    ClassicValidateCommit {
+        member_id: String,
+        group_instance_id: Option<String>,
+        generation_id: i32,
+        reply: oneshot::Sender<Option<i16>>,
+    },
+    /// Read-only classic snapshot for the admin/offset-delete handlers.
+    ClassicInspect {
+        reply: oneshot::Sender<ClassicView>,
+    },
+
+    // ── committed offsets (protocol-agnostic; on `Group.committed_offsets`) ──
+    UpdateCommitted {
+        entries: Vec<((String, i32), OffsetEntry)>,
+        reply: oneshot::Sender<()>,
+    },
+    FetchCommitted {
+        reply: oneshot::Sender<HashMap<(String, i32), OffsetEntry>>,
+    },
+    RemoveCommitted {
+        keys: Vec<(String, i32)>,
+        reply: oneshot::Sender<()>,
+    },
+
+    // ── bootstrap / lifecycle ──
     Seed(super::GroupSeed),
+    /// Replace this (classic) actor's whole `Group` with replayed state.
+    ClassicSeed(Box<Group>),
     Shutdown(oneshot::Sender<()>),
+}
+
+/// Structured `JoinGroup` result handed back to the handler, which encodes it
+/// for the wire version. Mirrors the fields of `JoinGroupResponse`.
+#[derive(Debug, Default, Clone)]
+pub struct JoinResult {
+    pub error_code: i16,
+    pub generation_id: i32,
+    pub protocol_type: Option<String>,
+    pub protocol_name: Option<String>,
+    pub leader: String,
+    pub member_id: String,
+    pub members: Vec<JoinResultMember>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinResultMember {
+    pub member_id: String,
+    pub group_instance_id: Option<String>,
+    pub metadata: Bytes,
+}
+
+/// Structured `SyncGroup` result handed back to the handler.
+#[derive(Debug, Default, Clone)]
+pub struct SyncResult {
+    pub error_code: i16,
+    pub assignment: Bytes,
+    pub protocol_type: Option<String>,
+    pub protocol_name: Option<String>,
+}
+
+/// Read-only projection of a classic `Group` for the admin / offset-delete
+/// handlers (which need member subscriptions the next-gen `DescribeView`
+/// doesn't carry).
+#[derive(Debug, Clone)]
+pub struct ClassicView {
+    pub group_id: String,
+    pub state: ClassicGroupState,
+    pub protocol_type: Option<String>,
+    pub generation_id: i32,
+    pub members: Vec<ClassicMemberView>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ClassicMemberView {
+    pub member_id: String,
+    pub client_id: String,
+    pub host: String,
+    pub group_instance_id: Option<String>,
+    pub protocol_metadata: Bytes,
+    pub assignment: Option<Bytes>,
+}
+
+impl ClassicView {
+    /// Build the admin `GroupSnapshot` (`ListGroups`/`DescribeGroups`).
+    #[must_use]
+    pub fn snapshot(&self) -> GroupSnapshot {
+        GroupSnapshot {
+            group_id: self.group_id.clone(),
+            state: self.state,
+            protocol_type: self.protocol_type.clone(),
+            generation_id: self.generation_id,
+            members: self
+                .members
+                .iter()
+                .map(|m| MemberSnapshot {
+                    member_id: m.member_id.clone(),
+                    client_id: m.client_id.clone(),
+                    client_host: m.host.clone(),
+                    assignment: m
+                        .assignment
+                        .as_ref()
+                        .map(|b| b.to_vec())
+                        .unwrap_or_default(),
+                })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -64,12 +213,14 @@ pub struct DescribeMember {
 #[derive(Debug)]
 pub struct GroupActorHandle {
     pub tx: mpsc::Sender<GroupActorMessage>,
+    pub kind: GroupKindTag,
     _task: JoinHandle<()>,
 }
 
 impl GroupActorHandle {
     pub fn spawn(
         group_id: String,
+        kind: GroupKindTag,
         config: Arc<NextGenConfig>,
         metadata_provider: Arc<dyn MetadataProvider>,
         offsets_log: Arc<dyn OffsetsLog>,
@@ -78,13 +229,18 @@ impl GroupActorHandle {
         let (tx, rx) = mpsc::channel(64);
         let task = tokio::spawn(actor_loop(
             group_id,
+            kind,
             config,
             metadata_provider,
             offsets_log,
             coordinator,
             rx,
         ));
-        Self { tx, _task: task }
+        Self {
+            tx,
+            kind,
+            _task: task,
+        }
     }
 }
 
@@ -92,41 +248,61 @@ pub trait MetadataProvider: Send + Sync + std::fmt::Debug {
     fn snapshot(&self) -> ReconcileInput;
 }
 
+/// Parked classic-protocol waiters for one group.
+#[derive(Default)]
+struct ParkedWaiters {
+    /// Parked `JoinGroup` handlers, keyed by `member_id` → reply sender.
+    joiners: HashMap<String, oneshot::Sender<JoinResult>>,
+    /// Parked `SyncGroup` followers, keyed by `member_id` → reply sender.
+    followers: HashMap<String, oneshot::Sender<SyncResult>>,
+}
+
+#[allow(clippy::too_many_lines)] // one match arm per message variant; splitting hurts readability
 async fn actor_loop(
     group_id: String,
+    kind: GroupKindTag,
     config: Arc<NextGenConfig>,
     metadata: Arc<dyn MetadataProvider>,
     offsets_log: Arc<dyn OffsetsLog>,
     coordinator: Arc<super::GroupCoordinator>,
     mut rx: mpsc::Receiver<GroupActorMessage>,
 ) {
-    let mut state = GroupState::new(group_id);
-    let mut tick = tokio::time::interval(config.heartbeat_interval);
+    let mut group = match kind {
+        GroupKindTag::Classic => Group::new_classic(group_id),
+        GroupKindTag::Consumer => Group::new_consumer(group_id),
+    };
+    let mut parked = ParkedWaiters::default();
+    // Classic groups poll once a second for session expiry (matching the old
+    // `GroupManager` ticker); consumer groups tick on the heartbeat interval.
+    let tick_period = match kind {
+        GroupKindTag::Classic => Duration::from_secs(1),
+        GroupKindTag::Consumer => config.heartbeat_interval,
+    };
+    let mut tick = tokio::time::interval(tick_period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
+        let deadline = classic_deadline(&group);
         tokio::select! {
             msg = rx.recv() => {
                 let Some(msg) = msg else { break };
                 match msg {
+                    // ── next-gen ──
                     GroupActorMessage::Heartbeat { request, client_host, reply } => {
+                        let Some(state) = group.as_consumer_mut() else {
+                            let _ = reply.send(ConsumerGroupHeartbeatResponse {
+                                error_code: codes::GROUP_ID_NOT_FOUND,
+                                ..Default::default()
+                            });
+                            continue;
+                        };
                         match handle_heartbeat(
-                            &mut state,
-                            &config,
-                            &*metadata,
-                            &*offsets_log,
-                            &coordinator,
-                            &request,
-                            &client_host,
-                        )
-                        .await
-                        {
-                            Ok(resp) => {
-                                let _ = reply.send(resp);
-                            }
+                            state, &config, &*metadata, &*offsets_log, &coordinator,
+                            &request, &client_host,
+                        ).await {
+                            Ok(resp) => { let _ = reply.send(resp); }
                             Err(e) => {
                                 tracing::warn!(
-                                    group_id = %state.group_id,
-                                    error = %e,
+                                    group_id = %group.group_id, error = %e,
                                     "next-gen actor exiting after log-write failure",
                                 );
                                 let _ = reply.send(ConsumerGroupHeartbeatResponse {
@@ -138,7 +314,7 @@ async fn actor_loop(
                         }
                     }
                     GroupActorMessage::OffsetValidate { member_id, member_epoch, reply } => {
-                        let result = match state.members.get(&member_id) {
+                        let result = match group.as_consumer().and_then(|s| s.members.get(&member_id)) {
                             None => Err(codes::UNKNOWN_MEMBER_ID),
                             Some(m) if member_epoch < m.member_epoch => Err(codes::STALE_MEMBER_EPOCH),
                             Some(m) if member_epoch > m.member_epoch => Err(codes::FENCED_MEMBER_EPOCH),
@@ -147,10 +323,114 @@ async fn actor_loop(
                         let _ = reply.send(result);
                     }
                     GroupActorMessage::Describe { reply } => {
-                        let _ = reply.send(build_describe(&state));
+                        if let Some(state) = group.as_consumer() {
+                            let _ = reply.send(build_describe(state));
+                        }
                     }
+
+                    // ── classic ──
+                    GroupActorMessage::ClassicJoin { req, client_host, reply } => {
+                        let Some(state) = group.as_classic_mut() else {
+                            let _ = reply.send(JoinResult {
+                                error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
+                                member_id: req.member_id,
+                                ..JoinResult::default()
+                            });
+                            continue;
+                        };
+                        match classic_ops::handle_join(state, &req, &client_host) {
+                            classic_ops::JoinAction::Immediate(result) => {
+                                let _ = reply.send(result);
+                            }
+                            classic_ops::JoinAction::Park => {
+                                parked.joiners.insert(req.member_id, reply);
+                            }
+                            classic_ops::JoinAction::CompleteNow => {
+                                parked.joiners.insert(req.member_id, reply);
+                                complete_classic_rebalance(state, &mut parked.joiners);
+                            }
+                        }
+                    }
+                    GroupActorMessage::ClassicSync { req, reply } => {
+                        let Some(state) = group.as_classic_mut() else {
+                            let _ = reply.send(SyncResult {
+                                error_code: codes::UNKNOWN_MEMBER_ID,
+                                ..SyncResult::default()
+                            });
+                            continue;
+                        };
+                        match classic_ops::handle_sync(state, &req) {
+                            classic_ops::SyncAction::Immediate(result) => {
+                                let _ = reply.send(result);
+                            }
+                            classic_ops::SyncAction::Park => {
+                                parked.followers.insert(req.member_id, reply);
+                            }
+                            classic_ops::SyncAction::LeaderInstalled(result) => {
+                                let _ = reply.send(result);
+                                drain_parked_followers(state, &mut parked.followers);
+                            }
+                        }
+                    }
+                    GroupActorMessage::ClassicHeartbeat { req, reply } => {
+                        let code = group
+                            .as_classic_mut()
+                            .map_or(codes::UNKNOWN_MEMBER_ID, |s| classic_ops::handle_heartbeat(s, &req));
+                        let _ = reply.send(code);
+                    }
+                    GroupActorMessage::ClassicLeave { req, version, reply } => {
+                        if let Some(state) = group.as_classic_mut() {
+                            let responses = classic_ops::handle_leave(state, &req, version);
+                            let _ = reply.send(responses);
+                            // A leave can make every survivor "joined this round"
+                            // true; complete the rebalance early if so (mirrors the
+                            // old `join_complete.notify_waiters()`).
+                            maybe_complete_classic(state, &mut parked.joiners);
+                        } else {
+                            let _ = reply.send(Vec::new());
+                        }
+                    }
+                    GroupActorMessage::ClassicValidateCommit {
+                        member_id, group_instance_id, generation_id, reply,
+                    } => {
+                        let code = group.as_classic().and_then(|s| {
+                            classic_ops::validate_commit(
+                                s, &member_id, group_instance_id.as_deref(), generation_id,
+                            )
+                        });
+                        let _ = reply.send(code);
+                    }
+                    GroupActorMessage::ClassicInspect { reply } => {
+                        if let Some(state) = group.as_classic() {
+                            let _ = reply.send(build_classic_view(state));
+                        }
+                    }
+
+                    // ── committed offsets ──
+                    GroupActorMessage::UpdateCommitted { entries, reply } => {
+                        for (k, v) in entries {
+                            group.committed_offsets.insert(k, v);
+                        }
+                        let _ = reply.send(());
+                    }
+                    GroupActorMessage::FetchCommitted { reply } => {
+                        let _ = reply.send(group.committed_offsets.clone());
+                    }
+                    GroupActorMessage::RemoveCommitted { keys, reply } => {
+                        for k in &keys {
+                            group.committed_offsets.remove(k);
+                        }
+                        let _ = reply.send(());
+                    }
+
+                    // ── lifecycle ──
                     GroupActorMessage::Seed(seed) => {
-                        apply_seed(&mut state, seed);
+                        if let Some(state) = group.as_consumer_mut() {
+                            apply_seed(state, seed);
+                        }
+                    }
+                    GroupActorMessage::ClassicSeed(seeded) => {
+                        group = *seeded;
                     }
                     GroupActorMessage::Shutdown(reply) => {
                         let _ = reply.send(());
@@ -159,11 +439,126 @@ async fn actor_loop(
                 }
             }
             _ = tick.tick() => {
-                if handle_session_tick(&mut state, &config, &*metadata, &*offsets_log, &coordinator).await.is_err() {
-                    break;
+                match kind {
+                    GroupKindTag::Consumer => {
+                        let state = group.as_consumer_mut().expect("consumer kind");
+                        if handle_session_tick(state, &config, &*metadata, &*offsets_log, &coordinator)
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    GroupKindTag::Classic => {
+                        let gid = group.group_id.clone();
+                        let state = group.as_classic_mut().expect("classic kind");
+                        let dropped = state.expire_dead_members(Instant::now());
+                        if !dropped.is_empty() {
+                            tracing::info!(
+                                group = %gid, dropped = ?dropped,
+                                "expired members; waking joiners",
+                            );
+                            maybe_complete_classic(state, &mut parked.joiners);
+                        }
+                    }
+                }
+            }
+            () = opt_sleep(deadline) => {
+                // Classic rebalance deadline fired: complete with whoever is here.
+                if let Some(state) = group.as_classic_mut() {
+                    complete_classic_rebalance(state, &mut parked.joiners);
                 }
             }
         }
+    }
+}
+
+/// The classic rebalance-completion deadline, if a rebalance is open.
+fn classic_deadline(group: &Group) -> Option<Instant> {
+    group.as_classic().and_then(|s| s.rebalance_deadline)
+}
+
+/// A future that resolves at `deadline`, or never if `None`.
+async fn opt_sleep(deadline: Option<Instant>) {
+    match deadline {
+        Some(d) => tokio::time::sleep_until(d.into()).await,
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// Run the rebalance vote and resolve every parked joiner. Mirrors the old
+/// `join_group.rs` block 5 + `notify_waiters()`.
+fn complete_classic_rebalance(
+    state: &mut ClassicState,
+    joiners: &mut HashMap<String, oneshot::Sender<JoinResult>>,
+) {
+    let inconsistent = classic_ops::try_complete(state).is_err();
+    for (member_id, sender) in joiners.drain() {
+        let result = if inconsistent {
+            JoinResult {
+                error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
+                member_id: member_id.clone(),
+                protocol_type: state.protocol_type.clone(),
+                ..JoinResult::default()
+            }
+        } else {
+            classic_ops::build_join_result(state, &member_id)
+        };
+        let _ = sender.send(result);
+    }
+}
+
+/// Complete the rebalance early iff every still-live member has joined this
+/// round and the group has rebalanced before (mirrors `wake_other_joiners`).
+fn maybe_complete_classic(
+    state: &mut ClassicState,
+    joiners: &mut HashMap<String, oneshot::Sender<JoinResult>>,
+) {
+    let should = state.generation_id > 0
+        && matches!(state.state, ClassicGroupState::PreparingRebalance)
+        && state.all_members_joined_this_round();
+    if should {
+        complete_classic_rebalance(state, joiners);
+    }
+}
+
+/// Deliver each parked follower its installed assignment (post leader-sync).
+fn drain_parked_followers(
+    state: &ClassicState,
+    followers: &mut HashMap<String, oneshot::Sender<SyncResult>>,
+) {
+    let protocol_type = state.protocol_type.clone();
+    let protocol_name = state.protocol_name.clone();
+    for (member_id, sender) in followers.drain() {
+        let result = classic_ops::read_sync_result(
+            state,
+            &member_id,
+            protocol_type.clone(),
+            protocol_name.clone(),
+        );
+        let _ = sender.send(result);
+    }
+}
+
+/// Build the read-only classic view for the admin / offset-delete handlers.
+fn build_classic_view(state: &ClassicState) -> ClassicView {
+    ClassicView {
+        group_id: state.group_id.clone(),
+        state: state.state,
+        protocol_type: state.protocol_type.clone(),
+        generation_id: state.generation_id,
+        members: state
+            .members
+            .values()
+            .map(|m| ClassicMemberView {
+                member_id: m.member_id.clone(),
+                client_id: m.client_id.clone(),
+                host: m.host.clone(),
+                group_instance_id: m.group_instance_id.clone(),
+                protocol_metadata: m.protocol_metadata.clone(),
+                assignment: m.assignment.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -240,6 +635,7 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             assigned_partitions: HashMap::new(),
             partitions_pending_revocation: HashMap::new(),
             last_seen: Instant::now(),
+            classic: None,
         });
     }
     for (mid, cur) in seed.current_per_member {
@@ -485,6 +881,7 @@ fn build_member(
         assigned_partitions: HashMap::new(),
         partitions_pending_revocation: HashMap::new(),
         last_seen: now,
+        classic: None,
     }
 }
 
@@ -578,7 +975,6 @@ fn build_describe(state: &GroupState) -> DescribeView {
 // encodes them as a single RecordBatch ready for OffsetsLog::append.
 // ---------------------------------------------------------------------------
 
-use bytes::Bytes;
 use crabka_protocol::records::{Record, RecordBatch};
 
 use super::persistence_next_gen::{
@@ -889,7 +1285,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn first_join_emits_one_batch() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create("g");
+        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
@@ -921,7 +1317,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn first_join_adopts_client_member_id() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create("g");
+        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
@@ -957,7 +1353,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn known_member_id_epoch_zero_is_stale() {
         let (coord, _log) = make_coordinator();
-        let handle = coord.get_or_create("g");
+        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
         // First join with a client id, epoch 0 → succeeds, epoch advances.
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -1003,7 +1399,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unchanged_heartbeat_emits_no_batch() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create("g");
+        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
@@ -1053,7 +1449,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn leave_emits_tombstone_batch() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create("g");
+        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
@@ -1102,7 +1498,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actor_exits_on_append_error() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create("g");
+        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
         log.fail_next
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1132,7 +1528,7 @@ mod tests {
         );
 
         // get_or_create should respawn a fresh actor.
-        let fresh = coord.get_or_create("g");
+        let fresh = coord.get_or_create_consumer("g").expect("consumer actor");
         assert!(!fresh.tx.is_closed());
     }
 
@@ -1293,7 +1689,7 @@ mod tests {
 
         let log = Arc::new(InMemoryOffsetsLog::default());
         let coord = Arc::new(GroupCoordinator::new(config, empty_metadata(), log));
-        let handle = coord.get_or_create("g");
+        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -1319,5 +1715,197 @@ mod tests {
             calls.load(Ordering::SeqCst) >= 1,
             "custom assignor must be invoked at least once",
         );
+    }
+
+    // ── classic actor arms + coordinator admin surface (64d-B) ──────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_admin_surface_and_immediate_join() {
+        use crabka_protocol::owned::join_group_request::JoinGroupRequest;
+        let (coord, _log) = make_coordinator();
+        let handle = coord.get_or_create_classic("g").expect("classic actor");
+
+        // Empty member_id → immediate MEMBER_ID_REQUIRED (no member added).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicJoin {
+                req: JoinGroupRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    protocol_type: "consumer".into(),
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let r = rx.await.unwrap();
+        assert!(r.error_code == codes::MEMBER_ID_REQUIRED);
+
+        // ClassicInspect → empty view.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicInspect { reply: tx })
+            .await
+            .unwrap();
+        let view = rx.await.unwrap();
+        assert!(view.group_id == "g" && view.members.is_empty());
+
+        // Admin surface lists/describes the classic group, then deletes it (empty).
+        let listed = coord.list_groups().await;
+        assert!(listed.iter().any(|s| s.group_id == "g"));
+        assert!(coord.describe_group("g").await.is_some());
+        assert!(coord.delete_group("g").await.is_ok());
+        assert!(coord.describe_group("g").await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_offset_validate_heartbeat_arms() {
+        use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
+
+        use super::super::classic_state::OffsetEntry;
+        let (coord, _log) = make_coordinator();
+        let handle = coord.get_or_create_classic("g").expect("classic actor");
+
+        // UpdateCommitted then FetchCommitted round-trips on the kind-agnostic Group.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::UpdateCommitted {
+                entries: vec![(
+                    ("t".to_string(), 0),
+                    OffsetEntry {
+                        offset: 42,
+                        leader_epoch: 1,
+                        metadata: String::new(),
+                        commit_timestamp_ms: 0,
+                    },
+                )],
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::FetchCommitted { reply: tx })
+            .await
+            .unwrap();
+        let committed = rx.await.unwrap();
+        assert!(committed.get(&("t".to_string(), 0)).unwrap().offset == 42);
+
+        // Classic offset-commit validate: a simple consumer (no member/instance)
+        // is allowed.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicValidateCommit {
+                member_id: String::new(),
+                group_instance_id: None,
+                generation_id: -1,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().is_none());
+
+        // Classic Heartbeat for an unknown member on an empty group.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicHeartbeat {
+                req: HeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: "ghost".into(),
+                    generation_id: 0,
+                    ..Default::default()
+                },
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap() == codes::UNKNOWN_MEMBER_ID);
+
+        // RemoveCommitted clears the entry.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::RemoveCommitted {
+                keys: vec![("t".to_string(), 0)],
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::FetchCommitted { reply: tx })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn classic_seed_hydrates_group_and_blocks_delete_when_nonempty() {
+        use std::time::Duration;
+
+        use super::super::classic_state::{Group as ClassicState, Member, OffsetEntry};
+        use super::super::group::{Group, GroupKind};
+        let (coord, _log) = make_coordinator();
+
+        let mut cs = ClassicState::new("g");
+        cs.add_member(Member::new(
+            "m1",
+            "client",
+            "127.0.0.1",
+            Duration::from_secs(30),
+            Duration::from_mins(1),
+            vec![("range".into(), bytes::Bytes::new())],
+        ));
+        let group = Box::new(Group {
+            group_id: "g".into(),
+            kind: GroupKind::Classic(cs),
+            committed_offsets: [(
+                ("t".to_string(), 0),
+                OffsetEntry {
+                    offset: 7,
+                    leader_epoch: 0,
+                    metadata: String::new(),
+                    commit_timestamp_ms: 0,
+                },
+            )]
+            .into(),
+        });
+        coord.seed_classic("g", group);
+
+        // Seeded committed offsets and member are visible.
+        let handle = coord.find("g").expect("seeded actor");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::FetchCommitted { reply: tx })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().get(&("t".to_string(), 0)).unwrap().offset == 7);
+        // Non-empty group cannot be deleted.
+        assert!(
+            coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::NonEmpty)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cross_protocol_get_or_create_returns_none() {
+        let (coord, _log) = make_coordinator();
+        // Consumer owns "c" → a classic get-or-create is refused.
+        let _ = coord.get_or_create_consumer("c").expect("consumer actor");
+        assert!(coord.get_or_create_classic("c").is_none());
+        // Classic owns "k" → a consumer get-or-create is refused.
+        let _ = coord.get_or_create_classic("k").expect("classic actor");
+        assert!(coord.get_or_create_consumer("k").is_none());
     }
 }

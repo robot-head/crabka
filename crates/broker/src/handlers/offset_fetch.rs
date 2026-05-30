@@ -6,6 +6,7 @@
 //! serve the legacy single-group shape.
 
 use bytes::{Bytes, BytesMut};
+use tokio::sync::oneshot;
 
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::offset_fetch_request::OffsetFetchRequest;
@@ -17,6 +18,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
+use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
 #[allow(clippy::too_many_lines)] // ACL preamble (group + per-topic) + fetch-all vs named-topic branches; splitting hurts readability
@@ -55,8 +57,30 @@ pub(crate) async fn handle(
         }
     }
 
-    let handle = broker.group_manager.get_or_create(&req.group_id);
-    let g = handle.state.lock().await;
+    // Fetch the group's committed offsets from its actor (a classic actor is
+    // created for an unknown id, matching the old get-or-create behavior).
+    let committed = {
+        let handle = broker.group_coordinator.find(&req.group_id).or_else(|| {
+            broker
+                .group_coordinator
+                .get_or_create_classic(&req.group_id)
+        });
+        match handle {
+            Some(h) => {
+                let (tx, rx) = oneshot::channel();
+                if h.tx
+                    .send(GroupActorMessage::FetchCommitted { reply: tx })
+                    .await
+                    .is_ok()
+                {
+                    rx.await.unwrap_or_default()
+                } else {
+                    std::collections::HashMap::new()
+                }
+            }
+            None => std::collections::HashMap::new(),
+        }
+    };
 
     // A `None` `topics` field (v ≥ 2) is the "fetch all" sentinel:
     // return every committed offset stored for this group.
@@ -64,7 +88,7 @@ pub(crate) async fn handle(
         // Aggregate all committed offsets grouped by topic name.
         let mut by_topic: std::collections::HashMap<String, Vec<OffsetFetchResponsePartition>> =
             std::collections::HashMap::new();
-        for ((topic, pid), entry) in &g.committed_offsets {
+        for ((topic, pid), entry) in &committed {
             by_topic
                 .entry(topic.clone())
                 .or_default()
@@ -177,26 +201,24 @@ pub(crate) async fn handle(
                     let partitions = t
                         .partition_indexes
                         .iter()
-                        .map(
-                            |&pid| match g.committed_offsets.get(&(t.name.clone(), pid)) {
-                                Some(entry) => OffsetFetchResponsePartition {
-                                    partition_index: pid,
-                                    committed_offset: entry.offset,
-                                    committed_leader_epoch: entry.leader_epoch,
-                                    metadata: Some(entry.metadata.clone()),
-                                    error_code: codes::NONE,
-                                    ..Default::default()
-                                },
-                                None => OffsetFetchResponsePartition {
-                                    partition_index: pid,
-                                    committed_offset: -1,
-                                    committed_leader_epoch: -1,
-                                    metadata: None,
-                                    error_code: codes::NONE,
-                                    ..Default::default()
-                                },
+                        .map(|&pid| match committed.get(&(t.name.clone(), pid)) {
+                            Some(entry) => OffsetFetchResponsePartition {
+                                partition_index: pid,
+                                committed_offset: entry.offset,
+                                committed_leader_epoch: entry.leader_epoch,
+                                metadata: Some(entry.metadata.clone()),
+                                error_code: codes::NONE,
+                                ..Default::default()
                             },
-                        )
+                            None => OffsetFetchResponsePartition {
+                                partition_index: pid,
+                                committed_offset: -1,
+                                committed_leader_epoch: -1,
+                                metadata: None,
+                                error_code: codes::NONE,
+                                ..Default::default()
+                            },
+                        })
                         .collect();
                     OffsetFetchResponseTopic {
                         name: t.name.clone(),
