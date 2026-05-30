@@ -1,6 +1,7 @@
 pub mod api_key_enum;
 pub mod api_key_enum_quote;
 pub mod borrowed;
+pub mod borrowed_quote;
 pub mod common;
 pub mod default_json;
 pub mod differential_table;
