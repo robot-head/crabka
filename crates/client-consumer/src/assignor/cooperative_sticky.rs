@@ -253,8 +253,18 @@ fn constrained_assign(
                 break;
             }
         }
+        // Invariant: per-member targets sum to `total`, and Step A only ever
+        // marks partitions of `all_partitions` as `taken` (each at most once,
+        // since `prepopulate_current_assignments` filters stale ownership and
+        // resolves conflicts). So the remaining capacity Σ(target − kept)
+        // equals |unassigned|, and because the inner loop scans every member,
+        // any leftover capacity is always found. A failure to place means the
+        // target arithmetic or Step-A bookkeeping has regressed.
+        debug_assert!(
+            placed,
+            "constrained_assign: unassigned partition found no slot despite Σtargets == total"
+        );
         if !placed {
-            // FIXME: this is unreachable when targets sum to total; sanity.
             break;
         }
     }
