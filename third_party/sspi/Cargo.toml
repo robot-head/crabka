@@ -271,7 +271,7 @@ version = "0.5"
 version = "=5.0.0-pre.6"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.ed25519-dalek]
-version = "=3.0.0-pre.6"
+version = "=3.0.0-rc.0"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.ff]
 version = "=0.14.0-pre.0"
