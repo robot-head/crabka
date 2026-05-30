@@ -14,7 +14,6 @@ use tokio_util::sync::CancellationToken;
 use crabka_client_core::Client;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
 use crabka_protocol::owned::join_group_response::JoinGroupResponse;
-use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
@@ -413,35 +412,22 @@ impl Consumer {
         self.assigned.lock().await.clone()
     }
 
-    /// Stop the coordinator task and best-effort `LeaveGroup` so the broker
-    /// evicts this member immediately rather than after `session_timeout`.
+    /// Stop the coordinator task so the broker evicts this member promptly.
     ///
-    /// We cancel + join the coordinator first (now prompt — its in-tick RPCs
-    /// race the shutdown token) so the connection is idle, then send the
-    /// `LeaveGroup` ourselves. The send is best-effort: a failure just means
-    /// the broker falls back to session-timeout eviction, which is harmless
-    /// on close. Mirrors the Java client, which leaves the group on close for
-    /// dynamic members.
+    /// The coordinator itself sends a best-effort `LeaveGroup` as the last
+    /// thing it does on shutdown (see [`crate::coordinator::run`]), using its
+    /// *live* `member_id`. That id can differ from the one captured at build
+    /// time — a from-scratch rejoin (`UNKNOWN_MEMBER_ID`) replaces it — so the
+    /// leave must come from the coordinator, which owns the current value;
+    /// sending it here with `self.member_id` would silently leave a stale id
+    /// and orphan the real member until its session expires. Cancel + join is
+    /// prompt because the coordinator races its in-tick RPCs against the
+    /// shutdown token.
     pub async fn close(mut self) -> Result<(), ConsumerError> {
         self.coordinator_shutdown.cancel();
         if let Some(h) = self.coordinator_handle.take() {
             let _ = h.await;
         }
-        // `member_id` is populated for both the v0–v2 (top-level) and v3+
-        // (`members` array) wire shapes so the negotiated version picks up
-        // whichever it serializes.
-        let _ = self
-            .client
-            .send(LeaveGroupRequest {
-                group_id: self.group_id.clone(),
-                member_id: self.member_id.clone(),
-                members: vec![MemberIdentity {
-                    member_id: self.member_id.clone(),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .await;
         Ok(())
     }
 }
