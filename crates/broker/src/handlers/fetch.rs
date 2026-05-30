@@ -199,24 +199,18 @@ pub(crate) async fn handle(
     // after a long-poll wake without re-decoding the request.
     let mut pending: Vec<PendingRead> = Vec::new();
     for topic in &effective_topics {
-        // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
-        // we look it up. The client populates whichever the negotiated
-        // version requires.
-        let topic_name = if topic.topic.is_empty() {
-            image
-                .topics()
-                .find(|t| t.topic_id.into_bytes() == topic.topic_id.0)
-                .map_or_else(String::new, |t| t.name.clone())
-        } else {
-            topic.topic.clone()
-        };
-        let topic_id = if topic.topic_id == WireUuid::ZERO {
-            image
-                .topic(&topic_name)
-                .map_or(WireUuid::ZERO, |t| WireUuid(t.topic_id.into_bytes()))
-        } else {
-            topic.topic_id
-        };
+        // KIP-516 strict resolution. v ≤ 12 sends the name (id zero); v ≥ 13
+        // sends only topic_id. An explicit, unknown id ⇒ every partition row
+        // gets UNKNOWN_TOPIC_ID. A name-only miss keeps the legacy
+        // UNKNOWN_TOPIC_OR_PARTITION via the partition lookup below.
+        let (topic_name, topic_id, topic_id_error) =
+            match crate::topic_resolve::resolve(&image, &topic.topic, topic.topic_id) {
+                Ok(rec) => (rec.name.clone(), WireUuid(rec.topic_id.into_bytes()), None),
+                Err(codes::UNKNOWN_TOPIC_OR_PARTITION) => {
+                    (topic.topic.clone(), topic.topic_id, None)
+                }
+                Err(code) => (topic.topic.clone(), topic.topic_id, Some(code)),
+            };
 
         // If the topic was denied by the ACL preamble,
         // every partition row gets TOPIC_AUTHORIZATION_FAILED and
@@ -242,6 +236,23 @@ pub(crate) async fn handle(
                 out.error_code = codes::TOPIC_AUTHORIZATION_FAILED;
                 // Records stays `None` — the codegen encodes this as
                 // an empty/null record buffer.
+                pending.push(PendingRead {
+                    topic_name: topic_name.clone(),
+                    topic_id,
+                    partition_index: idx,
+                    fetch_offset,
+                    max_bytes,
+                    read_committed,
+                    is_follower_fetch,
+                    partition: None,
+                    out,
+                    cpu_micros: 0,
+                });
+                continue;
+            }
+
+            if let Some(code) = topic_id_error {
+                out.error_code = code;
                 pending.push(PendingRead {
                     topic_name: topic_name.clone(),
                     topic_id,
