@@ -1,10 +1,12 @@
 pub mod api_key_enum;
+pub mod api_key_enum_quote;
 pub mod borrowed;
 pub mod common;
 pub mod default_json;
 pub mod differential_table;
 pub mod mod_rs;
 pub mod owned;
+pub mod owned_quote;
 pub mod protocol_request;
 pub mod wrappers;
 pub use crate::emit::owned::EmitError;
