@@ -1,9 +1,64 @@
 //! Static broker config for the KIP-848 next-gen consumer group protocol.
 
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::assignor::{Assignor, RangeAssignor, UniformAssignor};
+
+/// `group.consumer.migration.policy` — governs classic ↔ next-gen consumer
+/// group conversion. Default `Bidirectional`, matching Apache Kafka 4.0
+/// (verified empirically against `apache/kafka:4.0.0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConsumerGroupMigrationPolicy {
+    /// No conversion in either direction.
+    Disabled,
+    /// Classic → consumer only.
+    Upgrade,
+    /// Consumer → classic only.
+    Downgrade,
+    /// Both upgrade and downgrade are enabled.
+    #[default]
+    Bidirectional,
+}
+
+impl ConsumerGroupMigrationPolicy {
+    /// `true` if a classic group may be upgraded to a consumer group.
+    #[must_use]
+    pub fn allows_upgrade(self) -> bool {
+        matches!(self, Self::Upgrade | Self::Bidirectional)
+    }
+
+    /// `true` if a consumer group may be downgraded to a classic group.
+    #[must_use]
+    pub fn allows_downgrade(self) -> bool {
+        matches!(self, Self::Downgrade | Self::Bidirectional)
+    }
+
+    /// The Kafka config string for this policy.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Upgrade => "upgrade",
+            Self::Downgrade => "downgrade",
+            Self::Bidirectional => "bidirectional",
+        }
+    }
+}
+
+impl FromStr for ConsumerGroupMigrationPolicy {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_ascii_lowercase().as_str() {
+            "disabled" => Ok(Self::Disabled),
+            "upgrade" => Ok(Self::Upgrade),
+            "downgrade" => Ok(Self::Downgrade),
+            "bidirectional" => Ok(Self::Bidirectional),
+            other => Err(format!("invalid group.consumer.migration.policy: {other}")),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NextGenConfig {
@@ -22,6 +77,9 @@ pub struct NextGenConfig {
     /// `register_assignor` before `Broker::start`.
     pub assignors: Vec<Arc<dyn Assignor>>,
     pub max_size: usize,
+    /// `group.consumer.migration.policy` — governs classic ↔ next-gen
+    /// conversion. Consulted by the conversion triggers (Slices 64d-D/E).
+    pub migration_policy: ConsumerGroupMigrationPolicy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +109,7 @@ impl Default for NextGenConfig {
             max_heartbeat_interval: Duration::from_secs(15),
             assignors: vec![Arc::new(UniformAssignor), Arc::new(RangeAssignor)],
             max_size: 200,
+            migration_policy: ConsumerGroupMigrationPolicy::default(),
         }
     }
 }
@@ -154,5 +213,40 @@ mod tests {
         for name in ["uniform", "range", "y", "ghost"] {
             assert!(cfg.assignor_enabled(name) == cfg.find_assignor(name).is_some());
         }
+    }
+
+    #[test]
+    fn migration_policy_default_is_bidirectional() {
+        // Matches Apache Kafka 4.0 (verified empirically).
+        assert!(
+            NextGenConfig::default().migration_policy
+                == ConsumerGroupMigrationPolicy::Bidirectional
+        );
+    }
+
+    #[test]
+    fn migration_policy_from_str_round_trips_all_names() {
+        use ConsumerGroupMigrationPolicy as P;
+        for p in [P::Disabled, P::Upgrade, P::Downgrade, P::Bidirectional] {
+            assert!(p.as_str().parse::<P>().unwrap() == p);
+        }
+        // Case-insensitive.
+        assert!("BiDirectional".parse::<P>().unwrap() == P::Bidirectional);
+        assert!("UPGRADE".parse::<P>().unwrap() == P::Upgrade);
+    }
+
+    #[test]
+    fn migration_policy_from_str_rejects_junk() {
+        assert!("sideways".parse::<ConsumerGroupMigrationPolicy>().is_err());
+        assert!("".parse::<ConsumerGroupMigrationPolicy>().is_err());
+    }
+
+    #[test]
+    fn migration_policy_direction_truth_table() {
+        use ConsumerGroupMigrationPolicy as P;
+        assert!(!P::Disabled.allows_upgrade() && !P::Disabled.allows_downgrade());
+        assert!(P::Upgrade.allows_upgrade() && !P::Upgrade.allows_downgrade());
+        assert!(!P::Downgrade.allows_upgrade() && P::Downgrade.allows_downgrade());
+        assert!(P::Bidirectional.allows_upgrade() && P::Bidirectional.allows_downgrade());
     }
 }

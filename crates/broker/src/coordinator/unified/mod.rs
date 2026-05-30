@@ -11,6 +11,7 @@ pub(crate) mod classic_state;
 pub mod config;
 pub(crate) mod consumer_state;
 pub(crate) mod group;
+pub(crate) mod migration;
 pub mod offsets_log;
 pub(crate) mod persistence;
 pub mod persistence_next_gen;
