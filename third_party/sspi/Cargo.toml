@@ -296,7 +296,7 @@ version = "=0.14.0-rc.9"
 version = "=0.8.0-rc.4"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.pkcs8]
-version = "=0.11.0-rc.11"
+version = "=0.11.0"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.primefield]
 version = "=0.14.0-rc.9"
