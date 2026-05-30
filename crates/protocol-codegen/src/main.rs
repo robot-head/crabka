@@ -266,7 +266,7 @@ fn run(
 
     // When namespaced, write the namespace-level mod.rs declaring the two flavor mods.
     if let Some(_ns) = namespace {
-        let body = "pub mod owned;\npub mod borrowed;\n";
+        let body = "pub mod borrowed;\npub mod owned;\n";
         std::fs::write(protocol_src.join("mod.rs"), body)?;
     }
 
