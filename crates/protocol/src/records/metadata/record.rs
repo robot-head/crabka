@@ -37,25 +37,27 @@ use crate::{Decode, Encode, ProtocolError};
 /// A single `KRaft` metadata record (the value of one Kafka `Record`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum KraftMetadataRecord {
-    RegisterBroker(RegisterBrokerRecord),         // apiKey 0
-    Topic(TopicRecord),                           // apiKey 1
-    Partition(PartitionRecord),                   // apiKey 2
-    RemoveTopic(RemoveTopicRecord),               // apiKey 3
-    BeginTransaction(BeginTransactionRecord),     // apiKey 4
-    EndTransaction(EndTransactionRecord),         // apiKey 5
-    NoOp(NoOpRecord),                             // apiKey 6
-    RegisterController(RegisterControllerRecord), // apiKey 7
-    BrokerRegistrationChange(BrokerRegistrationChangeRecord), // apiKey 8
-    FeatureLevel(FeatureLevelRecord),             // apiKey 12
-    UnregisterBroker(UnregisterBrokerRecord),     // apiKey 1
-    Config(ConfigRecord),                         // apiKey 4
-    DelegationToken(DelegationTokenRecord),       // apiKey 10
+    // apiKeys are Kafka's real (non-sequential) metadata-record keys; `api_key()`
+    // is the authoritative mapping and these comments mirror it.
+    RegisterBroker(RegisterBrokerRecord),           // apiKey 0
+    UnregisterBroker(UnregisterBrokerRecord),       // apiKey 1
+    Topic(TopicRecord),                             // apiKey 2
+    Partition(PartitionRecord),                     // apiKey 3
+    Config(ConfigRecord),                           // apiKey 4
+    RemoveTopic(RemoveTopicRecord),                 // apiKey 9
+    DelegationToken(DelegationTokenRecord),         // apiKey 10
     UserScramCredential(UserScramCredentialRecord), // apiKey 11
-    ClientQuota(ClientQuotaRecord),               // apiKey 14
-    AccessControlEntry(AccessControlEntryRecord), // apiKey 18
+    FeatureLevel(FeatureLevelRecord),               // apiKey 12
+    ClientQuota(ClientQuotaRecord),                 // apiKey 14
+    BrokerRegistrationChange(BrokerRegistrationChangeRecord), // apiKey 17
+    AccessControlEntry(AccessControlEntryRecord),   // apiKey 18
     RemoveAccessControlEntry(RemoveAccessControlEntryRecord), // apiKey 19
+    NoOp(NoOpRecord),                               // apiKey 20
     RemoveUserScramCredential(RemoveUserScramCredentialRecord), // apiKey 22
+    BeginTransaction(BeginTransactionRecord),       // apiKey 23
+    EndTransaction(EndTransactionRecord),           // apiKey 24
     RemoveDelegationToken(RemoveDelegationTokenRecord), // apiKey 26
+    RegisterController(RegisterControllerRecord),   // apiKey 27
     /// A record this build does not model. Body is the post-envelope bytes.
     Unknown {
         api_key: u32,
