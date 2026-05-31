@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn guard_predicate_flags_only_present_out_of_range_features() {
-        use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+        use crabka_metadata::{FeatureLevelRecord, MetadataImage};
         let empty = MetadataImage::new(uuid::Uuid::nil());
         assert!(super::first_out_of_range_feature(&empty).is_none());
 
@@ -325,6 +325,16 @@ mod tests {
         let hit = super::first_out_of_range_feature(&bad).expect("flagged");
         assert!(hit.0 == "metadata.version");
         assert!(hit.1 == 99);
+
+        // Forward-compat: an UNREGISTERED feature name (finalized by a newer
+        // controller this binary doesn't know) must be IGNORED, never aborted
+        // on — this pins the `feature(name).is_some()` guard.
+        let mut unknown = MetadataImage::new(uuid::Uuid::nil());
+        unknown.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "future.unknown.feature".into(),
+            level: 999,
+        }));
+        assert!(super::first_out_of_range_feature(&unknown).is_none());
     }
 
     #[tokio::test]
