@@ -7,7 +7,7 @@ use assert2::assert;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crabka_metadata::{MetadataRecord, TopicRecord, VoterEndpoint};
+use crabka_metadata::{FeatureLevelRecord, MetadataRecord, TopicRecord, VoterEndpoint};
 use crabka_raft::{BootstrapMode, Controller, ControllerConfig, Node};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -64,15 +64,24 @@ async fn snapshot_then_restart_recovers_image() {
         wait_for_leader(&controller).await;
 
         controller
-            .submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
-                name: "t".into(),
-                topic_id: Uuid::new_v4(),
-                partitions: 1,
-                replication_factor: 1,
-            })])
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: Uuid::new_v4(),
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                // KIP-584 finalized feature: must survive snapshot + restart.
+                // A dropped feature level reverts metadata.version to UNKNOWN.
+                MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                    name: "metadata.version".into(),
+                    level: 25,
+                }),
+            ])
             .await
             .expect("submit topic");
         assert!(controller.current_image().topic("t").is_some());
+        assert!(controller.current_image().finalized_metadata_version() == Some(25));
 
         controller
             .trigger_snapshot()
@@ -109,6 +118,10 @@ async fn snapshot_then_restart_recovers_image() {
         assert!(
             controller.current_image().topic("t").is_some(),
             "topic 't' must survive snapshot + restart"
+        );
+        assert!(
+            controller.current_image().finalized_metadata_version() == Some(25),
+            "finalized metadata.version must survive snapshot + restart"
         );
 
         controller.shutdown().await;

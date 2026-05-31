@@ -12,8 +12,8 @@ use crate::acl::{AclEntry, PatternType, ResourceType};
 use crate::error::MetadataError;
 use crate::records::{
     BrokerConfigRecord, BrokerRegistrationRecord, ClientQuotaRecord, DelegationTokenRecord,
-    MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
-    TopicRecord,
+    FeatureLevelRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
+    ScramCredentialRecord, TopicConfigRecord, TopicRecord,
 };
 
 pub type EntityKey = Vec<(String, Option<String>)>;
@@ -592,6 +592,18 @@ impl MetadataImage {
             }));
         }
 
+        // KIP-584 finalized feature levels (metadata.version, group.version,
+        // …). Independent of every other record, but they MUST be emitted or
+        // a snapshot recovery / learner install silently drops them: the
+        // metadata.version reverts to UNKNOWN and the next-gen consumer group
+        // protocol disables. The BTreeMap iterates in deterministic key order.
+        for (name, level) in &self.feature_levels {
+            out.push(MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: name.clone(),
+                level: *level,
+            }));
+        }
+
         out
     }
 
@@ -986,6 +998,33 @@ mod tests {
         ));
 
         let rebuilt = MetadataImage::from_records(cid, &image.to_records());
+        assert!(rebuilt == image);
+    }
+
+    /// KIP-584 finalized feature levels must survive `to_records` /
+    /// `from_records`. Before the fix `to_records` dropped them, so a
+    /// snapshot recovery reverted metadata.version to UNKNOWN and silently
+    /// disabled the next-gen consumer group protocol (group.version).
+    #[test]
+    fn to_records_preserves_finalized_features() {
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "group.version".into(),
+            level: 1,
+        }));
+
+        let rebuilt = MetadataImage::from_records(cid, &image.to_records());
+
+        assert!(rebuilt.finalized_features() == image.finalized_features());
+        assert!(rebuilt.finalized_metadata_version() == Some(25));
+        assert!(rebuilt.finalized_features().get("group.version") == Some(&1));
+        // Two distinct features applied once each → identical epoch, so the
+        // whole image round-trips by value.
         assert!(rebuilt == image);
     }
 
