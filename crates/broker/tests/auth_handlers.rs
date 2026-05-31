@@ -2684,8 +2684,6 @@ mod two_broker_sasl {
             dir0.path(),
             BootstrapMode::Bootstrap,
         );
-        let broker0 = Broker::start(cfg0.clone()).await.expect("broker0 start");
-
         let dir1 = TempDir::new().unwrap();
         let cfg1 = sasl_two_listener_config(
             1,
@@ -2698,14 +2696,16 @@ mod two_broker_sasl {
         );
         // KIP-595 Slice 3c static bootstrap: both brokers boot with the same
         // static voter set and elect among themselves over the SASL controller
-        // wire — no add_learner / change_membership (KIP-853, Slice 5).
+        // wire — no add_learner / change_membership (KIP-853, Slice 5). Start
+        // them concurrently: `Broker::start` blocks until a leader is committed,
+        // which needs a voter majority up, so a sequential `start().await` on
+        // broker0 alone would deadlock.
+        let cfg0_for_spawn = cfg0.clone();
         let cfg1_for_spawn = cfg1.clone();
-        let join_handle = tokio::spawn(async move { Broker::start(cfg1_for_spawn).await });
-
-        let broker1 = join_handle
-            .await
-            .expect("join spawn")
-            .expect("broker1 start");
+        let join0 = tokio::spawn(async move { Broker::start(cfg0_for_spawn).await });
+        let join1 = tokio::spawn(async move { Broker::start(cfg1_for_spawn).await });
+        let broker0 = join0.await.expect("join0 spawn").expect("broker0 start");
+        let broker1 = join1.await.expect("join1 spawn").expect("broker1 start");
         vec![(broker0, cfg0, dir0), (broker1, cfg1, dir1)]
     }
 
