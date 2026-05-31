@@ -99,6 +99,21 @@ impl Collector for ClientMetricsCollector {
     }
 }
 
+/// Newtype wrapper around `Arc<ClientMetricsCollector>` that implements
+/// `prometheus_client::collector::Collector`, allowing the shared collector to
+/// be registered into a `Registry` via `register_collector`.
+#[derive(Debug)]
+pub(crate) struct SharedClientMetricsCollector(pub std::sync::Arc<ClientMetricsCollector>);
+
+impl prometheus_client::collector::Collector for SharedClientMetricsCollector {
+    fn encode(
+        &self,
+        encoder: prometheus_client::encoding::DescriptorEncoder,
+    ) -> Result<(), std::fmt::Error> {
+        self.0.encode(encoder)
+    }
+}
+
 /// Prometheus metric names allow `[a-zA-Z0-9_:]`; map everything else to `_`
 /// and prefix with `crabka_client_`.
 fn sanitize(metric: &str) -> String {

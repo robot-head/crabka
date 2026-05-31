@@ -121,6 +121,10 @@ pub struct Broker {
     /// [`crate::log_dir_status::LogDirRegistry::is_offline`] before
     /// touching the dir.
     pub(crate) log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// KIP-714 client-metrics receiver: subscription manager + Prometheus
+    /// collector + OTLP forwarder. Shared so the push handler (Task 15)
+    /// and the scrape path both touch the same instance.
+    pub(crate) client_metrics: Arc<crate::client_metrics::ClientMetrics>,
     handlers: HandlerTable,
 }
 
@@ -1570,6 +1574,40 @@ impl Broker {
         } else {
             None
         };
+        // KIP-714 client-metrics: build the bundle (manager + Prometheus
+        // collector + OTLP forwarder) and register the collector into the
+        // shared metrics registry so it appears on the `/metrics` scrape.
+        let otlp_metrics_endpoint =
+            crate::telemetry::OtlpConfig::from_env(|k| std::env::var(k).ok(), "", "")
+                .map(|c| c.endpoint);
+        let client_metrics = Arc::new(crate::client_metrics::ClientMetrics::new(
+            crate::client_metrics::DEFAULT_TELEMETRY_MAX_BYTES,
+            otlp_metrics_endpoint,
+        ));
+        {
+            let mut reg = metrics.registry.lock().await;
+            reg.register_collector(Box::new(
+                crate::client_metrics::prometheus_sink::SharedClientMetricsCollector(
+                    client_metrics.prometheus.clone(),
+                ),
+            ));
+        }
+        // Periodic eviction of stale client-metrics entries (3× push
+        // interval, floor 600s). Child token of supervisor_shutdown.
+        {
+            let cm = client_metrics.clone();
+            let token = supervisor_shutdown.child_token();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    tokio::select! {
+                        () = token.cancelled() => break,
+                        _ = tick.tick() => cm.manager.evict_stale(3, std::time::Duration::from_secs(600)),
+                    }
+                }
+            });
+        }
+
         // Background gauge updater: poll partitions_led + active_controller
         // once a second. Cheap (DashMap iteration + one atomic borrow).
         {
@@ -2145,6 +2183,7 @@ impl Broker {
             should_shutdown: should_shutdown_tx,
             remote_reader,
             log_dir_status,
+            client_metrics,
             handlers,
         });
 
