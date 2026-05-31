@@ -34,9 +34,14 @@ use crate::error::BrokerError;
 /// `DEFAULT_CONFIG = 5`, `DYNAMIC_BROKER_LOGGER_CONFIG = 6`.
 const CONFIG_SOURCE_DYNAMIC_TOPIC: i8 = 1;
 const CONFIG_SOURCE_DYNAMIC_BROKER: i8 = 2;
+/// `ConfigSource::DEFAULT_CONFIG` — used for keys reported at their default.
+const CONFIG_SOURCE_DEFAULT: i8 = 5;
+/// `DescribeConfigsResponse.ConfigSource::CLIENT_METRICS_CONFIG` wire byte.
+const CONFIG_SOURCE_CLIENT_METRICS: i8 = 7;
 
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
+const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
 
 /// Produce a `DescribeConfigsResourceResult` for a single `(key, value)` pair.
 fn make_entry(key: &str, value: &str, config_source: i8) -> DescribeConfigsResourceResult {
@@ -102,6 +107,32 @@ fn describe_one(
             .filter(|(k, _)| key_filter.is_none_or(|ks| ks.iter().any(|f| f == *k)))
             .map(|(k, v)| make_entry(k, v, CONFIG_SOURCE_DYNAMIC_BROKER))
             .collect();
+        return ok(configs);
+    }
+
+    if r.resource_type == RESOURCE_TYPE_CLIENT_METRICS {
+        use crate::client_metrics::config::{
+            DEFAULT_INTERVAL_MS, KEY_INTERVAL_MS, KEY_MATCH, KEY_METRICS,
+        };
+        let overrides = image.client_metrics_config(&r.resource_name).cloned().unwrap_or_default();
+        let key_filter: Option<&[String]> = r.configuration_keys.as_deref();
+        let mut configs = Vec::new();
+        // Emit all three keys: set values use CLIENT_METRICS_CONFIG source;
+        // unset keys report their default value/source (KAFKA-17516 — tooling
+        // needs effective values, not blanks).
+        let default_interval = DEFAULT_INTERVAL_MS.to_string();
+        let mut emit = |key: &str, default: &str| {
+            if key_filter.is_some_and(|ks| !ks.iter().any(|f| f == key)) {
+                return;
+            }
+            match overrides.get(key) {
+                Some(v) => configs.push(make_entry(key, v, CONFIG_SOURCE_CLIENT_METRICS)),
+                None => configs.push(make_entry(key, default, CONFIG_SOURCE_DEFAULT)),
+            }
+        };
+        emit(KEY_METRICS, "");
+        emit(KEY_INTERVAL_MS, &default_interval);
+        emit(KEY_MATCH, "");
         return ok(configs);
     }
 
@@ -215,5 +246,31 @@ mod tests {
     #[test]
     fn config_source_dynamic_broker_is_2() {
         assert!(super::CONFIG_SOURCE_DYNAMIC_BROKER == 2i8);
+    }
+
+    #[test]
+    fn client_metrics_describe_emits_defaults() {
+        use crabka_metadata::{ClientMetricsConfigRecord, MetadataRecord};
+        let mut img = MetadataImage::new(Uuid::nil());
+        let mut cfgs = std::collections::BTreeMap::new();
+        cfgs.insert("metrics".to_string(), "a.".to_string());
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
+            name: "sub-a".into(),
+            configs: cfgs,
+        }));
+        let r = crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
+            resource_type: super::RESOURCE_TYPE_CLIENT_METRICS,
+            resource_name: "sub-a".into(),
+            configuration_keys: None,
+            ..Default::default()
+        };
+        let res = super::describe_one(&img, r);
+        assert_eq!(res.error_code, crate::codes::NONE);
+        let by_name: std::collections::HashMap<_, _> =
+            res.configs.iter().map(|c| (c.name.as_str(), c)).collect();
+        assert_eq!(by_name["metrics"].value.as_deref(), Some("a."));
+        assert_eq!(by_name["metrics"].config_source, super::CONFIG_SOURCE_CLIENT_METRICS);
+        assert_eq!(by_name["interval.ms"].value.as_deref(), Some("300000"));
+        assert_eq!(by_name["interval.ms"].config_source, super::CONFIG_SOURCE_DEFAULT);
     }
 }
