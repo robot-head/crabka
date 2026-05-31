@@ -1067,6 +1067,13 @@ impl Engine {
         let qs = self.core.quorum_state();
         let mut per_voter_fetch_offset = std::collections::BTreeMap::new();
         if let Role::Leader { replicas, .. } = self.core.role() {
+            // The leader's own matched index is its log end offset — its local
+            // log is, by definition, fully matched against itself. The
+            // `replicas` progress map tracks only *peers*, so the leader must
+            // insert its own entry explicitly (otherwise a single-voter quorum
+            // reports an empty matched-index map and `DescribeQuorum` returns
+            // the JVM "unknown" sentinel -1 for the leader).
+            per_voter_fetch_offset.insert(self.core.me(), self.log.log_end_offset());
             for (id, progress) in replicas {
                 per_voter_fetch_offset.insert(*id, progress.fetch_offset);
             }

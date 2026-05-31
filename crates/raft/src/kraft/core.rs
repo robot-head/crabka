@@ -46,6 +46,11 @@ impl QuorumStateMachine {
     pub fn quorum_state(&self) -> &QuorumState {
         &self.state
     }
+    /// This replica's own node id.
+    #[must_use]
+    pub fn me(&self) -> NodeId {
+        self.me
+    }
     #[must_use]
     pub fn role(&self) -> &Role {
         &self.role
