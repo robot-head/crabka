@@ -321,6 +321,17 @@ impl QuorumStateMachine {
     /// non-binding pre-vote at the *current* epoch (epoch is not bumped until the
     /// pre-vote succeeds).
     fn start_election(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
+        // Starting a pre-vote round means we have given up on the current leader
+        // (our fetch timed out, or the leader resigned). Drop the leader belief:
+        // KIP-996 only grants a pre-vote when the voter is no longer following a
+        // live leader, and the grant check keys off `leader_id.is_none()`. If we
+        // kept `leader_id = Some(old)` here, a `Prospective` voter would refuse to
+        // grant pre-votes to an equally-stranded peer, and re-election after the
+        // leader is lost would deadlock (no voter can ever clear its stale leader
+        // belief without a new leader, which can never be elected). The epoch is
+        // unchanged — this is not a step-up to a new epoch, just abandoning the
+        // dead leader for the current one.
+        self.state.leader_id = None;
         let mut granted = BTreeSet::new();
         granted.insert(self.me);
         let deadline = self.election_deadline(now);

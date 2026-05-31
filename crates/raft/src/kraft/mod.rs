@@ -15,7 +15,7 @@ pub mod role;
 pub mod types;
 
 pub use action::Action;
-// pub use core::QuorumStateMachine; // added in Task 3
+pub use core::QuorumStateMachine;
 pub use event::Event;
 pub use role::Role;
 pub use types::{
