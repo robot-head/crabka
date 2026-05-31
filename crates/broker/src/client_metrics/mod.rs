@@ -4,4 +4,5 @@
 pub(crate) mod config;
 pub(crate) mod manager;
 pub(crate) mod otlp;
+pub(crate) mod prometheus_sink;
 pub(crate) use manager::ClientMetricsManager;

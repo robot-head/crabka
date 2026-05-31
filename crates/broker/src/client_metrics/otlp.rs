@@ -18,8 +18,8 @@ pub(crate) fn decode_metrics(bytes: &[u8]) -> Result<MetricsData, OtlpDecodeErro
 mod tests {
     use super::*;
     use opentelemetry_proto::tonic::metrics::v1::{
-        metric::Data, number_data_point::Value, Gauge, Metric, MetricsData, NumberDataPoint,
-        ResourceMetrics, ScopeMetrics,
+        Gauge, Metric, MetricsData, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric::Data,
+        number_data_point::Value,
     };
     use prost::Message;
 

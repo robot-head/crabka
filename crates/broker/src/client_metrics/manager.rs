@@ -65,7 +65,10 @@ pub(crate) const ACCEPTED_COMPRESSION_TYPES: [i8; 4] = [4, 3, 1, 2];
 
 impl ClientMetricsManager {
     pub(crate) fn new(telemetry_max_bytes: i32) -> Self {
-        Self { instances: Mutex::new(HashMap::new()), telemetry_max_bytes }
+        Self {
+            instances: Mutex::new(HashMap::new()),
+            telemetry_max_bytes,
+        }
     }
 
     pub(crate) fn telemetry_max_bytes(&self) -> i32 {
@@ -80,19 +83,24 @@ impl ClientMetricsManager {
         let computed = compute_subscription(image, attrs);
         let sub_id = subscription_id(&computed, attrs.client_instance_id);
         let now = Instant::now();
-        let mut guard = self.instances.lock().expect("client-metrics mutex poisoned");
+        let mut guard = self
+            .instances
+            .lock()
+            .expect("client-metrics mutex poisoned");
         // push_interval_ms is validated in [100, 3_600_000] — always positive.
         #[allow(clippy::cast_sign_loss)]
         let push_interval = Duration::from_millis(computed.push_interval_ms as u64);
-        let inst = guard.entry(attrs.client_instance_id).or_insert(ClientInstance {
-            subscription_id: sub_id,
-            push_interval,
-            metrics: computed.metrics.clone(),
-            last_get: now,
-            last_push: None,
-            terminating: false,
-            last_error: crate::codes::NONE,
-        });
+        let inst = guard
+            .entry(attrs.client_instance_id)
+            .or_insert(ClientInstance {
+                subscription_id: sub_id,
+                push_interval,
+                metrics: computed.metrics.clone(),
+                last_get: now,
+                last_push: None,
+                terminating: false,
+                last_error: crate::codes::NONE,
+            });
         inst.subscription_id = sub_id;
         inst.push_interval = push_interval;
         inst.metrics.clone_from(&computed.metrics);
@@ -113,7 +121,10 @@ impl ClientMetricsManager {
         payload_len: usize,
     ) -> PushDecision {
         let now = Instant::now();
-        let mut guard = self.instances.lock().expect("client-metrics mutex poisoned");
+        let mut guard = self
+            .instances
+            .lock()
+            .expect("client-metrics mutex poisoned");
         let Some(inst) = guard.get_mut(&client_instance_id) else {
             return PushDecision::Reject {
                 error_code: crate::codes::INVALID_REQUEST,
@@ -167,7 +178,10 @@ impl ClientMetricsManager {
     /// Drop instances idle beyond `max(interval * factor, floor)`.
     pub(crate) fn evict_stale(&self, factor: u32, floor: Duration) {
         let now = Instant::now();
-        let mut guard = self.instances.lock().expect("client-metrics mutex poisoned");
+        let mut guard = self
+            .instances
+            .lock()
+            .expect("client-metrics mutex poisoned");
         guard.retain(|_, inst| {
             if inst.terminating {
                 return false;
@@ -198,8 +212,9 @@ pub(crate) fn compute_subscription(
         if !rules.iter().all(|r| selector_matches(r, attrs)) {
             continue;
         }
-        let metrics =
-            configs.get(config::KEY_METRICS).map_or_else(Vec::new, |v| config::parse_metrics(v));
+        let metrics = configs
+            .get(config::KEY_METRICS)
+            .map_or_else(Vec::new, |v| config::parse_metrics(v));
         if metrics.is_empty() {
             continue;
         }
@@ -215,7 +230,11 @@ pub(crate) fn compute_subscription(
         min_interval = Some(min_interval.map_or(interval, |cur| cur.min(interval)));
     }
 
-    let metrics = if any_star { vec![ALL_METRICS.to_string()] } else { matched_metrics };
+    let metrics = if any_star {
+        vec![ALL_METRICS.to_string()]
+    } else {
+        matched_metrics
+    };
     ComputedSubscription {
         metrics,
         push_interval_ms: min_interval.unwrap_or(config::DEFAULT_INTERVAL_MS),
@@ -235,7 +254,9 @@ fn selector_matches(rule: &config::MatchRule, attrs: &ClientAttributes) -> bool 
         ClientSourceAddress => (&attrs.source_address).into(),
         ClientSourcePort => attrs.source_port.to_string().into(),
     };
-    rule.pattern.find(&target).is_some_and(|m| m.start() == 0 && m.end() == target.len())
+    rule.pattern
+        .find(&target)
+        .is_some_and(|m| m.start() == 0 && m.end() == target.len())
 }
 
 /// Stable, change-sensitive subscription id. CRC32C over a canonical
@@ -279,10 +300,12 @@ mod tests {
         for (k, v) in kvs {
             cfgs.insert((*k).to_string(), (*v).to_string());
         }
-        img.apply(&MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
-            name: name.into(),
-            configs: cfgs,
-        }));
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: name.into(),
+                configs: cfgs,
+            },
+        ));
         img
     }
 
@@ -315,29 +338,44 @@ mod tests {
 
     #[test]
     fn selector_filters_clients() {
-        let img =
-            img_with("java-only", &[("metrics", "a."), ("match", "client_software_name=apache-kafka-java")]);
+        let img = img_with(
+            "java-only",
+            &[
+                ("metrics", "a."),
+                ("match", "client_software_name=apache-kafka-java"),
+            ],
+        );
         let m = compute_subscription(&img, &attrs());
         assert_eq!(m.metrics, vec!["a.".to_string()]);
 
-        let img2 =
-            img_with("py-only", &[("metrics", "a."), ("match", "client_software_name=kafka-python")]);
+        let img2 = img_with(
+            "py-only",
+            &[
+                ("metrics", "a."),
+                ("match", "client_software_name=kafka-python"),
+            ],
+        );
         let m2 = compute_subscription(&img2, &attrs());
-        assert!(m2.metrics.is_empty(), "java client must not match python selector");
+        assert!(
+            m2.metrics.is_empty(),
+            "java client must not match python selector"
+        );
     }
 
     #[test]
     fn min_interval_and_metric_union_across_subs() {
         let mut img = img_with("s1", &[("metrics", "a."), ("interval.ms", "60000")]);
-        img.apply(&MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
-            name: "s2".into(),
-            configs: {
-                let mut c = BTreeMap::new();
-                c.insert("metrics".into(), "b.".into());
-                c.insert("interval.ms".into(), "30000".into());
-                c
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: "s2".into(),
+                configs: {
+                    let mut c = BTreeMap::new();
+                    c.insert("metrics".into(), "b.".into());
+                    c.insert("interval.ms".into(), "30000".into());
+                    c
+                },
             },
-        }));
+        ));
         let m = compute_subscription(&img, &attrs());
         let mut got = m.metrics.clone();
         got.sort();
@@ -348,14 +386,16 @@ mod tests {
     #[test]
     fn star_collapses_union() {
         let mut img = img_with("s1", &[("metrics", "a.")]);
-        img.apply(&MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
-            name: "s2".into(),
-            configs: {
-                let mut c = BTreeMap::new();
-                c.insert("metrics".into(), "*".into());
-                c
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: "s2".into(),
+                configs: {
+                    let mut c = BTreeMap::new();
+                    c.insert("metrics".into(), "*".into());
+                    c
+                },
             },
-        }));
+        ));
         let m = compute_subscription(&img, &attrs());
         assert_eq!(m.metrics, vec!["*".to_string()]);
     }
@@ -378,8 +418,10 @@ mod tests {
             push_interval_ms: 30_000,
         };
         assert_ne!(id1, subscription_id(&s2, a.client_instance_id));
-        let s3 =
-            ComputedSubscription { metrics: vec!["a.".into()], push_interval_ms: 60_000 };
+        let s3 = ComputedSubscription {
+            metrics: vec!["a.".into()],
+            push_interval_ms: 60_000,
+        };
         assert_ne!(id1, subscription_id(&s3, a.client_instance_id));
     }
 

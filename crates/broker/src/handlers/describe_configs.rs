@@ -114,7 +114,10 @@ fn describe_one(
         use crate::client_metrics::config::{
             DEFAULT_INTERVAL_MS, KEY_INTERVAL_MS, KEY_MATCH, KEY_METRICS,
         };
-        let overrides = image.client_metrics_config(&r.resource_name).cloned().unwrap_or_default();
+        let overrides = image
+            .client_metrics_config(&r.resource_name)
+            .cloned()
+            .unwrap_or_default();
         let key_filter: Option<&[String]> = r.configuration_keys.as_deref();
         let mut configs = Vec::new();
         // Emit all three keys: set values use CLIENT_METRICS_CONFIG source;
@@ -254,10 +257,12 @@ mod tests {
         let mut img = MetadataImage::new(Uuid::nil());
         let mut cfgs = std::collections::BTreeMap::new();
         cfgs.insert("metrics".to_string(), "a.".to_string());
-        img.apply(&MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
-            name: "sub-a".into(),
-            configs: cfgs,
-        }));
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: "sub-a".into(),
+                configs: cfgs,
+            },
+        ));
         let r = crabka_protocol::owned::describe_configs_request::DescribeConfigsResource {
             resource_type: super::RESOURCE_TYPE_CLIENT_METRICS,
             resource_name: "sub-a".into(),
@@ -269,8 +274,14 @@ mod tests {
         let by_name: std::collections::HashMap<_, _> =
             res.configs.iter().map(|c| (c.name.as_str(), c)).collect();
         assert_eq!(by_name["metrics"].value.as_deref(), Some("a."));
-        assert_eq!(by_name["metrics"].config_source, super::CONFIG_SOURCE_CLIENT_METRICS);
+        assert_eq!(
+            by_name["metrics"].config_source,
+            super::CONFIG_SOURCE_CLIENT_METRICS
+        );
         assert_eq!(by_name["interval.ms"].value.as_deref(), Some("300000"));
-        assert_eq!(by_name["interval.ms"].config_source, super::CONFIG_SOURCE_DEFAULT);
+        assert_eq!(
+            by_name["interval.ms"].config_source,
+            super::CONFIG_SOURCE_DEFAULT
+        );
     }
 }

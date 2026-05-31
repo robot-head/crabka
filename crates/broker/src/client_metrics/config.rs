@@ -143,7 +143,13 @@ mod tests {
     #[test]
     fn match_selectors_validated() {
         assert!(validate("match", "client_id=my-app.*").is_ok());
-        assert!(validate("match", "client_software_name=apache-kafka-java,client_id=svc-.*").is_ok());
+        assert!(
+            validate(
+                "match",
+                "client_software_name=apache-kafka-java,client_id=svc-.*"
+            )
+            .is_ok()
+        );
         assert!(validate("match", "client_foo=x").is_err());
         assert!(validate("match", "client_id").is_err());
         assert!(validate("match", "client_id=[unclosed").is_err());
@@ -152,7 +158,13 @@ mod tests {
     #[test]
     fn metrics_list_accepts_star_and_prefixes() {
         assert!(validate("metrics", "*").is_ok());
-        assert!(validate("metrics", "org.apache.kafka.consumer.,org.apache.kafka.producer.").is_ok());
+        assert!(
+            validate(
+                "metrics",
+                "org.apache.kafka.consumer.,org.apache.kafka.producer."
+            )
+            .is_ok()
+        );
         assert!(validate("metrics", "").is_ok());
     }
 
@@ -175,6 +187,9 @@ mod tests {
     fn parse_metrics_collapses_star() {
         assert_eq!(parse_metrics("*"), vec!["*".to_string()]);
         assert_eq!(parse_metrics(""), Vec::<String>::new());
-        assert_eq!(parse_metrics("a.,b."), vec!["a.".to_string(), "b.".to_string()]);
+        assert_eq!(
+            parse_metrics("a.,b."),
+            vec!["a.".to_string(), "b.".to_string()]
+        );
     }
 }
