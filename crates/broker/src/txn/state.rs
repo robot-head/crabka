@@ -40,6 +40,40 @@ impl TxnState {
             | (CompleteCommit | CompleteAbort, Dead)
         )
     }
+
+    /// Kafka `TransactionState` byte id (TransactionLogValue.TransactionStatus,
+    /// int8). Matches org.apache.kafka.coordinator.transaction.TransactionState
+    /// exactly: Empty=0, Ongoing=1, PrepareCommit=2, PrepareAbort=3,
+    /// CompleteCommit=4, CompleteAbort=5, Dead=6. (Kafka also has
+    /// `PrepareEpochFence`=7, a transient fencing state Crabka does not model.)
+    #[must_use]
+    pub fn to_kafka_status(self) -> i8 {
+        match self {
+            TxnState::Empty => 0,
+            TxnState::Ongoing => 1,
+            TxnState::PrepareCommit => 2,
+            TxnState::PrepareAbort => 3,
+            TxnState::CompleteCommit => 4,
+            TxnState::CompleteAbort => 5,
+            TxnState::Dead => 6,
+        }
+    }
+
+    /// Inverse of [`Self::to_kafka_status`]. Returns `None` for an id Crabka
+    /// does not model (e.g. 7 = `PrepareEpochFence`) or an out-of-range id.
+    #[must_use]
+    pub fn from_kafka_status(id: i8) -> Option<TxnState> {
+        Some(match id {
+            0 => TxnState::Empty,
+            1 => TxnState::Ongoing,
+            2 => TxnState::PrepareCommit,
+            3 => TxnState::PrepareAbort,
+            4 => TxnState::CompleteCommit,
+            5 => TxnState::CompleteAbort,
+            6 => TxnState::Dead,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +144,32 @@ mod tests {
     #[test]
     fn complete_commit_to_empty_for_reuse() {
         assert!(TxnState::CompleteCommit.can_transition_to(TxnState::Empty));
+    }
+
+    #[test]
+    fn kafka_status_round_trips_all_states() {
+        for s in [
+            TxnState::Empty,
+            TxnState::Ongoing,
+            TxnState::PrepareCommit,
+            TxnState::PrepareAbort,
+            TxnState::CompleteCommit,
+            TxnState::CompleteAbort,
+            TxnState::Dead,
+        ] {
+            assert!(TxnState::from_kafka_status(s.to_kafka_status()) == Some(s));
+        }
+    }
+
+    #[test]
+    fn kafka_status_values_match_kafka() {
+        // Empirically pinned: cp-kafka 4.0 Ongoing record had TransactionStatus=1.
+        assert!(TxnState::Ongoing.to_kafka_status() == 1);
+        assert!(TxnState::Empty.to_kafka_status() == 0);
+        assert!(TxnState::Dead.to_kafka_status() == 6);
+        // PrepareEpochFence (7) and out-of-range are not modeled.
+        assert!(TxnState::from_kafka_status(7).is_none());
+        assert!(TxnState::from_kafka_status(-1).is_none());
     }
 
     #[test]
