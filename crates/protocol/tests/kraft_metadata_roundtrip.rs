@@ -7,9 +7,9 @@
 //!
 //! Fixtures captured from a freshly-formatted JVM node (see
 //! docs/superpowers/specs/2026-05-30-kraft-wire-findings.md):
-//! - `bootstrap_checkpoint.bin`: SnapshotHeader + 3 FeatureLevelRecords + SnapshotFooter
-//! - `startup_log.bin`: offsets 0..=8 (LeaderChange, bootstrap txn, registrations)
-//! - `topic_log.bin`: through offset 31 (adds TopicRecord + 2 PartitionRecords)
+//! - `bootstrap_checkpoint.bin`: `SnapshotHeader` + 3 `FeatureLevelRecord`s + `SnapshotFooter`
+//! - `startup_log.bin`: offsets 0..=8 (`LeaderChange`, bootstrap txn, registrations)
+//! - `topic_log.bin`: through offset 31 (adds `TopicRecord` + 2 `PartitionRecord`s)
 
 use assert2::assert;
 use bytes::BytesMut;
