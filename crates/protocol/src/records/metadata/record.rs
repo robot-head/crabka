@@ -138,12 +138,28 @@ impl KraftMetadataRecord {
                 Self::BrokerRegistrationChange(BrokerRegistrationChangeRecord::decode(&mut cur, v)?)
             }
             12 => Self::FeatureLevel(FeatureLevelRecord::decode(&mut cur, v)?),
-            other => Self::Unknown {
-                api_key: other,
-                api_version: hdr.api_version,
-                body: Bytes::copy_from_slice(cur),
-            },
+            other => {
+                // Unknown records keep their raw post-envelope bytes verbatim,
+                // so trailing bytes are intentional here (not checked below).
+                return Ok((
+                    Self::Unknown {
+                        api_key: other,
+                        api_version: hdr.api_version,
+                        body: Bytes::copy_from_slice(cur),
+                    },
+                    v,
+                ));
+            }
         };
+        // A modeled record body must consume the whole value. Trailing bytes mean
+        // the record carries fields this build does not model — fail loudly so a
+        // round-trip would not silently re-encode shorter (mirrors the
+        // trailing-byte rejection in the RecordBatch/Record layers).
+        if !cur.is_empty() {
+            return Err(ProtocolError::SchemaMismatch(
+                "trailing bytes after metadata record body",
+            ));
+        }
         Ok((rec, v))
     }
 }
