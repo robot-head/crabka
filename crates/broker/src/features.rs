@@ -69,10 +69,34 @@ pub(crate) fn require_feature(
     }
 }
 
+/// True when `name` is finalized at >= `level`, treating an UNFINALIZED feature
+/// as level 0 (disabled). Use for features where absence means "off" (e.g.
+/// `group.version` → next-gen disabled), unlike `require_feature` which is
+/// permissive on absence (used for metadata.version-gated RPCs on legacy images).
+pub(crate) fn feature_enabled(
+    image: &crabka_metadata::MetadataImage,
+    name: &str,
+    level: i16,
+) -> bool {
+    image.finalized_features().get(name).copied().unwrap_or(0) >= level
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use assert2::assert;
+
+    #[test]
+    fn feature_enabled_treats_absence_as_disabled() {
+        use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        assert!(!feature_enabled(&image, "group.version", 1)); // absent → disabled
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "group.version".into(),
+            level: 1,
+        }));
+        assert!(feature_enabled(&image, "group.version", 1)); // present at 1 → enabled
+    }
 
     #[test]
     fn supported_features_include_metadata_version() {

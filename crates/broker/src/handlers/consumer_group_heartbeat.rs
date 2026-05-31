@@ -29,16 +29,13 @@ pub(crate) fn handle(
         let req = ConsumerGroupHeartbeatRequest::decode(&mut cur, version)?;
 
         // KIP-848 / KIP-584: the next-gen protocol is gated on a finalized
-        // group.version >= 1. Below that (or unfinalized on an old-release
-        // cluster) reject so the client falls back to the classic protocol.
-        // require_feature is permissive when unfinalized.
-        if crate::features::require_feature(
+        // group.version >= 1. Below that — including UNFINALIZED, which means
+        // disabled — reject so the client falls back to the classic protocol.
+        if !crate::features::feature_enabled(
             &image,
             crabka_metadata::group_version::GROUP_VERSION_FEATURE,
             1,
-        )
-        .is_err()
-        {
+        ) {
             return encode(version, &error(codes::UNSUPPORTED_VERSION));
         }
 

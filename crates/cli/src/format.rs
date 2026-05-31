@@ -21,8 +21,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 use crabka_metadata::{
-    AclEntry, FeatureLevelRecord, KRaftVersionRange, KRaftVersionRecord, MetadataRecord,
-    ScramCredentialRecord, Voter, VoterEndpoint, VoterSet, VotersRecord,
+    AclEntry, KRaftVersionRange, KRaftVersionRecord, MetadataRecord, ScramCredentialRecord, Voter,
+    VoterEndpoint, VoterSet, VotersRecord,
 };
 use crabka_security::SaslMechanism;
 use crabka_security::scram::hash_scram_password_with_salt;
@@ -397,7 +397,7 @@ pub async fn run(args: FormatArgs) -> i32 {
     // per-release default, derived from the bootstrap metadata.version. A 4.0
     // format thus seeds metadata.version, group.version, etc. at their 4.0
     // defaults so a fresh cluster engages each feature with no manual step.
-    records.extend(bootstrap_feature_records(release_level));
+    records.extend(crabka_metadata::bootstrap_feature_records(release_level));
 
     // Build the seed records. Each `--add-scram` is hashed *here* (CLI
     // side) using `hash_scram_password_with_salt` from `crabka-security`
@@ -492,22 +492,6 @@ fn write_bootstrap_files(
     Ok(())
 }
 
-/// Build the bootstrap [`FeatureLevelRecord`]s seeded by `crabka format`:
-/// one per registered feature, each at its per-release default derived from
-/// the bootstrap `metadata.version` level. Shared by `run()` and tests so the
-/// set stays correct as features are added to the registry.
-fn bootstrap_feature_records(bootstrap_mv: i16) -> Vec<MetadataRecord> {
-    crabka_metadata::feature_registry()
-        .iter()
-        .map(|feat| {
-            MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
-                name: feat.name().to_string(),
-                level: feat.default_level(bootstrap_mv),
-            })
-        })
-        .collect()
-}
-
 /// Tiny self-contained base64 encoder (standard alphabet, padded). We
 /// don't pull in the `base64` crate just for the manifest mirror — the
 /// records are only base64'd for human readability; the authoritative
@@ -565,7 +549,7 @@ mod tests {
             .feature_level();
         // Exercises the exact helper `run()` uses, so it tracks the registry
         // as features are added in later tasks.
-        let records = bootstrap_feature_records(bootstrap_mv);
+        let records = crabka_metadata::bootstrap_feature_records(bootstrap_mv);
         for feat in crabka_metadata::feature_registry() {
             let found = records.iter().find_map(|r| match r {
                 MetadataRecord::V1FeatureLevel(f) if f.name == feat.name() => Some(f.level),

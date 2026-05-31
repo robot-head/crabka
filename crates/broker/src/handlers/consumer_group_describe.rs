@@ -38,15 +38,13 @@ pub(crate) fn handle(
                 ..Default::default()
             };
             // KIP-848 / KIP-584: next-gen describe requires finalized
-            // group.version >= 1; below that, report the group as not found
-            // (consistent with the heartbeat fallback).
-            if crate::features::require_feature(
+            // group.version >= 1; below that — including UNFINALIZED, which
+            // means disabled — reject (consistent with the heartbeat fallback).
+            if !crate::features::feature_enabled(
                 &image,
                 crabka_metadata::group_version::GROUP_VERSION_FEATURE,
                 1,
-            )
-            .is_err()
-            {
+            ) {
                 row.error_code = codes::UNSUPPORTED_VERSION;
                 described.push(row);
                 continue;

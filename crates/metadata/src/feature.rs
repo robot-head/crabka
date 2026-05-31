@@ -118,6 +118,25 @@ pub fn feature(name: &str) -> Option<&'static dyn Feature> {
         .find(|f| f.name() == name)
 }
 
+/// KIP-584/1022 bootstrap: one `V1FeatureLevel` record per registered feature
+/// at its per-release default, derived from `bootstrap_mv` (the bootstrap
+/// metadata.version level). Used by both `crabka format` and the broker's
+/// standalone self-bootstrap so a fresh cluster finalizes every feature's
+/// release default. A feature whose default is 0 still emits a record; apply
+/// treats level 0 as a tombstone (the feature stays absent = disabled).
+#[must_use]
+pub fn bootstrap_feature_records(bootstrap_mv: i16) -> Vec<crate::MetadataRecord> {
+    feature_registry()
+        .iter()
+        .map(|f| {
+            crate::MetadataRecord::V1FeatureLevel(crate::FeatureLevelRecord {
+                name: f.name().to_string(),
+                level: f.default_level(bootstrap_mv),
+            })
+        })
+        .collect()
+}
+
 /// True if `level` is within the registered feature's supported range.
 /// `false` for an unknown feature (nothing supports that level).
 #[must_use]
