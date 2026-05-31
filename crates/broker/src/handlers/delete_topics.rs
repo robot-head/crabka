@@ -6,6 +6,7 @@ use bytes::{Bytes, BytesMut};
 use crabka_metadata::{AclOperation, DeleteTopicRecord, MetadataRecord};
 use crabka_protocol::owned::delete_topics_request::DeleteTopicsRequest;
 use crabka_protocol::owned::delete_topics_response::{DeletableTopicResult, DeleteTopicsResponse};
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::{Decode, Encode};
 use crabka_raft::RaftError;
 
@@ -37,16 +38,17 @@ pub(crate) async fn handle(
     // sent only a topic_id (name is None/empty), resolve the name from the
     // current image and mark the entry as id-based so that a miss returns
     // UNKNOWN_TOPIC_ID (KIP-516) rather than UNKNOWN_TOPIC_OR_PARTITION.
-    use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-
     let image = controller.current_image();
     // (resolved_name, requested_by_id, requested_topic_id)
     let mut name_list: Vec<(Option<String>, bool, WireUuid)> = Vec::new();
     if req.topic_names.is_empty() {
         for state in &req.topics {
             let id = state.topic_id;
-            let requested_by_id =
-                state.name.as_ref().map_or(true, |n| n.is_empty()) && id != WireUuid::ZERO;
+            let requested_by_id = state
+                .name
+                .as_ref()
+                .is_none_or(std::string::String::is_empty)
+                && id != WireUuid::ZERO;
             if requested_by_id {
                 // id-only path: look up by topic_id in the image index.
                 let uuid = uuid::Uuid::from_bytes(id.0);

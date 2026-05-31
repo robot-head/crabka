@@ -1,4 +1,4 @@
-//! KIP-516: Fetch by topic_id error semantics.
+//! KIP-516: Fetch by `topic_id` error semantics.
 use assert2::assert;
 mod support;
 

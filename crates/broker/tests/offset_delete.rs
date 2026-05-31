@@ -31,7 +31,7 @@ use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 const OFFSET_ABSENT_SENTINEL: i64 = -1; // OffsetFetch returns -1 when no offset is committed.
 
 /// Resolve a topic's UUID via Metadata. KIP-516: OffsetCommit/OffsetFetch
-/// negotiate to v10/v8+, which key by topic_id on the wire.
+/// negotiate to v10/v8+, which key by `topic_id` on the wire.
 async fn topic_id_for(p: &support::InProcess, name: &str) -> WireUuid {
     let resp = p
         .client

@@ -18,15 +18,15 @@ pub(crate) fn resolve<'a>(
     name: &str,
     id: WireUuid,
 ) -> Result<&'a TopicRecord, i16> {
-    if id != WireUuid::ZERO {
+    if id == WireUuid::ZERO {
+        image.topic(name).ok_or(codes::UNKNOWN_TOPIC_OR_PARTITION)
+    } else {
         let uuid = uuid::Uuid::from_bytes(id.0);
         match image.topic_by_id(&uuid) {
             None => Err(codes::UNKNOWN_TOPIC_ID),
             Some(t) if !name.is_empty() && t.name != name => Err(codes::INCONSISTENT_TOPIC_ID),
             Some(t) => Ok(t),
         }
-    } else {
-        image.topic(name).ok_or(codes::UNKNOWN_TOPIC_OR_PARTITION)
     }
 }
 

@@ -1,4 +1,4 @@
-//! KIP-516: OffsetCommit v10 / OffsetFetch v8+ by topic_id.
+//! KIP-516: `OffsetCommit` v10 / `OffsetFetch` v8+ by `topic_id`.
 use assert2::assert;
 mod support;
 
