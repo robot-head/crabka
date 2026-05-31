@@ -1,5 +1,7 @@
-//! openraft `TypeConfig` for Crabka. Single source of truth for the
-//! generic parameter set every adapter uses.
+//! Shared controller types: the `NodeId` alias, the KIP-853 voter `Node`
+//! identity, and the `AppData`/`AppDataResponse` records carried through the
+//! controller. These are the plain Crabka types the engine and reconfig
+//! coordinator use.
 
 use serde::{Deserialize, Serialize};
 
@@ -7,7 +9,7 @@ use crabka_metadata::MetadataRecord;
 
 pub type NodeId = u64;
 
-/// KIP-853 voter node identity used by openraft membership.
+/// KIP-853 voter node identity used by controller membership.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Node {
     pub directory_id: uuid::Uuid,
@@ -16,7 +18,7 @@ pub struct Node {
 }
 
 impl Node {
-    /// The controller RPC endpoint openraft dials. By convention the first
+    /// The controller RPC endpoint peers dial. By convention the first
     /// endpoint named "CONTROLLER"; falls back to the first endpoint.
     #[must_use]
     pub fn controller_addr(&self) -> Option<std::net::SocketAddr> {
@@ -62,21 +64,6 @@ pub struct AppDataResponse {
     /// silently committing every duplicate.
     pub rejected: Vec<String>,
 }
-
-openraft::declare_raft_types!(
-    pub TypeConfig:
-        D = AppData,
-        R = AppDataResponse,
-        NodeId = NodeId,
-        Node = Node,
-        Entry = openraft::Entry<TypeConfig>,
-        SnapshotData = std::io::Cursor<Vec<u8>>,
-        AsyncRuntime = openraft::TokioRuntime,
-);
-
-/// Re-export the openraft-derived `Raft` alias so adapters can name it
-/// without re-stating the type config.
-pub type Raft = openraft::Raft<TypeConfig>;
 
 #[cfg(test)]
 mod node_tests {

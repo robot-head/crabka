@@ -20,8 +20,8 @@ pub enum RaftError {
     #[error("metadata: {0}")]
     Metadata(#[from] crabka_metadata::MetadataError),
 
-    #[error("openraft fatal: {0}")]
-    Openraft(String),
+    #[error("unsupported: {0}")]
+    Unsupported(&'static str),
 
     #[error("not leader; current leader: {current_leader:?}")]
     NotLeader { current_leader: Option<NodeId> },

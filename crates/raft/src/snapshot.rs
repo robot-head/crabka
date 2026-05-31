@@ -2,13 +2,11 @@
 //!
 //! The format layer: image ⇄ record sequence, the `.checkpoint` filename
 //! grammar, and the canonical on-disk bytes (header/data/footer Kafka
-//! `RecordBatch`es), plus the `persist`/`load_latest` helpers that write
-//! and recover the artifact and its `.meta` sidecar.
-
-use std::path::Path;
+//! `RecordBatch`es). The engine ([`crate::kraft::KraftController`]) writes the
+//! `.checkpoint` directly (no `.meta` sidecar) and recovers from it via
+//! [`SnapshotReader::read_records`].
 
 use bytes::{BufMut, Bytes, BytesMut};
-use openraft::SnapshotMeta;
 use serde_wincode::SerdeCompat;
 use wincode::{Deserialize as _, Serialize as _};
 
@@ -17,7 +15,6 @@ use crabka_protocol::records::header::Attributes;
 use crabka_protocol::records::{Record, RecordBatch};
 
 use crate::error::RaftError;
-use crate::types::{Node, NodeId};
 
 /// Control-record key type codes (KIP-630). The key of a control record
 /// is `i16 version` + `i16 type`.
@@ -30,30 +27,10 @@ const SNAPSHOT_FOOTER_VERSION: i16 = 0;
 
 /// Identifies a snapshot by the log position it covers: `end_offset` is
 /// the offset of the last record contained in the snapshot, and `epoch`
-/// is the leader epoch at that offset. The on-disk artifact is named
-/// `<end_offset>-<epoch>.checkpoint` with both fields zero-padded so
-/// lexical sort matches numeric sort.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SnapshotId {
-    pub end_offset: i64,
-    pub epoch: i32,
-}
-
-impl SnapshotId {
-    pub(crate) fn file_name(self) -> String {
-        format!("{:020}-{:010}.checkpoint", self.end_offset, self.epoch)
-    }
-
-    pub(crate) fn parse(name: &str) -> Option<Self> {
-        let stem = name.strip_suffix(".checkpoint")?;
-        let (off, ep) = stem.split_once('-')?;
-        Some(Self {
-            end_offset: off.parse().ok()?,
-            epoch: ep.parse().ok()?,
-        })
-    }
-}
-
+/// is the leader epoch at that offset. The engine names the on-disk artifact
+/// `<end_offset>-<epoch>.checkpoint` (both fields zero-padded so lexical sort
+/// matches numeric sort) and parses it back directly.
+///
 /// Serializes a [`MetadataImage`] into the canonical KIP-630
 /// `.checkpoint` byte layout: a header control batch, one data batch of
 /// `MetadataRecord` values, then a footer control batch — concatenated
@@ -179,76 +156,6 @@ impl SnapshotReader {
     }
 }
 
-/// Write the `.checkpoint` artifact plus its `.meta` sidecar for `id`
-/// into `dir`. The checkpoint stays pure KIP-630 (record batches only);
-/// openraft's `SnapshotMeta` (`last_log_id` + `last_membership` + id) rides
-/// alongside in `<id>.checkpoint.meta` as bincode, mirroring the
-/// `vote.bin` sidecar pattern.
-///
-/// The `.meta` is written *before* the `.checkpoint`, making the
-/// `.checkpoint` the commit marker: [`load_latest`] keys off `.checkpoint`
-/// files, so a crash between the two writes leaves at worst an orphan
-/// `.meta` (ignored on recovery), never a `.checkpoint` whose sidecar is
-/// missing. Each file lands via temp + rename so neither is ever seen
-/// half-written.
-pub(crate) fn persist(
-    dir: &Path,
-    id: SnapshotId,
-    bytes: &[u8],
-    meta: &SnapshotMeta<NodeId, Node>,
-) -> Result<(), RaftError> {
-    std::fs::create_dir_all(dir).map_err(crabka_log::LogError::Io)?;
-    let meta_bytes = <SerdeCompat<SnapshotMeta<NodeId, Node>>>::serialize(meta)?;
-    write_atomic(&dir.join(format!("{}.meta", id.file_name())), &meta_bytes)?;
-    write_atomic(&dir.join(id.file_name()), bytes)?;
-    Ok(())
-}
-
-/// A loaded checkpoint: its id, the raw `.checkpoint` bytes, and the
-/// `SnapshotMeta` recovered from the sidecar.
-pub(crate) type LoadedSnapshot = (SnapshotId, Vec<u8>, SnapshotMeta<NodeId, Node>);
-
-/// Scan `dir` for `.checkpoint` artifacts, pick the highest
-/// `(end_offset, epoch)`, and load its bytes plus the `SnapshotMeta`
-/// sidecar. Returns `None` when the directory is absent or holds no
-/// checkpoint.
-pub(crate) fn load_latest(dir: &Path) -> Result<Option<LoadedSnapshot>, RaftError> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(RaftError::Storage(crabka_log::LogError::Io(e))),
-    };
-    let mut latest: Option<SnapshotId> = None;
-    for entry in entries {
-        let entry = entry.map_err(crabka_log::LogError::Io)?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some(id) = SnapshotId::parse(name) else {
-            continue;
-        };
-        if latest.is_none_or(|cur| (id.end_offset, id.epoch) > (cur.end_offset, cur.epoch)) {
-            latest = Some(id);
-        }
-    }
-    let Some(id) = latest else { return Ok(None) };
-    let bytes = std::fs::read(dir.join(id.file_name())).map_err(crabka_log::LogError::Io)?;
-    let meta_bytes = std::fs::read(dir.join(format!("{}.meta", id.file_name())))
-        .map_err(crabka_log::LogError::Io)?;
-    let meta = <SerdeCompat<SnapshotMeta<NodeId, Node>>>::deserialize(&meta_bytes)?;
-    Ok(Some((id, bytes, meta)))
-}
-
-/// Write `bytes` to `path` durably-ish: stage into a sibling `.tmp`
-/// file, then rename over `path`. Rename is atomic on the same
-/// filesystem, so concurrent readers see either the old file or the
-/// fully-written new one — never a partial write.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), RaftError> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).map_err(crabka_log::LogError::Io)?;
-    std::fs::rename(&tmp, path).map_err(crabka_log::LogError::Io)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,47 +199,6 @@ mod tests {
         let records = SnapshotReader::read_records(&bytes).unwrap();
         assert!(records.is_empty());
         assert!(MetadataImage::from_records(cid, &records) == image);
-    }
-
-    #[test]
-    fn persist_then_load_latest_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let id = SnapshotId {
-            end_offset: 42,
-            epoch: 1,
-        };
-        let bytes = b"checkpoint-bytes".to_vec();
-        let meta = SnapshotMeta {
-            last_log_id: None,
-            last_membership: openraft::StoredMembership::default(),
-            snapshot_id: id.file_name(),
-        };
-        persist(dir.path(), id, &bytes, &meta).unwrap();
-
-        let (loaded_id, loaded_bytes, loaded_meta) = load_latest(dir.path())
-            .unwrap()
-            .expect("checkpoint present");
-        assert!(loaded_id == id);
-        assert!(loaded_bytes == bytes);
-        assert!(loaded_meta.snapshot_id == id.file_name());
-    }
-
-    #[test]
-    fn load_latest_ignores_orphan_meta() {
-        // A crash between persist's two writes can leave a `.meta` with no
-        // `.checkpoint`. Since the `.checkpoint` is the commit marker,
-        // load_latest must treat that directory as having no snapshot.
-        let dir = tempfile::tempdir().unwrap();
-        let id = SnapshotId {
-            end_offset: 7,
-            epoch: 0,
-        };
-        std::fs::write(
-            dir.path().join(format!("{}.meta", id.file_name())),
-            b"orphan",
-        )
-        .unwrap();
-        assert!(load_latest(dir.path()).unwrap().is_none());
     }
 
     #[test]

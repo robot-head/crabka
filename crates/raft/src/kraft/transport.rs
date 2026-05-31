@@ -87,6 +87,13 @@ pub enum Command {
     QuorumStateSnapshot {
         reply: oneshot::Sender<QuorumStateSnapshot>,
     },
+    /// Handle op: read a committed `__cluster_metadata` slice for an observer's
+    /// `API_KEY_METADATA_FETCH` (1004), encoded as Kafka record batches.
+    MetadataFetch {
+        fetch_offset: i64,
+        max_bytes: usize,
+        reply: oneshot::Sender<MetadataFetchSlice>,
+    },
     /// Test-only: append a metadata batch to the log (as the leader's
     /// `submit_change` will) and drive commit through the real apply pipeline.
     /// Replies with the appended base offset.
@@ -97,6 +104,16 @@ pub enum Command {
     },
     /// Stop the loop.
     Shutdown,
+}
+
+/// A committed-range read result for the observer metadata-fetch path (1004).
+/// `records` is concatenated Kafka `RecordBatch`es (one per committed log batch
+/// in `[fetch_offset, high_watermark)`); the offsets are `KraftLog` offsets.
+#[derive(Debug, Clone)]
+pub struct MetadataFetchSlice {
+    pub records: bytes::Bytes,
+    pub log_start_offset: i64,
+    pub high_watermark: i64,
 }
 
 /// Which timer fired. The loop interprets the tick against current role/liveness
@@ -114,7 +131,7 @@ pub enum TimerTick {
 /// A structured, node-local snapshot of consensus state surfaced to the handle
 /// for the broker's `DescribeQuorum` admin view. (The handle-level
 /// `crate::controller::QuorumState` translation lands in Task 8; this is the
-/// engine's own view, free of openraft types.)
+/// engine's own view.)
 #[derive(Debug, Clone)]
 pub struct QuorumStateSnapshot {
     pub leader_id: Option<NodeId>,

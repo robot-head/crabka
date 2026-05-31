@@ -6,7 +6,7 @@
 //! Ownership model: one task owns the [`Engine`]; everything else talks to it
 //! over an mpsc of [`Command`]. The public [`KraftController`] handle is a
 //! cheap clone holding the command sender plus the `watch` receivers. This
-//! mirrors the actor pattern openraft used, but the engine is now ours.
+//! a single-owner actor pattern; the engine is entirely ours.
 //!
 //! ## Concurrency / no-inline-await invariant
 //!
@@ -47,7 +47,7 @@ use crate::kraft::event::{Event, LogEnd};
 use crate::kraft::log::KraftLog;
 use crate::kraft::role::Role;
 use crate::kraft::transport::{
-    Command, Inbound, PeerSender, QuorumStateSnapshot, TimerTick, api_key, wire,
+    Command, Inbound, MetadataFetchSlice, PeerSender, QuorumStateSnapshot, TimerTick, api_key, wire,
 };
 use crate::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, ReplicaKey, SimInstant};
 
@@ -76,6 +76,10 @@ struct Engine {
     image_tx: watch::Sender<Arc<MetadataImage>>,
     /// Publishes the current leader id (None while unknown / election running).
     leader_tx: watch::Sender<Option<NodeId>>,
+    /// Publishes a structured consensus snapshot for the handle's synchronous
+    /// `quorum_state()` (the broker's `DescribeQuorum` reads it without an mpsc
+    /// round-trip).
+    quorum_tx: watch::Sender<QuorumStateSnapshot>,
     /// Clone of the command sender, handed to fire-and-forget send tasks so
     /// they can post the decoded `Receive*Response` event back to the loop.
     cmd_tx: mpsc::Sender<Command>,
@@ -121,6 +125,7 @@ pub struct KraftController {
     cmd_tx: mpsc::Sender<Command>,
     image_rx: watch::Receiver<Arc<MetadataImage>>,
     leader_rx: watch::Receiver<Option<NodeId>>,
+    quorum_rx: watch::Receiver<QuorumStateSnapshot>,
     me: NodeId,
 }
 
@@ -173,6 +178,15 @@ impl KraftController {
 
         let (image_tx, image_rx) = watch::channel(Arc::new(image.clone()));
         let (leader_tx, leader_rx) = watch::channel(initial_leader);
+        let initial_snapshot = QuorumStateSnapshot {
+            leader_id: initial_leader,
+            leader_epoch: initial_epoch,
+            high_watermark: log.hwm(),
+            log_end_offset: log.log_end_offset(),
+            voters: initial_state_voters(&core),
+            per_voter_fetch_offset: std::collections::BTreeMap::new(),
+        };
+        let (quorum_tx, quorum_rx) = watch::channel(initial_snapshot);
         let (cmd_tx, cmd_rx) = mpsc::channel(256);
 
         let clock_base = Instant::now();
@@ -192,6 +206,7 @@ impl KraftController {
             peers,
             image_tx,
             leader_tx,
+            quorum_tx,
             cmd_tx: cmd_tx.clone(),
             data_dir,
             clock_base,
@@ -210,6 +225,7 @@ impl KraftController {
             cmd_tx,
             image_rx,
             leader_rx,
+            quorum_rx,
             me,
         }
     }
@@ -292,6 +308,14 @@ impl KraftController {
         self.leader_rx.clone()
     }
 
+    /// A synchronous snapshot of consensus state (the handle's `quorum_state()`
+    /// reads this without an mpsc round-trip — the engine republishes it on
+    /// every event). Cheap `watch` borrow + clone.
+    #[must_use]
+    pub fn quorum_snapshot(&self) -> QuorumStateSnapshot {
+        self.quorum_rx.borrow().clone()
+    }
+
     /// Submit a metadata change. On the leader, appends the batch at the current
     /// leader epoch and returns once it is committed (HWM ≥ the appended end
     /// offset) AND applied, surfacing the first per-record rejection. On a
@@ -323,6 +347,28 @@ impl KraftController {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::QuorumStateSnapshot { reply })
+            .await
+            .map_err(|_| RaftError::Shutdown)?;
+        rx.await.map_err(|_| RaftError::Shutdown)
+    }
+
+    /// Read a committed `__cluster_metadata` slice for an observer's
+    /// `API_KEY_METADATA_FETCH` (1004).
+    ///
+    /// # Errors
+    /// Returns [`RaftError::Shutdown`] if the engine task is gone.
+    pub async fn metadata_fetch(
+        &self,
+        fetch_offset: i64,
+        max_bytes: usize,
+    ) -> Result<MetadataFetchSlice, RaftError> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(Command::MetadataFetch {
+                fetch_offset,
+                max_bytes,
+                reply,
+            })
             .await
             .map_err(|_| RaftError::Shutdown)?;
         rx.await.map_err(|_| RaftError::Shutdown)
@@ -452,6 +498,13 @@ impl Engine {
             }
             Command::QuorumStateSnapshot { reply } => {
                 let _ = reply.send(self.quorum_state_snapshot());
+            }
+            Command::MetadataFetch {
+                fetch_offset,
+                max_bytes,
+                reply,
+            } => {
+                let _ = reply.send(self.metadata_fetch_slice(fetch_offset, max_bytes));
             }
             #[cfg(test)]
             Command::TestAppendAndCommit { records, reply } => {
@@ -1017,6 +1070,38 @@ impl Engine {
         }
     }
 
+    /// Serve a committed `__cluster_metadata` slice for an observer's metadata
+    /// fetch (1004): read committed batches at/after `fetch_offset` up to the
+    /// HWM and concatenate their verbatim `RecordBatch` bytes (the engine's
+    /// records are already Kafka record batches). At least the first batch is
+    /// always emitted so the observer makes progress.
+    fn metadata_fetch_slice(&self, fetch_offset: i64, max_bytes: usize) -> MetadataFetchSlice {
+        let high_watermark = self.log.hwm();
+        let log_start_offset = self.log.log_start_offset();
+        let records = if fetch_offset < 0 || fetch_offset >= high_watermark {
+            bytes::Bytes::new()
+        } else {
+            match self.log.read_decoded(fetch_offset, max_bytes.max(1)) {
+                Ok(batches) => {
+                    let committed: Vec<RecordBatch> = batches
+                        .into_iter()
+                        .filter(|b| b.base_offset < high_watermark)
+                        .collect();
+                    encode_batches(&committed)
+                }
+                Err(e) => {
+                    tracing::error!(?e, "kraft: metadata fetch read failed");
+                    bytes::Bytes::new()
+                }
+            }
+        };
+        MetadataFetchSlice {
+            records,
+            log_start_offset,
+            high_watermark,
+        }
+    }
+
     /// Voter ids other than self.
     fn other_voters(&self) -> Vec<NodeId> {
         self.core
@@ -1205,6 +1290,11 @@ impl Engine {
         if *self.leader_tx.borrow() != leader {
             let _ = self.leader_tx.send(leader);
         }
+        // Republish the structured consensus snapshot for the handle's
+        // synchronous `quorum_state()` (DescribeQuorum). `send_replace` keeps
+        // the watch's stored value current even with no active receiver.
+        let snapshot = self.quorum_state_snapshot();
+        self.quorum_tx.send_replace(snapshot);
     }
 }
 
@@ -1275,6 +1365,12 @@ fn decode_batches(mut buf: &[u8]) -> Result<Vec<RecordBatch>, RaftError> {
         }
     }
     Ok(out)
+}
+
+/// Voter ids from the core's current quorum state (for the initial published
+/// snapshot, before the loop runs).
+fn initial_state_voters(core: &QuorumStateMachine) -> Vec<NodeId> {
+    core.quorum_state().voters.ids().into_iter().collect()
 }
 
 /// Build the leader's `LeaderChange` marker batch for `epoch`.
@@ -1384,7 +1480,7 @@ fn load_quorum_state(
     }))
 }
 
-/// Write a KIP-630 `.checkpoint` artifact (bytes only — the openraft `.meta`
+/// Write a KIP-630 `.checkpoint` artifact (bytes only — the `.meta`
 /// sidecar that `snapshot::persist` writes is being removed in Task 9, so the
 /// engine writes the checkpoint directly with the same temp+rename atomicity).
 fn write_checkpoint(
@@ -1405,7 +1501,7 @@ fn write_checkpoint(
 /// Scan `dir` for `<end_offset>-<epoch>.checkpoint` artifacts, pick the highest
 /// `(end_offset, epoch)`, and return its raw bytes. Returns `None` when the
 /// directory is absent or holds no checkpoint. Unlike `snapshot::load_latest`,
-/// this reads only the `.checkpoint` (the openraft `.meta` sidecar is gone in
+/// this reads only the `.checkpoint` (the `.meta` sidecar is gone in
 /// this engine — the durable epoch lives in the quorum-state file).
 fn load_latest_checkpoint(dir: &std::path::Path) -> Result<Option<Vec<u8>>, RaftError> {
     let entries = match std::fs::read_dir(dir) {

@@ -24,7 +24,7 @@ use crate::types::NodeId;
 ///    [`crate::ControllerHandle::add_learner`] +
 ///    [`crate::ControllerHandle::change_membership`].
 /// 3. After the initial format, restarted brokers use `Rejoin` — their
-///    on-disk raft log already carries the membership and openraft replays
+///    on-disk raft log already carries the membership and the engine replays
 ///    it during `Raft::new`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapMode {
@@ -43,7 +43,7 @@ pub enum BootstrapMode {
 
     /// Restart a previously-formatted broker. The on-disk raft log encodes
     /// the cluster's current membership; `Controller::start` skips
-    /// `initialize` and openraft replays existing state during `Raft::new`.
+    /// recovers existing state from the on-disk log + checkpoint at startup.
     Rejoin,
 }
 

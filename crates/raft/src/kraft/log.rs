@@ -1,7 +1,7 @@
 //! `KraftLog`: the real replicated metadata log behind the 3a `LogView` seam.
 //! A thin facade over `crabka_log::Log` that adds high-watermark tracking,
 //! committed-read filtering for KIP-595 `Fetch`, and divergence lookup. Wired
-//! into the controller (replacing openraft's `log_store`) in slice 3c.
+//! into the controller (the metadata log) in slice 3c.
 
 use std::path::Path;
 
