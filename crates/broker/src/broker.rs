@@ -1044,27 +1044,29 @@ impl Broker {
         {
             let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
 
-            // KIP-595 static bootstrap: a `Bootstrap` node with no seeded
-            // `VotersRecord` (an in-process start that didn't run
-            // `format --standalone`) seeds its initial voter set from
+            // KIP-595 static voters: the engine reconstructs its voter set from
+            // `ControllerConfig.initial_voters` every boot (static this slice;
+            // KIP-853 dynamic reconfig is Slice 5). When no `VotersRecord` was
+            // loaded from `bootstrap.records.bin` (the in-process start path that
+            // didn't run `crabka format`), build the static set from
             // `controller_quorum_voters`. Two shapes:
             //
-            //   * Single-voter (`len <= 1`): standalone self-bootstrap — form a
-            //     single-voter cluster of *this* node and self-elect on the
-            //     first election timeout.
-            //   * Multi-voter (`len > 1`): static N-voter bootstrap — seed the
-            //     full configured voter set so every node starts with
-            //     voters={all configured} and elects among themselves over the
-            //     real KIP-595 wire. No auto-join (that's KIP-853, Slice 5);
-            //     every node runs this identically with the same configured set.
+            //   * Single-voter (`len <= 1`): standalone self-bootstrap of *this*
+            //     node; self-elects on the first election timeout.
+            //   * Multi-voter (`len > 1`): the full configured voter set, so
+            //     every node starts with voters={all configured} and elects
+            //     among themselves over the real KIP-595 wire — no auto-join.
             //
-            // Either way we seed both the engine's `initial_voters` and the
-            // metadata log (a `V1Voters` + `V1KRaftVersion` pair submitted
-            // through raft after election in step 2b) so the two stay in
-            // lockstep.
-            if initial_voters.is_empty()
-                && matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
-            {
+            // This must run for `Rejoin` as well as `Bootstrap`: a restarted
+            // node recovers its committed metadata log from disk but the engine
+            // still derives `voters` (peer endpoints for dialing/forwarding)
+            // from `initial_voters`. Without this a `Rejoin` node would come up
+            // with an empty voter set — unable to dial peers or forward
+            // `submit_change` to the leader. Only `Bootstrap` additionally seeds
+            // the metadata log (the `V1Voters` + `V1KRaftVersion` pair submitted
+            // through raft in step 2b); a `Rejoin` node already has them
+            // committed on disk and must not re-submit.
+            if initial_voters.is_empty() && !config.controller_quorum_voters.is_empty() {
                 let voters = if config.controller_quorum_voters.len() > 1 {
                     // Static N-voter set: one `Voter` per configured
                     // `(node_id, controller_addr)`. The engine identifies
@@ -1098,7 +1100,8 @@ impl Broker {
                     tracing::info!(
                         node_id = config.node_id,
                         voter_count = voters.len(),
-                        "KIP-595 static multi-voter bootstrap: seeding full configured voter set"
+                        mode = ?config.bootstrap_mode,
+                        "KIP-595 static multi-voter set: deriving voters from controller_quorum_voters"
                     );
                     crabka_metadata::VoterSet::from_voters(voters)
                 } else {
@@ -1114,22 +1117,28 @@ impl Broker {
                     };
                     tracing::info!(
                         node_id = config.node_id,
-                        "KIP-595 standalone self-bootstrap: forming single-voter cluster"
+                        mode = ?config.bootstrap_mode,
+                        "KIP-595 single-voter set: forming/recovering single-voter cluster"
                     );
                     crabka_metadata::VoterSet::from_voters([self_voter])
                 };
-                bootstrap_records.insert(
-                    0,
-                    crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
-                        voters: voters.clone(),
-                    }),
-                );
-                bootstrap_records.insert(
-                    0,
-                    crabka_metadata::MetadataRecord::V1KRaftVersion(
-                        crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
-                    ),
-                );
+                // Only a fresh `Bootstrap` node seeds the metadata log; a
+                // `Rejoin` node already has the committed `V1Voters` /
+                // `V1KRaftVersion` records on disk and must not re-submit them.
+                if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
+                    bootstrap_records.insert(
+                        0,
+                        crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
+                            voters: voters.clone(),
+                        }),
+                    );
+                    bootstrap_records.insert(
+                        0,
+                        crabka_metadata::MetadataRecord::V1KRaftVersion(
+                            crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
+                        ),
+                    );
+                }
                 initial_voters = voters;
             }
 
