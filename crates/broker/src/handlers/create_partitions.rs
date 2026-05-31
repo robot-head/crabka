@@ -7,7 +7,7 @@
 
 use bytes::{Bytes, BytesMut};
 
-use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, TopicRecord};
+use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord};
 use crabka_protocol::owned::create_partitions_request::{
     CreatePartitionsAssignment, CreatePartitionsRequest,
 };
@@ -238,15 +238,14 @@ pub(crate) async fn handle(
             continue;
         }
 
-        // Build batch: one updated V1Topic (new partition count) +
-        // one V1Partition per new index.
-        let mut records: Vec<MetadataRecord> = Vec::with_capacity(new_partition_count + 1);
-        records.push(MetadataRecord::V1Topic(TopicRecord {
-            name: t.name.clone(),
-            topic_id: topic_rec.topic_id,
-            partitions: new_count,
-            replication_factor: rf,
-        }));
+        // Build batch: one V1Partition per new index. Under KIP-631 framing the
+        // topic's partition count IS the number of PartitionRecords (the
+        // `TopicRecord` carries no count), so CreatePartitions appends only the
+        // new partition records — no `V1Topic` rewrite. The image derives the
+        // grown count from the partitions map as these apply. (Re-submitting a
+        // `V1Topic` would round-trip back to the pre-grow count and be rejected
+        // by the strict-expansion `validate` on the apply path.)
+        let mut records: Vec<MetadataRecord> = Vec::with_capacity(new_partition_count);
         for (i, p) in new_partition_indices.iter().enumerate() {
             let replicas = new_assignments[i].clone();
             records.push(MetadataRecord::V1Partition(PartitionRecord {
