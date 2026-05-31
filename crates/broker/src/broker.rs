@@ -49,6 +49,7 @@ pub struct Broker {
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
     pub(crate) txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
+    pub(crate) share_coordinator: Arc<crate::share_coordinator::coordinator::ShareCoordinator>,
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     /// Handle for the periodic disk-usage scanner spawned when
@@ -1361,6 +1362,22 @@ impl Broker {
             .await
             .map_err(|e| tracing::warn!(error = %e, "txn coordinator recovery error"));
 
+        // 4a'. Construct the share coordinator (KIP-932 persister). Same
+        //      dependencies as the txn coordinator; replay any existing
+        //      __share_group_state records (warnings only — a fresh broker
+        //      has nothing to replay).
+        let share_coordinator = Arc::new(
+            crate::share_coordinator::coordinator::ShareCoordinator::new(
+                config.node_id,
+                partitions.clone(),
+                (*config.share_coordinator).clone(),
+            ),
+        );
+        let _ = share_coordinator
+            .recover(&controller.current_image())
+            .await
+            .map_err(|e| tracing::warn!(error = %e, "share coordinator recovery error"));
+
         // 4b. Spawn the replicator supervisor. Started AFTER the controller
         //    is up and self-registration succeeded so the supervisor's
         //    initial reconcile already sees this broker in the brokers()
@@ -1396,6 +1413,7 @@ impl Broker {
             format!("crabka-broker-{}-replicator", config.broker_id),
             supervisor_shutdown.clone(),
             Some(txn_coordinator.clone()),
+            Some(share_coordinator.clone()),
             inter_broker_client.clone(),
             inter_listener_proto,
             config.inter_broker_listener_name.clone(),
@@ -2129,6 +2147,7 @@ impl Broker {
             producer_ids,
             producer_state,
             txn_coordinator,
+            share_coordinator,
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             disk_scanner_handle: tokio::sync::Mutex::new(disk_scanner_handle),
