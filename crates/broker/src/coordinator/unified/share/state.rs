@@ -156,9 +156,21 @@ mod tests {
     fn evict_expired_removes_silent_members() {
         let mut g = ShareGroupState::new("g1");
         let mut m = ShareMemberState::joining("m1", "c1", "h1", HashSet::default());
-        m.last_seen = Instant::now() - Duration::from_secs(120);
+        // `last_seen` is "now"; evaluating eviction at a point slightly in the
+        // future with a tiny session timeout makes the member overdue without
+        // ever subtracting from an `Instant` (which underflows on low-uptime CI).
+        m.last_seen = Instant::now();
         g.add_or_update_member(m);
-        let evicted = g.evict_expired(Instant::now(), Duration::from_secs(45));
+
+        // A member seen within the session timeout is retained.
+        let recent = Instant::now() + Duration::from_millis(50);
+        let kept = g.evict_expired(recent, Duration::from_secs(45));
+        assert!(kept.is_empty());
+        assert!(g.members.len() == 1);
+
+        // The same member is overdue once the timeout shrinks below its silence.
+        let later = Instant::now() + Duration::from_millis(50);
+        let evicted = g.evict_expired(later, Duration::from_millis(1));
         assert!(evicted == vec!["m1".to_string()]);
         assert!(g.members.is_empty());
     }
