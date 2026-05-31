@@ -1,22 +1,28 @@
 //! `OffsetFetch` (`api_key=9`). Reads from `Group.committed_offsets`.
 //!
 //! For v0-v7 the request carries the legacy single-group fields:
-//! `group_id` + `topics: Option<Vec<OffsetFetchRequestTopic>>`. v8+ moved
-//! to a per-group array; for the MVP we ignore the `groups` array and only
-//! serve the legacy single-group shape.
+//! `group_id` + `topics: Option<Vec<OffsetFetchRequestTopic>>`. v8+ (KIP-516)
+//! moves to a per-group `groups[]` array and, at v10, keys topics by
+//! `topic_id`; that path is handled in `handle_groups`. Internal offset
+//! storage stays name-keyed, so topic ids are resolved to names at the wire
+//! boundary and echoed back on the response.
 
 use bytes::{Bytes, BytesMut};
+use tokio::sync::oneshot;
 
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::offset_fetch_request::OffsetFetchRequest;
 use crabka_protocol::owned::offset_fetch_response::{
-    OffsetFetchResponse, OffsetFetchResponsePartition, OffsetFetchResponseTopic,
+    OffsetFetchResponse, OffsetFetchResponseGroup, OffsetFetchResponsePartition,
+    OffsetFetchResponsePartitions, OffsetFetchResponseTopic, OffsetFetchResponseTopics,
 };
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::{Decode, Encode};
 
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
+use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
 #[allow(clippy::too_many_lines)] // ACL preamble (group + per-topic) + fetch-all vs named-topic branches; splitting hurts readability
@@ -29,6 +35,15 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = OffsetFetchRequest::decode(&mut cur, version)?;
+
+    // ── KIP-516 (v8+): per-group `groups[]` request/response shape ──
+    // v8 moved from a single (group_id, topics) pair to an array of
+    // groups, and v10 keys topics by `topic_id`. Internal offset storage
+    // stays name-keyed, so resolve id→name at the boundary and echo the
+    // id back. The legacy v0–v7 single-group path is preserved below.
+    if version >= 8 {
+        return handle_groups(broker, version, &req, ctx).await;
+    }
 
     // ── ACL preamble ────────────────────────────────────────────
     // Step 1: `Describe` on `Group(group_id)`. On Deny → whole-response
@@ -55,8 +70,30 @@ pub(crate) async fn handle(
         }
     }
 
-    let handle = broker.group_manager.get_or_create(&req.group_id);
-    let g = handle.state.lock().await;
+    // Fetch the group's committed offsets from its actor (a classic actor is
+    // created for an unknown id, matching the old get-or-create behavior).
+    let committed = {
+        let handle = broker.group_coordinator.find(&req.group_id).or_else(|| {
+            broker
+                .group_coordinator
+                .get_or_create_classic(&req.group_id)
+        });
+        match handle {
+            Some(h) => {
+                let (tx, rx) = oneshot::channel();
+                if h.tx
+                    .send(GroupActorMessage::FetchCommitted { reply: tx })
+                    .await
+                    .is_ok()
+                {
+                    rx.await.unwrap_or_default()
+                } else {
+                    std::collections::HashMap::new()
+                }
+            }
+            None => std::collections::HashMap::new(),
+        }
+    };
 
     // A `None` `topics` field (v ≥ 2) is the "fetch all" sentinel:
     // return every committed offset stored for this group.
@@ -64,7 +101,7 @@ pub(crate) async fn handle(
         // Aggregate all committed offsets grouped by topic name.
         let mut by_topic: std::collections::HashMap<String, Vec<OffsetFetchResponsePartition>> =
             std::collections::HashMap::new();
-        for ((topic, pid), entry) in &g.committed_offsets {
+        for ((topic, pid), entry) in &committed {
             by_topic
                 .entry(topic.clone())
                 .or_default()
@@ -177,26 +214,24 @@ pub(crate) async fn handle(
                     let partitions = t
                         .partition_indexes
                         .iter()
-                        .map(
-                            |&pid| match g.committed_offsets.get(&(t.name.clone(), pid)) {
-                                Some(entry) => OffsetFetchResponsePartition {
-                                    partition_index: pid,
-                                    committed_offset: entry.offset,
-                                    committed_leader_epoch: entry.leader_epoch,
-                                    metadata: Some(entry.metadata.clone()),
-                                    error_code: codes::NONE,
-                                    ..Default::default()
-                                },
-                                None => OffsetFetchResponsePartition {
-                                    partition_index: pid,
-                                    committed_offset: -1,
-                                    committed_leader_epoch: -1,
-                                    metadata: None,
-                                    error_code: codes::NONE,
-                                    ..Default::default()
-                                },
+                        .map(|&pid| match committed.get(&(t.name.clone(), pid)) {
+                            Some(entry) => OffsetFetchResponsePartition {
+                                partition_index: pid,
+                                committed_offset: entry.offset,
+                                committed_leader_epoch: entry.leader_epoch,
+                                metadata: Some(entry.metadata.clone()),
+                                error_code: codes::NONE,
+                                ..Default::default()
                             },
-                        )
+                            None => OffsetFetchResponsePartition {
+                                partition_index: pid,
+                                committed_offset: -1,
+                                committed_leader_epoch: -1,
+                                metadata: None,
+                                error_code: codes::NONE,
+                                ..Default::default()
+                            },
+                        })
                         .collect();
                     OffsetFetchResponseTopic {
                         name: t.name.clone(),
@@ -212,6 +247,267 @@ pub(crate) async fn handle(
         topics: topics_out,
         error_code: codes::NONE,
         throttle_time_ms: 0,
+        ..Default::default()
+    };
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
+}
+
+/// v8+ per-group fetch. Processes `req.groups` into `resp.groups`, leaving
+/// `resp.topics` empty (it is only encoded for v < 8). Offset storage is
+/// name-keyed, so at v10 we resolve each requested `topic_id` → name and
+/// echo the id back; unknown ids return `UNKNOWN_TOPIC_ID` per partition.
+#[allow(clippy::too_many_lines)] // per-group loop: ACL + id→name resolve + named/fetch-all branches
+async fn handle_groups(
+    broker: &Broker,
+    version: i16,
+    req: &OffsetFetchRequest,
+    ctx: &crate::handlers::RequestContext<'_>,
+) -> Result<Bytes, BrokerError> {
+    let mut groups_out: Vec<OffsetFetchResponseGroup> = Vec::with_capacity(req.groups.len());
+
+    for grp in &req.groups {
+        // ── ACL: `Describe` on `Group(group_id)` ────────────────
+        {
+            let image = broker.controller.current_image();
+            let acl_req = AuthorizationRequest {
+                principal: ctx.principal,
+                host: ctx.peer,
+                resource_type: ResourceType::Group,
+                resource_name: grp.group_id.as_str(),
+                operation: AclOperation::Describe,
+            };
+            if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
+                groups_out.push(OffsetFetchResponseGroup {
+                    group_id: grp.group_id.clone(),
+                    topics: Vec::new(),
+                    error_code: codes::GROUP_AUTHORIZATION_FAILED,
+                    ..Default::default()
+                });
+                continue;
+            }
+        }
+
+        // Fetch the group's committed offsets from its actor (a classic actor
+        // is created for an unknown id, matching get-or-create behavior).
+        let committed = {
+            let h = broker.group_coordinator.find(&grp.group_id).or_else(|| {
+                broker
+                    .group_coordinator
+                    .get_or_create_classic(&grp.group_id)
+            });
+            match h {
+                Some(h) => {
+                    let (tx, rx) = oneshot::channel();
+                    if h.tx
+                        .send(GroupActorMessage::FetchCommitted { reply: tx })
+                        .await
+                        .is_ok()
+                    {
+                        rx.await.unwrap_or_default()
+                    } else {
+                        std::collections::HashMap::new()
+                    }
+                }
+                None => std::collections::HashMap::new(),
+            }
+        };
+        let image = broker.controller.current_image();
+
+        // Named/id'd topics: resolve id→name (v10) and read each requested
+        // partition from the name-keyed store. `None` topics → fetch-all.
+        let topics_out: Vec<OffsetFetchResponseTopics> =
+            if let Some(req_topics) = grp.topics.as_deref() {
+                // Resolve each requested topic to a name first (id→name at
+                // v10); an unknown id is flagged so it short-circuits to
+                // UNKNOWN_TOPIC_ID without an ACL lookup.
+                let resolved: Vec<(&_, Option<String>)> = req_topics
+                    .iter()
+                    .map(|t| {
+                        let name = if t.topic_id == WireUuid::ZERO {
+                            Some(t.name.clone())
+                        } else {
+                            image
+                                .topic_name_by_id(&uuid::Uuid::from_bytes(t.topic_id.0))
+                                .map(str::to_string)
+                        };
+                        (t, name)
+                    })
+                    .collect();
+
+                // ── ACL: `Read` on each resolved topic. On Deny → per-partition
+                // TOPIC_AUTHORIZATION_FAILED (mirrors the v0–v7 path). The
+                // names are collected into an owned Vec so the decisions map
+                // doesn't borrow `resolved` (which is consumed below).
+                let auth_names: Vec<String> =
+                    resolved.iter().filter_map(|(_, n)| n.clone()).collect();
+                let decisions = authorize_topics(
+                    broker.config.authorizer.as_ref(),
+                    &image,
+                    ctx.principal,
+                    ctx.peer,
+                    AclOperation::Read,
+                    auth_names.iter().map(String::as_str),
+                );
+
+                resolved
+                    .into_iter()
+                    .map(|(t, name)| {
+                        let Some(name) = name else {
+                            // Unknown id → UNKNOWN_TOPIC_ID per partition.
+                            return OffsetFetchResponseTopics {
+                                name: String::new(),
+                                topic_id: t.topic_id,
+                                partitions: t
+                                    .partition_indexes
+                                    .iter()
+                                    .map(|&pid| OffsetFetchResponsePartitions {
+                                        partition_index: pid,
+                                        committed_offset: -1,
+                                        committed_leader_epoch: -1,
+                                        metadata: None,
+                                        error_code: codes::UNKNOWN_TOPIC_ID,
+                                        ..Default::default()
+                                    })
+                                    .collect(),
+                                ..Default::default()
+                            };
+                        };
+
+                        let denied = decisions
+                            .get(name.as_str())
+                            .copied()
+                            .unwrap_or(AuthorizationResult::Deny)
+                            == AuthorizationResult::Deny;
+
+                        let partitions = t
+                            .partition_indexes
+                            .iter()
+                            .map(|&pid| {
+                                if denied {
+                                    return OffsetFetchResponsePartitions {
+                                        partition_index: pid,
+                                        committed_offset: -1,
+                                        committed_leader_epoch: -1,
+                                        metadata: None,
+                                        error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                                        ..Default::default()
+                                    };
+                                }
+                                match committed.get(&(name.clone(), pid)) {
+                                    Some(entry) => OffsetFetchResponsePartitions {
+                                        partition_index: pid,
+                                        committed_offset: entry.offset,
+                                        committed_leader_epoch: entry.leader_epoch,
+                                        metadata: Some(entry.metadata.clone()),
+                                        error_code: codes::NONE,
+                                        ..Default::default()
+                                    },
+                                    None => OffsetFetchResponsePartitions {
+                                        partition_index: pid,
+                                        committed_offset: -1,
+                                        committed_leader_epoch: -1,
+                                        metadata: None,
+                                        error_code: codes::NONE,
+                                        ..Default::default()
+                                    },
+                                }
+                            })
+                            .collect();
+
+                        OffsetFetchResponseTopics {
+                            name,
+                            topic_id: t.topic_id,
+                            partitions,
+                            ..Default::default()
+                        }
+                    })
+                    .collect()
+            } else {
+                // fetch-all: every committed offset for the group, grouped by
+                // topic name. Echo each topic's id (required at v10, where the
+                // name is dropped from the wire) and authorize Read per topic.
+                let mut by_topic: std::collections::HashMap<
+                    String,
+                    Vec<OffsetFetchResponsePartitions>,
+                > = std::collections::HashMap::new();
+                for ((topic, pid), entry) in &committed {
+                    by_topic.entry(topic.clone()).or_default().push(
+                        OffsetFetchResponsePartitions {
+                            partition_index: *pid,
+                            committed_offset: entry.offset,
+                            committed_leader_epoch: entry.leader_epoch,
+                            metadata: Some(entry.metadata.clone()),
+                            error_code: codes::NONE,
+                            ..Default::default()
+                        },
+                    );
+                }
+
+                let discovered: Vec<String> = by_topic.keys().cloned().collect();
+                let decisions = authorize_topics(
+                    broker.config.authorizer.as_ref(),
+                    &image,
+                    ctx.principal,
+                    ctx.peer,
+                    AclOperation::Read,
+                    discovered.iter().map(String::as_str),
+                );
+
+                by_topic
+                    .into_iter()
+                    .map(|(name, partitions)| {
+                        let topic_id = image
+                            .topic(&name)
+                            .map_or(WireUuid::ZERO, |t| WireUuid(t.topic_id.into_bytes()));
+                        let denied = decisions
+                            .get(name.as_str())
+                            .copied()
+                            .unwrap_or(AuthorizationResult::Deny)
+                            == AuthorizationResult::Deny;
+                        if denied {
+                            OffsetFetchResponseTopics {
+                                name,
+                                topic_id,
+                                partitions: partitions
+                                    .into_iter()
+                                    .map(|p| OffsetFetchResponsePartitions {
+                                        partition_index: p.partition_index,
+                                        committed_offset: -1,
+                                        committed_leader_epoch: -1,
+                                        metadata: None,
+                                        error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                                        ..Default::default()
+                                    })
+                                    .collect(),
+                                ..Default::default()
+                            }
+                        } else {
+                            OffsetFetchResponseTopics {
+                                name,
+                                topic_id,
+                                partitions,
+                                ..Default::default()
+                            }
+                        }
+                    })
+                    .collect()
+            };
+
+        groups_out.push(OffsetFetchResponseGroup {
+            group_id: grp.group_id.clone(),
+            topics: topics_out,
+            error_code: codes::NONE,
+            ..Default::default()
+        });
+    }
+
+    let resp = OffsetFetchResponse {
+        topics: Vec::new(),
+        error_code: codes::NONE,
+        throttle_time_ms: 0,
+        groups: groups_out,
         ..Default::default()
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));

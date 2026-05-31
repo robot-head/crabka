@@ -1,6 +1,7 @@
 //! `OffsetCommit` (`api_key=8`). Encodes `OffsetCommitKey` +
 //! `OffsetCommitValue` records, appends them to `__consumer_offsets-0`
-//! via the partition writer, then updates `Group.committed_offsets`.
+//! via the partition writer, then updates the group's committed offsets
+//! through its actor.
 
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 use crabka_protocol::owned::offset_commit_response::{
     OffsetCommitResponse, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
 };
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{Record, RecordBatch};
 use crabka_protocol::{Decode, Encode};
 use tokio::sync::oneshot;
@@ -18,10 +20,10 @@ use tokio::sync::oneshot;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::GroupHandle;
 use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
-use crate::coordinator::group::OffsetEntry;
 use crate::coordinator::persistence::OffsetCommitValue;
+use crate::coordinator::unified::actor::{GroupActorHandle, GroupActorMessage, GroupKindTag};
+use crate::coordinator::unified::classic_state::OffsetEntry;
 use crate::error::BrokerError;
 use crate::partition::{ProduceJob, WriterMessage};
 use crate::partition_registry::PartitionRegistry;
@@ -35,7 +37,49 @@ pub(crate) async fn handle(
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
-    let req = OffsetCommitRequest::decode(&mut cur, version)?;
+    let mut req = OffsetCommitRequest::decode(&mut cur, version)?;
+
+    // ── KIP-516 (v10+): topic_id → name normalization ───────────
+    // At v10 the client sends `name` empty + `topic_id` set. The internal
+    // commit pipeline (and the `__consumer_offsets` record key) is
+    // name-keyed, so resolve id→name in place. Topics whose id is unknown
+    // are split off: they get UNKNOWN_TOPIC_ID on every partition and are
+    // not committed. `finalize` appends those rows to every response, and
+    // the response echoes each topic's `topic_id`.
+    let mut unknown_id_topics: Vec<OffsetCommitResponseTopic> = Vec::new();
+    {
+        let image = broker.controller.current_image();
+        let mut resolved = Vec::with_capacity(req.topics.len());
+        for mut topic in req.topics.drain(..) {
+            if topic.name.is_empty() && topic.topic_id != WireUuid::ZERO {
+                match image.topic_name_by_id(&uuid::Uuid::from_bytes(topic.topic_id.0)) {
+                    Some(name) => {
+                        topic.name = name.to_string();
+                        resolved.push(topic);
+                    }
+                    None => {
+                        unknown_id_topics.push(OffsetCommitResponseTopic {
+                            name: String::new(),
+                            topic_id: topic.topic_id,
+                            partitions: topic
+                                .partitions
+                                .iter()
+                                .map(|p| OffsetCommitResponsePartition {
+                                    partition_index: p.partition_index,
+                                    error_code: codes::UNKNOWN_TOPIC_ID,
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            ..Default::default()
+                        });
+                    }
+                }
+            } else {
+                resolved.push(topic);
+            }
+        }
+        req.topics = resolved;
+    }
 
     // ── ACL preamble ────────────────────────────────────────────
     // Step 1: `Read` on `Group(group_id)`. On Deny → whole-response
@@ -52,64 +96,26 @@ pub(crate) async fn handle(
         };
         if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
             let resp = build_response_all(&req, codes::GROUP_AUTHORIZATION_FAILED);
-            return encode(version, &resp);
+            return finalize(version, resp, unknown_id_topics.clone());
         }
     }
 
     let now_ms = now_ms();
-    let group_handle = broker.group_manager.get_or_create(&req.group_id);
+    // Find the group's actor (a classic actor is created for an unknown id —
+    // e.g. a "simple" consumer committing offsets without joining a group).
+    let Some(handle) = broker.group_coordinator.find(&req.group_id).or_else(|| {
+        broker
+            .group_coordinator
+            .get_or_create_classic(&req.group_id)
+    }) else {
+        let resp = build_response_all(&req, codes::UNKNOWN_SERVER_ERROR);
+        return finalize(version, resp, unknown_id_topics.clone());
+    };
 
-    // KIP-848: determine whether this group is managed by the next-gen coordinator.
-    let is_next_gen = broker.group_manager.next_gen().is_some_and(|ng| {
-        matches!(
-            ng.group_type(&req.group_id),
-            Some(crate::coordinator::unified::GroupType::NextGen)
-        )
-    });
-
-    if is_next_gen {
-        // Next-gen groups validate member_epoch via the per-group actor.
-        let ng = broker
-            .group_manager
-            .next_gen()
-            .expect("next_gen present: checked above");
-        let Some(ng_handle) = ng.find(&req.group_id) else {
-            let resp = build_response_all(&req, codes::GROUP_ID_NOT_FOUND);
-            return encode(version, &resp);
-        };
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let _ = ng_handle
-            .tx
-            .send(
-                crate::coordinator::unified::actor::GroupActorMessage::OffsetValidate {
-                    member_id: req.member_id.clone(),
-                    member_epoch: req.generation_id_or_member_epoch,
-                    reply: tx,
-                },
-            )
-            .await;
-        match rx.await {
-            Ok(Ok(())) => {
-                // Validation passed; proceed with topic ACL and persistence below.
-                let _ = &group_handle; // group_handle unused for next-gen path
-            }
-            Ok(Err(code)) => {
-                let resp = build_response_all(&req, code);
-                return encode(version, &resp);
-            }
-            Err(_) => {
-                let resp = build_response_all(&req, codes::UNKNOWN_SERVER_ERROR);
-                return encode(version, &resp);
-            }
-        }
-    } else {
-        // 1. Validate (group, generation, member). Empty `member_id` means
-        //    a "simple" consumer that doesn't participate in a group — skip
-        //    the membership/generation check entirely.
-        if let Some(code) = validate(&req, &group_handle).await {
-            let resp = build_response_all(&req, code);
-            return encode(version, &resp);
-        }
+    // Validate membership/epoch through the actor (kind-specific).
+    if let Some(code) = validate(&handle, &req).await {
+        let resp = build_response_all(&req, code);
+        return finalize(version, resp, unknown_id_topics.clone());
     }
 
     // ── ACL preamble ────────────────────────────────────────────
@@ -136,8 +142,6 @@ pub(crate) async fn handle(
     if any_denied {
         // Build a mixed response: denied topics get TOPIC_AUTHORIZATION_FAILED,
         // allowed topics proceed normally but we need to do the real work for them.
-        // For simplicity, split: if there are allowed topics, we run the full
-        // pipeline for the filtered request; here we return per-topic error codes.
         let topics_out = req
             .topics
             .iter()
@@ -154,6 +158,7 @@ pub(crate) async fn handle(
                 };
                 OffsetCommitResponseTopic {
                     name: t.name.clone(),
+                    topic_id: t.topic_id,
                     partitions: t
                         .partitions
                         .iter()
@@ -203,6 +208,7 @@ pub(crate) async fn handle(
                         };
                         OffsetCommitResponseTopic {
                             name: t.name.clone(),
+                            topic_id: t.topic_id,
                             partitions: t
                                 .partitions
                                 .iter()
@@ -221,9 +227,9 @@ pub(crate) async fn handle(
                     throttle_time_ms: 0,
                     ..Default::default()
                 };
-                return encode(version, &resp);
+                return finalize(version, resp, unknown_id_topics.clone());
             }
-            update_committed(&allowed_req, &group_handle, now_ms).await;
+            update_committed(&allowed_req, &handle, now_ms).await;
         }
 
         let resp = OffsetCommitResponse {
@@ -231,20 +237,32 @@ pub(crate) async fn handle(
             throttle_time_ms: 0,
             ..Default::default()
         };
-        return encode(version, &resp);
+        return finalize(version, resp, unknown_id_topics.clone());
     }
 
     // 2. Append a RecordBatch into `__consumer_offsets-0`.
     if let Err(code) = append_batch(&req, &broker.partitions, now_ms).await {
         let resp = build_response_all(&req, code);
-        return encode(version, &resp);
+        return finalize(version, resp, unknown_id_topics.clone());
     }
 
     // 3. Update in-memory state.
-    update_committed(&req, &group_handle, now_ms).await;
+    update_committed(&req, &handle, now_ms).await;
 
     // 4. Uniform per-(topic, partition) success.
     let resp = build_response_all(&req, codes::NONE);
+    finalize(version, resp, unknown_id_topics)
+}
+
+/// Append the KIP-516 unknown-`topic_id` rows (if any) to the response and
+/// encode it. Every return path in `handle` flows through here so unknown-id
+/// topics surface `UNKNOWN_TOPIC_ID` even when the rest of the commit errors.
+fn finalize(
+    version: i16,
+    mut resp: OffsetCommitResponse,
+    unknown: Vec<OffsetCommitResponseTopic>,
+) -> Result<Bytes, BrokerError> {
+    resp.topics.extend(unknown);
     encode(version, &resp)
 }
 
@@ -257,33 +275,49 @@ fn now_ms() -> i64 {
     .unwrap_or(0)
 }
 
+/// Validate the commit against the group's membership/epoch through its actor.
 /// Returns `Some(error_code)` if the request should be rejected.
-async fn validate(req: &OffsetCommitRequest, handle: &Arc<GroupHandle>) -> Option<i16> {
-    // KIP-345: a request that supplies a `group.instance.id` with an empty
-    // `member_id` is a static-only commit — resolve via the static index.
-    if req.member_id.is_empty() && req.group_instance_id.is_none() {
-        // Simple consumer (no group membership) — no validation needed.
-        return None;
-    }
-    let g = handle.state.lock().await;
-    // KIP-345 fence: if instance id is set, it must resolve and (if
-    // member_id is also set) match.
-    if let Some(iid) = req.group_instance_id.as_deref() {
-        match g.current_member_id_for_instance(iid) {
-            None => return Some(codes::UNKNOWN_MEMBER_ID),
-            Some(pinned) => {
-                if !req.member_id.is_empty() && pinned != req.member_id {
-                    return Some(codes::FENCED_INSTANCE_ID);
-                }
+async fn validate(handle: &Arc<GroupActorHandle>, req: &OffsetCommitRequest) -> Option<i16> {
+    match handle.kind {
+        GroupKindTag::Consumer => {
+            // Next-gen: validate member_epoch via the per-group actor.
+            let (tx, rx) = oneshot::channel();
+            if handle
+                .tx
+                .send(GroupActorMessage::OffsetValidate {
+                    member_id: req.member_id.clone(),
+                    member_epoch: req.generation_id_or_member_epoch,
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                return Some(codes::UNKNOWN_SERVER_ERROR);
+            }
+            match rx.await {
+                Ok(Ok(())) => None,
+                Ok(Err(code)) => Some(code),
+                Err(_) => Some(codes::UNKNOWN_SERVER_ERROR),
             }
         }
-    } else if !g.members.contains_key(&req.member_id) {
-        return Some(codes::UNKNOWN_MEMBER_ID);
+        GroupKindTag::Classic => {
+            let (tx, rx) = oneshot::channel();
+            if handle
+                .tx
+                .send(GroupActorMessage::ClassicValidateCommit {
+                    member_id: req.member_id.clone(),
+                    group_instance_id: req.group_instance_id.clone(),
+                    generation_id: req.generation_id_or_member_epoch,
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                return Some(codes::UNKNOWN_SERVER_ERROR);
+            }
+            rx.await.unwrap_or(Some(codes::UNKNOWN_SERVER_ERROR))
+        }
     }
-    if g.generation_id != req.generation_id_or_member_epoch {
-        return Some(codes::ILLEGAL_GENERATION);
-    }
-    None
 }
 
 /// Append a single `RecordBatch` covering every (topic, partition) in `req`
@@ -348,11 +382,11 @@ async fn append_batch(
     }
 }
 
-async fn update_committed(req: &OffsetCommitRequest, handle: &Arc<GroupHandle>, now_ms: i64) {
-    let mut g = handle.state.lock().await;
+async fn update_committed(req: &OffsetCommitRequest, handle: &Arc<GroupActorHandle>, now_ms: i64) {
+    let mut entries: Vec<((String, i32), OffsetEntry)> = Vec::new();
     for topic in &req.topics {
         for part in &topic.partitions {
-            g.committed_offsets.insert(
+            entries.push((
                 (topic.name.clone(), part.partition_index),
                 OffsetEntry {
                     offset: part.committed_offset,
@@ -360,8 +394,17 @@ async fn update_committed(req: &OffsetCommitRequest, handle: &Arc<GroupHandle>, 
                     metadata: part.committed_metadata.clone().unwrap_or_default(),
                     commit_timestamp_ms: now_ms,
                 },
-            );
+            ));
         }
+    }
+    let (tx, rx) = oneshot::channel();
+    if handle
+        .tx
+        .send(GroupActorMessage::UpdateCommitted { entries, reply: tx })
+        .await
+        .is_ok()
+    {
+        let _ = rx.await;
     }
 }
 
@@ -371,6 +414,7 @@ fn build_response_all(req: &OffsetCommitRequest, code: i16) -> OffsetCommitRespo
         .iter()
         .map(|t| OffsetCommitResponseTopic {
             name: t.name.clone(),
+            topic_id: t.topic_id,
             partitions: t
                 .partitions
                 .iter()

@@ -1,0 +1,329 @@
+//! Classic ↔ next-gen consumer-group conversion predicates (KIP-848 64d-C).
+//!
+//! This slice adds the *machinery* the conversion triggers in Slices 64d-D/E
+//! consume — the [`super::config::ConsumerGroupMigrationPolicy`] and the
+//! convertibility predicate — without performing any live conversion yet. The
+//! predicates are unit-tested here and wired into the conversion triggers in
+//! D/E, so they are dead in the lib build until then.
+#![allow(dead_code)]
+
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+use bytes::{BufMut, Bytes, BytesMut};
+
+use crabka_protocol::owned::consumer_protocol_assignment::{
+    ConsumerProtocolAssignment, TopicPartition,
+};
+use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
+use crabka_protocol::primitives::uuid::Uuid;
+use crabka_protocol::{Decode, Encode};
+
+use super::classic_state::Group as ClassicState;
+use super::consumer_state::{ClassicMemberFacade, GroupState as ConsumerState, MemberState};
+use super::persistence_next_gen::MemberAssignmentState;
+use super::reconciler::ReconcileInput;
+
+/// Decode a classic member's `protocol_metadata` blob as a
+/// `ConsumerProtocolSubscription`. The blob carries a leading `i16` version
+/// (the "consumer" embedded-protocol version negotiation, separate from the
+/// `ConsumerProtocolSubscription` schema's per-field version gates) followed by
+/// the schema body. Returns `None` on any decode error or unknown version —
+/// such a member's subscription cannot survive translation to the server-side
+/// consumer model. Mirrors `offset_delete::decode_subscribed_topics`.
+pub(crate) fn decode_consumer_subscription(
+    metadata: &[u8],
+) -> Option<ConsumerProtocolSubscription> {
+    use bytes::Buf;
+    if metadata.len() < 2 {
+        return None;
+    }
+    let mut cur = metadata;
+    let version = cur.get_i16();
+    if !(0..=3).contains(&version) {
+        return None;
+    }
+    ConsumerProtocolSubscription::decode(&mut cur, version).ok()
+}
+
+/// Can this classic group be upgraded to a next-gen consumer group?
+///
+/// Mirrors Apache Kafka's `ConsumerGroup.fromClassicGroup` admission rule: the
+/// group must use the `"consumer"` protocol type and **every** current member's
+/// selected `protocol_metadata` must decode as a valid
+/// `ConsumerProtocolSubscription`, so each subscription survives translation. An
+/// empty group is trivially convertible.
+pub(crate) fn classic_is_convertible(state: &ClassicState) -> bool {
+    if state.protocol_type.as_deref() != Some("consumer") {
+        return false;
+    }
+    state
+        .members
+        .values()
+        .all(|m| decode_consumer_subscription(&m.protocol_metadata).is_some())
+}
+
+/// Can this consumer group be downgraded to a classic group? Always `true` in
+/// Kafka — a server-managed consumer group can always be re-expressed as a
+/// classic group (members become classic members, the server target becomes the
+/// seed assignment). Provided for symmetry; the real work is in Slice 64d-E.
+pub(crate) fn consumer_is_convertible() -> bool {
+    true
+}
+
+/// Convert a classic group into a consumer group that **hosts its classic
+/// members** (KIP-848 64d-D upgrade). Each classic member becomes a
+/// [`MemberState`] carrying a [`ClassicMemberFacade`]; its subscription is
+/// decoded from its `ConsumerProtocolSubscription` metadata (topic names — the
+/// reconciler resolves them to topic-IDs against the metadata image). The
+/// group is marked dirty so the next reconcile computes the unified target.
+///
+/// Precondition: the caller has checked [`classic_is_convertible`]. Committed
+/// offsets live on the kind-agnostic `Group` container and are untouched here.
+pub(crate) fn convert_classic_to_consumer(classic: &ClassicState) -> ConsumerState {
+    let mut state = ConsumerState::new(classic.group_id.clone());
+    // Seed the group epoch from the classic generation so epochs stay
+    // monotonic across the flip; the first reconcile bumps it.
+    state.group_epoch = classic.generation_id.max(0);
+    for m in classic.members.values() {
+        let names: HashSet<String> = decode_consumer_subscription(&m.protocol_metadata)
+            .map(|s| s.topics.into_iter().collect())
+            .unwrap_or_default();
+        let facade = ClassicMemberFacade {
+            generation_id: classic.generation_id,
+            supported_protocols: m.protocols.clone(),
+            session_timeout: m.session_timeout,
+            last_synced_assignment: m.assignment.clone().unwrap_or_default(),
+            awaiting_sync: true,
+        };
+        state.add_or_update_member(MemberState {
+            member_id: m.member_id.clone(),
+            instance_id: m.group_instance_id.clone(),
+            rack_id: None,
+            client_id: m.client_id.clone(),
+            client_host: m.host.clone(),
+            subscribed_topic_names: names,
+            subscribed_topic_regex: None,
+            compiled_regex: None,
+            server_assignor: None,
+            rebalance_timeout: m.rebalance_timeout,
+            member_epoch: state.group_epoch,
+            previous_member_epoch: 0,
+            assignment_state: MemberAssignmentState::Stable,
+            assigned_partitions: HashMap::new(),
+            partitions_pending_revocation: HashMap::new(),
+            last_seen: Instant::now(),
+            classic: Some(facade),
+        });
+    }
+    state.dirty = true;
+    state
+}
+
+/// Translate a member's server-side target (topic-ID → partitions) into a
+/// classic `ConsumerProtocolAssignment` wire blob (topic-name → partitions),
+/// with the leading `i16` version prefix a classic client expects in the
+/// `SyncGroup` assignment field. Topic IDs absent from the metadata image are
+/// dropped (the topic was deleted). Deterministic order (by topic name).
+pub(crate) fn target_to_consumer_assignment(
+    target: &HashMap<Uuid, Vec<i32>>,
+    image: &ReconcileInput,
+) -> Bytes {
+    let id_to_name: HashMap<Uuid, &str> = image
+        .topic_id_by_name
+        .iter()
+        .map(|(name, id)| (*id, name.as_str()))
+        .collect();
+    let mut assigned: Vec<TopicPartition> = target
+        .iter()
+        .filter_map(|(tid, parts)| {
+            id_to_name.get(tid).map(|name| {
+                let mut p = parts.clone();
+                p.sort_unstable();
+                TopicPartition {
+                    topic: (*name).to_string(),
+                    partitions: p,
+                    ..Default::default()
+                }
+            })
+        })
+        .collect();
+    assigned.sort_by(|a, b| a.topic.cmp(&b.topic));
+    let assignment = ConsumerProtocolAssignment {
+        assigned_partitions: assigned,
+        ..Default::default()
+    };
+    let mut out = BytesMut::new();
+    out.put_i16(0); // "consumer" embedded-protocol version-negotiation prefix
+    assignment
+        .encode(&mut out, 0)
+        .expect("ConsumerProtocolAssignment encode is infallible into BytesMut");
+    out.freeze()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use bytes::{Buf, BufMut, Bytes, BytesMut};
+    use crabka_protocol::Encode;
+    use crabka_protocol::primitives::uuid::Uuid;
+    use std::time::Duration;
+
+    use super::super::classic_state::{Group, Member};
+
+    /// Encode a `ConsumerProtocolSubscription` with the leading version prefix,
+    /// as a real classic consumer client sends in its `JoinGroup` protocol
+    /// metadata.
+    fn subscription_blob(topics: &[&str]) -> Bytes {
+        let sub = ConsumerProtocolSubscription {
+            topics: topics.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        };
+        let mut out = BytesMut::new();
+        out.put_i16(0); // protocol version-negotiation prefix
+        sub.encode(&mut out, 0).unwrap();
+        out.freeze()
+    }
+
+    fn consumer_member(id: &str, metadata: Bytes) -> Member {
+        let mut m = Member::new(
+            id,
+            "client",
+            "127.0.0.1",
+            Duration::from_secs(30),
+            Duration::from_mins(1),
+            vec![("range".into(), metadata.clone())],
+        );
+        m.protocol_metadata = metadata;
+        m
+    }
+
+    #[test]
+    fn empty_consumer_group_is_convertible() {
+        let mut g = Group::new("g");
+        g.protocol_type = Some("consumer".into());
+        assert!(classic_is_convertible(&g));
+    }
+
+    #[test]
+    fn non_consumer_protocol_type_is_not_convertible() {
+        let mut g = Group::new("g");
+        g.protocol_type = Some("connect".into());
+        assert!(!classic_is_convertible(&g));
+        // None protocol_type (never joined) is also not convertible.
+        let g2 = Group::new("g2");
+        assert!(!classic_is_convertible(&g2));
+    }
+
+    #[test]
+    fn group_of_valid_consumer_members_is_convertible() {
+        let mut g = Group::new("g");
+        g.protocol_type = Some("consumer".into());
+        g.add_member(consumer_member("m1", subscription_blob(&["t1"])));
+        g.add_member(consumer_member("m2", subscription_blob(&["t1", "t2"])));
+        assert!(classic_is_convertible(&g));
+    }
+
+    #[test]
+    fn member_with_undecodable_metadata_blocks_conversion() {
+        let mut g = Group::new("g");
+        g.protocol_type = Some("consumer".into());
+        g.add_member(consumer_member("ok", subscription_blob(&["t1"])));
+        // Garbage metadata that is not a ConsumerProtocolSubscription.
+        g.add_member(consumer_member(
+            "bad",
+            Bytes::from_static(&[0xff, 0xff, 0x01]),
+        ));
+        assert!(!classic_is_convertible(&g));
+    }
+
+    #[test]
+    fn decode_rejects_short_and_bad_version() {
+        assert!(decode_consumer_subscription(&[]).is_none());
+        assert!(decode_consumer_subscription(&[0]).is_none());
+        // Version 99 is out of the supported 0..=3 range.
+        assert!(decode_consumer_subscription(&[0, 99]).is_none());
+    }
+
+    #[test]
+    fn consumer_group_always_downgradable() {
+        assert!(consumer_is_convertible());
+    }
+
+    #[test]
+    fn convert_preserves_members_subscriptions_and_facade() {
+        let mut g = Group::new("g");
+        g.protocol_type = Some("consumer".into());
+        g.generation_id = 3;
+        g.add_member(consumer_member("m1", subscription_blob(&["t1"])));
+        g.add_member(consumer_member("m2", subscription_blob(&["t1", "t2"])));
+
+        let state = convert_classic_to_consumer(&g);
+        assert!(state.group_id == "g");
+        assert!(state.group_epoch == 3); // seeded from classic generation
+        assert!(state.members.len() == 2);
+        let m1 = &state.members["m1"];
+        assert!(m1.is_classic());
+        assert!(m1.subscribed_topic_names.contains("t1"));
+        let facade = m1.classic.as_ref().unwrap();
+        assert!(facade.generation_id == 3);
+        assert!(facade.awaiting_sync);
+        // m2 subscribed to both topics.
+        let m2 = &state.members["m2"];
+        assert!(m2.subscribed_topic_names.len() == 2);
+        // Marked dirty so the next reconcile computes the unified target.
+        assert!(state.dirty);
+    }
+
+    #[test]
+    fn target_translates_to_consumer_assignment_blob() {
+        let t1 = Uuid([1; 16]);
+        let t2 = Uuid([2; 16]);
+        let image = ReconcileInput {
+            topic_id_by_name: [("orders".to_string(), t1), ("events".to_string(), t2)].into(),
+            ..Default::default()
+        };
+        let target: std::collections::HashMap<Uuid, Vec<i32>> =
+            [(t1, vec![2, 0, 1]), (t2, vec![5])].into();
+
+        let blob = target_to_consumer_assignment(&target, &image);
+        // Strip the version prefix and decode back.
+        let mut cur = &blob[..];
+        let version = cur.get_i16();
+        assert!(version == 0);
+        let decoded = ConsumerProtocolAssignment::decode(&mut cur, version).unwrap();
+        // Deterministic order by topic name: events, orders.
+        let names: Vec<&str> = decoded
+            .assigned_partitions
+            .iter()
+            .map(|tp| tp.topic.as_str())
+            .collect();
+        assert!(names == vec!["events", "orders"]);
+        let orders = decoded
+            .assigned_partitions
+            .iter()
+            .find(|tp| tp.topic == "orders")
+            .unwrap();
+        // Partitions sorted.
+        assert!(orders.partitions == vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn target_drops_unknown_topic_ids() {
+        let known = Uuid([1; 16]);
+        let ghost = Uuid([9; 16]);
+        let image = ReconcileInput {
+            topic_id_by_name: [("orders".to_string(), known)].into(),
+            ..Default::default()
+        };
+        let target: std::collections::HashMap<Uuid, Vec<i32>> =
+            [(known, vec![0]), (ghost, vec![0])].into();
+        let blob = target_to_consumer_assignment(&target, &image);
+        let mut cur = &blob[..];
+        let _ = cur.get_i16();
+        let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
+        assert!(decoded.assigned_partitions.len() == 1);
+        assert!(decoded.assigned_partitions[0].topic == "orders");
+    }
+}

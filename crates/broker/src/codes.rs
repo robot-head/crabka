@@ -228,6 +228,15 @@ pub const POSITION_OUT_OF_RANGE: i16 = 99;
 /// `INCONSISTENT_CLUSTER_ID` (104) — the request's `cluster_id` does not
 /// match this cluster's id.
 pub const INCONSISTENT_CLUSTER_ID: i16 = 104;
+/// `UNKNOWN_TOPIC_ID` (100) — a request referenced a topic by UUID that this
+/// cluster does not know about (KIP-516).
+pub const UNKNOWN_TOPIC_ID: i16 = 100;
+/// `INCONSISTENT_TOPIC_ID` (103) — a request supplied a topic UUID that does
+/// not match the UUID stored for the named topic (KIP-516).
+pub const INCONSISTENT_TOPIC_ID: i16 = 103;
+/// `FETCH_SESSION_TOPIC_ID_ERROR` (106) — a fetch session referenced a topic
+/// UUID that no longer resolves (e.g. recreated mid-session) (KIP-516).
+pub const FETCH_SESSION_TOPIC_ID_ERROR: i16 = 106;
 
 /// `UNSUPPORTED_COMPRESSION_TYPE` (76) — KIP-714 `PushTelemetry` carried a
 /// `compression_type` the broker can't decompress.
@@ -365,5 +374,12 @@ mod tests {
     fn unknown_leader_epoch_maps_correctly() {
         let e = BrokerError::UnknownLeaderEpoch(2);
         assert!(from_broker_error(&e) == UNKNOWN_LEADER_EPOCH);
+    }
+
+    #[test]
+    fn kip516_error_code_numbers_match_kafka() {
+        assert!(super::UNKNOWN_TOPIC_ID == 100);
+        assert!(super::INCONSISTENT_TOPIC_ID == 103);
+        assert!(super::FETCH_SESSION_TOPIC_ID_ERROR == 106);
     }
 }

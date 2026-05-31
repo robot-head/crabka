@@ -12,8 +12,9 @@ use crate::acl::{AclEntry, PatternType, ResourceType};
 use crate::error::MetadataError;
 use crate::records::{
     BrokerConfigRecord, BrokerRegistrationRecord, ClientMetricsConfigRecord, ClientQuotaRecord,
-    DelegationTokenRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
-    ScramCredentialRecord, TopicConfigRecord, TopicRecord,
+    DelegationTokenRecord, FeatureLevelRecord, FeaturesEpochRecord, KRaftVersionRecord,
+    MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
+    TopicRecord, VotersRecord,
 };
 
 pub type EntityKey = Vec<(String, Option<String>)>;
@@ -57,6 +58,10 @@ pub fn canonicalize_entity(mut tuple: Vec<(String, Option<String>)>) -> EntityKe
 pub struct MetadataImage {
     cluster_id: Uuid,
     topics: HashMap<String, TopicRecord>,
+    /// KIP-516 reverse index: topic UUID -> topic name. Maintained in
+    /// `apply()` alongside `topics`; rebuilt on snapshot replay because
+    /// every record (including snapshot installs) flows through `apply()`.
+    topic_ids: HashMap<Uuid, String>,
     partitions: HashMap<(String, i32), PartitionRecord>,
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
     topic_configs: HashMap<String, BTreeMap<String, String>>,
@@ -90,6 +95,7 @@ impl MetadataImage {
         Self {
             cluster_id,
             topics: HashMap::new(),
+            topic_ids: HashMap::new(),
             partitions: HashMap::new(),
             brokers: HashMap::new(),
             topic_configs: HashMap::new(),
@@ -119,6 +125,19 @@ impl MetadataImage {
     #[must_use]
     pub fn topic(&self, name: &str) -> Option<&TopicRecord> {
         self.topics.get(name)
+    }
+
+    /// KIP-516: resolve a topic by its UUID. O(1) via the `topic_ids` index.
+    #[must_use]
+    pub fn topic_by_id(&self, id: &Uuid) -> Option<&TopicRecord> {
+        let name = self.topic_ids.get(id)?;
+        self.topics.get(name)
+    }
+
+    /// KIP-516: resolve a topic name by its UUID.
+    #[must_use]
+    pub fn topic_name_by_id(&self, id: &Uuid) -> Option<&str> {
+        self.topic_ids.get(id).map(String::as_str)
     }
 
     #[must_use]
@@ -382,6 +401,14 @@ impl MetadataImage {
     pub fn apply(&mut self, rec: &MetadataRecord) {
         match rec {
             MetadataRecord::V1Topic(t) => {
+                // If a topic with this name already exists under a different
+                // id, drop the stale id entry before re-indexing.
+                if let Some(prev) = self.topics.get(&t.name)
+                    && prev.topic_id != t.topic_id
+                {
+                    self.topic_ids.remove(&prev.topic_id);
+                }
+                self.topic_ids.insert(t.topic_id, t.name.clone());
                 self.topics.insert(t.name.clone(), t.clone());
             }
             MetadataRecord::V1Partition(p) => {
@@ -392,6 +419,9 @@ impl MetadataImage {
                 self.brokers.insert(b.node_id, b.clone());
             }
             MetadataRecord::V1DeleteTopic(d) => {
+                if let Some(prev) = self.topics.get(&d.name) {
+                    self.topic_ids.remove(&prev.topic_id);
+                }
                 self.topics.remove(&d.name);
                 self.partitions.retain(|(t, _), _| t != &d.name);
                 self.topic_configs.remove(&d.name);
@@ -510,6 +540,13 @@ impl MetadataImage {
                         .insert(c.name.clone(), c.configs.clone());
                 }
             }
+            // Snapshot-only: restore the epoch verbatim rather than bumping.
+            // Emitted last by `to_records` so it overrides the value the
+            // preceding `V1FeatureLevel` replays accumulated. Never reaches
+            // the live log (not a controller-submittable change).
+            MetadataRecord::V1FeaturesEpoch(rec) => {
+                self.features_epoch = rec.epoch;
+            }
         }
     }
 
@@ -625,6 +662,52 @@ impl MetadataImage {
             ));
         }
 
+        // KIP-584 finalized features: one record per live feature, in the
+        // BTreeMap's deterministic key order. (level == 0 is the delete
+        // sentinel and is never stored, so every emitted level is >= 1 and
+        // re-applies as a set.) The trailing V1FeaturesEpoch then pins the
+        // epoch verbatim — the preceding feature records each bump it, but the
+        // bumped value reflects the live feature count, not the original apply
+        // history, so it must be overwritten. Emitted whenever any feature was
+        // ever finalized (epoch left -1 only on a pristine image), so an image
+        // that finalized then removed every feature still restores its epoch.
+        for (name, level) in &self.feature_levels {
+            out.push(MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: name.clone(),
+                level: *level,
+            }));
+        }
+        if self.features_epoch >= 0 {
+            out.push(MetadataRecord::V1FeaturesEpoch(FeaturesEpochRecord {
+                epoch: self.features_epoch,
+            }));
+        }
+
+        // KIP-853 controller-quorum state. Both MUST be emitted or a snapshot
+        // recovery / learner install silently drops them: the voter set goes
+        // empty (breaking `DescribeQuorum` and KIP-853 auto-join) and the
+        // cluster `kraft.version` reverts to 0. The cluster `kraft_version`
+        // in particular has no other persistence path — unlike the openraft
+        // membership (restored from `SnapshotMeta.last_membership`), it is not
+        // carried anywhere outside the metadata records, so the image is its
+        // only source of truth. Independent of every other record, so order
+        // here is irrelevant. The reconfig coordinator commits the openraft
+        // membership change and the authoritative `V1Voters` record under one
+        // lock, so the emitted voter set mirrors `last_membership` for the
+        // same committed prefix (any transient one-reconfig skew self-heals as
+        // the trailing entry replays from the retained log — the same
+        // eventual lockstep that holds in live operation).
+        if self.kraft_version != 0 {
+            out.push(MetadataRecord::V1KRaftVersion(KRaftVersionRecord {
+                kraft_version: self.kraft_version,
+            }));
+        }
+        if !self.voters.is_empty() {
+            out.push(MetadataRecord::V1Voters(VotersRecord {
+                voters: self.voters.clone(),
+            }));
+        }
+
         out
     }
 
@@ -714,7 +797,11 @@ impl MetadataImage {
             // IncrementalAlterConfigs handler validates the subscription
             // name and config keys before submission; image-level apply
             // is an idempotent map upsert (or removal on empty map).
-            | MetadataRecord::V1ClientMetricsConfig(_) => Ok(()),
+            | MetadataRecord::V1ClientMetricsConfig(_)
+            // Snapshot-only epoch carrier: only ever produced by `to_records`
+            // and replayed on snapshot install, never submitted as a change.
+            // Validated permissively for match-exhaustiveness.
+            | MetadataRecord::V1FeaturesEpoch(_) => Ok(()),
         }
     }
 }
@@ -1023,8 +1110,115 @@ mod tests {
             },
         ));
 
+        // KIP-584 finalized features: two live features at a non-trivial epoch
+        // (the metadata.version re-finalize bumps the epoch past the live
+        // count), so the trailing V1FeaturesEpoch carrier is exercised too.
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 24,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "group.version".into(),
+            level: 1,
+        }));
+        assert!(image.finalized_features_epoch() == 2);
+
         let rebuilt = MetadataImage::from_records(cid, &image.to_records());
         assert!(rebuilt == image);
+    }
+
+    /// Finalized features and their epoch must survive a `to_records` /
+    /// `from_records` round-trip exactly. The epoch is carried verbatim by a
+    /// trailing snapshot-only record, NOT recomputed by apply-bumping — so an
+    /// image whose epoch (history of `UpdateFeatures` applies) exceeds its live
+    /// feature count still reproduces exactly. Regression guard for the bug
+    /// where `to_records` emitted no feature records at all and the snapshot
+    /// path silently dropped every finalized feature.
+    #[test]
+    fn to_records_round_trips_features_and_epoch() {
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        // Four applies → epoch climbs -1 → 0 → 1 → 2 → 3, while only two
+        // features remain live (metadata.version re-finalized once).
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 24,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "group.version".into(),
+            level: 1,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        }));
+        assert!(image.finalized_features_epoch() == 3);
+
+        let rebuilt = MetadataImage::from_records(cid, &image.to_records());
+        assert!(rebuilt == image);
+        // Belt-and-suspenders beyond derived PartialEq: the two fields the
+        // snapshot path used to lose.
+        assert!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
+        assert!(rebuilt.finalized_features().get("group.version") == Some(&1));
+        assert!(rebuilt.finalized_features_epoch() == 3);
+    }
+
+    /// KIP-853 voter set + finalized cluster `kraft.version` must survive
+    /// `to_records` / `from_records`. Before the fix `to_records` dropped
+    /// both, so a snapshot recovery / learner install rebuilt the image with
+    /// an EMPTY voter set and `kraft_version = 0` — breaking `DescribeQuorum`
+    /// and KIP-853 auto-join. The cluster `kraft_version` has no other
+    /// persistence source (it is not part of openraft's membership), so it
+    /// can only round-trip through a `V1KRaftVersion` record.
+    #[test]
+    fn to_records_preserves_voters_and_kraft_version() {
+        use crate::records::{KRaftVersionRecord, VotersRecord};
+        use crate::voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
+
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        image.apply(&MetadataRecord::V1KRaftVersion(KRaftVersionRecord {
+            kraft_version: 1,
+        }));
+        let voters = VoterSet::from_voters([
+            Voter {
+                id: 1,
+                directory_id: Uuid::from_u128(1),
+                endpoints: vec![VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "127.0.0.1".into(),
+                    port: 9093,
+                }],
+                kraft_version: KRaftVersionRange::default(),
+            },
+            Voter {
+                id: 2,
+                directory_id: Uuid::from_u128(2),
+                endpoints: vec![VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "127.0.0.1".into(),
+                    port: 9094,
+                }],
+                kraft_version: KRaftVersionRange { min: 0, max: 1 },
+            },
+        ]);
+        image.apply(&MetadataRecord::V1Voters(VotersRecord {
+            voters: voters.clone(),
+        }));
+
+        let rebuilt = MetadataImage::from_records(cid, &image.to_records());
+
+        assert_eq!(rebuilt.kraft_version(), 1);
+        assert_eq!(rebuilt.voters(), &voters);
+        assert_eq!(rebuilt, image);
     }
 
     fn topic(name: &str, partitions: i32) -> MetadataRecord {
@@ -1903,5 +2097,31 @@ mod tests {
             },
         ));
         assert!(m.min_required_metadata_version() == DELEGATION_TOKEN_MIN_LEVEL);
+    }
+
+    #[test]
+    fn topic_by_id_resolves_and_drops_on_delete() {
+        use crate::records::{MetadataRecord, TopicRecord};
+        let mut img = MetadataImage::new(Uuid::nil());
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1122_3344_5566_7788);
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+
+        // Resolves by id to the same record `topic(name)` returns.
+        assert!(img.topic_by_id(&id).map(|t| t.name.as_str()) == Some("orders"));
+        assert!(img.topic_name_by_id(&id) == Some("orders"));
+
+        // After delete the id no longer resolves and the name index is gone.
+        img.apply(&MetadataRecord::V1DeleteTopic(
+            crate::records::DeleteTopicRecord {
+                name: "orders".into(),
+            },
+        ));
+        assert!(img.topic_by_id(&id).is_none());
+        assert!(img.topic_name_by_id(&id).is_none());
     }
 }

@@ -13,7 +13,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::group::GroupState;
+use crate::coordinator::unified::classic_state::GroupState;
 use crate::error::BrokerError;
 
 pub(crate) async fn handle(
@@ -25,7 +25,7 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = ListGroupsRequest::decode(&mut cur, version)?;
-    let snapshots = broker.group_manager.list_groups().await;
+    let snapshots = broker.group_coordinator.list_groups().await;
 
     let image = broker.controller.current_image();
 

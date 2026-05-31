@@ -34,6 +34,7 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
 use crate::coordinator::persistence::OffsetCommitValue;
+use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
 use crate::txn::util::now_millis;
 
@@ -45,7 +46,6 @@ pub(crate) async fn handle(
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
-    let group_manager = broker.group_manager.clone();
     let mut cur: &[u8] = req_bytes;
     let req = TxnOffsetCommitRequest::decode(&mut cur, version)?;
 
@@ -106,39 +106,51 @@ pub(crate) async fn handle(
     //    is not present we'll detect that below and return NOT_COORDINATOR.
     //    For a multi-broker future this would route to the leader for
     //    hash(group_id) % __consumer_offsets.partition_count.
-    let _handle = group_manager.get_or_create(&req.group_id);
+    let handle = broker.group_coordinator.find(&req.group_id).or_else(|| {
+        broker
+            .group_coordinator
+            .get_or_create_classic(&req.group_id)
+    });
 
     // 2. KIP-1319 stale-member-epoch check (api_version >= 3 adds
-    //    generation_id/member_id). The GroupManager does not yet
-    //    expose a `member_epoch()` accessor, so we emit ILLEGAL_GENERATION
-    //    only when the request carries a non-default generation_id that
-    //    differs from the group's current generation_id (classic protocol).
+    //    generation_id/member_id). The coordinator does not yet expose a
+    //    `member_epoch()` accessor, so we emit ILLEGAL_GENERATION only when the
+    //    request carries a non-default generation_id that differs from the
+    //    classic group's current generation_id.
     //    TODO(KIP-1319 v4+): implement per-member epoch tracking and
     //    surface STALE_MEMBER_EPOCH (113) when supplied epoch < current.
-    if version >= 3 && req.generation_id >= 0 {
-        let group_handle = group_manager.get_or_create(&req.group_id);
-        let g = group_handle.state.lock().await;
-        // KIP-345 fence: instance id (if present) must resolve to the
-        // request's member id when both are set.
-        if let Some(iid) = req.group_instance_id.as_deref() {
-            match g.current_member_id_for_instance(iid) {
-                None => {
-                    drop(g);
-                    return encode_err_all(version, &req, codes::UNKNOWN_MEMBER_ID);
-                }
-                Some(pinned) => {
-                    if !req.member_id.is_empty() && pinned != req.member_id {
-                        drop(g);
-                        return encode_err_all(version, &req, codes::FENCED_INSTANCE_ID);
+    if version >= 3
+        && req.generation_id >= 0
+        && let Some(h) = &handle
+        && h.kind == GroupKindTag::Classic
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if h.tx
+            .send(GroupActorMessage::ClassicInspect { reply: tx })
+            .await
+            .is_ok()
+            && let Ok(view) = rx.await
+        {
+            // KIP-345 fence: instance id (if present) must resolve to the
+            // request's member id when both are set.
+            if let Some(iid) = req.group_instance_id.as_deref() {
+                match view
+                    .members
+                    .iter()
+                    .find(|m| m.group_instance_id.as_deref() == Some(iid))
+                {
+                    None => return encode_err_all(version, &req, codes::UNKNOWN_MEMBER_ID),
+                    Some(m) => {
+                        if !req.member_id.is_empty() && m.member_id != req.member_id {
+                            return encode_err_all(version, &req, codes::FENCED_INSTANCE_ID);
+                        }
                     }
                 }
             }
+            if view.generation_id >= 0 && req.generation_id != view.generation_id {
+                return encode_err_all(version, &req, codes::ILLEGAL_GENERATION);
+            }
         }
-        if g.generation_id >= 0 && req.generation_id != g.generation_id {
-            drop(g);
-            return encode_err_all(version, &req, codes::ILLEGAL_GENERATION);
-        }
-        drop(g);
     }
 
     // 3. Append a transactional RecordBatch to __consumer_offsets.

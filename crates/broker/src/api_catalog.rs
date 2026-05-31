@@ -52,24 +52,8 @@ fn client_facing_apis() -> Vec<ApiVersion> {
         v!(leave_group_request),
         v!(sasl_handshake_request),
         v!(sasl_authenticate_request),
-        // OffsetCommit and OffsetFetch only handle the legacy
-        // single-group / name-keyed shape. v8+ (OffsetFetch) and v10+
-        // (OffsetCommit) switch to topic_id / per-group arrays which
-        // require a topic-id index that is not wired up. Cap the
-        // advertised max so clients negotiate down to a version we can
-        // serve cleanly.
-        ApiVersion {
-            api_key: owned::offset_commit_request::API_KEY,
-            min_version: owned::offset_commit_request::MIN_VERSION,
-            max_version: 9,
-            ..Default::default()
-        },
-        ApiVersion {
-            api_key: owned::offset_fetch_request::API_KEY,
-            min_version: owned::offset_fetch_request::MIN_VERSION,
-            max_version: 7,
-            ..Default::default()
-        },
+        v!(offset_commit_request),
+        v!(offset_fetch_request),
     ]
 }
 
