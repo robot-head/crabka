@@ -144,6 +144,46 @@ recording each addition here.
   `UnknownHostException`.
 - Data dir for `apache/kafka:4.0.0` is `/tmp/kafka-logs`.
 
+## Spike result (validated 2026-05-30)
+
+Decode-only success confirmed against a live `apache/kafka:4.0.0` broker observer
+(`crates/broker/tests/kraft_spike_jvm.rs`, Docker-gated). The Crabka controller
+served real `ApiVersions` v4 + `Fetch` v17 and replayed the captured 284-byte
+bootstrap log (offsets 0–5) embedded via `include_bytes!`. The JVM observer's own
+logs showed:
+
+- `Attempting durable transition to FollowerState(epoch=1, leader=1, leaderEndpoints=…:9093)`
+  — accepted the Crabka controller as the Raft leader at epoch 1.
+- `High watermark set to … offset=6 … for epoch 1` — accepted the served hwm.
+- `[MetadataLoader] finished catching up to the current high water mark of 6` —
+  decoded every served record.
+- `Publishing initial metadata at offset OffsetAndEpoch(offset=5, epoch=1) with
+  metadata.version Optional[4.0-IV3]` — parsed the `FEATURE_LEVEL_RECORD` and built
+  a `MetadataImage` at metadata.version level 25.
+- **Zero** `CorruptRecordException` / `InvalidRecordException` / metadata-log decode
+  faults.
+
+The only JVM-side ERRORs were `BROKER_REGISTRATION` `UnsupportedVersionException` —
+the deliberately out-of-scope broker-management path (the observer tries to register
+over a separate RPC the spike does not serve). Not a metadata-log decode error.
+
+**Conclusion:** the three hardest unknowns are de-risked empirically — byte-exact
+`Fetch`-for-Raft framing (request v17 decode + response with `current_leader`/HWM
+tagged fields), the KRaft `Fetch`/`ApiVersions` handshake, and KRaft record/batch
+framing (validated by replaying the JVM's own bytes). Slices 1–3 can proceed against
+the concrete facts above.
+
 ## Disposition
 
-_(Filled in Task 8.)_
+The spike code is **throwaway** and feature-gated (`kraft-spike`, off by default):
+- `crates/raft/src/kraft_spike.rs` + `crates/raft/src/kraft_spike_metadata_log.bin`
+- the `#[cfg(feature = "kraft-spike")]` interception block + stub gating in
+  `crates/raft/src/server.rs`
+- `crates/broker/tests/kraft_spike_jvm.rs`
+- the `kraft-spike` feature in `crates/raft/Cargo.toml` and `crates/broker/Cargo.toml`
+
+It must NOT be mistaken for production code: it serves a hand-captured static log, has
+no state machine, election, writes, registration, or multi-voter support. Delete it
+(or keep purely as a wire reference) once slice 3 lands the real KRaft consensus layer.
+The default build is unaffected — the openraft controller path is unchanged when the
+feature is off (verified: `cargo build -p crabka-raft` + 30 raft unit tests green).
