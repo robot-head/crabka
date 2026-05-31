@@ -126,6 +126,7 @@ pub(crate) mod auto_join;
 pub mod bootstrap;
 mod broker;
 pub(crate) mod cleaner;
+mod client_metrics;
 pub mod codes;
 pub mod config;
 pub(crate) mod config_keys;

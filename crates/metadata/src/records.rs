@@ -98,6 +98,18 @@ pub struct BrokerConfigRecord {
     pub config_value: Option<String>,
 }
 
+/// KIP-714 client-metrics subscription config. Authoritative target
+/// state: each `V1ClientMetricsConfig` fully replaces the previous
+/// override map for `name` (the subscription name). Empty map = delete
+/// the subscription. Merging happens at the `IncrementalAlterConfigs`
+/// handler before the record is submitted (same pattern as
+/// [`TopicConfigRecord`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientMetricsConfigRecord {
+    pub name: String,
+    pub configs: std::collections::BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QuotaEntity {
     pub entity_type: String,
@@ -221,6 +233,7 @@ pub enum MetadataRecord {
     V1KRaftVersion(KRaftVersionRecord),
     V1Voters(VotersRecord),
     V1FeatureLevel(FeatureLevelRecord),
+    V1ClientMetricsConfig(ClientMetricsConfigRecord),
     /// Snapshot-only: pins the finalized-features epoch on reconstruction.
     /// Never submitted via the controller; see [`FeaturesEpochRecord`].
     V1FeaturesEpoch(FeaturesEpochRecord),
@@ -464,5 +477,20 @@ mod tests {
     fn kraft_version_record_round_trips() {
         let rec = MetadataRecord::V1KRaftVersion(KRaftVersionRecord { kraft_version: 1 });
         assert!(round_trip(&rec) == rec);
+    }
+
+    #[test]
+    fn client_metrics_config_round_trip() {
+        let mut overrides = std::collections::BTreeMap::new();
+        overrides.insert("interval.ms".to_string(), "60000".to_string());
+        overrides.insert(
+            "metrics".to_string(),
+            "org.apache.kafka.consumer.".to_string(),
+        );
+        let r = MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
+            name: "sub-a".into(),
+            configs: overrides,
+        });
+        assert_eq!(round_trip(&r), r);
     }
 }

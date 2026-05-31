@@ -11,6 +11,9 @@
 //! and Crabka has no group-config knobs today. Clients filtering for those
 //! types get an empty list — the same surface the JVM client expects when
 //! the broker doesn't recognise the type.
+//!
+//! `CLIENT_METRICS` enumerates configured subscription names from the
+//! metadata image (see `MetadataImage::client_metrics_subscriptions`).
 
 use bytes::{Bytes, BytesMut};
 
@@ -131,12 +134,16 @@ fn collect_resources(
                     });
                 }
             }
-            // CLIENT_METRICS (16) is recognized but Crabka has no
-            // subscriptions (see `get_telemetry_subscriptions`), so it
-            // collapses into the same empty-output arm as unknown types.
-            // Unknown types (BROKER_LOGGER, GROUP, anything new) silently
-            // drop — matches JVM behavior when the broker doesn't
-            // support a requested type.
+            RESOURCE_TYPE_CLIENT_METRICS => {
+                for (name, _cfgs) in image.client_metrics_subscriptions() {
+                    out.push(ConfigResource {
+                        resource_name: name.clone(),
+                        resource_type: RESOURCE_TYPE_CLIENT_METRICS,
+                        ..Default::default()
+                    });
+                }
+            }
+            // Unknown types (BROKER_LOGGER, GROUP, anything new) silently drop.
             _ => {}
         }
     }
@@ -180,14 +187,42 @@ mod tests {
         img
     }
 
+    fn image_with_subs(names: &[&str]) -> MetadataImage {
+        use crabka_metadata::ClientMetricsConfigRecord;
+        let mut img = MetadataImage::new(Uuid::nil());
+        for n in names {
+            let mut cfgs = std::collections::BTreeMap::new();
+            cfgs.insert("interval.ms".to_string(), "60000".to_string());
+            img.apply(&MetadataRecord::V1ClientMetricsConfig(
+                ClientMetricsConfigRecord {
+                    name: (*n).into(),
+                    configs: cfgs,
+                },
+            ));
+        }
+        img
+    }
+
     #[test]
-    fn v0_returns_client_metrics_only_which_is_empty() {
-        let img = image_with_topics_and_brokers(&["t1", "t2"], &[1, 2]);
+    fn v0_returns_client_metrics_subscriptions() {
+        let img = image_with_subs(&["sub-b", "sub-a"]);
         let out = collect_resources(&img, 0, &[]);
+        assert_eq!(out.len(), 2);
         assert!(
-            out.is_empty(),
-            "v0 must return only client-metrics resources (Crabka has none); got {out:?}"
+            out.iter()
+                .all(|r| r.resource_type == RESOURCE_TYPE_CLIENT_METRICS)
         );
+        assert_eq!(out[0].resource_name, "sub-a"); // sorted
+        assert_eq!(out[1].resource_name, "sub-b");
+    }
+
+    #[test]
+    fn v1_client_metrics_filter_returns_subscriptions() {
+        let img = image_with_subs(&["sub-a"]);
+        let out = collect_resources(&img, 1, &[RESOURCE_TYPE_CLIENT_METRICS]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].resource_type, RESOURCE_TYPE_CLIENT_METRICS);
+        assert_eq!(out[0].resource_name, "sub-a");
     }
 
     #[test]
@@ -225,16 +260,6 @@ mod tests {
         assert!(out[0].resource_name == "5");
         assert!(out[1].resource_type == RESOURCE_TYPE_BROKER);
         assert!(out[1].resource_name == "7");
-    }
-
-    #[test]
-    fn v1_client_metrics_filter_returns_empty() {
-        let img = image_with_topics_and_brokers(&["t-a"], &[1]);
-        let out = collect_resources(&img, 1, &[RESOURCE_TYPE_CLIENT_METRICS]);
-        assert!(
-            out.is_empty(),
-            "Crabka has no client-metrics subscriptions; got {out:?}"
-        );
     }
 
     #[test]

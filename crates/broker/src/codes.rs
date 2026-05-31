@@ -238,6 +238,18 @@ pub const INCONSISTENT_TOPIC_ID: i16 = 103;
 /// UUID that no longer resolves (e.g. recreated mid-session) (KIP-516).
 pub const FETCH_SESSION_TOPIC_ID_ERROR: i16 = 106;
 
+/// `UNSUPPORTED_COMPRESSION_TYPE` (76) — KIP-714 `PushTelemetry` carried a
+/// `compression_type` the broker can't decompress.
+pub const UNSUPPORTED_COMPRESSION_TYPE: i16 = 76;
+
+/// `THROTTLING_QUOTA_EXCEEDED` (89) — KIP-714 client pushed/fetched
+/// telemetry faster than the configured interval allows.
+pub const THROTTLING_QUOTA_EXCEEDED: i16 = 89;
+
+/// `TELEMETRY_TOO_LARGE` (118) — KIP-714 `PushTelemetry` payload exceeded
+/// `telemetry.max.bytes`.
+pub const TELEMETRY_TOO_LARGE: i16 = 118;
+
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
 /// pick more meaningful codes.

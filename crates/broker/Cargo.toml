@@ -53,6 +53,7 @@ tracing-subscriber = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 opentelemetry-otlp = { workspace = true }
+opentelemetry-proto = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 uuid = { workspace = true }
@@ -79,6 +80,10 @@ lru.workspace = true
 zerocopy.workspace = true
 # JSON Schema generation for FileConfig — consumed by crabka-docgen.
 schemars = { workspace = true }
+# KIP-714: stable subscription-id via CRC32C over sorted metric-prefix set.
+crc32c = { workspace = true }
+# KIP-714: decode OTLP MetricsData protobuf payloads in PushTelemetry handler.
+prost = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

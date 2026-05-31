@@ -241,6 +241,13 @@ async fn serve_connection_stream<S>(
     };
     tracing::info!(listener = %spec.name, sasl = is_sasl_listener, "connection opened");
 
+    // KIP-714: per-connection client software name + version, populated from
+    // the first `ApiVersions v3+` request (KIP-511). Default to empty strings
+    // so `GetTelemetrySubscriptions` can be served even on connections that
+    // never sent `ApiVersions` (e.g. early-version clients).
+    let mut client_software_name = String::new();
+    let mut client_software_version = String::new();
+
     loop {
         // Compute the re-auth deadline for OAUTHBEARER connections. PLAIN /
         // SCRAM / mTLS / anonymous return `None` and the timer arm is
@@ -590,7 +597,51 @@ async fn serve_connection_stream<S>(
                 handle_txn_offset_commit_frame(&broker, &frame, &auth, &peer),
                 "TxnOffsetCommit"
             ),
+            Some(71) => intercept!(
+                handle_get_telemetry_subscriptions_frame(
+                    &broker,
+                    &frame,
+                    &peer,
+                    &client_software_name,
+                    &client_software_version,
+                ),
+                "GetTelemetrySubscriptions"
+            ),
+            Some(72) => intercept!(
+                handle_push_telemetry_frame(
+                    &broker,
+                    &frame,
+                    &peer,
+                    &client_software_name,
+                    &client_software_version,
+                ),
+                "PushTelemetry"
+            ),
             _ => {}
+        }
+        // KIP-511: capture client software name + version from ApiVersions v3+
+        // frames so they're available for telemetry subscription matching. This
+        // runs on the fall-through path (key 18 is not inline-intercepted), just
+        // before dispatch_one. We decode only the version field from the header
+        // and the software fields from the body; the full response is built by
+        // the api_versions handler inside dispatch_one as normal.
+        if peek_api_key(&frame).ok() == Some(API_VERSIONS_KEY)
+            && let Ok((_, api_version, _, body)) = parse_request_header(&frame)
+            && api_version >= 3
+        {
+            use crabka_protocol::Decode;
+            let mut cur: &[u8] = body;
+            if let Ok(req) =
+                crabka_protocol::owned::api_versions_request::ApiVersionsRequest::decode(
+                    &mut cur,
+                    api_version,
+                )
+                && crate::handlers::api_versions::is_valid_client_info(&req.client_software_name)
+                && crate::handlers::api_versions::is_valid_client_info(&req.client_software_version)
+            {
+                client_software_name.clone_from(&req.client_software_name);
+                client_software_version.clone_from(&req.client_software_version);
+            }
         }
         // KIP-124 request_percentage enforcement — fallback HandlerTable path only.
         // Intercept arms (admin RPCs: ACLs, ElectLeaders, AlterPartitionReassignments,
@@ -2612,6 +2663,79 @@ async fn handle_txn_offset_commit_frame(
         &ctx,
     )
     .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `GetTelemetrySubscriptions` (`api_key` 71, KIP-714)
+/// frame. Needs the peer `SocketAddr` and per-connection software
+/// name/version for KIP-714 subscription matching; these are not
+/// available via the `&Broker`-only handler-table signature.
+async fn handle_get_telemetry_subscriptions_frame(
+    broker: &Broker,
+    frame: &[u8],
+    peer: &SocketAddr,
+    software_name: &str,
+    software_version: &str,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 71);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let tctx = crate::handlers::TelemetryContext {
+        client_id,
+        peer,
+        software_name,
+        software_version,
+    };
+
+    let resp_body = crate::handlers::get_telemetry_subscriptions::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &tctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `PushTelemetry` (`api_key` 72, KIP-714) frame.
+/// Needs the peer `SocketAddr` and per-connection software name/version
+/// for subscription authorization; these are not available via the
+/// `&Broker`-only handler-table signature.
+async fn handle_push_telemetry_frame(
+    broker: &Broker,
+    frame: &[u8],
+    peer: &SocketAddr,
+    software_name: &str,
+    software_version: &str,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 72);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let tctx = crate::handlers::TelemetryContext {
+        client_id,
+        peer,
+        software_name,
+        software_version,
+    };
+
+    let resp_body =
+        crate::handlers::push_telemetry::handle(broker, api_version, correlation_id, body, &tctx)
+            .await?;
     Ok(encode_response(
         api_key,
         correlation_id,
