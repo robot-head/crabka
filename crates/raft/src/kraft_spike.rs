@@ -14,7 +14,10 @@
 //! Wire facts captured against `apache/kafka:4.0.0` are recorded in
 //! `docs/superpowers/specs/2026-05-30-kraft-wire-findings.md`.
 
-#![allow(dead_code)]
+// Throwaway spike: explicit `Default::default()` initializers on the
+// generated protocol structs read more clearly here than naming each type,
+// and the constants are exercised only from tests.
+#![allow(dead_code, clippy::default_trait_access, clippy::doc_markdown)]
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -90,7 +93,7 @@ pub(crate) fn bootstrap_log_batch() -> Bytes {
 /// Number of records the bootstrap log contains (used as the Fetch
 /// high-watermark / log-end-offset for offset 0).
 fn bootstrap_record_count() -> i64 {
-    bootstrap_records().len() as i64
+    i64::try_from(bootstrap_records().len()).unwrap_or(i64::MAX)
 }
 
 // --- Step C: ApiVersions responder -------------------------------------
@@ -132,7 +135,7 @@ pub(crate) fn api_versions_response_frame(correlation_id: i32, req_version: i16)
     frame.put_i32(correlation_id);
     frame.put_slice(&body);
 
-    prepend_len(frame)
+    prepend_len(&frame)
 }
 
 // --- Step D: Fetch responder -------------------------------------------
@@ -206,7 +209,7 @@ pub(crate) fn fetch_response_frame(
     }
     frame.put_slice(&body);
 
-    prepend_len(frame)
+    prepend_len(&frame)
 }
 
 /// Decode a `FetchRequest` body at `version` and return the first
@@ -220,10 +223,10 @@ pub(crate) fn fetch_offset_from_request(body: &[u8], version: i16) -> Option<i64
 }
 
 /// Prepend the 4-byte big-endian length prefix to a complete response frame.
-fn prepend_len(frame: BytesMut) -> Bytes {
+fn prepend_len(frame: &BytesMut) -> Bytes {
     let mut out = BytesMut::with_capacity(4 + frame.len());
     out.put_i32(i32::try_from(frame.len()).unwrap_or(i32::MAX));
-    out.put_slice(&frame);
+    out.put_slice(frame);
     out.freeze()
 }
 
@@ -255,7 +258,7 @@ mod tests {
         let mut cur: &[u8] = &frame;
         // Strip length prefix.
         let len = cur.get_i32();
-        assert!(len as usize == cur.remaining());
+        assert!(usize::try_from(len).unwrap() == cur.remaining());
         // ResponseHeader v0: correlation id only.
         let corr = cur.get_i32();
         assert!(corr == 7);
@@ -273,7 +276,7 @@ mod tests {
         let mut cur: &[u8] = &frame;
         // Strip length prefix.
         let len = cur.get_i32();
-        assert!(len as usize == cur.remaining());
+        assert!(usize::try_from(len).unwrap() == cur.remaining());
         // ResponseHeader v1 (flexible): correlation id + empty tagged byte.
         let corr = cur.get_i32();
         assert!(corr == 9);
@@ -309,12 +312,18 @@ mod tests {
         // Build a minimal FetchRequest with one topic + partition at a known
         // fetch_offset, encode it, then decode the offset back out.
         use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic};
-        let mut req = FetchRequest::default();
-        let mut partition = FetchPartition::default();
-        partition.fetch_offset = 42;
-        let mut topic = FetchTopic::default();
-        topic.partitions = vec![partition];
-        req.topics = vec![topic];
+        let partition = FetchPartition {
+            fetch_offset: 42,
+            ..Default::default()
+        };
+        let topic = FetchTopic {
+            partitions: vec![partition],
+            ..Default::default()
+        };
+        let req = FetchRequest {
+            topics: vec![topic],
+            ..Default::default()
+        };
 
         let mut buf = BytesMut::new();
         req.encode(&mut buf, FETCH_REQ_VERSION).unwrap();

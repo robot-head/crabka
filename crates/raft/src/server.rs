@@ -37,6 +37,11 @@ use crate::wire::{
 /// performs an `ApiVersions` handshake before any other request — the
 /// openraft network factory leans on that connection for the
 /// Crabka-private Raft RPCs.
+///
+/// When the `kraft-spike` feature is on, real `KRaft` `ApiVersions` is served
+/// by [`crate::kraft_spike`] instead of the minimal stub, so this constant and
+/// the stub it gates are compiled out.
+#[cfg(not(feature = "kraft-spike"))]
 const API_KEY_API_VERSIONS: i16 = 18;
 
 pub(crate) async fn run(
@@ -99,7 +104,11 @@ where
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
             res = read_one_request(&mut stream) => {
-                let (api_key, correlation_id, body) = match res {
+                // `api_version` is only consumed by the `kraft-spike` Fetch /
+                // ApiVersions interception below; the openraft path decodes at
+                // a fixed v0.
+                #[cfg_attr(not(feature = "kraft-spike"), allow(unused_variables))]
+                let (api_key, api_version, correlation_id, body) = match res {
                     Ok(v) => v,
                     Err(e) => {
                         // Treat peer EOF as a clean shutdown of this conn,
@@ -110,6 +119,41 @@ where
                         return Err(e);
                     }
                 };
+                // THROWAWAY KRaft slice-0 spike: when the `kraft-spike`
+                // feature is on, intercept REAL KRaft ApiVersions (18) and
+                // Fetch (1) FIRST and serve hand-built frames to a JVM broker
+                // observer. This runs parallel to the openraft flow and does
+                // not touch the Crabka-private RPCs (api keys 1000-1002).
+                #[cfg(feature = "kraft-spike")]
+                {
+                    if api_key == 18 {
+                        let frame = crate::kraft_spike::api_versions_response_frame(
+                            correlation_id,
+                            api_version,
+                        );
+                        stream.write_all(&frame).await.map_err(io_err)?;
+                        stream.flush().await.map_err(io_err)?;
+                        continue;
+                    }
+                    if api_key == 1 {
+                        let fetch_offset =
+                            crate::kraft_spike::fetch_offset_from_request(&body, api_version)
+                                .unwrap_or(0);
+                        tracing::info!(
+                            fetch_offset,
+                            api_version,
+                            "kraft-spike: serving Fetch on controller listener"
+                        );
+                        let frame = crate::kraft_spike::fetch_response_frame(
+                            correlation_id,
+                            api_version,
+                            fetch_offset,
+                        );
+                        stream.write_all(&frame).await.map_err(io_err)?;
+                        stream.flush().await.map_err(io_err)?;
+                        continue;
+                    }
+                }
                 // ApiVersions (api_key 18) is the bootstrap handshake
                 // performed by `crabka_client_core::Connection::connect`. It
                 // arrives at v0 with a header v1 (no tagged-fields byte) and
@@ -120,6 +164,7 @@ where
                 // asymmetry that must NOT include it. We dispatch and
                 // serialise this path separately rather than poisoning the
                 // generic codec.
+                #[cfg(not(feature = "kraft-spike"))]
                 if api_key == API_KEY_API_VERSIONS {
                     let resp = api_versions_response_body();
                     write_response_no_tagged_fields(&mut stream, correlation_id, resp).await?;
@@ -147,7 +192,7 @@ fn truncated(needed: usize) -> RaftError {
     RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed })
 }
 
-async fn read_one_request<S>(stream: &mut S) -> Result<(i16, i32, Bytes), RaftError>
+async fn read_one_request<S>(stream: &mut S) -> Result<(i16, i16, i32, Bytes), RaftError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -166,7 +211,7 @@ where
         return Err(truncated(fixed - cur.remaining()));
     }
     let api_key = cur.get_i16();
-    let _api_version = cur.get_i16();
+    let api_version = cur.get_i16();
     let correlation_id = cur.get_i32();
 
     // Skip client_id: NULLABLE_STRING (i16 length + bytes; -1 = null).
@@ -186,7 +231,12 @@ where
         cur.advance(1);
     }
 
-    Ok((api_key, correlation_id, Bytes::copy_from_slice(cur)))
+    Ok((
+        api_key,
+        api_version,
+        correlation_id,
+        Bytes::copy_from_slice(cur),
+    ))
 }
 
 async fn write_response<S>(
@@ -212,6 +262,9 @@ where
 
 /// Write a response without the leading tagged-fields byte. Used only
 /// by the `ApiVersions` v0 path, which decodes a `ResponseHeader v0`.
+/// The `kraft-spike` feature serves real `KRaft` `ApiVersions` instead and so
+/// does not use this helper.
+#[cfg(not(feature = "kraft-spike"))]
 async fn write_response_no_tagged_fields<S>(
     stream: &mut S,
     correlation_id: i32,
@@ -236,6 +289,7 @@ where
 /// `api_keys` array. The openraft network adapter doesn't consult the
 /// returned table — it always issues `raw_request` at version 0 against
 /// the Crabka-private api keys — so an empty list is harmless.
+#[cfg(not(feature = "kraft-spike"))]
 fn api_versions_response_body() -> Bytes {
     let mut out = BytesMut::with_capacity(6);
     // error_code: INT16
