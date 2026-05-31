@@ -12,8 +12,8 @@ use crate::acl::{AclEntry, PatternType, ResourceType};
 use crate::error::MetadataError;
 use crate::records::{
     BrokerConfigRecord, BrokerRegistrationRecord, ClientQuotaRecord, DelegationTokenRecord,
-    MetadataRecord, NodeId, PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord,
-    TopicRecord,
+    FeatureLevelRecord, FeaturesEpochRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
+    ScramCredentialRecord, TopicConfigRecord, TopicRecord,
 };
 
 pub type EntityKey = Vec<(String, Option<String>)>;
@@ -487,6 +487,13 @@ impl MetadataImage {
                 // Monotonic epoch: -1 -> 0 on the first record, then +1.
                 self.features_epoch = self.features_epoch.saturating_add(1).max(0);
             }
+            // Snapshot-only: restore the epoch verbatim rather than bumping.
+            // Emitted last by `to_records` so it overrides the value the
+            // preceding `V1FeatureLevel` replays accumulated. Never reaches
+            // the live log (not a controller-submittable change).
+            MetadataRecord::V1FeaturesEpoch(rec) => {
+                self.features_epoch = rec.epoch;
+            }
         }
     }
 
@@ -592,6 +599,27 @@ impl MetadataImage {
             }));
         }
 
+        // KIP-584 finalized features: one record per live feature, in the
+        // BTreeMap's deterministic key order. (level == 0 is the delete
+        // sentinel and is never stored, so every emitted level is >= 1 and
+        // re-applies as a set.) The trailing V1FeaturesEpoch then pins the
+        // epoch verbatim — the preceding feature records each bump it, but the
+        // bumped value reflects the live feature count, not the original apply
+        // history, so it must be overwritten. Emitted whenever any feature was
+        // ever finalized (epoch left -1 only on a pristine image), so an image
+        // that finalized then removed every feature still restores its epoch.
+        for (name, level) in &self.feature_levels {
+            out.push(MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: name.clone(),
+                level: *level,
+            }));
+        }
+        if self.features_epoch >= 0 {
+            out.push(MetadataRecord::V1FeaturesEpoch(FeaturesEpochRecord {
+                epoch: self.features_epoch,
+            }));
+        }
+
         out
     }
 
@@ -676,7 +704,11 @@ impl MetadataImage {
             // KIP-584: feature-level admission is fully gated by the
             // UpdateFeatures handler (supported-range + downgrade checks);
             // image-level apply is an idempotent map upsert.
-            | MetadataRecord::V1FeatureLevel(_) => Ok(()),
+            | MetadataRecord::V1FeatureLevel(_)
+            // Snapshot-only epoch carrier: only ever produced by `to_records`
+            // and replayed on snapshot install, never submitted as a change.
+            // Validated permissively for match-exhaustiveness.
+            | MetadataRecord::V1FeaturesEpoch(_) => Ok(()),
         }
     }
 }
@@ -985,8 +1017,65 @@ mod tests {
             },
         ));
 
+        // KIP-584 finalized features: two live features at a non-trivial epoch
+        // (the metadata.version re-finalize bumps the epoch past the live
+        // count), so the trailing V1FeaturesEpoch carrier is exercised too.
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 24,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "group.version".into(),
+            level: 1,
+        }));
+        assert!(image.finalized_features_epoch() == 2);
+
         let rebuilt = MetadataImage::from_records(cid, &image.to_records());
         assert!(rebuilt == image);
+    }
+
+    /// Finalized features and their epoch must survive a `to_records` /
+    /// `from_records` round-trip exactly. The epoch is carried verbatim by a
+    /// trailing snapshot-only record, NOT recomputed by apply-bumping — so an
+    /// image whose epoch (history of `UpdateFeatures` applies) exceeds its live
+    /// feature count still reproduces exactly. Regression guard for the bug
+    /// where `to_records` emitted no feature records at all and the snapshot
+    /// path silently dropped every finalized feature.
+    #[test]
+    fn to_records_round_trips_features_and_epoch() {
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        // Four applies → epoch climbs -1 → 0 → 1 → 2 → 3, while only two
+        // features remain live (metadata.version re-finalized once).
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 24,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "group.version".into(),
+            level: 1,
+        }));
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        }));
+        assert!(image.finalized_features_epoch() == 3);
+
+        let rebuilt = MetadataImage::from_records(cid, &image.to_records());
+        assert!(rebuilt == image);
+        // Belt-and-suspenders beyond derived PartialEq: the two fields the
+        // snapshot path used to lose.
+        assert!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
+        assert!(rebuilt.finalized_features().get("group.version") == Some(&1));
+        assert!(rebuilt.finalized_features_epoch() == 3);
     }
 
     fn topic(name: &str, partitions: i32) -> MetadataRecord {

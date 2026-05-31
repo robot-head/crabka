@@ -7,7 +7,7 @@ use assert2::assert;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crabka_metadata::{MetadataRecord, TopicRecord, VoterEndpoint};
+use crabka_metadata::{FeatureLevelRecord, MetadataRecord, TopicRecord, VoterEndpoint};
 use crabka_raft::{BootstrapMode, Controller, ControllerConfig, Node};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -74,6 +74,19 @@ async fn snapshot_then_restart_recovers_image() {
             .expect("submit topic");
         assert!(controller.current_image().topic("t").is_some());
 
+        // Finalize a KIP-584 feature so the snapshot carries finalized
+        // features + their epoch. Regression guard: `to_records` once dropped
+        // every V1FeatureLevel, so metadata.version reverted to UNKNOWN after a
+        // restart and the range guard / SCRAM gates silently went permissive.
+        controller
+            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: "metadata.version".into(),
+                level: 25,
+            })])
+            .await
+            .expect("submit feature level");
+        assert!(controller.current_image().finalized_metadata_version() == Some(25));
+
         controller
             .trigger_snapshot()
             .await
@@ -110,6 +123,18 @@ async fn snapshot_then_restart_recovers_image() {
             controller.current_image().topic("t").is_some(),
             "topic 't' must survive snapshot + restart"
         );
+        // The finalized feature + its epoch must be rebuilt from the on-disk
+        // checkpoint, not silently dropped.
+        let recovered = controller.current_image();
+        assert!(
+            recovered.finalized_metadata_version() == Some(25),
+            "finalized metadata.version must survive snapshot + restart"
+        );
+        assert!(
+            recovered.finalized_features_epoch() >= 0,
+            "finalized-features epoch must survive snapshot + restart, got {}",
+            recovered.finalized_features_epoch()
+        );
 
         controller.shutdown().await;
     }
@@ -145,6 +170,16 @@ async fn lagging_learner_catches_up_via_snapshot() {
         .await
         .expect("submit topic");
     assert!(leader.current_image().topic("t").is_some());
+
+    // Finalize a feature too, so the InstallSnapshot path must carry finalized
+    // features + epoch to the learner (not just topic state).
+    leader
+        .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        })])
+        .await
+        .expect("submit feature level");
 
     leader.trigger_snapshot().await.expect("trigger snapshot");
     let snap_dir = dir1.path().join("@metadata-0");
@@ -190,6 +225,11 @@ async fn lagging_learner_catches_up_via_snapshot() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // ...and on the finalized feature carried by that same installed snapshot.
+    assert!(
+        learner.current_image().finalized_metadata_version() == Some(25),
+        "finalized metadata.version must arrive via InstallSnapshot"
+    );
 
     // The learner never triggers its own snapshot, so a checkpoint in its
     // snapshot dir can only have come from install_snapshot — proof the

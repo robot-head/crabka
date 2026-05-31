@@ -180,6 +180,27 @@ pub struct FeatureLevelRecord {
     pub level: i16,
 }
 
+/// Snapshot-only carrier for the KIP-584 finalized-features epoch.
+///
+/// The epoch is normally apply-derived (one bump per `V1FeatureLevel`
+/// applied, so it tracks the history of `UpdateFeatures` calls, not the live
+/// feature count). That derivation can't survive a snapshot: a snapshot
+/// stores resulting *state*, so it emits at most one `V1FeatureLevel` per
+/// live feature — fewer records than the original apply history. Replaying
+/// those alone would reconstruct a smaller epoch and diverge from a replica
+/// that replayed the full log.
+///
+/// So [`MetadataImage::to_records`](crate::MetadataImage::to_records) emits
+/// this record last, and [`MetadataImage::apply`](crate::MetadataImage::apply)
+/// SETS the epoch from it verbatim (rather than bumping), pinning the
+/// reconstructed epoch to the original. It is produced only by `to_records`
+/// and consumed only on snapshot replay — it is never submitted as a
+/// controller change, so it never appears in the live Raft log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeaturesEpochRecord {
+    pub epoch: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum MetadataRecord {
@@ -200,6 +221,9 @@ pub enum MetadataRecord {
     V1KRaftVersion(KRaftVersionRecord),
     V1Voters(VotersRecord),
     V1FeatureLevel(FeatureLevelRecord),
+    /// Snapshot-only: pins the finalized-features epoch on reconstruction.
+    /// Never submitted via the controller; see [`FeaturesEpochRecord`].
+    V1FeaturesEpoch(FeaturesEpochRecord),
 }
 
 #[cfg(test)]
@@ -220,6 +244,12 @@ mod tests {
             name: "metadata.version".into(),
             level: 1,
         });
+        assert!(round_trip(&r) == r);
+    }
+
+    #[test]
+    fn features_epoch_round_trip() {
+        let r = MetadataRecord::V1FeaturesEpoch(FeaturesEpochRecord { epoch: 7 });
         assert!(round_trip(&r) == r);
     }
 
