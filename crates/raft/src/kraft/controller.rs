@@ -531,7 +531,7 @@ impl Engine {
                     last_epoch,
                     last_offset,
                     pre_vote,
-                }) = wire::PeerRequest::decode(&req)
+                }) = wire::decode_vote(&req)
                 {
                     let event = Event::ReceiveVoteRequest {
                         from: candidate,
@@ -551,7 +551,7 @@ impl Engine {
                 if let Some(wire::PeerRequest::BeginQuorumEpoch {
                     leader_id,
                     leader_epoch,
-                }) = wire::PeerRequest::decode(&req)
+                }) = wire::decode_begin(&req)
                 {
                     self.on_event(Event::ReceiveBeginQuorumEpoch {
                         leader_id,
@@ -567,7 +567,7 @@ impl Engine {
                 if let Some(wire::PeerRequest::EndQuorumEpoch {
                     leader_id,
                     leader_epoch,
-                }) = wire::PeerRequest::decode(&req)
+                }) = wire::decode_end(&req)
                 {
                     self.on_event(Event::ReceiveEndQuorumEpoch {
                         leader_id,
@@ -584,7 +584,7 @@ impl Engine {
                     from,
                     fetch_epoch,
                     fetch_offset,
-                }) = wire::PeerRequest::decode(&req)
+                }) = wire::decode_fetch(&req)
                 {
                     let now = self.now();
                     let prev_role = self.core.role().name();
@@ -1114,7 +1114,7 @@ impl Engine {
             diverging,
             hwm,
             records,
-        }) = wire::PeerResponse::decode(body)
+        }) = wire::PeerResponse::decode_fetch(body)
         else {
             return;
         };
@@ -1191,7 +1191,7 @@ impl Engine {
                                 body: resp_body,
                             })
                             .await;
-                    } else if let Some(event) = response_to_event(peer, &resp_body) {
+                    } else if let Some(event) = response_to_event(peer, api_key, &resp_body) {
                         let _ = cmd_tx.send(Command::Event(event)).await;
                     }
                 }
@@ -1213,19 +1213,24 @@ impl Engine {
 /// `Ack` (Begin/End acks produce no core event), `Fetch` (handled by the
 /// dedicated [`Engine::on_fetch_response`] path, which must touch the log before
 /// the core sees the event), and undecodable bodies.
-fn response_to_event(peer: NodeId, body: &[u8]) -> Option<Event> {
-    match wire::PeerResponse::decode(body)? {
-        wire::PeerResponse::Vote {
-            epoch,
-            granted,
-            pre_vote,
-        } => Some(Event::ReceiveVoteResponse {
-            from: peer,
-            epoch,
-            vote_granted: granted,
-            pre_vote,
-        }),
-        wire::PeerResponse::Fetch { .. } | wire::PeerResponse::Ack { .. } => None,
+fn response_to_event(peer: NodeId, api_key: i16, body: &[u8]) -> Option<Event> {
+    match api_key {
+        self::api_key::VOTE => match wire::PeerResponse::decode_vote(body)? {
+            wire::PeerResponse::Vote {
+                epoch,
+                granted,
+                pre_vote,
+            } => Some(Event::ReceiveVoteResponse {
+                from: peer,
+                epoch,
+                vote_granted: granted,
+                pre_vote,
+            }),
+            _ => None,
+        },
+        // Begin/End acks produce no core event; Fetch is handled by the
+        // dedicated `FetchResponse` command path before reaching here.
+        _ => None,
     }
 }
 
