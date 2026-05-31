@@ -253,3 +253,139 @@ async fn state_survives_restart() {
         );
     }
 }
+
+/// Resolve a created topic's id from this broker's metadata image.
+async fn topic_id(broker: &crabka_broker::BrokerHandle, topic: &str) -> uuid::Uuid {
+    let image = broker.controller_image_for_test();
+    image
+        .topic(topic)
+        .map(|t| *t.topic_id.as_bytes())
+        .map(uuid::Uuid::from_bytes)
+        .expect("topic present in image")
+}
+
+/// KIP-932 group-coordinator lifecycle: a share group joining a topic with `P`
+/// partitions drives the coordinator to Initialize per-partition share state in
+/// the `__share_group_state` persister (start_offset 0, state present — not the
+/// missing-key sentinel). The heartbeat hook runs after reconcile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_initializes_share_state() {
+    let (broker, bootstrap, _d) = boot().await;
+    let client = connect(&bootstrap).await;
+    create_topic(&client, "t5", 3).await;
+    let tid = topic_id(&broker, "t5").await;
+
+    let mut join = heartbeat("g5", "", 0);
+    join.subscribed_topic_names = Some(vec!["t5".into()]);
+    let r = client.send(join).await.unwrap();
+    assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
+    let mid = r.member_id.clone().unwrap();
+
+    // The lifecycle hook initializes the assigned partitions best-effort after
+    // reconcile; a steady-state heartbeat (and a brief settle) lets every
+    // partition get persisted.
+    for _ in 0..3 {
+        let mut hb = heartbeat("g5", &mid, r.member_epoch);
+        hb.subscribed_topic_names = Some(vec!["t5".into()]);
+        let _ = client.send(hb).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    for p in 0..3 {
+        let summary = broker.share_state_summary_for_test("g5", tid, p).await;
+        let (_se, _le, start_offset, _dcc) =
+            summary.unwrap_or_else(|| panic!("partition {p} must be initialized"));
+        assert!(
+            start_offset == 0,
+            "partition {p} initialized at start_offset 0, got {start_offset}"
+        );
+    }
+}
+
+/// After a restart, the group's `ShareGroupStatePartitionMetadata` is recovered
+/// so re-joining does not re-initialize: a stale (non-zero) start_offset written
+/// directly to the persister survives because the coordinator skips already-
+/// initialized partitions on the post-restart heartbeat.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lifecycle_metadata_survives_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let log_dir = dir.path().to_path_buf();
+
+    let tid;
+    {
+        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
+            .await
+            .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        let client = connect(&bootstrap).await;
+        create_topic(&client, "t6", 2).await;
+        tid = topic_id(&broker, "t6").await;
+
+        let mut join = heartbeat("g6", "", 0);
+        join.subscribed_topic_names = Some(vec!["t6".into()]);
+        let r = client.send(join).await.unwrap();
+        assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
+        let mid = r.member_id.clone().unwrap();
+
+        for _ in 0..3 {
+            let mut hb = heartbeat("g6", &mid, r.member_epoch);
+            hb.subscribed_topic_names = Some(vec!["t6".into()]);
+            let _ = client.send(hb).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        // Both partitions are initialized before restart.
+        for p in 0..2 {
+            assert!(
+                broker
+                    .share_state_summary_for_test("g6", tid, p)
+                    .await
+                    .is_some(),
+                "partition {p} initialized pre-restart"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        broker.shutdown().await;
+    }
+
+    {
+        let mut cfg = BrokerConfig::for_tests(log_dir);
+        cfg.bootstrap_mode = BootstrapMode::Rejoin;
+        let broker = Broker::start(cfg).await.unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        let client = connect(&bootstrap).await;
+
+        // The recovered ShareCoordinator replays __share_group_state, so the
+        // summary is present immediately after restart.
+        for p in 0..2 {
+            assert!(
+                broker
+                    .share_state_summary_for_test("g6", tid, p)
+                    .await
+                    .is_some(),
+                "partition {p} share-state recovered after restart"
+            );
+        }
+
+        // Re-join the recovered group; the coordinator's recovered
+        // ShareGroupStatePartitionMetadata means the heartbeat hook treats the
+        // partitions as already initialized and does NOT re-Initialize them
+        // (a re-init would FENCE on the same state_epoch). The group stays
+        // healthy and the state remains present.
+        let desc = describe(&client, "g6").await;
+        let mid = desc.groups[0].members[0].member_id.clone();
+        let mut hb = heartbeat("g6", &mid, desc.groups[0].group_epoch);
+        hb.subscribed_topic_names = Some(vec!["t6".into()]);
+        let _ = client.send(hb).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        for p in 0..2 {
+            assert!(
+                broker
+                    .share_state_summary_for_test("g6", tid, p)
+                    .await
+                    .is_some(),
+                "partition {p} share-state still present after restart re-join"
+            );
+        }
+    }
+}

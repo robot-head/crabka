@@ -252,7 +252,8 @@ async fn handle_session_tick(
         pending.target_per_member.push((mid.clone(), None));
         pending.current_per_member.push((mid.clone(), None));
     }
-    if let Err(e) = flush_pending(state, pending, offsets_log, coordinator, chrono_now_ms()).await {
+    let now_ms = chrono_now_ms();
+    if let Err(e) = flush_pending(state, pending, offsets_log, coordinator, now_ms).await {
         tracing::warn!(
             group_id = %state.group_id,
             error = %e,
@@ -260,6 +261,9 @@ async fn handle_session_tick(
         );
         return Err(e);
     }
+    // KIP-932 lifecycle: eviction may have dropped a member's partitions (or
+    // emptied the group); Delete share-state no longer assigned.
+    reconcile_share_state(state, offsets_log, coordinator, now_ms).await;
     Ok(())
 }
 
@@ -297,6 +301,7 @@ async fn handle_heartbeat(
         state.advance_member_epoch(&new_member_id);
         let pending = snapshot_pending_after_change(state, std::slice::from_ref(&new_member_id));
         flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
+        reconcile_share_state(state, offsets_log, coordinator, now_ms).await;
         return Ok(build_assignment_resp(state, &new_member_id, config));
     }
 
@@ -321,7 +326,120 @@ async fn handle_heartbeat(
         let pending = snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id));
         flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
     }
+    // KIP-932 lifecycle: every steady-state heartbeat re-checks the assignment
+    // and Initializes any not-yet-initialized share-states (best-effort retry).
+    reconcile_share_state(state, offsets_log, coordinator, now_ms).await;
     Ok(build_assignment_resp(state, &req.member_id, config))
+}
+
+/// KIP-932 lifecycle hook (Slice B Task 11). Runs AFTER `reconcile`, off the
+/// sync state machine: gathers the group's full assigned `(topic_id,
+/// partition)` set and, for each not already Initialized, drives
+/// [`SharePersister::initialize`]. On success it records the partition in
+/// `state.initialized` and persists an updated `ShareGroupStatePartitionMetadata`
+/// (key v14) via the offsets log.
+///
+/// Best-effort: a persister error leaves the partition un-recorded so the next
+/// heartbeat retries; it never fails the heartbeat. `state_epoch` is the group
+/// epoch (monotonic, bumped on every membership change); `start_offset` is 0
+/// (a freshly-initialized share partition starts at the beginning).
+async fn reconcile_share_state(
+    state: &mut ShareGroupState,
+    offsets_log: &dyn OffsetsLog,
+    coordinator: &super::super::GroupCoordinator,
+    now_ms: i64,
+) {
+    let Some(persister) = coordinator.share_persister() else {
+        // No persister wired (pure-coordinator unit tests): nothing to do.
+        return;
+    };
+
+    // The union of every member's assigned partitions is the set of
+    // (topic_id, partition) the group actively uses.
+    let mut assigned: HashSet<(Uuid, i32)> = HashSet::new();
+    for m in state.members.values() {
+        for (tid, parts) in &m.assigned_partitions {
+            for p in parts {
+                assigned.insert((*tid, *p));
+            }
+        }
+    }
+
+    let to_init: Vec<(Uuid, i32)> = assigned
+        .iter()
+        .copied()
+        .filter(|tp| !state.initialized.contains(tp))
+        .collect();
+    // Partitions previously Initialized but no longer assigned (a topic left
+    // the subscription, or the group emptied) get their share-state Deleted.
+    let to_delete: Vec<(Uuid, i32)> = state
+        .initialized
+        .iter()
+        .copied()
+        .filter(|tp| !assigned.contains(tp))
+        .collect();
+    if to_init.is_empty() && to_delete.is_empty() {
+        return;
+    }
+
+    let state_epoch = state.group_epoch;
+    let mut changed = false;
+    for (tid, partition) in to_init {
+        let topic_uuid = uuid::Uuid::from_bytes(tid.0);
+        match persister
+            .initialize(&state.group_id, topic_uuid, partition, state_epoch, 0)
+            .await
+        {
+            Ok(()) => {
+                state.initialized.insert((tid, partition));
+                changed = true;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    group_id = %state.group_id,
+                    topic_id = %topic_uuid,
+                    partition,
+                    error = %e,
+                    "share-state Initialize failed; will retry next heartbeat",
+                );
+            }
+        }
+    }
+    for (tid, partition) in to_delete {
+        let topic_uuid = uuid::Uuid::from_bytes(tid.0);
+        match persister
+            .delete(&state.group_id, topic_uuid, partition)
+            .await
+        {
+            Ok(()) => {
+                state.initialized.remove(&(tid, partition));
+                changed = true;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    group_id = %state.group_id,
+                    topic_id = %topic_uuid,
+                    partition,
+                    error = %e,
+                    "share-state Delete failed; will retry next heartbeat",
+                );
+            }
+        }
+    }
+
+    if changed {
+        let pending = PendingShareRecords {
+            state_partition_metadata: Some(state_partition_metadata_from(state)),
+            ..Default::default()
+        };
+        if let Err(e) = flush_pending(state, pending, offsets_log, coordinator, now_ms).await {
+            tracing::warn!(
+                group_id = %state.group_id,
+                error = %e,
+                "persisting ShareGroupStatePartitionMetadata failed; in-memory set retained",
+            );
+        }
+    }
 }
 
 /// Apply steady-state member updates and run reconciliation. Returns `true`
@@ -379,6 +497,9 @@ async fn handle_leave(
         epoch: state.group_epoch,
     });
     flush_pending(state, pending, offsets_log, coordinator, now_ms).await?;
+    // KIP-932 lifecycle: a leave can empty the group (or drop a member's
+    // partitions), so Delete any share-state that is no longer assigned.
+    reconcile_share_state(state, offsets_log, coordinator, now_ms).await;
     Ok(base_resp(0, req.member_epoch, config))
 }
 
@@ -537,6 +658,15 @@ fn apply_seed(state: &mut ShareGroupState, seed: super::super::ShareGroupSeed) {
         let entry: HashMap<Uuid, Vec<i32>> = tv.topic_partitions.into_iter().collect();
         state.target.per_member.insert(mid, entry);
     }
+    // KIP-932: rehydrate the already-Initialized share-state set so the
+    // lifecycle hook skips partitions whose state survived the restart.
+    state.initialized.clear();
+    for (topic_id, partitions) in &seed.state_partition_metadata.initialized {
+        let tid = Uuid(*topic_id.as_bytes());
+        for p in partitions {
+            state.initialized.insert((tid, *p));
+        }
+    }
     state.dirty = false;
 }
 
@@ -556,6 +686,9 @@ pub(crate) struct PendingShareRecords {
     pub target_metadata: Option<ShareGroupTargetAssignmentMetadataValue>,
     pub target_per_member: Vec<(String, Option<ShareGroupTargetAssignmentMemberValue>)>,
     pub current_per_member: Vec<(String, Option<ShareGroupCurrentMemberAssignmentValue>)>,
+    /// KIP-932 `ShareGroupStatePartitionMetadata` (key v14). `Some` writes the
+    /// updated Initialized/deleting record after a lifecycle Initialize/Delete.
+    pub state_partition_metadata: Option<ShareGroupStatePartitionMetadataValue>,
 }
 
 impl PendingShareRecords {
@@ -565,6 +698,7 @@ impl PendingShareRecords {
             && self.target_metadata.is_none()
             && self.target_per_member.is_empty()
             && self.current_per_member.is_empty()
+            && self.state_partition_metadata.is_none()
     }
 
     pub fn into_batch(self, group_id: &str, now_ms: i64) -> RecordBatch {
@@ -621,6 +755,14 @@ impl PendingShareRecords {
                     member_id,
                 }),
                 v.map(|x| x.encode()),
+            );
+        }
+        if let Some(v) = self.state_partition_metadata {
+            push(
+                encode_share_key(&ShareGroupKey::StatePartitionMetadata {
+                    group_id: group_id.into(),
+                }),
+                Some(v.encode()),
             );
         }
 
@@ -735,9 +877,32 @@ fn snapshot_seed(state: &ShareGroupState) -> super::super::ShareGroupSeed {
         members,
         target_per_member,
         current_per_member,
-        // Populated by the KIP-932 lifecycle hook (Slice B Task 11); not yet
-        // tracked in the live `ShareGroupState`.
-        state_partition_metadata: ShareGroupStatePartitionMetadataValue::default(),
+        // KIP-932 lifecycle (Slice B Task 11): project the live Initialized set
+        // back into the persisted record so the cache (and a respawned actor)
+        // stay consistent with what the lifecycle hook wrote to the log.
+        state_partition_metadata: state_partition_metadata_from(state),
+    }
+}
+
+/// Build the `ShareGroupStatePartitionMetadata` (key v14) value from the live
+/// Initialized set: one `(topic_id, partitions)` row per topic, partitions
+/// sorted for a stable encoding.
+fn state_partition_metadata_from(state: &ShareGroupState) -> ShareGroupStatePartitionMetadataValue {
+    let mut by_topic: HashMap<Uuid, Vec<i32>> = HashMap::new();
+    for (tid, p) in &state.initialized {
+        by_topic.entry(*tid).or_default().push(*p);
+    }
+    let mut initialized: Vec<(uuid::Uuid, Vec<i32>)> = by_topic
+        .into_iter()
+        .map(|(tid, mut parts)| {
+            parts.sort_unstable();
+            (uuid::Uuid::from_bytes(tid.0), parts)
+        })
+        .collect();
+    initialized.sort_by_key(|(tid, _)| *tid);
+    ShareGroupStatePartitionMetadataValue {
+        initialized,
+        deleting: Vec::new(),
     }
 }
 

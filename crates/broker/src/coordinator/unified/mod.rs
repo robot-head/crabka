@@ -55,6 +55,13 @@ pub struct GroupCoordinator {
     /// Last-known-good share-group state, the share-group analogue of
     /// `seeds_cache`.
     pub share_seeds_cache: Arc<DashMap<String, ShareGroupSeed>>,
+    /// KIP-932 group-coordinator → share-state-persister bridge. Set once in
+    /// `Broker::start` after both the `ShareCoordinator` and this coordinator
+    /// exist. Per-group share actors read it (via [`Self::share_persister`]) to
+    /// drive Initialize/Delete lifecycle calls after reconcile. `None` in the
+    /// pure-coordinator unit tests, where the lifecycle hook is a no-op.
+    pub(crate) share_persister:
+        std::sync::OnceLock<Arc<crate::share_coordinator::persister_client::SharePersister>>,
 }
 
 impl GroupCoordinator {
@@ -76,7 +83,27 @@ impl GroupCoordinator {
             share_seeds: Arc::new(DashMap::new()),
             seeds_cache: Arc::new(DashMap::new()),
             share_seeds_cache: Arc::new(DashMap::new()),
+            share_persister: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Install the KIP-932 share-state persister bridge. Called once in
+    /// `Broker::start`. A second call is silently ignored (the `OnceLock`
+    /// keeps the first value), which keeps construction order-independent.
+    pub(crate) fn set_share_persister(
+        &self,
+        persister: Arc<crate::share_coordinator::persister_client::SharePersister>,
+    ) {
+        let _ = self.share_persister.set(persister);
+    }
+
+    /// The installed share-state persister, if any. `None` in unit tests that
+    /// construct a bare `GroupCoordinator`; the lifecycle hook then no-ops.
+    #[must_use]
+    pub(crate) fn share_persister(
+        &self,
+    ) -> Option<&Arc<crate::share_coordinator::persister_client::SharePersister>> {
+        self.share_persister.get()
     }
 
     /// Replace the cached seed for `group_id` with `seed`. Called by the

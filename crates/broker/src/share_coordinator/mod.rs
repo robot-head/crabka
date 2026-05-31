@@ -8,5 +8,6 @@ pub(crate) mod coordinator;
 pub(crate) mod handlers;
 pub mod partitioner;
 pub mod persistence;
+pub(crate) mod persister_client;
 pub mod pruning;
 pub mod state;

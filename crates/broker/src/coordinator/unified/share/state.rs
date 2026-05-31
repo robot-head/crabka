@@ -60,6 +60,12 @@ pub struct ShareGroupState {
     /// Set whenever membership/subscription changes so the actor knows a
     /// reconcile is pending; cleared once the reconcile installs a target.
     pub dirty: bool,
+    /// KIP-932 (Slice B Task 11): `(topic_id, partition)` share-states this
+    /// group has already Initialized in the share-state persister. Seeded from
+    /// the replayed `ShareGroupStatePartitionMetadata` (key v14) so a
+    /// post-restart heartbeat does not re-Initialize. The lifecycle hook adds
+    /// to this on each successful `SharePersister::initialize`.
+    pub initialized: HashSet<(Uuid, i32)>,
 }
 
 impl ShareGroupState {
@@ -73,6 +79,7 @@ impl ShareGroupState {
                 per_member: HashMap::new(),
             },
             dirty: false,
+            initialized: HashSet::new(),
         }
     }
 

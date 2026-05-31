@@ -387,6 +387,27 @@ impl BrokerHandle {
         self._broker.partitions.contains(topic, partition)
     }
 
+    /// Test-only: read the share-state summary
+    /// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)`
+    /// for `(group, topic_id, partition)` straight from this broker's
+    /// [`ShareCoordinator`](crate::share_coordinator::coordinator::ShareCoordinator).
+    /// Returns `None` when the key has no initialized state. KIP-932 lifecycle
+    /// tests use this to assert the group-coordinator Initialized per-partition
+    /// share state without advertising the persister RPCs over the wire.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn share_state_summary_for_test(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+    ) -> Option<(i32, i32, i64, i32)> {
+        self._broker
+            .share_coordinator
+            .read_summary(group, topic_id, partition)
+            .await
+    }
+
     /// Test-only: return the `log_start_offset` of `(topic, partition)` as
     /// reported by its underlying [`crabka_log::Log`]. Returns `None` if the
     /// partition is not hosted on this broker.
@@ -1377,6 +1398,30 @@ impl Broker {
             .recover(&controller.current_image())
             .await
             .map_err(|e| tracing::warn!(error = %e, "share coordinator recovery error"));
+
+        // 4a''. Wire the KIP-932 group-coordinator → share-state-persister
+        //       bridge. Both the `ShareCoordinator` and the `GroupCoordinator`
+        //       exist now, so build the `SharePersister` and hand it to the
+        //       coordinator; its per-group share actors read it after reconcile
+        //       to Initialize/Delete per-partition share state. Single-broker
+        //       setups always route locally; remote routing mirrors EndTxn.
+        let share_persister = Arc::new(
+            crate::share_coordinator::persister_client::SharePersister::new(
+                config.node_id,
+                share_coordinator.clone(),
+                controller.clone(),
+                inter_broker_client.clone(),
+                config
+                    .effective_listeners()
+                    .iter()
+                    .find(|l| l.name == config.inter_broker_listener_name)
+                    .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol),
+                config.inter_broker_listener_name.clone(),
+            ),
+        );
+        if let Some(coord) = group_manager.next_gen() {
+            coord.set_share_persister(share_persister);
+        }
 
         // 4b. Spawn the replicator supervisor. Started AFTER the controller
         //    is up and self-registration succeeded so the supervisor's
