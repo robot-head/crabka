@@ -22,6 +22,7 @@ use crate::coordinator::unified::share::config::ShareGroupConfig;
 use crate::metadata_source::MetadataSource;
 use crate::partition_registry::PartitionRegistry;
 use crate::share_coordinator::persister_client::SharePersister;
+use crate::share_partition::session::ShareSessionCache;
 use crate::share_partition::state::AcquisitionState;
 
 /// Live acquisition-state machines keyed by `(group, topic_id, partition)`.
@@ -29,17 +30,13 @@ type LeaderKey = (String, uuid::Uuid, i32);
 
 /// Per-broker owner of the share-partition acquisition state machines for the
 /// `(group, topic, partition)` triples this broker leads.
-//
-// `partitions`/`controller` and the leadership/leader-epoch helpers are
-// consumed by the `ShareFetch(78)`/`ShareAcknowledge(79)` handlers landing in
-// the next plan batch (Slice C Tasks 4/5); allow until they wire in.
-#[allow(dead_code)]
 pub(crate) struct SharePartitionLeaderManager {
     node_id: NodeId,
     partitions: Arc<PartitionRegistry>,
     controller: Arc<dyn MetadataSource>,
     persister: Arc<SharePersister>,
     config: Arc<ShareGroupConfig>,
+    sessions: ShareSessionCache,
     leaders: DashMap<LeaderKey, Arc<Mutex<AcquisitionState>>>,
 }
 
@@ -60,14 +57,62 @@ impl SharePartitionLeaderManager {
         persister: Arc<SharePersister>,
         config: Arc<ShareGroupConfig>,
     ) -> Self {
+        // The share-session cache is capped at the same per-broker session
+        // ceiling as classic fetch sessions; `max_groups` of 0 means
+        // "unbounded" in `ShareGroupConfig`, so fall back to a generous cap.
+        let session_max = if config.max_groups == 0 {
+            10_000
+        } else {
+            config.max_groups.saturating_mul(config.max_size.max(1))
+        };
         Self {
             node_id,
             partitions,
             controller,
             persister,
             config,
+            sessions: ShareSessionCache::new(session_max),
             leaders: DashMap::new(),
         }
+    }
+
+    /// Validate (and advance) the share session for `(group, member)`. See
+    /// [`ShareSessionCache::validate`].
+    pub(crate) fn validate_session(
+        &self,
+        group: &str,
+        member: &str,
+        epoch: i32,
+    ) -> Result<(), i16> {
+        self.sessions.validate(group, member, epoch)
+    }
+
+    /// Resolve the wire `(leader_id, leader_epoch)` for `(topic_id, partition)`
+    /// from the metadata image, for the `current_leader` redirect hint a
+    /// not-leader `ShareFetch`/`ShareAcknowledge` response carries. Returns
+    /// `(-1, -1)` when the topic/partition is unknown.
+    pub(crate) fn current_leader_of(&self, topic_id: uuid::Uuid, partition: i32) -> (i32, i32) {
+        let image = self.controller.current_image();
+        let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
+            return (-1, -1);
+        };
+        image
+            .partition(&topic.name, partition)
+            .map_or((-1, -1), |p| {
+                (i32::try_from(p.leader).unwrap_or(-1), p.leader_epoch)
+            })
+    }
+
+    /// Resolve the data-topic name for `topic_id` from the metadata image, or
+    /// `None` when the id is unknown. The share path carries only `topic_id`;
+    /// the handlers need the name to look up the local [`PartitionRegistry`]
+    /// entry and to key per-topic `Read` ACL checks.
+    pub(crate) fn topic_name_for(&self, topic_id: uuid::Uuid) -> Option<String> {
+        self.controller
+            .current_image()
+            .topics()
+            .find(|t| t.topic_id == topic_id)
+            .map(|t| t.name.clone())
     }
 
     /// Returns `true` if this broker is the topic-partition leader for the
@@ -76,7 +121,6 @@ impl SharePartitionLeaderManager {
     /// the partition leader to `node_id`.
     ///
     /// Consumed by the ShareFetch/ShareAcknowledge handlers (Slice C T4/T5).
-    #[allow(dead_code)]
     pub(crate) fn topic_leader_is_self(&self, topic_id: uuid::Uuid, partition: i32) -> bool {
         let image = self.controller.current_image();
         let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
@@ -89,7 +133,6 @@ impl SharePartitionLeaderManager {
 
     /// Current `leader_epoch` for `(topic_id, partition)` from the local
     /// partition's atomic, or `0` when the partition isn't materialized here.
-    #[allow(dead_code)]
     fn leader_epoch_for(&self, topic_id: uuid::Uuid, partition: i32) -> i32 {
         let image = self.controller.current_image();
         let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
@@ -110,7 +153,6 @@ impl SharePartitionLeaderManager {
     /// loader losing the insert race adopts the winner's cell.
     ///
     /// Consumed by the ShareFetch/ShareAcknowledge handlers (Slice C T4/T5).
-    #[allow(dead_code)]
     pub(crate) async fn get_or_load(
         &self,
         group: &str,

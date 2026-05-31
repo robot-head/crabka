@@ -161,6 +161,8 @@ fn admin_apis() -> Vec<ApiVersion> {
         // KIP-932 share-group membership protocol.
         v!(share_group_heartbeat_request),
         v!(share_group_describe_request),
+        // KIP-932 ShareFetch data-plane RPC.
+        v!(share_fetch_request),
         // KIP-932 share-coordinator (persister) RPCs.
         v!(initialize_share_group_state_request),
         v!(read_share_group_state_request),

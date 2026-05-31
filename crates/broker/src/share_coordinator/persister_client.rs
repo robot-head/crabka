@@ -206,9 +206,7 @@ impl SharePersister {
     ///
     /// As [`SharePersister::initialize`] (connect/send on the remote path).
     // Consumed by `SharePartitionLeaderManager::get_or_load`, which the
-    // ShareFetch/ShareAcknowledge handlers (Slice C T4/T5) drive; allow until
-    // they wire in.
-    #[allow(dead_code)]
+    // ShareFetch/ShareAcknowledge handlers drive.
     pub(crate) async fn read_state(
         &self,
         group: &str,
@@ -412,7 +410,6 @@ impl SharePersister {
 
     /// Send `req` to the `state_partition` leader and return the typed
     /// response.
-    #[allow(dead_code)]
     async fn send_to_leader_resp<R>(
         &self,
         state_partition: i32,

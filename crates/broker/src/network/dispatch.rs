@@ -462,6 +462,10 @@ async fn serve_connection_stream<S>(
                 handle_share_group_describe_frame(&broker, &frame, &auth, &peer),
                 "ShareGroupDescribe"
             ),
+            Some(78) => intercept!(
+                handle_share_fetch_frame(&broker, &frame, &auth, &peer),
+                "ShareFetch"
+            ),
             Some(42) => intercept!(
                 handle_delete_groups_frame(&broker, &frame, &auth, &peer),
                 "DeleteGroups"
@@ -2308,6 +2312,39 @@ async fn handle_share_group_describe_frame(
     ))
 }
 
+/// Decode + dispatch a `ShareFetch` (`api_key` 78, KIP-932) frame. The handler
+/// needs the authenticated principal + peer `SocketAddr` for the per-topic
+/// `Read` ACL gate, which the `&Broker`-only handler table signature can't
+/// carry; this helper builds the [`crate::handlers::RequestContext`].
+async fn handle_share_fetch_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 78);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body =
+        crate::handlers::share_fetch::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
 /// Decode + dispatch a `ListGroups` (`api_key` 16) frame. Pulls the
 /// authenticated principal off the per-connection `auth` state and the
 /// peer `SocketAddr` from the accept-time capture so the handler can
@@ -2902,6 +2939,8 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         // KIP-932 share-group membership pair; both are flexible from v0.
         76 => version >= owned::share_group_heartbeat_request::FLEXIBLE_MIN,
         77 => version >= owned::share_group_describe_request::FLEXIBLE_MIN,
+        // KIP-932 ShareFetch — flexible from v0.
+        78 => version >= owned::share_fetch_request::FLEXIBLE_MIN,
         // KIP-932 share-coordinator persister RPCs (83-87) — all flexible from v0.
         83 => version >= owned::initialize_share_group_state_request::FLEXIBLE_MIN,
         84 => version >= owned::read_share_group_state_request::FLEXIBLE_MIN,

@@ -5,4 +5,5 @@
 //! offset-range state machine the share-partition leader drives during
 //! `ShareFetch`/`ShareAcknowledge`.
 pub mod manager;
+pub mod session;
 pub mod state;
