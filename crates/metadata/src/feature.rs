@@ -102,10 +102,50 @@ impl Feature for GroupVersionFeature {
     // declares no hard `UpdateFeatures` dependency for group.version.
 }
 
+/// `transaction.version` (KIP-890). Default jumps to 2 once the bootstrap
+/// metadata.version reaches 4.0-IV2; downgrade floor is the supported min
+/// (in-flight txn state lives in the `__transaction_state` log, not the
+/// [`MetadataImage`], so an image-derived floor can't be computed — deferred).
+pub struct TransactionVersionFeature;
+
+impl Feature for TransactionVersionFeature {
+    fn name(&self) -> &'static str {
+        crate::transaction_version::TRANSACTION_VERSION_FEATURE
+    }
+    fn supported_range(&self) -> (i16, i16) {
+        (
+            crate::transaction_version::TRANSACTION_VERSION_MIN,
+            crate::transaction_version::TRANSACTION_VERSION_MAX,
+        )
+    }
+    // The TV_1 tier is retained as an explicit (currently coincident) threshold
+    // so a future Kafka release that splits TV_1's bootstrap level below TV_2's
+    // is a one-line constant change; `clippy::bool_to_int_with_if` would
+    // collapse the tiers and lose that.
+    #[allow(clippy::bool_to_int_with_if)]
+    fn default_level(&self, bootstrap_mv: i16) -> i16 {
+        // Both TV_1 and TV_2 bootstrap at level 24 (4.0-IV2) → default jumps
+        // 0 -> 2 at >= 24. Empirically pinned.
+        use crate::transaction_version::{TV1_METADATA_LEVEL, TV2_METADATA_LEVEL};
+        if bootstrap_mv >= TV2_METADATA_LEVEL {
+            2
+        } else if bootstrap_mv >= TV1_METADATA_LEVEL {
+            1
+        } else {
+            0
+        }
+    }
+    // dependencies + min_required_floor: inherit the empty/supported-min defaults.
+}
+
 /// All features this broker supports finalizing. Single source of truth.
 #[must_use]
 pub fn feature_registry() -> &'static [&'static dyn Feature] {
-    const REGISTRY: &[&dyn Feature] = &[&MetadataVersionFeature, &GroupVersionFeature];
+    const REGISTRY: &[&dyn Feature] = &[
+        &MetadataVersionFeature,
+        &GroupVersionFeature,
+        &TransactionVersionFeature,
+    ];
     REGISTRY
 }
 
@@ -204,6 +244,42 @@ mod tests {
         let f = feature("group.version").unwrap();
         assert!(f.dependencies(0).is_empty());
         assert!(f.dependencies(1).is_empty());
+    }
+
+    #[test]
+    fn transaction_version_registered() {
+        let f = feature("transaction.version").expect("registered");
+        assert!(f.supported_range() == (0, 2));
+    }
+
+    #[test]
+    fn transaction_version_default_jumps_to_two_at_4_0_iv2() {
+        let f = feature("transaction.version").unwrap();
+        assert!(f.default_level(23) == 0); // below 4.0-IV2
+        assert!(f.default_level(24) == 2); // at 4.0-IV2 → jumps to 2
+        assert!(f.default_level(25) == 2);
+    }
+
+    #[test]
+    fn transaction_version_declares_no_hard_dependencies() {
+        let f = feature("transaction.version").unwrap();
+        assert!(f.dependencies(0).is_empty());
+        assert!(f.dependencies(1).is_empty());
+        assert!(f.dependencies(2).is_empty());
+    }
+
+    #[test]
+    fn transaction_version_ga_threshold_is_4_0_iv2() {
+        // Anchor the bare 24 to the metadata.version table (mirrors the
+        // group.version GA-threshold anchor test).
+        assert!(
+            crate::metadata_version::from_feature_level(
+                crate::transaction_version::TV2_METADATA_LEVEL
+            )
+            .unwrap()
+            .ivn()
+                == "4.0-IV2"
+        );
     }
 
     #[test]

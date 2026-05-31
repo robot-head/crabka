@@ -7,7 +7,8 @@
 //! `max = 25` (`4.0-IV3`), driven by the broker-wide `features` table. A
 //! standalone (self-bootstrapped) broker behaves like a freshly-formatted 4.0
 //! cluster: it finalizes every registered feature at its release default
-//! (`metadata.version = 25`, `group.version = 1`) and surfaces a real
+//! (`metadata.version = 25`, `group.version = 1`, `transaction.version = 2`)
+//! and surfaces a real
 //! (`>= 0`) `finalized_features_epoch`. `UpdateFeatures` (api_key 57) then
 //! moves those levels — that path is exercised in `tests/update_features.rs`.
 //!
@@ -63,6 +64,13 @@ async fn v3_response_advertises_supported_and_bootstrapped_finalized_features() 
         .expect("group.version advertised in supported_features");
     assert!(gv.min_version == 0, "{resp:?}");
     assert!(gv.max_version == 1, "{resp:?}");
+    let tv = resp
+        .supported_features
+        .iter()
+        .find(|f| f.name == "transaction.version")
+        .expect("transaction.version advertised in supported_features");
+    assert!(tv.min_version == 0, "{resp:?}");
+    assert!(tv.max_version == 2, "{resp:?}");
 
     // A self-bootstrapped broker finalizes the release defaults.
     let fin_mv = resp
@@ -77,6 +85,12 @@ async fn v3_response_advertises_supported_and_bootstrapped_finalized_features() 
         .find(|f| f.name == "group.version")
         .expect("group.version finalized at bootstrap");
     assert!(fin_gv.max_version_level == 1, "{resp:?}");
+    let fin_tv = resp
+        .finalized_features
+        .iter()
+        .find(|f| f.name == "transaction.version")
+        .expect("transaction.version finalized at bootstrap");
+    assert!(fin_tv.max_version_level == 2, "{resp:?}");
     assert!(
         resp.finalized_features_epoch >= 0,
         "self-bootstrapped broker finalizes defaults so epoch must be >= 0: {resp:?}"

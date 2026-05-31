@@ -21,6 +21,7 @@ mod image;
 pub mod kafka_record;
 pub mod metadata_version;
 mod records;
+pub mod transaction_version;
 pub mod voters;
 
 pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType};
