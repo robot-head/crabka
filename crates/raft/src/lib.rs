@@ -49,6 +49,7 @@ mod config;
 mod controller;
 mod error;
 pub mod handshake;
+mod kraft;
 #[cfg(feature = "kraft-spike")]
 mod kraft_spike;
 mod log_store;
