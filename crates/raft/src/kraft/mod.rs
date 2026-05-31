@@ -11,12 +11,14 @@
 pub mod action;
 pub mod core;
 pub mod event;
+pub mod log;
 pub mod role;
 pub mod types;
 
 pub use action::Action;
 pub use core::QuorumStateMachine;
 pub use event::Event;
+pub use log::KraftLog;
 pub use role::Role;
 pub use types::{
     LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant,
