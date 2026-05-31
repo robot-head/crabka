@@ -83,6 +83,17 @@ impl LeaderEpochCheckpoint {
         self.flush()
     }
 
+    /// Remove epoch entries that begin at or after `end_offset` (mirrors Kafka's
+    /// LeaderEpochFileCache.truncateFromEnd). Persists if anything changed.
+    pub fn truncate_from_end(&mut self, end_offset: i64) -> Result<(), LogError> {
+        let before = self.entries.len();
+        self.entries.retain(|e| e.start_offset < end_offset);
+        if self.entries.len() != before {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
     fn flush(&self) -> Result<(), LogError> {
         let mut s = String::new();
         s.push_str("0\n");
@@ -209,6 +220,20 @@ mod tests {
         let mut c = LeaderEpochCheckpoint::open(path).unwrap();
         c.append(0, 0).unwrap();
         assert!(c.end_offset_for_epoch(7, 200) == -1);
+    }
+
+    #[test]
+    fn truncate_from_end_removes_entries_at_or_after_end_offset() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(1, 0).unwrap();
+        c.append(7, 4).unwrap();
+        c.truncate_from_end(4).unwrap();
+        assert!(c.latest_epoch() == Some(1));
+        // Epoch 7 began at offset 4 (>= end_offset), so it is gone.
+        assert!(c.end_offset_for_epoch(7, 4) == -1);
+        // Epoch 1 survives; its end is now the log end (4).
+        assert!(c.end_offset_for_epoch(1, 4) == 4);
     }
 
     #[test]

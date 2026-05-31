@@ -269,6 +269,13 @@ fn follower_truncates_real_log_on_divergence_then_reconverges() {
     // (real on-disk truncation) before it can append the leader's batches —
     // exactly the KRaft divergence-then-reconverge flow.
     sim.leader_append(leader, 2);
+    // Force the divergent follower to re-establish contact and re-run its fetch
+    // loop: partition it (so the cluster quiesces without it) then heal it. On
+    // reconnect it fetches, the leader detects the conflicting epoch-7 tail, and
+    // the follower truncates on disk before re-replicating the leader's suffix.
+    sim.partition(f);
+    sim.run_until_stable(10_000);
+    sim.heal(f);
     sim.run_until_stable(10_000);
 
     // The follower's KraftLog was truncated on disk (its end offset dropped back
@@ -288,16 +295,15 @@ fn follower_truncates_real_log_on_divergence_then_reconverges() {
         "follower {f} committed bytes did not re-converge to the leader"
     );
 
-    // NOTE: this asserts the byte/offset reconvergence contract only — it does
-    // NOT assert the follower's `last_epoch()` rolls back to the leader's. That
-    // is deliberately omitted because of a real core bug surfaced by this test
-    // (and reported separately): `crabka_log::Log::truncate_to` truncates the
-    // segment data + LSO but NOT the leader-epoch checkpoint, so after the
-    // conflicting epoch-7 tail is removed from disk, `last_epoch()` still
-    // reports 7. Kafka fixes this in `LeaderEpochFileCache.truncateFromEnd`. The
-    // fix lives in `crates/log/src/`, outside this task's allowed scope, so the
-    // epoch-metadata assertion is left out rather than written against the buggy
-    // value.
+    // The follower's leader-epoch metadata must also roll back: after the
+    // conflicting epoch-7 tail is truncated from disk, `last_epoch()` must no
+    // longer report the stale higher epoch and must match the leader's. This is
+    // guaranteed by `Log::truncate_to` now truncating the leader-epoch
+    // checkpoint (mirrors Kafka's `LeaderEpochFileCache.truncateFromEnd`).
+    assert!(
+        LogView::last_epoch(sim.node_log(f)) == LogView::last_epoch(sim.node_log(leader)),
+        "follower {f} last_epoch should match the leader after truncation (no stale epoch 7)"
+    );
 }
 
 #[test]
