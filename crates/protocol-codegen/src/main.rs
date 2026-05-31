@@ -97,26 +97,93 @@ fn write_wrapper(
     Ok(())
 }
 
+/// Split a common-struct emitter key `<message_snake>/<struct_snake>` into its
+/// two segments.
+fn split_common_stem(stem: &str) -> (&str, &str) {
+    stem.split_once('/')
+        .expect("common-struct key must be `<message_snake>/<struct_snake>`")
+}
+
+/// Write the `include!` wrapper for one message-scoped common struct at
+/// `src/{flavor}/common/<message_snake>/<struct_snake>.rs`, pulling in the
+/// generated body from `generated/common/{flavor}/<message_snake>/<struct_snake>.<suffix>.rs`.
 fn write_common_wrapper(
-    cs_name: &str,
+    message_snake: &str,
+    struct_snake: &str,
     flavor: emit::wrappers::Flavor,
     schemas_version: &str,
-    common_src_dir: &Path,
+    message_src_dir: &Path,
 ) -> std::io::Result<()> {
     use emit::wrappers::Flavor;
-    let snake = name_conv::module_name(cs_name);
     let suffix = match flavor {
         Flavor::Owned => "owned",
         Flavor::Borrowed => "borrowed",
     };
     let allow = emit::wrappers::allow_header();
     let body = format!(
-        "{}{allow}\n\ninclude!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/common/{flavor_dir}/{cs_name}.{suffix}.rs\"\n));\n",
+        "{}{allow}\n\ninclude!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/common/{flavor_dir}/{message_snake}/{struct_snake}.{suffix}.rs\"\n));\n",
         emit::common::banner(schemas_version),
         flavor_dir = flavor.dir(),
     );
-    std::fs::write(common_src_dir.join(format!("{snake}.rs")), body)?;
+    std::fs::write(message_src_dir.join(format!("{struct_snake}.rs")), body)?;
     Ok(())
+}
+
+/// Emit the nested wrapper module tree for one flavor's message-scoped common
+/// structs:
+///
+/// - `src/{flavor}/common/mod.rs`          — `pub mod <message_snake>;` per message
+/// - `src/{flavor}/common/<msg>/mod.rs`    — `pub mod <struct_snake>;` per struct
+/// - `src/{flavor}/common/<msg>/<struct>.rs` — the `include!` wrapper
+///
+/// Returns the number of files written. A no-op (returns 0) when `tree` is empty.
+fn write_common_wrapper_tree(
+    tree: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    flavor: emit::wrappers::Flavor,
+    schemas_version: &str,
+    protocol_src: &Path,
+) -> std::io::Result<usize> {
+    if tree.is_empty() {
+        return Ok(0);
+    }
+    let mut count = 0;
+    let flavor_doc = match flavor {
+        emit::wrappers::Flavor::Owned => "Owned",
+        emit::wrappers::Flavor::Borrowed => "Borrowed",
+    };
+    let src_common = protocol_src.join(flavor.dir()).join("common");
+    std::fs::create_dir_all(&src_common)?;
+
+    let mut top_mod = emit::common::banner(schemas_version);
+    writeln!(
+        top_mod,
+        "//! {flavor_doc} common structs, scoped per owning message schema.\n"
+    )
+    .unwrap();
+
+    for (message_snake, structs) in tree {
+        writeln!(top_mod, "pub mod {message_snake};").unwrap();
+        let message_dir = src_common.join(message_snake);
+        std::fs::create_dir_all(&message_dir)?;
+
+        let mut message_mod = emit::common::banner(schemas_version);
+        for struct_snake in structs {
+            write_common_wrapper(
+                message_snake,
+                struct_snake,
+                flavor,
+                schemas_version,
+                &message_dir,
+            )?;
+            writeln!(message_mod, "pub mod {struct_snake};").unwrap();
+            count += 1;
+        }
+        std::fs::write(message_dir.join("mod.rs"), &message_mod)?;
+        count += 1;
+    }
+    std::fs::write(src_common.join("mod.rs"), &top_mod)?;
+    count += 1;
+    Ok(count)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -145,9 +212,12 @@ fn run(
             .join(ns),
     };
 
-    // Track all unique common-struct names emitted (for the common/mod.rs).
-    let mut all_common_owned = std::collections::BTreeSet::<String>::new();
-    let mut all_common_borrowed = std::collections::BTreeSet::<String>::new();
+    // Track the message-scoped common structs emitted, as
+    // <message_snake> -> {<struct_snake>, ...}, for the nested wrapper modules.
+    let mut all_common_owned =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let mut all_common_borrowed =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
 
     let mut count = 0;
     for s in &specs {
@@ -162,24 +232,29 @@ fn run(
             &borrowed_em.primary,
         )?;
         count += 2;
-        // Write common-struct generated bodies.
-        if !owned_em.commons.is_empty() {
-            std::fs::create_dir_all(&common_owned_dir)?;
-        }
-        for (cs_name, body) in &owned_em.commons {
-            write_rs(common_owned_dir.join(format!("{cs_name}.owned.rs")), body)?;
-            all_common_owned.insert(cs_name.clone());
+        // Write common-struct generated bodies. The emitter key is the relative
+        // stem `<message_snake>/<struct_snake>`; bodies land at
+        // `generated/common/<flavor>/<message_snake>/<struct_snake>.<flavor>.rs`.
+        for (stem, body) in &owned_em.commons {
+            let (message_snake, struct_snake) = split_common_stem(stem);
+            let dir = common_owned_dir.join(message_snake);
+            std::fs::create_dir_all(&dir)?;
+            write_rs(dir.join(format!("{struct_snake}.owned.rs")), body)?;
+            all_common_owned
+                .entry(message_snake.to_string())
+                .or_default()
+                .insert(struct_snake.to_string());
             count += 1;
         }
-        if !borrowed_em.commons.is_empty() {
-            std::fs::create_dir_all(&common_borrowed_dir)?;
-        }
-        for (cs_name, body) in &borrowed_em.commons {
-            write_rs(
-                common_borrowed_dir.join(format!("{cs_name}.borrowed.rs")),
-                body,
-            )?;
-            all_common_borrowed.insert(cs_name.clone());
+        for (stem, body) in &borrowed_em.commons {
+            let (message_snake, struct_snake) = split_common_stem(stem);
+            let dir = common_borrowed_dir.join(message_snake);
+            std::fs::create_dir_all(&dir)?;
+            write_rs(dir.join(format!("{struct_snake}.borrowed.rs")), body)?;
+            all_common_borrowed
+                .entry(message_snake.to_string())
+                .or_default()
+                .insert(struct_snake.to_string());
             count += 1;
         }
 
@@ -203,48 +278,22 @@ fn run(
         }
     }
 
-    // Emit common-struct wrapper files under src/{owned,borrowed}/common/.
+    // Emit the message-scoped common-struct wrapper tree under
+    // src/{owned,borrowed}/common/<message_snake>/<struct_snake>.rs.
     let has_common_owned = !all_common_owned.is_empty();
     let has_common_borrowed = !all_common_borrowed.is_empty();
-    if has_common_owned {
-        let src_common_owned = protocol_src.join("owned").join("common");
-        std::fs::create_dir_all(&src_common_owned)?;
-        let mut mod_body = emit::common::banner(&schemas_sha);
-        mod_body.push_str("//! Owned common structs shared across multiple message schemas.\n\n");
-        for cs_name in &all_common_owned {
-            let snake = name_conv::module_name(cs_name);
-            write_common_wrapper(
-                cs_name,
-                emit::wrappers::Flavor::Owned,
-                &schemas_sha,
-                &src_common_owned,
-            )?;
-            writeln!(mod_body, "pub mod {snake};").unwrap();
-            count += 1;
-        }
-        std::fs::write(src_common_owned.join("mod.rs"), &mod_body)?;
-        count += 1;
-    }
-    if has_common_borrowed {
-        let src_common_borrowed = protocol_src.join("borrowed").join("common");
-        std::fs::create_dir_all(&src_common_borrowed)?;
-        let mut mod_body = emit::common::banner(&schemas_sha);
-        mod_body
-            .push_str("//! Borrowed common structs shared across multiple message schemas.\n\n");
-        for cs_name in &all_common_borrowed {
-            let snake = name_conv::module_name(cs_name);
-            write_common_wrapper(
-                cs_name,
-                emit::wrappers::Flavor::Borrowed,
-                &schemas_sha,
-                &src_common_borrowed,
-            )?;
-            writeln!(mod_body, "pub mod {snake};").unwrap();
-            count += 1;
-        }
-        std::fs::write(src_common_borrowed.join("mod.rs"), &mod_body)?;
-        count += 1;
-    }
+    count += write_common_wrapper_tree(
+        &all_common_owned,
+        emit::wrappers::Flavor::Owned,
+        &schemas_sha,
+        &protocol_src,
+    )?;
+    count += write_common_wrapper_tree(
+        &all_common_borrowed,
+        emit::wrappers::Flavor::Borrowed,
+        &schemas_sha,
+        &protocol_src,
+    )?;
 
     // Emit owned/mod.rs and borrowed/mod.rs for all active schemas.
     let active_specs: Vec<&ir::MessageSpec> = specs.iter().filter(|s| should_emit(s)).collect();

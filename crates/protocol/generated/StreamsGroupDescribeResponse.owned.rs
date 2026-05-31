@@ -460,8 +460,10 @@ pub struct Subtopology {
     pub subtopology_id: String,
     pub source_topics: Vec<String>,
     pub repartition_sink_topics: Vec<String>,
-    pub state_changelog_topics: Vec<super::common::topic_info::TopicInfo>,
-    pub repartition_source_topics: Vec<super::common::topic_info::TopicInfo>,
+    pub state_changelog_topics:
+        Vec<super::common::streams_group_describe_response::topic_info::TopicInfo>,
+    pub repartition_source_topics:
+        Vec<super::common::streams_group_describe_response::topic_info::TopicInfo>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Encode for Subtopology {
@@ -657,7 +659,7 @@ impl Decode<'_> for Subtopology {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_info::TopicInfo::decode(buf, version)?);
+                    v . push (super :: common :: streams_group_describe_response :: topic_info :: TopicInfo :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -667,7 +669,7 @@ impl Decode<'_> for Subtopology {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_info::TopicInfo::decode(buf, version)?);
+                    v . push (super :: common :: streams_group_describe_response :: topic_info :: TopicInfo :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -693,12 +695,18 @@ impl Subtopology {
             m.repartition_sink_topics = vec!["x".to_string()];
         }
         if version >= 0 {
-            m.state_changelog_topics =
-                vec![super::common::topic_info::TopicInfo::populated(version)];
+            m.state_changelog_topics = vec![
+                super::common::streams_group_describe_response::topic_info::TopicInfo::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
-            m.repartition_source_topics =
-                vec![super::common::topic_info::TopicInfo::populated(version)];
+            m.repartition_source_topics = vec![
+                super::common::streams_group_describe_response::topic_info::TopicInfo::populated(
+                    version,
+                ),
+            ];
         }
         m
     }
@@ -713,12 +721,13 @@ pub struct Member {
     pub client_host: String,
     pub topology_epoch: i32,
     pub process_id: String,
-    pub user_endpoint: Option<super::common::endpoint::Endpoint>,
-    pub client_tags: Vec<super::common::key_value::KeyValue>,
-    pub task_offsets: Vec<super::common::task_offset::TaskOffset>,
-    pub task_end_offsets: Vec<super::common::task_offset::TaskOffset>,
-    pub assignment: super::common::assignment::Assignment,
-    pub target_assignment: super::common::assignment::Assignment,
+    pub user_endpoint: Option<super::common::streams_group_describe_response::endpoint::Endpoint>,
+    pub client_tags: Vec<super::common::streams_group_describe_response::key_value::KeyValue>,
+    pub task_offsets: Vec<super::common::streams_group_describe_response::task_offset::TaskOffset>,
+    pub task_end_offsets:
+        Vec<super::common::streams_group_describe_response::task_offset::TaskOffset>,
+    pub assignment: super::common::streams_group_describe_response::assignment::Assignment,
+    pub target_assignment: super::common::streams_group_describe_response::assignment::Assignment,
     pub is_classic: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
@@ -987,7 +996,11 @@ impl Decode<'_> for Member {
             out.user_endpoint = if get_i8(buf)? < 0 {
                 None
             } else {
-                Some(super::common::endpoint::Endpoint::decode(buf, version)?)
+                Some(
+                    super::common::streams_group_describe_response::endpoint::Endpoint::decode(
+                        buf, version,
+                    )?,
+                )
             };
         }
         if version >= 0 {
@@ -995,7 +1008,7 @@ impl Decode<'_> for Member {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::key_value::KeyValue::decode(buf, version)?);
+                    v . push (super :: common :: streams_group_describe_response :: key_value :: KeyValue :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -1005,9 +1018,7 @@ impl Decode<'_> for Member {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::task_offset::TaskOffset::decode(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_describe_response :: task_offset :: TaskOffset :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -1017,18 +1028,22 @@ impl Decode<'_> for Member {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::task_offset::TaskOffset::decode(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_describe_response :: task_offset :: TaskOffset :: decode (buf , version) ?) ;
                 }
                 v
             };
         }
         if version >= 0 {
-            out.assignment = super::common::assignment::Assignment::decode(buf, version)?;
+            out.assignment =
+                super::common::streams_group_describe_response::assignment::Assignment::decode(
+                    buf, version,
+                )?;
         }
         if version >= 0 {
-            out.target_assignment = super::common::assignment::Assignment::decode(buf, version)?;
+            out.target_assignment =
+                super::common::streams_group_describe_response::assignment::Assignment::decode(
+                    buf, version,
+                )?;
         }
         if version >= 0 {
             out.is_classic = get_bool(buf)?;
@@ -1069,22 +1084,44 @@ impl Member {
             m.process_id = "x".to_string();
         }
         if version >= 0 {
-            m.user_endpoint = Some(super::common::endpoint::Endpoint::populated(version));
+            m.user_endpoint = Some(
+                super::common::streams_group_describe_response::endpoint::Endpoint::populated(
+                    version,
+                ),
+            );
         }
         if version >= 0 {
-            m.client_tags = vec![super::common::key_value::KeyValue::populated(version)];
+            m.client_tags = vec![
+                super::common::streams_group_describe_response::key_value::KeyValue::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
-            m.task_offsets = vec![super::common::task_offset::TaskOffset::populated(version)];
+            m.task_offsets = vec![
+                super::common::streams_group_describe_response::task_offset::TaskOffset::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
-            m.task_end_offsets = vec![super::common::task_offset::TaskOffset::populated(version)];
+            m.task_end_offsets = vec![
+                super::common::streams_group_describe_response::task_offset::TaskOffset::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
-            m.assignment = super::common::assignment::Assignment::populated(version);
+            m.assignment =
+                super::common::streams_group_describe_response::assignment::Assignment::populated(
+                    version,
+                );
         }
         if version >= 0 {
-            m.target_assignment = super::common::assignment::Assignment::populated(version);
+            m.target_assignment =
+                super::common::streams_group_describe_response::assignment::Assignment::populated(
+                    version,
+                );
         }
         if version >= 0 {
             m.is_classic = true;

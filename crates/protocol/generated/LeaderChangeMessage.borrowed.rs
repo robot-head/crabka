@@ -18,8 +18,8 @@ fn is_flexible(version: i16) -> bool {
 pub struct LeaderChangeMessage {
     pub version: i16,
     pub leader_id: i32,
-    pub voters: Vec<super::common::voter::Voter>,
-    pub granting_voters: Vec<super::common::voter::Voter>,
+    pub voters: Vec<super::common::leader_change_message::voter::Voter>,
+    pub granting_voters: Vec<super::common::leader_change_message::voter::Voter>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl LeaderChangeMessage {
@@ -29,11 +29,11 @@ impl LeaderChangeMessage {
             leader_id: (self.leader_id),
             voters: (self.voters)
                 .iter()
-                .map(super::common::voter::Voter::to_owned)
+                .map(super::common::leader_change_message::voter::Voter::to_owned)
                 .collect(),
             granting_voters: (self.granting_voters)
                 .iter()
-                .map(super::common::voter::Voter::to_owned)
+                .map(super::common::leader_change_message::voter::Voter::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -132,7 +132,11 @@ impl<'de> DecodeBorrow<'de> for LeaderChangeMessage {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::voter::Voter::decode_borrow(buf, version)?);
+                    v.push(
+                        super::common::leader_change_message::voter::Voter::decode_borrow(
+                            buf, version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -142,7 +146,11 @@ impl<'de> DecodeBorrow<'de> for LeaderChangeMessage {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::voter::Voter::decode_borrow(buf, version)?);
+                    v.push(
+                        super::common::leader_change_message::voter::Voter::decode_borrow(
+                            buf, version,
+                        )?,
+                    );
                 }
                 v
             };
@@ -165,10 +173,11 @@ impl LeaderChangeMessage {
             m.leader_id = 1i32;
         }
         if version >= 0 {
-            m.voters = vec![super::common::voter::Voter::populated(version)];
+            m.voters = vec![super::common::leader_change_message::voter::Voter::populated(version)];
         }
         if version >= 0 {
-            m.granting_voters = vec![super::common::voter::Voter::populated(version)];
+            m.granting_voters =
+                vec![super::common::leader_change_message::voter::Voter::populated(version)];
         }
         m
     }

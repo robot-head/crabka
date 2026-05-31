@@ -60,12 +60,19 @@ pub fn emit(
     );
 
     // Emit common structs into separate file bodies.
+    //
+    // `commonStructs` are message-local: each is emitted under a per-message
+    // nested module `common/<message_snake>/<struct_snake>`. The `commons` key
+    // is the relative path stem `<message_snake>/<struct_snake>`; the caller
+    // turns that into the on-disk body path and the wrapper module nesting.
+    let message_snake = name_conv::module_name(&spec.name);
     let mut commons: Vec<(String, String)> = Vec::new();
     for cs in &spec.common_structs {
         let cs_flex_min = fm; // common structs inherit message flex threshold
         // Build a modified res_map for the common-struct context:
-        // - Common-struct references use sibling paths `super::<snake>::TypeName`
-        //   (since the file is included under `src/{flavor}/common/<snake>.rs`).
+        // - Common-struct references use sibling paths `super::<struct_snake>::TypeName`
+        //   (the body lands under `src/{flavor}/common/<message_snake>/<struct_snake>.rs`,
+        //   and sibling common structs of the same message share that parent module).
         // - Nested struct references remain unchanged (bare type name, same file).
         let common_res_map: HashMap<String, Resolution> = res_map
             .iter()
@@ -86,9 +93,10 @@ pub fn emit(
                 )
             })
             .collect();
-        // Use `common::<snake>` as the parent_module so `to_owned()` emits the correct path
-        // `crate::owned::common::<snake>::TypeName`.
-        let cs_parent_module = format!("common::{}", name_conv::module_name(&cs.name));
+        let cs_snake = name_conv::module_name(&cs.name);
+        // Use `common::<message_snake>::<struct_snake>` as the parent_module so
+        // `to_owned()` emits `crate::owned::common::<message_snake>::<struct_snake>::TypeName`.
+        let cs_parent_module = format!("common::{message_snake}::{cs_snake}");
         let body = emit_common_struct_file_borrowed(
             &cs.name,
             &cs.fields,
@@ -98,7 +106,7 @@ pub fn emit(
             schemas_version,
             namespace,
         );
-        commons.push((cs.name.clone(), body));
+        commons.push((format!("{message_snake}/{cs_snake}"), body));
     }
 
     Ok(EmittedMessage { primary, commons })
@@ -511,12 +519,17 @@ pub(crate) fn owned_struct_path_for(
 
 /// Convert a borrowed-flavor resolved `rust_path` to its owned-flavor equivalent.
 ///
+/// Common structs are message-scoped under `common/<message_snake>/<struct_snake>`.
+///
 /// - Inline nested structs have a bare `rust_path` like `"TypeName"` →
 ///   `"crate::owned::{parent_module}::TypeName"`.
 /// - Common structs from a message-level context have `rust_path` like
-///   `"super::common::<snake>::TypeName"` → `"crate::owned::common::<snake>::TypeName"`.
-/// - Common structs from a common-struct-level context (`parent_module` = `"common::<x>"`)
-///   have `rust_path` like `"super::<snake>::TypeName"` → `"crate::owned::common::<snake>::TypeName"`.
+///   `"super::common::<msg>::<struct>::TypeName"` →
+///   `"crate::owned::common::<msg>::<struct>::TypeName"`.
+/// - Common structs from a common-struct-level context (`parent_module` =
+///   `"common::<msg>::<struct>"`) have `rust_path` like `"super::<struct>::TypeName"`;
+///   the `<msg>` segment is recovered from `parent_module` →
+///   `"crate::owned::common::<msg>::<struct>::TypeName"`.
 fn resolved_to_owned_path(
     type_name: &str,
     parent_module: &str,
@@ -526,11 +539,18 @@ fn resolved_to_owned_path(
         Some(r) if r.kind == StructKind::Common => {
             // Determine the owned path from the rust_path stored in the res_map.
             if let Some(without_super) = r.rust_path.strip_prefix("super::common::") {
-                // Message-level context: rust_path = "super::common::<snake>::TypeName"
+                // Message-level context:
+                // rust_path = "super::common::<msg>::<struct>::TypeName"
                 format!("crate::owned::common::{without_super}")
-            } else if let Some(without_super) = r.rust_path.strip_prefix("super::") {
-                // Common-struct-level context: rust_path = "super::<snake>::TypeName"
-                format!("crate::owned::common::{without_super}")
+            } else if let Some(sibling) = r.rust_path.strip_prefix("super::") {
+                // Common-struct-level context: rust_path = "super::<struct>::TypeName"
+                // (a sibling common struct of the same message). Recover the
+                // <msg> segment from parent_module = "common::<msg>::<struct>".
+                let msg_seg = parent_module
+                    .strip_prefix("common::")
+                    .and_then(|rest| rest.split("::").next())
+                    .unwrap_or(parent_module);
+                format!("crate::owned::common::{msg_seg}::{sibling}")
             } else {
                 // Fallback: use parent_module
                 format!("crate::owned::{parent_module}::{type_name}")

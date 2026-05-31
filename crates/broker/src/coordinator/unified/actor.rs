@@ -532,7 +532,7 @@ fn build_assignment_resp(
         topic_partitions: target_partitions
             .iter()
             .map(
-                |(tid, parts)| crabka_protocol::owned::common::topic_partitions::TopicPartitions {
+                |(tid, parts)| crabka_protocol::owned::common::consumer_group_heartbeat_response::topic_partitions::TopicPartitions {
                     topic_id: *tid,
                     partitions: parts.clone(),
                     ..Default::default()

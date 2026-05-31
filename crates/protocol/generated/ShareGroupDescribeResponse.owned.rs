@@ -367,7 +367,7 @@ pub struct Member {
     pub client_id: String,
     pub client_host: String,
     pub subscribed_topic_names: Vec<String>,
-    pub assignment: super::common::assignment::Assignment,
+    pub assignment: super::common::share_group_describe_response::assignment::Assignment,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Encode for Member {
@@ -542,7 +542,10 @@ impl Decode<'_> for Member {
             };
         }
         if version >= 0 {
-            out.assignment = super::common::assignment::Assignment::decode(buf, version)?;
+            out.assignment =
+                super::common::share_group_describe_response::assignment::Assignment::decode(
+                    buf, version,
+                )?;
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -574,7 +577,10 @@ impl Member {
             m.subscribed_topic_names = vec!["x".to_string()];
         }
         if version >= 0 {
-            m.assignment = super::common::assignment::Assignment::populated(version);
+            m.assignment =
+                super::common::share_group_describe_response::assignment::Assignment::populated(
+                    version,
+                );
         }
         m
     }

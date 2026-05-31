@@ -29,9 +29,9 @@ use crabka_protocol::owned::add_partitions_to_txn_request::AddPartitionsToTxnReq
 use crabka_protocol::owned::add_partitions_to_txn_response::{
     AddPartitionsToTxnResponse, AddPartitionsToTxnResult,
 };
-use crabka_protocol::owned::common::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult;
-use crabka_protocol::owned::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
-use crabka_protocol::owned::common::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult;
+use crabka_protocol::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_partition_result::AddPartitionsToTxnPartitionResult;
+use crabka_protocol::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
+use crabka_protocol::owned::common::add_partitions_to_txn_response::add_partitions_to_txn_topic_result::AddPartitionsToTxnTopicResult;
 use crabka_protocol::{Decode, Encode};
 use crabka_security::Principal;
 

@@ -137,15 +137,21 @@ pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>
     // ── Pass 2: insert common struct resolutions with correct needs_lifetime ──
     // Common structs first — they win if there's a name collision with a nested
     // (in practice this doesn't happen but we don't need to enforce it).
+    //
+    // `commonStructs` are MESSAGE-LOCAL in Kafka schemas: two different messages
+    // may each declare a struct of the same name with different fields. We scope
+    // every common struct under its owning message so identically-named structs
+    // never collide. The wrapper module nests as
+    // `src/{flavor}/common/<message_snake>/<struct_snake>.rs`, so the path from a
+    // message file is `super::common::<message_snake>::<struct_snake>::TypeName`.
+    let message_snake = crate::name_conv::module_name(&spec.name);
     for cs in &spec.common_structs {
-        // The common struct wrapper lives at src/{flavor}/common/<snake>.rs, so the
-        // path from a message file is super::common::<snake>::TypeName.
         let snake = crate::name_conv::module_name(&cs.name);
         map.insert(
             cs.name.clone(),
             Resolution {
                 kind: StructKind::Common,
-                rust_path: format!("super::common::{snake}::{}", cs.name),
+                rust_path: format!("super::common::{message_snake}::{snake}::{}", cs.name),
                 needs_lifetime: cs_needing_lt.contains(&cs.name),
             },
         );
