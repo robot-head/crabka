@@ -1,8 +1,10 @@
 //! The `KRaft` quorum state machine: `on_event(event, log, now) -> Vec<Action>`.
 
-use crate::kraft::action::Action;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::kraft::action::{Action, TimerKind};
 use crate::kraft::event::{Event, LogEnd};
-use crate::kraft::role::Role;
+use crate::kraft::role::{ReplicaProgress, Role};
 use crate::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, ReplicaKey, SimInstant};
 
 /// The hand-rolled KIP-595 + KIP-996 quorum state machine. Pure and
@@ -86,9 +88,170 @@ impl QuorumStateMachine {
                 pre_vote,
                 now,
             ),
-            // remaining arms added in Tasks 4–6
+            Event::ElectionTimeout => self.handle_election_timeout(now),
+            Event::ReceiveVoteResponse {
+                from,
+                epoch,
+                vote_granted,
+                pre_vote,
+            } => self.handle_vote_response(log, from, epoch, vote_granted, pre_vote, now),
+            // remaining arms added in Tasks 5-6
             _ => Vec::new(),
         }
+    }
+
+    /// The election timer fired. A voter begins a KIP-996 pre-vote round
+    /// (becomes `Prospective`); an observer never elects.
+    fn handle_election_timeout(&mut self, now: SimInstant) -> Vec<Action> {
+        if !self.is_voter() {
+            return Vec::new();
+        }
+        self.start_election(now)
+    }
+
+    /// Shared election-start path (used by `ElectionTimeout` and a resigning
+    /// leader's `EndQuorumEpoch`): become `Prospective` and broadcast a
+    /// non-binding pre-vote at the *current* epoch (epoch is not bumped until the
+    /// pre-vote succeeds).
+    fn start_election(&mut self, now: SimInstant) -> Vec<Action> {
+        let mut granted = BTreeSet::new();
+        granted.insert(self.me);
+        let deadline = self.election_deadline(now);
+        self.role = Role::Prospective {
+            granted,
+            election_deadline: deadline,
+        };
+        let mut actions = vec![
+            Action::TransitionedTo(self.role.name()),
+            Action::SendVoteRequest {
+                epoch: self.state.leader_epoch,
+                pre_vote: true,
+            },
+            Action::ResetTimer {
+                kind: TimerKind::Election,
+                deadline,
+            },
+        ];
+        // A lone voter wins its own pre-vote immediately.
+        if self.tally_prevote_reached_majority() {
+            actions.extend(self.promote_to_candidate(now));
+        }
+        actions
+    }
+
+    fn handle_vote_response(
+        &mut self,
+        log: &dyn LogView,
+        from: NodeId,
+        epoch: LeaderEpoch,
+        vote_granted: bool,
+        pre_vote: bool,
+        now: SimInstant,
+    ) -> Vec<Action> {
+        // A higher-epoch rejection fences us: step down to that epoch.
+        if !vote_granted && epoch > self.state.leader_epoch {
+            let mut actions = Vec::new();
+            self.transition_to_unattached(epoch, now, &mut actions);
+            return actions;
+        }
+        if !vote_granted {
+            return Vec::new();
+        }
+        match (&mut self.role, pre_vote) {
+            (Role::Prospective { granted, .. }, true) => {
+                granted.insert(from);
+                if self.tally_prevote_reached_majority() {
+                    self.promote_to_candidate(now)
+                } else {
+                    Vec::new()
+                }
+            }
+            (Role::Candidate { granted, .. }, false) if epoch == self.state.leader_epoch => {
+                granted.insert(from);
+                if self.tally_candidate_reached_majority() {
+                    self.promote_to_leader(log)
+                } else {
+                    Vec::new()
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether the current `Prospective` grant set has reached a quorum.
+    fn tally_prevote_reached_majority(&self) -> bool {
+        match &self.role {
+            Role::Prospective { granted, .. } => granted.len() >= self.state.majority(),
+            _ => false,
+        }
+    }
+
+    /// Whether the current `Candidate` grant set has reached a quorum.
+    fn tally_candidate_reached_majority(&self) -> bool {
+        match &self.role {
+            Role::Candidate { granted, .. } => granted.len() >= self.state.majority(),
+            _ => false,
+        }
+    }
+
+    /// Pre-vote succeeded: bump the epoch, self-vote, and broadcast a real vote.
+    fn promote_to_candidate(&mut self, now: SimInstant) -> Vec<Action> {
+        self.state.leader_epoch += 1;
+        self.state.leader_id = None;
+        self.state.voted_key = Some(ReplicaKey {
+            id: self.me,
+            directory_id: uuid::Uuid::nil(),
+        });
+        let mut granted = BTreeSet::new();
+        granted.insert(self.me);
+        let deadline = self.election_deadline(now);
+        self.role = Role::Candidate {
+            granted,
+            election_deadline: deadline,
+        };
+        let mut actions = vec![
+            Action::PersistQuorumState,
+            Action::TransitionedTo(self.role.name()),
+            Action::SendVoteRequest {
+                epoch: self.state.leader_epoch,
+                pre_vote: false,
+            },
+            Action::ResetTimer {
+                kind: TimerKind::Election,
+                deadline,
+            },
+        ];
+        // A lone voter wins its own election immediately.
+        if self.tally_candidate_reached_majority() {
+            actions.extend(self.promote_to_leader_inner());
+        }
+        actions
+    }
+
+    /// Real vote succeeded: become leader for the current epoch.
+    fn promote_to_leader(&mut self, _log: &dyn LogView) -> Vec<Action> {
+        self.promote_to_leader_inner()
+    }
+
+    fn promote_to_leader_inner(&mut self) -> Vec<Action> {
+        let epoch = self.state.leader_epoch;
+        self.state.leader_id = Some(self.me);
+        let mut replicas = BTreeMap::new();
+        for id in self.state.voters.ids() {
+            if id != self.me {
+                replicas.insert(id, ReplicaProgress::default());
+            }
+        }
+        self.role = Role::Leader {
+            replicas,
+            high_watermark: 0,
+        };
+        vec![
+            Action::AppendLeaderChange { epoch },
+            Action::SendBeginQuorumEpoch { epoch },
+            Action::PersistQuorumState,
+            Action::TransitionedTo(self.role.name()),
+        ]
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -371,6 +534,112 @@ mod tests {
             actions
                 .iter()
                 .any(|a| matches!(a, Action::ReplyVote { granted: false, .. }))
+        );
+    }
+
+    #[test]
+    fn election_timeout_starts_prevote_prospective() {
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        let actions = m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
+        assert!(matches!(m.role(), Role::Prospective { .. }));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SendVoteRequest { pre_vote: true, .. }))
+        );
+        assert!(m.quorum_state().leader_epoch == 0); // pre-vote: epoch not bumped yet
+    }
+
+    #[test]
+    fn prevote_majority_promotes_to_candidate_and_bumps_epoch() {
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        m.on_event(Event::ElectionTimeout, &log, SimInstant(2000)); // Prospective
+        // 1 (self) + grant from 2 = majority of 3
+        let actions = m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 0,
+                vote_granted: true,
+                pre_vote: true,
+            },
+            &log,
+            SimInstant(2001),
+        );
+        assert!(matches!(m.role(), Role::Candidate { .. }));
+        assert!(m.quorum_state().leader_epoch == 1);
+        assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(1)); // self-vote
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::SendVoteRequest {
+                pre_vote: false,
+                epoch: 1
+            }
+        )));
+    }
+
+    #[test]
+    fn real_majority_promotes_to_leader_and_appends_leader_change() {
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 0,
+                vote_granted: true,
+                pre_vote: true,
+            },
+            &log,
+            SimInstant(2001),
+        );
+        let actions = m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 1,
+                vote_granted: true,
+                pre_vote: false,
+            },
+            &log,
+            SimInstant(2002),
+        );
+        assert!(m.role().is_leader());
+        assert!(m.quorum_state().leader_id == Some(1));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::AppendLeaderChange { epoch: 1 }))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SendBeginQuorumEpoch { epoch: 1 }))
+        );
+    }
+
+    #[test]
+    fn observer_never_starts_election() {
+        let mut m = machine(99, &[1, 2, 3]); // 99 is not a voter
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        let actions = m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
+        assert!(matches!(m.role(), Role::Observer { .. }));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, Action::SendVoteRequest { .. }))
         );
     }
 }
