@@ -1598,11 +1598,11 @@ impl Broker {
             let cm = client_metrics.clone();
             let token = supervisor_shutdown.child_token();
             tokio::spawn(async move {
-                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                let mut tick = tokio::time::interval(std::time::Duration::from_mins(1));
                 loop {
                     tokio::select! {
                         () = token.cancelled() => break,
-                        _ = tick.tick() => cm.manager.evict_stale(3, std::time::Duration::from_secs(600)),
+                        _ = tick.tick() => cm.manager.evict_stale(3, std::time::Duration::from_mins(10)),
                     }
                 }
             });

@@ -50,8 +50,14 @@ pub(crate) struct SubscriptionAssignment {
 }
 
 pub(crate) enum PushDecision {
-    Accept { metrics: Vec<String> },
-    Reject { error_code: i16, throttle_ms: i32 },
+    Accept {
+        #[allow(dead_code)] // carried for future per-prefix filtering
+        metrics: Vec<String>,
+    },
+    Reject {
+        error_code: i16,
+        throttle_ms: i32,
+    },
 }
 
 pub(crate) struct ClientMetricsManager {

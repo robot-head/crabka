@@ -66,6 +66,7 @@ impl OtlpForwarder {
         Self { tx: Some(tx) }
     }
 
+    #[allow(dead_code)] // diagnostic helper; used in tests and future health-check
     pub(crate) fn is_enabled(&self) -> bool {
         self.tx.is_some()
     }
@@ -73,10 +74,10 @@ impl OtlpForwarder {
     /// Enqueue metrics for forwarding. Drops (with a debug log) if the queue
     /// is full or the forwarder is disabled — never blocks.
     pub(crate) fn forward(&self, md: MetricsData, client_instance_id: &str) {
-        if let Some(tx) = &self.tx {
-            if let Err(e) = tx.try_send((md, client_instance_id.to_string())) {
-                tracing::debug!(error = %e, "client-metrics OTLP forward queue full; dropping");
-            }
+        if let Some(tx) = &self.tx
+            && let Err(e) = tx.try_send((md, client_instance_id.to_string()))
+        {
+            tracing::debug!(error = %e, "client-metrics OTLP forward queue full; dropping");
         }
     }
 }

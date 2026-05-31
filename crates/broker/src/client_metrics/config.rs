@@ -2,7 +2,7 @@
 //!
 //! Three keys only (matching `org.apache.kafka.server.metrics.ClientMetricsConfigs`):
 //! `metrics` (CSV prefix list; the single token `"*"` = all), `interval.ms`
-//! (int, 100..=3_600_000, default 300000), and `match` (CSV of `selector=regex`).
+//! (int, `100..=3_600_000`, default 300000), and `match` (CSV of `selector=regex`).
 
 use std::collections::BTreeMap;
 

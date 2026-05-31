@@ -506,7 +506,8 @@ impl MetadataImage {
                 if c.configs.is_empty() {
                     self.client_metrics_configs.remove(&c.name);
                 } else {
-                    self.client_metrics_configs.insert(c.name.clone(), c.configs.clone());
+                    self.client_metrics_configs
+                        .insert(c.name.clone(), c.configs.clone());
                 }
             }
         }
@@ -616,10 +617,12 @@ impl MetadataImage {
 
         // Client-metrics subscriptions (KIP-714).
         for (name, configs) in &self.client_metrics_configs {
-            out.push(MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
-                name: name.clone(),
-                configs: configs.clone(),
-            }));
+            out.push(MetadataRecord::V1ClientMetricsConfig(
+                ClientMetricsConfigRecord {
+                    name: name.clone(),
+                    configs: configs.clone(),
+                },
+            ));
         }
 
         out
@@ -1846,19 +1849,25 @@ mod tests {
         let mut img = MetadataImage::new(uuid::Uuid::nil());
         let mut cfgs = std::collections::BTreeMap::new();
         cfgs.insert("interval.ms".to_string(), "60000".to_string());
-        img.apply(&MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
-            name: "sub-a".into(),
-            configs: cfgs,
-        }));
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: "sub-a".into(),
+                configs: cfgs,
+            },
+        ));
         assert_eq!(
-            img.client_metrics_config("sub-a").and_then(|m| m.get("interval.ms")).map(String::as_str),
+            img.client_metrics_config("sub-a")
+                .and_then(|m| m.get("interval.ms"))
+                .map(String::as_str),
             Some("60000")
         );
         assert_eq!(img.client_metrics_subscriptions().count(), 1);
-        img.apply(&MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
-            name: "sub-a".into(),
-            configs: std::collections::BTreeMap::new(),
-        }));
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: "sub-a".into(),
+                configs: std::collections::BTreeMap::new(),
+            },
+        ));
         assert!(img.client_metrics_config("sub-a").is_none());
         assert_eq!(img.client_metrics_subscriptions().count(), 0);
     }

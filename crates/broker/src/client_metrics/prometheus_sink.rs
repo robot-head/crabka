@@ -64,6 +64,7 @@ impl ClientMetricsCollector {
     }
 
     /// Count of non-stale points (also prunes stale entries in place).
+    #[allow(dead_code)] // diagnostic helper; used in tests and future scrape-metrics endpoint
     pub(crate) fn live_point_count(&self) -> usize {
         let now = Instant::now();
         let mut guard = self.points.lock().expect("prom sink mutex poisoned");
@@ -137,14 +138,14 @@ mod tests {
 
     #[test]
     fn ingest_then_encode_contains_series() {
-        let sink = ClientMetricsCollector::new(Duration::from_secs(60));
+        use prometheus_client::registry::Registry;
+        let sink = ClientMetricsCollector::new(Duration::from_mins(1));
         sink.ingest(&[DataPoint {
             metric: "org.apache.kafka.consumer.fetch.size".into(),
             client_instance_id: "11111111-1111-1111-1111-111111111111".into(),
             client_id: "svc-1".into(),
             value: 42.0,
         }]);
-        use prometheus_client::registry::Registry;
         let mut reg = Registry::default();
         reg.register_collector(Box::new(sink));
         let mut buf = String::new();

@@ -17,7 +17,7 @@ use self::prometheus_sink::ClientMetricsCollector;
 /// Default `telemetry.max.bytes` (1 MiB), matching Kafka.
 pub(crate) const DEFAULT_TELEMETRY_MAX_BYTES: i32 = 1_048_576;
 /// Staleness TTL for the Prometheus snapshot.
-pub(crate) const PROM_SNAPSHOT_TTL: Duration = Duration::from_secs(300);
+pub(crate) const PROM_SNAPSHOT_TTL: Duration = Duration::from_mins(5);
 
 /// Broker-held bundle: the manager (instance state + matching) plus the two
 /// sinks. The Prometheus collector is shared with the metrics registry.

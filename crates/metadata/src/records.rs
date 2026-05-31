@@ -453,7 +453,10 @@ mod tests {
     fn client_metrics_config_round_trip() {
         let mut overrides = std::collections::BTreeMap::new();
         overrides.insert("interval.ms".to_string(), "60000".to_string());
-        overrides.insert("metrics".to_string(), "org.apache.kafka.consumer.".to_string());
+        overrides.insert(
+            "metrics".to_string(),
+            "org.apache.kafka.consumer.".to_string(),
+        );
         let r = MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
             name: "sub-a".into(),
             configs: overrides,
