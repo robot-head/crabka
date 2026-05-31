@@ -34,19 +34,11 @@ use crabka_security::ListenerProtocol;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::bootstrap::OFFSETS_TOPIC;
 use crate::error::BrokerError;
 use crate::network::client::InterBrokerClient;
 use crate::txn::marker::{MarkerType, build_marker_batch};
-use crate::txn::partitioner::partition_for_tid;
 use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
 use crate::txn::util::now_millis;
-
-/// Number of partitions in `__consumer_offsets`. Bootstrap creates a
-/// 1-partition topic (`OFFSETS_PARTITION = 0`), so all group-ids map to
-/// partition 0. Documented here so it's easy to wire up the 50-partition
-/// topology once we get there.
-const OFFSETS_NUM_PARTITIONS: i32 = 1;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
@@ -303,8 +295,9 @@ fn validate_complete_reacquire(
 ///   [`InterBrokerClient`], which runs TLS / SASL when the inter-broker
 ///   listener demands them.
 ///
-/// `__consumer_offsets` partitions are added for each group in
-/// `entry.offset_commit_groups`.
+/// Any `__consumer_offsets` partitions registered via `AddOffsetsToTxn` live
+/// in `entry.partitions` (Kafka's model has no separate group list), so they
+/// are fanned out by the same loop as data partitions.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_markers(
     node_id: NodeId,
@@ -324,21 +317,6 @@ async fn dispatch_markers(
             .partition(&tp.topic, tp.partition)
             .map_or(node_id, |p| p.leader);
         by_leader.entry(leader).or_default().push(tp.clone());
-    }
-
-    // Also add the `__consumer_offsets` partition for each transactional
-    // offset-commit group. `__consumer_offsets` is currently a 1-partition
-    // topic, so `partition_for_tid(group_id, 1)` always returns 0.
-    for group_id in &entry.offset_commit_groups {
-        let part_idx = partition_for_tid(group_id, OFFSETS_NUM_PARTITIONS);
-        let tp = TopicPartition {
-            topic: OFFSETS_TOPIC.to_string(),
-            partition: part_idx,
-        };
-        let leader = image
-            .partition(OFFSETS_TOPIC, part_idx)
-            .map_or(node_id, |p| p.leader);
-        by_leader.entry(leader).or_default().push(tp);
     }
 
     for (leader, tps) in by_leader {

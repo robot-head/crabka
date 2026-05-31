@@ -203,7 +203,7 @@ async fn handle_transactional(
             }
 
             // Bump epoch on the existing entry. Persist a new TxnEntry with
-            // new epoch, Empty state, cleared partitions + offset_commit_groups.
+            // new epoch, Empty state, cleared partitions.
             let mut e3 = existing.lock().await;
             let new_epoch = e3.producer_epoch.checked_add(1).unwrap_or(0);
             *e3 = TxnEntry::new_empty(

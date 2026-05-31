@@ -23,6 +23,19 @@ use crate::partition_registry::PartitionRegistry;
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
 pub const OFFSETS_PARTITION: i32 = 0;
+/// Number of partitions in `__consumer_offsets`. Bootstrap creates a
+/// 1-partition topic (`OFFSETS_PARTITION = 0`), so all group-ids map to
+/// partition 0. Shared so the transaction handlers (`AddOffsetsToTxn`,
+/// `EndTxn`) agree on the partition a group's offset commits land in.
+///
+/// CAVEAT for a future multi-partition `__consumer_offsets`: Kafka partitions
+/// this topic by group with `abs(groupId.hashCode()) % N` (Java
+/// `String.hashCode`), NOT murmur2. `AddOffsetsToTxn` currently computes the
+/// group's partition with `partition_for_tid` (murmur2) — correct only while
+/// `N == 1`. Growing this past 1 requires a dedicated `partition_for_group`
+/// using the Java-hashCode rule, applied consistently here and in the offset
+/// storage path (which today hardcodes `OFFSETS_PARTITION = 0`).
+pub const OFFSETS_NUM_PARTITIONS: i32 = 1;
 
 /// Bootstrap-time accumulator. Committed offsets are protocol-agnostic, so we
 /// collect them per group and attach them once the group's kind is known;

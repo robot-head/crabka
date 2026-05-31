@@ -439,7 +439,6 @@ async fn process_partition(
                             | crate::txn::state::TxnState::CompleteAbort
                     ) {
                         entry.partitions.clear();
-                        entry.offset_commit_groups.clear();
                     }
                     entry.state = crate::txn::state::TxnState::Ongoing;
                     entry.partitions.insert(tp);

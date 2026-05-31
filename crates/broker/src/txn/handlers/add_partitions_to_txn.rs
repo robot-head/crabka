@@ -266,7 +266,6 @@ async fn process_one_txn(
         // Starting a new transaction after a completed one: discard the stale
         // partition set so the new transaction starts clean.
         entry.partitions.clear();
-        entry.offset_commit_groups.clear();
     }
 
     // 4. Register partitions for ALLOWED topics only.

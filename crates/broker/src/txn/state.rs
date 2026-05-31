@@ -90,7 +90,11 @@ pub struct TxnEntry {
     pub state: TxnState,
     pub txn_timeout_ms: i32,
     pub partitions: HashSet<TopicPartition>,
-    pub offset_commit_groups: HashSet<String>,
+    /// KIP-890 epoch bookkeeping (Kafka's `TransactionLogValue.PreviousProducerId`
+    /// / `NextProducerId` tagged fields). `-1` means "none", matching Kafka's
+    /// tagged-field default.
+    pub prev_producer_id: i64,
+    pub next_producer_id: i64,
     pub last_update_ms: i64,
     pub start_ms: i64,
 }
@@ -111,7 +115,8 @@ impl TxnEntry {
             state: TxnState::Empty,
             txn_timeout_ms,
             partitions: HashSet::new(),
-            offset_commit_groups: HashSet::new(),
+            prev_producer_id: -1,
+            next_producer_id: -1,
             last_update_ms: now_ms,
             start_ms: now_ms,
         }
@@ -180,6 +185,10 @@ mod tests {
             partition: 0,
         });
         e.state = TxnState::Ongoing;
+        // Non-default KIP-890 ids so the round-trip proves the codec actually
+        // carries them (not just re-defaults to -1).
+        e.prev_producer_id = 7;
+        e.next_producer_id = 9;
 
         let bytes = <SerdeCompat<TxnEntry>>::serialize(&e).unwrap();
         let decoded: TxnEntry = <SerdeCompat<TxnEntry>>::deserialize(&bytes).unwrap();
@@ -188,5 +197,8 @@ mod tests {
         assert!(decoded.producer_id == 1000);
         assert!(decoded.state == TxnState::Ongoing);
         assert!(decoded.partitions.len() == 1);
+        // KIP-890 bookkeeping ids round-trip at their set (non-default) values.
+        assert!(decoded.prev_producer_id == 7);
+        assert!(decoded.next_producer_id == 9);
     }
 }

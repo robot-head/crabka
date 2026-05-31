@@ -15,8 +15,10 @@ use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
 use crate::codes;
+use crate::coordinator::bootstrap::{OFFSETS_NUM_PARTITIONS, OFFSETS_TOPIC};
 use crate::error::BrokerError;
-use crate::txn::state::TxnState;
+use crate::txn::partitioner::partition_for_tid;
+use crate::txn::state::{TopicPartition, TxnState};
 use crate::txn::util::now_millis;
 
 pub(crate) fn handle(
@@ -60,8 +62,23 @@ pub(crate) fn handle(
         }
         entry.state = TxnState::Ongoing;
 
-        // Register the consumer group as a participant in this transaction.
-        entry.offset_commit_groups.insert(req.group_id.clone());
+        // KIP-890 / Kafka model: a consumer-group offset commit is represented
+        // as the group's __consumer_offsets partition in the txn partition set
+        // (Kafka's TransactionLogValue has no group-name field). EndTxn fans a
+        // marker to every partition in the set, including this one.
+        //
+        // NOTE: `partition_for_tid` is the murmur2 partitioner Kafka uses for
+        // `transactional_id -> __transaction_state`. Kafka partitions
+        // `__consumer_offsets` by group with `abs(groupId.hashCode()) % N`
+        // (Java String.hashCode), NOT murmur2. This is only correct today
+        // because `OFFSETS_NUM_PARTITIONS == 1` (every group maps to 0). A real
+        // multi-partition `__consumer_offsets` will need a dedicated
+        // `partition_for_group` using the Java-hashCode rule — see the const's
+        // doc in `coordinator::bootstrap`.
+        entry.partitions.insert(TopicPartition {
+            topic: OFFSETS_TOPIC.to_string(),
+            partition: partition_for_tid(&req.group_id, OFFSETS_NUM_PARTITIONS),
+        });
         entry.last_update_ms = now_millis();
 
         let snap = entry.clone();
