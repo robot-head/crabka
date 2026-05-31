@@ -4,6 +4,8 @@
 
 pub mod bootstrap;
 pub mod config;
+pub(crate) mod coordinator;
 pub mod partitioner;
 pub mod persistence;
+pub mod pruning;
 pub mod state;
