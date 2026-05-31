@@ -3,3 +3,4 @@
 //! topic. Mirrors the transaction coordinator (`crate::txn`).
 
 pub mod config;
+pub mod persistence;
