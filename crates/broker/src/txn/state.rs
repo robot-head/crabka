@@ -2,11 +2,9 @@
 
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
-
 /// Tx state machine, mirroring Apache Kafka's classic transaction
 /// states (KIP-98) extended for KIP-1319 v2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxnState {
     Empty,
     Ongoing,
@@ -76,13 +74,13 @@ impl TxnState {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct TopicPartition {
     pub topic: String,
     pub partition: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TxnEntry {
     pub transactional_id: String,
     pub producer_id: i64,
@@ -126,8 +124,6 @@ impl TxnEntry {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use serde_wincode::SerdeCompat;
-    use wincode::{Deserialize as _, Serialize as _};
 
     use super::*;
 
@@ -175,30 +171,5 @@ mod tests {
         // PrepareEpochFence (7) and out-of-range are not modeled.
         assert!(TxnState::from_kafka_status(7).is_none());
         assert!(TxnState::from_kafka_status(-1).is_none());
-    }
-
-    #[test]
-    fn entry_serde_round_trip() {
-        let mut e = TxnEntry::new_empty("my-tid".into(), 1000, 0, 60_000, 1000);
-        e.partitions.insert(TopicPartition {
-            topic: "t".into(),
-            partition: 0,
-        });
-        e.state = TxnState::Ongoing;
-        // Non-default KIP-890 ids so the round-trip proves the codec actually
-        // carries them (not just re-defaults to -1).
-        e.prev_producer_id = 7;
-        e.next_producer_id = 9;
-
-        let bytes = <SerdeCompat<TxnEntry>>::serialize(&e).unwrap();
-        let decoded: TxnEntry = <SerdeCompat<TxnEntry>>::deserialize(&bytes).unwrap();
-
-        assert!(decoded.transactional_id == "my-tid");
-        assert!(decoded.producer_id == 1000);
-        assert!(decoded.state == TxnState::Ongoing);
-        assert!(decoded.partitions.len() == 1);
-        // KIP-890 bookkeeping ids round-trip at their set (non-default) values.
-        assert!(decoded.prev_producer_id == 7);
-        assert!(decoded.next_producer_id == 9);
     }
 }
