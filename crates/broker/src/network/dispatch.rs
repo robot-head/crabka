@@ -2902,6 +2902,12 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         // KIP-932 share-group membership pair; both are flexible from v0.
         76 => version >= owned::share_group_heartbeat_request::FLEXIBLE_MIN,
         77 => version >= owned::share_group_describe_request::FLEXIBLE_MIN,
+        // KIP-932 share-coordinator persister RPCs (83-87) — all flexible from v0.
+        83 => version >= owned::initialize_share_group_state_request::FLEXIBLE_MIN,
+        84 => version >= owned::read_share_group_state_request::FLEXIBLE_MIN,
+        85 => version >= owned::write_share_group_state_request::FLEXIBLE_MIN,
+        86 => version >= owned::delete_share_group_state_request::FLEXIBLE_MIN,
+        87 => version >= owned::read_share_group_state_summary_request::FLEXIBLE_MIN,
         // ListConfigResources (74, KIP-1142) is flexible from v0.
         74 => version >= owned::list_config_resources_request::FLEXIBLE_MIN,
         // DescribeTopicPartitions (75, KIP-966) is flexible from v0.
