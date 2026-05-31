@@ -324,6 +324,10 @@ pub struct BrokerConfig {
     /// KIP-932 share-group configuration.
     pub share_group: Box<crate::coordinator::unified::share::config::ShareGroupConfig>,
 
+    /// KIP-932 share-coordinator (persister) configuration. Controls the
+    /// `__share_group_state` internal topic geometry and snapshot folding.
+    pub share_coordinator: Box<crate::share_coordinator::config::ShareCoordinatorConfig>,
+
     /// How often the auto-rebalance ticker fires, in seconds. Default
     /// 300 (5 minutes). Matches Kafka's
     /// `leader.imbalance.check.interval.seconds`.
@@ -574,6 +578,9 @@ impl BrokerConfig {
             ),
             share_group: Box::new(
                 crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            ),
+            share_coordinator: Box::new(
+                crate::share_coordinator::config::ShareCoordinatorConfig::default(),
             ),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
@@ -826,6 +833,9 @@ impl Default for BrokerConfig {
             ),
             share_group: Box::new(
                 crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            ),
+            share_coordinator: Box::new(
+                crate::share_coordinator::config::ShareCoordinatorConfig::default(),
             ),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
