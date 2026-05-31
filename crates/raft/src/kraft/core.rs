@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::kraft::action::{Action, TimerKind};
 use crate::kraft::event::{Event, LogEnd};
 use crate::kraft::role::{ReplicaProgress, Role};
-use crate::kraft::types::{LeaderEpoch, LogView, NodeId, QuorumState, ReplicaKey, SimInstant};
+use crate::kraft::types::{
+    LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant,
+};
 
 /// The hand-rolled KIP-595 + KIP-996 quorum state machine. Pure and
 /// deterministic: it consumes [`Event`]s, reads the log through [`LogView`],
@@ -71,6 +73,10 @@ impl QuorumStateMachine {
         now.saturating_add_ms(self.election_timeout_ms)
     }
 
+    // `event` is taken by value: it models a consumed input message, and 3b/3c
+    // hand ownership to the machine. The current arms happen to only read Copy
+    // fields, but that is an implementation detail of slice 3a.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn on_event(&mut self, event: Event, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         match event {
             Event::ReceiveVoteRequest {
@@ -103,8 +109,109 @@ impl QuorumStateMachine {
                 leader_id,
                 leader_epoch,
             } => self.handle_end_quorum_epoch(leader_id, leader_epoch, now),
-            // remaining arms added in Task 6
-            _ => Vec::new(),
+            Event::ReceiveFetch {
+                from,
+                fetch_epoch,
+                fetch_offset,
+            } => self.handle_fetch(log, from, fetch_epoch, fetch_offset),
+            Event::ReceiveFetchResponse {
+                leader_id,
+                leader_epoch,
+                diverging,
+            } => self.handle_fetch_response(leader_id, leader_epoch, diverging, now),
+            Event::FetchTimeout => self.handle_fetch_timeout(now),
+        }
+    }
+
+    /// (Leader side) a follower fetched at `fetch_offset` claiming it last
+    /// replicated up to `fetch_epoch`. If the follower's claimed epoch extends
+    /// past where that epoch ends in our log, the logs diverged: reply with the
+    /// truncation point. Otherwise record its progress and advance the HWM.
+    fn handle_fetch(
+        &mut self,
+        log: &dyn LogView,
+        from: NodeId,
+        fetch_epoch: LeaderEpoch,
+        fetch_offset: i64,
+    ) -> Vec<Action> {
+        // Only a leader tracks follower progress / serves divergence hints.
+        if !self.role.is_leader() {
+            return Vec::new();
+        }
+        // Divergence check: if the follower claims to have replicated `fetch_epoch`
+        // beyond where that epoch ends in our log, it must truncate.
+        if fetch_offset > 0
+            && let Some(div_end) = log.end_offset_for_epoch(fetch_epoch)
+            && fetch_offset > div_end
+        {
+            return vec![Action::TruncateTo(LogOffsetMetadata {
+                offset: div_end,
+                epoch: fetch_epoch,
+            })];
+        }
+        // Consistent: record the follower's fetch offset and recompute the HWM.
+        let log_end = log.end_offset();
+        if let Role::Leader { replicas, .. } = &mut self.role
+            && let Some(progress) = replicas.get_mut(&from)
+        {
+            progress.fetch_offset = fetch_offset;
+        }
+        let new_hwm = self.recompute_high_watermark(log_end);
+        if let Role::Leader { high_watermark, .. } = &mut self.role
+            && new_hwm > *high_watermark
+        {
+            *high_watermark = new_hwm;
+            return vec![Action::AdvanceHighWatermark(new_hwm)];
+        }
+        Vec::new()
+    }
+
+    /// The HWM as the `majority()`-th largest match offset across the leader's
+    /// own log end and every follower's acknowledged fetch offset. Never
+    /// regresses (the caller only adopts a strictly larger value).
+    fn recompute_high_watermark(&self, log_end: i64) -> i64 {
+        let Role::Leader { replicas, .. } = &self.role else {
+            return 0;
+        };
+        let mut match_offsets: Vec<i64> = Vec::with_capacity(replicas.len() + 1);
+        match_offsets.push(log_end);
+        for progress in replicas.values() {
+            match_offsets.push(progress.fetch_offset);
+        }
+        // Sort descending; the majority-th largest sits at index `majority - 1`.
+        match_offsets.sort_unstable_by(|a, b| b.cmp(a));
+        match_offsets[self.state.majority() - 1]
+    }
+
+    /// (Follower side) the leader answered our Fetch. A diverging hint means we
+    /// must truncate; otherwise we re-arm the fetch timer and fetch again.
+    fn handle_fetch_response(
+        &mut self,
+        leader_id: NodeId,
+        _leader_epoch: LeaderEpoch,
+        diverging: Option<LogOffsetMetadata>,
+        now: SimInstant,
+    ) -> Vec<Action> {
+        if let Some(point) = diverging {
+            return vec![Action::TruncateTo(point)];
+        }
+        let fetch_deadline = now.saturating_add_ms(self.election_timeout_ms);
+        vec![
+            Action::SendFetch { leader_id },
+            Action::ResetTimer {
+                kind: TimerKind::Fetch,
+                deadline: fetch_deadline,
+            },
+        ]
+    }
+
+    /// The fetch timer fired: a follower/observer lost contact with the leader.
+    /// A voter starts an election; an observer just keeps trying to find a leader.
+    fn handle_fetch_timeout(&mut self, now: SimInstant) -> Vec<Action> {
+        if self.is_voter() {
+            self.start_election(now)
+        } else {
+            Vec::new()
         }
     }
 
@@ -791,5 +898,164 @@ mod tests {
         );
         assert!(actions.is_empty()); // lower epoch → ignored
         assert!(m.quorum_state().leader_id.is_none());
+    }
+
+    #[test]
+    fn leader_advances_hwm_at_majority_fetch_offset() {
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 10,
+            last_epoch: 1,
+        };
+        // drive to leader
+        m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 0,
+                vote_granted: true,
+                pre_vote: true,
+            },
+            &log,
+            SimInstant(2001),
+        );
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 1,
+                vote_granted: true,
+                pre_vote: false,
+            },
+            &log,
+            SimInstant(2002),
+        );
+        // leader end offset 10. follower 2 fetches at 8, follower 3 at 4.
+        let a2 = m.on_event(
+            Event::ReceiveFetch {
+                from: 2,
+                fetch_epoch: 1,
+                fetch_offset: 8,
+            },
+            &log,
+            SimInstant(2100),
+        );
+        // majority of {self=10, 2=8} = 8 → HWM advances to 8
+        assert!(
+            a2.iter()
+                .any(|a| matches!(a, Action::AdvanceHighWatermark(8)))
+        );
+        let _ = m.on_event(
+            Event::ReceiveFetch {
+                from: 3,
+                fetch_epoch: 1,
+                fetch_offset: 4,
+            },
+            &log,
+            SimInstant(2101),
+        );
+        // sorted match offsets {10,8,4}; majority (2nd highest) = 8 → no regress
+        if let Role::Leader { high_watermark, .. } = m.role() {
+            assert!(*high_watermark == 8);
+        } else {
+            panic!()
+        }
+    }
+
+    #[test]
+    fn leader_detects_divergence_and_returns_truncate() {
+        // log has last_epoch 2 ending at 10; epoch-1 ended at 5.
+        struct L;
+        impl LogView for L {
+            fn end_offset(&self) -> i64 {
+                10
+            }
+            fn last_epoch(&self) -> LeaderEpoch {
+                2
+            }
+            fn end_offset_for_epoch(&self, e: LeaderEpoch) -> Option<i64> {
+                match e {
+                    0 => Some(0),
+                    1 => Some(5),
+                    2 => Some(10),
+                    _ => None,
+                }
+            }
+        }
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = L;
+        m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 0,
+                vote_granted: true,
+                pre_vote: true,
+            },
+            &log,
+            SimInstant(2001),
+        );
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 1,
+                vote_granted: true,
+                pre_vote: false,
+            },
+            &log,
+            SimInstant(2002),
+        );
+        // follower claims it fetched epoch 1 at offset 8, but epoch 1 ended at 5 → diverged.
+        let actions = m.on_event(
+            Event::ReceiveFetch {
+                from: 2,
+                fetch_epoch: 1,
+                fetch_offset: 8,
+            },
+            &log,
+            SimInstant(2100),
+        );
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::TruncateTo(LogOffsetMetadata {
+                offset: 5,
+                epoch: 1
+            })
+        )));
+    }
+
+    #[test]
+    fn follower_truncates_on_diverging_fetch_response() {
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 10,
+            last_epoch: 2,
+        };
+        m.on_event(
+            Event::ReceiveBeginQuorumEpoch {
+                leader_id: 2,
+                leader_epoch: 3,
+            },
+            &log,
+            SimInstant(10),
+        );
+        let actions = m.on_event(
+            Event::ReceiveFetchResponse {
+                leader_id: 2,
+                leader_epoch: 3,
+                diverging: Some(LogOffsetMetadata {
+                    offset: 5,
+                    epoch: 1,
+                }),
+            },
+            &log,
+            SimInstant(11),
+        );
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::TruncateTo(LogOffsetMetadata {
+                offset: 5,
+                epoch: 1
+            })
+        )));
     }
 }
