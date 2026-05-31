@@ -164,6 +164,10 @@ fn admin_apis() -> Vec<ApiVersion> {
         // KIP-932 ShareFetch / ShareAcknowledge data-plane RPCs.
         v!(share_fetch_request),
         v!(share_acknowledge_request),
+        // KIP-932 share-group admin offset RPCs.
+        v!(describe_share_group_offsets_request),
+        v!(alter_share_group_offsets_request),
+        v!(delete_share_group_offsets_request),
         // KIP-932 share-coordinator (persister) RPCs.
         v!(initialize_share_group_state_request),
         v!(read_share_group_state_request),

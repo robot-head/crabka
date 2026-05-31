@@ -128,6 +128,11 @@ pub(crate) mod renew_delegation_token;
 pub(crate) mod share_group_describe;
 // KIP-932 share-group membership (api_key 76).
 pub(crate) mod share_group_heartbeat;
+// KIP-932 admin offset RPCs (api_key 90/91/92). Intercepted inline in
+// `network::dispatch` for the per-group Describe/Alter/Delete ACL gates.
+pub(crate) mod alter_share_group_offsets;
+pub(crate) mod delete_share_group_offsets;
+pub(crate) mod describe_share_group_offsets;
 // KIP-932 ShareAcknowledge (api_key 79). Intercepted inline in
 // `network::dispatch` for the per-topic Read ACL gate.
 pub(crate) mod share_acknowledge;

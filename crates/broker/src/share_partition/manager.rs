@@ -199,6 +199,17 @@ impl SharePartitionLeaderManager {
         self.leaders.entry(key).or_insert(cell).value().clone()
     }
 
+    /// Drop the cached acquisition-state cell for `(group, topic_id, partition)`
+    /// so the next `get_or_load` re-reads the durable SPSO. The admin offset
+    /// RPCs call this after `AlterShareGroupOffsets`/`DeleteShareGroupOffsets`
+    /// rewrite the persister state, so an in-flight reset is observed by
+    /// subsequent `ShareFetch` on this broker. (Cross-broker cells are stale until
+    /// their own next load — a deferred concern, same as classic offset resets.)
+    pub(crate) fn invalidate(&self, group: &str, topic_id: uuid::Uuid, partition: i32) {
+        self.leaders
+            .remove(&(group.to_string(), topic_id, partition));
+    }
+
     /// Persist `st` if it's dirty, then clear the dirty flag. Errors are
     /// logged and swallowed — persistence is best-effort and never panics or
     /// fails the calling fetch/ack.
@@ -416,5 +427,18 @@ mod tests {
         let mgr = manager();
         let tid = uuid::Uuid::from_bytes([23; 16]);
         assert!(!mgr.topic_leader_is_self(tid, 0));
+    }
+
+    #[tokio::test]
+    async fn invalidate_removes_cached_cell() {
+        let mgr = manager();
+        let tid = uuid::Uuid::from_bytes([24; 16]);
+
+        // Populate the cache, then invalidate; a subsequent load yields a
+        // fresh, distinct cell.
+        let cell = mgr.get_or_load("g1", tid, 0).await;
+        mgr.invalidate("g1", tid, 0);
+        let cell2 = mgr.get_or_load("g1", tid, 0).await;
+        assert!(!Arc::ptr_eq(&cell, &cell2));
     }
 }

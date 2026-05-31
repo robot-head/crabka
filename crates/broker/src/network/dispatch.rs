@@ -470,6 +470,18 @@ async fn serve_connection_stream<S>(
                 handle_share_acknowledge_frame(&broker, &frame, &auth, &peer),
                 "ShareAcknowledge"
             ),
+            Some(90) => intercept!(
+                handle_describe_share_group_offsets_frame(&broker, &frame, &auth, &peer),
+                "DescribeShareGroupOffsets"
+            ),
+            Some(91) => intercept!(
+                handle_alter_share_group_offsets_frame(&broker, &frame, &auth, &peer),
+                "AlterShareGroupOffsets"
+            ),
+            Some(92) => intercept!(
+                handle_delete_share_group_offsets_frame(&broker, &frame, &auth, &peer),
+                "DeleteShareGroupOffsets"
+            ),
             Some(42) => intercept!(
                 handle_delete_groups_frame(&broker, &frame, &auth, &peer),
                 "DeleteGroups"
@@ -2316,6 +2328,117 @@ async fn handle_share_group_describe_frame(
     ))
 }
 
+/// Decode + dispatch a `DescribeShareGroupOffsets` (`api_key` 90, KIP-932)
+/// frame. Builds the [`crate::handlers::RequestContext`] the inline handler
+/// needs for the per-group `Describe` ACL gate.
+async fn handle_describe_share_group_offsets_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 90);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body = crate::handlers::describe_share_group_offsets::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `AlterShareGroupOffsets` (`api_key` 91, KIP-932) frame.
+/// Builds the [`crate::handlers::RequestContext`] for the per-group `Alter` ACL
+/// gate.
+async fn handle_alter_share_group_offsets_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 91);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body = crate::handlers::alter_share_group_offsets::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DeleteShareGroupOffsets` (`api_key` 92, KIP-932) frame.
+/// Builds the [`crate::handlers::RequestContext`] for the per-group `Delete`
+/// ACL gate.
+async fn handle_delete_share_group_offsets_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 92);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body = crate::handlers::delete_share_group_offsets::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
 /// Decode + dispatch a `ShareFetch` (`api_key` 78, KIP-932) frame. The handler
 /// needs the authenticated principal + peer `SocketAddr` for the per-topic
 /// `Read` ACL gate, which the `&Broker`-only handler table signature can't
@@ -2978,6 +3101,10 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         // KIP-932 ShareFetch / ShareAcknowledge — both flexible from v0.
         78 => version >= owned::share_fetch_request::FLEXIBLE_MIN,
         79 => version >= owned::share_acknowledge_request::FLEXIBLE_MIN,
+        // KIP-932 share-group admin offset RPCs — all flexible from v0.
+        90 => version >= owned::describe_share_group_offsets_request::FLEXIBLE_MIN,
+        91 => version >= owned::alter_share_group_offsets_request::FLEXIBLE_MIN,
+        92 => version >= owned::delete_share_group_offsets_request::FLEXIBLE_MIN,
         // KIP-932 share-coordinator persister RPCs (83-87) — all flexible from v0.
         83 => version >= owned::initialize_share_group_state_request::FLEXIBLE_MIN,
         84 => version >= owned::read_share_group_state_request::FLEXIBLE_MIN,

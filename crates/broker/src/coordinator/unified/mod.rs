@@ -440,6 +440,21 @@ impl GroupCoordinator {
         cached.state_partition_metadata = v;
     }
 
+    /// Read the cached `ShareGroupStatePartitionMetadata` for `group_id`,
+    /// recording which `(topic_id, partition)` share-states the group has
+    /// initialized. Returns `None` for an unknown group. Drives the admin
+    /// offset RPCs (Describe/Alter/Delete `ShareGroupOffsets`), which enumerate
+    /// initialized partitions when the request omits an explicit list.
+    #[must_use]
+    pub fn share_state_partition_metadata(
+        &self,
+        group_id: &str,
+    ) -> Option<share::persistence::ShareGroupStatePartitionMetadataValue> {
+        self.share_seeds_cache
+            .get(group_id)
+            .map(|e| e.value().state_partition_metadata.clone())
+    }
+
     /// Apply a tombstone for a share-group key. Removes the corresponding
     /// entry from both `share_seeds` and `share_seeds_cache`.
     pub fn replay_share_tombstone(&self, key: &share::persistence::ShareGroupKey) {
@@ -634,5 +649,21 @@ mod tests {
         let b = coord.get_or_create_share("sg");
         assert!(Arc::ptr_eq(&a, &b));
         assert!(coord.find_share("sg").is_some());
+    }
+
+    #[test]
+    fn share_state_partition_metadata_none_then_some() {
+        let coord = make_coord();
+        // Unknown group → None.
+        assert!(coord.share_state_partition_metadata("sg").is_none());
+
+        let tid = uuid::Uuid::from_u128(1);
+        let v = share::persistence::ShareGroupStatePartitionMetadataValue {
+            initialized: vec![(tid, vec![0, 1])],
+            deleting: vec![],
+        };
+        coord.replay_share_state_partition_metadata("sg", v.clone());
+        // Some after a replay, with the same contents.
+        assert!(coord.share_state_partition_metadata("sg") == Some(v));
     }
 }
