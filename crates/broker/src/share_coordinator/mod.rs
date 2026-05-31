@@ -2,6 +2,7 @@
 //! partition)` delivery state stored in the `__share_group_state` internal
 //! topic. Mirrors the transaction coordinator (`crate::txn`).
 
+pub mod bootstrap;
 pub mod config;
 pub mod partitioner;
 pub mod persistence;
