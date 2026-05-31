@@ -16,6 +16,7 @@
 pub mod acl;
 mod error;
 mod feature;
+pub mod group_version;
 mod image;
 pub mod kafka_record;
 pub mod metadata_version;

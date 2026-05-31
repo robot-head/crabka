@@ -74,10 +74,38 @@ impl Feature for MetadataVersionFeature {
     }
 }
 
+/// `group.version` (KIP-848). Plain integer feature; default rises to 1 once
+/// the bootstrap metadata.version reaches the KIP-848 GA level.
+pub struct GroupVersionFeature;
+
+impl Feature for GroupVersionFeature {
+    fn name(&self) -> &'static str {
+        crate::group_version::GROUP_VERSION_FEATURE
+    }
+    fn supported_range(&self) -> (i16, i16) {
+        (
+            crate::group_version::GROUP_VERSION_MIN,
+            crate::group_version::GROUP_VERSION_MAX,
+        )
+    }
+    fn default_level(&self, bootstrap_mv: i16) -> i16 {
+        if bootstrap_mv >= crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL {
+            crate::group_version::GROUP_VERSION_MAX
+        } else {
+            crate::group_version::GROUP_VERSION_MIN
+        }
+    }
+    // min_required_floor: inherits the default (supported min). Next-gen group
+    // state lives in the coordinator / __consumer_offsets, NOT the
+    // MetadataImage, so a live-state-aware downgrade floor can't be computed
+    // here (deferred). dependencies: inherits the empty default — Kafka 4.0
+    // declares no hard `UpdateFeatures` dependency for group.version.
+}
+
 /// All features this broker supports finalizing. Single source of truth.
 #[must_use]
 pub fn feature_registry() -> &'static [&'static dyn Feature] {
-    const REGISTRY: &[&dyn Feature] = &[&MetadataVersionFeature];
+    const REGISTRY: &[&dyn Feature] = &[&MetadataVersionFeature, &GroupVersionFeature];
     REGISTRY
 }
 
@@ -136,5 +164,41 @@ mod tests {
         assert!(f.level_name(25) == Some("4.0-IV3"));
         assert!(f.level_name(7) == Some("3.3-IV3"));
         assert!(f.level_name(99).is_none());
+    }
+
+    #[test]
+    fn group_version_registered_with_range() {
+        let f = feature("group.version").expect("registered");
+        assert!(f.supported_range() == (0, 1));
+    }
+
+    #[test]
+    fn group_version_default_follows_release() {
+        let f = feature("group.version").unwrap();
+        assert!(f.default_level(crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL - 1) == 0);
+        assert!(f.default_level(crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL) == 1);
+        assert!(f.default_level(25) == 1);
+    }
+
+    #[test]
+    fn group_version_declares_no_hard_dependencies() {
+        let f = feature("group.version").unwrap();
+        assert!(f.dependencies(0).is_empty());
+        assert!(f.dependencies(1).is_empty());
+    }
+
+    #[test]
+    fn group_version_ga_threshold_is_4_0_iv0() {
+        // Anchor the bare `22` to the metadata.version table so the
+        // bootstrap-default threshold can't silently drift from `4.0-IV0`
+        // (mirrors metadata_version's `gate_level_constants`).
+        assert!(
+            crate::metadata_version::from_feature_level(
+                crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL
+            )
+            .unwrap()
+            .ivn()
+                == "4.0-IV0"
+        );
     }
 }
