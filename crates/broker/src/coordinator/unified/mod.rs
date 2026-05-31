@@ -13,6 +13,7 @@ pub mod offsets_log;
 pub(crate) mod persistence;
 pub mod persistence_next_gen;
 pub mod reconciler;
+pub mod share;
 
 use std::sync::Arc;
 

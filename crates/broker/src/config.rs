@@ -321,6 +321,9 @@ pub struct BrokerConfig {
     /// timeout bounds, and the set of enabled server-side assignors.
     pub next_gen_consumer_group: crate::coordinator::unified::config::NextGenConfig,
 
+    /// KIP-932 share-group configuration.
+    pub share_group: crate::coordinator::unified::share::config::ShareGroupConfig,
+
     /// How often the auto-rebalance ticker fires, in seconds. Default
     /// 300 (5 minutes). Matches Kafka's
     /// `leader.imbalance.check.interval.seconds`.
@@ -567,6 +570,7 @@ impl BrokerConfig {
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: false, // tests opt in explicitly
             next_gen_consumer_group: crate::coordinator::unified::config::NextGenConfig::default(),
+            share_group: crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]
@@ -814,6 +818,7 @@ impl Default for BrokerConfig {
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: true,
             next_gen_consumer_group: crate::coordinator::unified::config::NextGenConfig::default(),
+            share_group: crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]
