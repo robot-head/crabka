@@ -131,6 +131,17 @@ impl MetadataImage {
             .map(|(_, v)| v)
     }
 
+    /// The live partition count for `topic`, derived from the partitions
+    /// map rather than the stored `TopicRecord.partitions` field. This is
+    /// the authoritative count for the KIP-631 round-trip (the KIP-631
+    /// `TopicRecord` carries no partition count) and for the `validate`
+    /// partition-count-grew check. Returns 0 for an unknown topic or one
+    /// with no partition records yet applied.
+    #[must_use]
+    pub fn topic_partition_count(&self, topic: &str) -> i32 {
+        i32::try_from(self.partitions_of(topic).count()).unwrap_or(i32::MAX)
+    }
+
     /// Single-pass iterator over every partition in the image, yielding
     /// the flat `(topic_name, partition_index)` key alongside the record.
     /// O(P) in total partition count — the cluster-wide maintenance loops
@@ -620,9 +631,13 @@ impl MetadataImage {
                     // partitions strictly growing. CreatePartitions emits
                     // exactly this. Identical re-submits stay rejected so
                     // CreateTopics' idempotency contract still holds.
+                    // Partition count derives from the partitions map (the
+                    // KIP-631 round-trip does not carry the stored
+                    // `TopicRecord.partitions`), so the expansion check reads
+                    // the live count rather than `existing.partitions`.
                     if existing.topic_id != t.topic_id
                         || existing.replication_factor != t.replication_factor
-                        || t.partitions <= existing.partitions
+                        || t.partitions <= self.topic_partition_count(&t.name)
                     {
                         return Err(MetadataError::TopicExists(t.name.clone()));
                     }
@@ -1045,10 +1060,30 @@ mod tests {
         assert!(matches!(err, MetadataError::TopicExists(_)));
     }
 
+    /// Apply `count` partition records (indices `0..count`) for `topic` so
+    /// the image's derived partition count reflects a realistic topic. The
+    /// `validate` partition-count check reads this derived count, not the
+    /// stored `TopicRecord.partitions`.
+    fn apply_partitions(m: &mut MetadataImage, topic: &str, count: i32) {
+        for p in 0..count {
+            m.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: topic.into(),
+                partition: p,
+                leader: 1,
+                replicas: vec![1],
+                isr: vec![1],
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+            }));
+        }
+    }
+
     #[test]
     fn validate_topic_partition_count_increase_allowed() {
         let mut m = img();
         m.apply(&topic("t", 1));
+        apply_partitions(&mut m, "t", 1);
         let existing = m.topic("t").unwrap().clone();
         let updated = MetadataRecord::V1Topic(TopicRecord {
             name: "t".into(),
@@ -1063,6 +1098,7 @@ mod tests {
     fn validate_topic_partition_count_decrease_rejected() {
         let mut m = img();
         m.apply(&topic("t", 3));
+        apply_partitions(&mut m, "t", 3);
         let existing = m.topic("t").unwrap().clone();
         let updated = MetadataRecord::V1Topic(TopicRecord {
             name: "t".into(),
