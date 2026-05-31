@@ -12,8 +12,9 @@ use crate::acl::{AclEntry, PatternType, ResourceType};
 use crate::error::MetadataError;
 use crate::records::{
     BrokerConfigRecord, BrokerRegistrationRecord, ClientQuotaRecord, DelegationTokenRecord,
-    FeatureLevelRecord, FeaturesEpochRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
-    ScramCredentialRecord, TopicConfigRecord, TopicRecord,
+    FeatureLevelRecord, FeaturesEpochRecord, KRaftVersionRecord, MetadataRecord, NodeId,
+    PartitionRecord, QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord,
+    VotersRecord,
 };
 
 pub type EntityKey = Vec<(String, Option<String>)>;
@@ -649,6 +650,31 @@ impl MetadataImage {
             }));
         }
 
+        // KIP-853 controller-quorum state. Both MUST be emitted or a snapshot
+        // recovery / learner install silently drops them: the voter set goes
+        // empty (breaking `DescribeQuorum` and KIP-853 auto-join) and the
+        // cluster `kraft.version` reverts to 0. The cluster `kraft_version`
+        // in particular has no other persistence path — unlike the openraft
+        // membership (restored from `SnapshotMeta.last_membership`), it is not
+        // carried anywhere outside the metadata records, so the image is its
+        // only source of truth. Independent of every other record, so order
+        // here is irrelevant. The reconfig coordinator commits the openraft
+        // membership change and the authoritative `V1Voters` record under one
+        // lock, so the emitted voter set mirrors `last_membership` for the
+        // same committed prefix (any transient one-reconfig skew self-heals as
+        // the trailing entry replays from the retained log — the same
+        // eventual lockstep that holds in live operation).
+        if self.kraft_version != 0 {
+            out.push(MetadataRecord::V1KRaftVersion(KRaftVersionRecord {
+                kraft_version: self.kraft_version,
+            }));
+        }
+        if !self.voters.is_empty() {
+            out.push(MetadataRecord::V1Voters(VotersRecord {
+                voters: self.voters.clone(),
+            }));
+        }
+
         out
     }
 
@@ -1105,6 +1131,56 @@ mod tests {
         assert!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
         assert!(rebuilt.finalized_features().get("group.version") == Some(&1));
         assert!(rebuilt.finalized_features_epoch() == 3);
+    }
+
+    /// KIP-853 voter set + finalized cluster `kraft.version` must survive
+    /// `to_records` / `from_records`. Before the fix `to_records` dropped
+    /// both, so a snapshot recovery / learner install rebuilt the image with
+    /// an EMPTY voter set and `kraft_version = 0` — breaking `DescribeQuorum`
+    /// and KIP-853 auto-join. The cluster `kraft_version` has no other
+    /// persistence source (it is not part of openraft's membership), so it
+    /// can only round-trip through a `V1KRaftVersion` record.
+    #[test]
+    fn to_records_preserves_voters_and_kraft_version() {
+        use crate::records::{KRaftVersionRecord, VotersRecord};
+        use crate::voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
+
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        image.apply(&MetadataRecord::V1KRaftVersion(KRaftVersionRecord {
+            kraft_version: 1,
+        }));
+        let voters = VoterSet::from_voters([
+            Voter {
+                id: 1,
+                directory_id: Uuid::from_u128(1),
+                endpoints: vec![VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "127.0.0.1".into(),
+                    port: 9093,
+                }],
+                kraft_version: KRaftVersionRange::default(),
+            },
+            Voter {
+                id: 2,
+                directory_id: Uuid::from_u128(2),
+                endpoints: vec![VoterEndpoint {
+                    name: "CONTROLLER".into(),
+                    host: "127.0.0.1".into(),
+                    port: 9094,
+                }],
+                kraft_version: KRaftVersionRange { min: 0, max: 1 },
+            },
+        ]);
+        image.apply(&MetadataRecord::V1Voters(VotersRecord {
+            voters: voters.clone(),
+        }));
+
+        let rebuilt = MetadataImage::from_records(cid, &image.to_records());
+
+        assert_eq!(rebuilt.kraft_version(), 1);
+        assert_eq!(rebuilt.voters(), &voters);
+        assert_eq!(rebuilt, image);
     }
 
     fn topic(name: &str, partitions: i32) -> MetadataRecord {
