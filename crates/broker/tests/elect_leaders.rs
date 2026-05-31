@@ -67,6 +67,16 @@ mod support;
 
 const ELECT_LEADERS_VERSION: i16 = 2;
 
+/// Shared cluster lock — serializes every test in this binary onto one
+/// 3-broker cluster at a time. Mirrors `quorum.rs` / `leader_election.rs`.
+/// Without this, the tests' static 3-voter clusters boot concurrently on
+/// the same loopback with short raft timings and starve each other's
+/// elections / ISR re-admission (intermittent FENCED_LEADER_EPOCH churn).
+fn cluster_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Minimal wire helpers — bare TCP on PLAINTEXT, no SASL.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -264,10 +274,7 @@ async fn wait_partition_isr_only(
 /// 5. Assert per-partition error_code = 0; poll until leader == 1 again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn preferred_election_via_wire_returns_success() {
-    // Cluster lock matches the pattern in tests/leader_election.rs.
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let lock = LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
-    let _g = lock.lock().await;
+    let _g = cluster_lock().lock().await;
 
     let mut cluster = support::start_n_node_with_retry(3).await;
     support::wait_for_all_brokers_registered(&cluster, 3).await;
@@ -386,9 +393,7 @@ async fn preferred_election_via_wire_returns_success() {
 /// 5. Assert per-partition error_code = 0 and poll until leader == 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unclean_election_via_wire_picks_alive_replica() {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let lock = LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
-    let _g = lock.lock().await;
+    let _g = cluster_lock().lock().await;
 
     let cluster = support::start_n_node_with_retry(3).await;
     support::wait_for_all_brokers_registered(&cluster, 3).await;
@@ -649,9 +654,7 @@ async fn non_super_user_without_acl_denied() {
 /// 5. Within 15s, broker 1 must be the partition leader again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn auto_rebalance_restores_preferred_leader() {
-    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-    let lock = LOCK.get_or_init(|| tokio::sync::Mutex::new(()));
-    let _g = lock.lock().await;
+    let _g = cluster_lock().lock().await;
 
     support::init_tracing();
 
