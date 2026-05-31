@@ -33,26 +33,34 @@ pub(crate) async fn handle(
     // v0-5: `topic_names: Vec<String>` (topic_id not present).
     // v6+:  `topics: Vec<DeleteTopicState>` with optional name + topic_id.
     //
-    // Collect (name, topic_id_bytes) pairs. If the client sent only a
-    // topic_id (name is None), resolve the name from the current image.
+    // Collect (name, requested_by_id, topic_id_bytes) tuples. If the client
+    // sent only a topic_id (name is None/empty), resolve the name from the
+    // current image and mark the entry as id-based so that a miss returns
+    // UNKNOWN_TOPIC_ID (KIP-516) rather than UNKNOWN_TOPIC_OR_PARTITION.
+    use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+
     let image = controller.current_image();
-    let mut name_list: Vec<Option<String>> = Vec::new();
+    // (resolved_name, requested_by_id, requested_topic_id)
+    let mut name_list: Vec<(Option<String>, bool, WireUuid)> = Vec::new();
     if req.topic_names.is_empty() {
         for state in &req.topics {
-            if let Some(ref n) = state.name {
-                name_list.push(Some(n.clone()));
+            let id = state.topic_id;
+            let requested_by_id =
+                state.name.as_ref().map_or(true, |n| n.is_empty()) && id != WireUuid::ZERO;
+            if requested_by_id {
+                // id-only path: look up by topic_id in the image index.
+                let uuid = uuid::Uuid::from_bytes(id.0);
+                let found = image.topic_by_id(&uuid).map(|t| t.name.clone());
+                name_list.push((found, true, id));
+            } else if let Some(ref n) = state.name {
+                name_list.push((Some(n.clone()), false, id));
             } else {
-                // name is absent — resolve by topic_id from the image.
-                let found = image
-                    .topics()
-                    .find(|t| t.topic_id.into_bytes() == state.topic_id.0)
-                    .map(|t| t.name.clone());
-                name_list.push(found);
+                name_list.push((None, false, id));
             }
         }
     } else {
         for n in &req.topic_names {
-            name_list.push(Some(n.clone()));
+            name_list.push((Some(n.clone()), false, WireUuid::ZERO));
         }
     }
 
@@ -60,7 +68,7 @@ pub(crate) async fn handle(
     // Nonexistent topics (name_opt = None) contribute 0 partitions.
     let mutation_count: u64 = name_list
         .iter()
-        .map(|name_opt| {
+        .map(|(name_opt, _, _)| {
             name_opt
                 .as_deref()
                 .map_or(0, |name| image.partitions_of(name).count() as u64)
@@ -71,7 +79,10 @@ pub(crate) async fn handle(
     // Batch-authorize every topic name for `Delete`. Topics that come
     // back `Deny` short-circuit the delete loop and emit
     // TOPIC_AUTHORIZATION_FAILED on that topic row.
-    let known_names: Vec<&str> = name_list.iter().filter_map(|opt| opt.as_deref()).collect();
+    let known_names: Vec<&str> = name_list
+        .iter()
+        .filter_map(|(opt, _, _)| opt.as_deref())
+        .collect();
     let acl_results = authorize_topics(
         broker.config.authorizer.as_ref(),
         &image,
@@ -93,11 +104,17 @@ pub(crate) async fn handle(
 
     let mut results: Vec<DeletableTopicResult> = Vec::with_capacity(name_list.len());
 
-    for name_opt in name_list {
+    for (name_opt, requested_by_id, req_topic_id) in name_list {
         let Some(name) = name_opt else {
-            // topic_id not found in image — unknown topic.
+            // topic not found in image — choose error code by how it was requested.
+            let error_code = if requested_by_id {
+                codes::UNKNOWN_TOPIC_ID
+            } else {
+                codes::UNKNOWN_TOPIC_OR_PARTITION
+            };
             results.push(DeletableTopicResult {
-                error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                topic_id: req_topic_id,
+                error_code,
                 ..Default::default()
             });
             continue;
