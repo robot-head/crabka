@@ -2,7 +2,7 @@
 //!
 //! Reconstructed by folding a `ShareSnapshot` then any subsequent
 //! `ShareUpdate` deltas over it (`apply_snapshot` / `apply_update`). The
-//! merge logic mirrors KIP-932's WriteShareGroupState semantics: advance the
+//! merge logic mirrors KIP-932's `WriteShareGroupState` semantics: advance the
 //! share-partition start offset (SPSO), drop in-memory batches fully below
 //! it, and upsert written batches keyed by their first offset.
 
@@ -27,7 +27,7 @@ impl SharePartitionState {
         self.leader_epoch = v.leader_epoch;
         self.start_offset = v.start_offset;
         self.delivery_complete_count = v.delivery_complete_count;
-        self.state_batches = v.state_batches.clone();
+        self.state_batches.clone_from(&v.state_batches);
         self.updates_since_snapshot = 0;
     }
 
@@ -119,8 +119,10 @@ mod tests {
 
     #[test]
     fn merge_upserts_batch_by_first_offset() {
-        let mut s = SharePartitionState::default();
-        s.state_batches = vec![batch(0, 9), batch(10, 19)];
+        let mut s = SharePartitionState {
+            state_batches: vec![batch(0, 9), batch(10, 19)],
+            ..Default::default()
+        };
         // Overwrite batch starting at 10 with a longer one and add a new one.
         s.merge_batches(
             0,
@@ -149,8 +151,10 @@ mod tests {
 
     #[test]
     fn merge_drops_written_batch_below_spso() {
-        let mut s = SharePartitionState::default();
-        s.start_offset = 50;
+        let mut s = SharePartitionState {
+            start_offset: 50,
+            ..Default::default()
+        };
         // A written batch entirely below the SPSO is ignored.
         s.merge_batches(50, &[batch(0, 9)]);
         assert!(s.state_batches.is_empty());
@@ -158,11 +162,13 @@ mod tests {
 
     #[test]
     fn to_snapshot_bumps_snapshot_epoch() {
-        let mut s = SharePartitionState::default();
-        s.snapshot_epoch = 4;
-        s.state_epoch = 1;
-        s.start_offset = 10;
-        s.state_batches = vec![batch(10, 19)];
+        let s = SharePartitionState {
+            snapshot_epoch: 4,
+            state_epoch: 1,
+            start_offset: 10,
+            state_batches: vec![batch(10, 19)],
+            ..Default::default()
+        };
         let snap = s.to_snapshot();
         assert!(snap.snapshot_epoch == 5);
         assert!(snap.start_offset == 10);
