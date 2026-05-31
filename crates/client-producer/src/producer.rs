@@ -243,6 +243,16 @@ impl Producer {
         let mut state = self.txn_state.lock().await;
         match resp.error_code {
             0 => {
+                // KIP-890 (transaction.version 2): the coordinator bumps the
+                // producer epoch on transaction completion and returns the new
+                // (producer_id, producer_epoch) in the EndTxn v5 response. Adopt
+                // it so the next transaction (and its record batches, which read
+                // this shared pair) use the un-fenced epoch. A pre-KIP-890
+                // coordinator leaves these at -1, in which case we keep the
+                // current pair unchanged.
+                if resp.producer_id >= 0 {
+                    *self.txn_pid_epoch.lock().await = (resp.producer_id, resp.producer_epoch);
+                }
                 *state = TxnState::Ready;
                 Ok(())
             }

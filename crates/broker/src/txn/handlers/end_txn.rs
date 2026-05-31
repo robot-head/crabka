@@ -39,6 +39,7 @@ use crate::network::client::InterBrokerClient;
 use crate::txn::marker::{MarkerType, build_marker_batch};
 use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
 use crate::txn::util::now_millis;
+use crate::txn::version::TxnVersion;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
@@ -177,6 +178,13 @@ pub(crate) async fn handle(
         return encode_err(version, codes::INVALID_PRODUCER_ID_MAPPING);
     };
 
+    // The (pid, epoch) returned to the producer. At TV_2 the epoch is bumped
+    // by one on completion (see `epoch_after_completion`); below TV_2 it is the
+    // producer's current epoch unchanged. The producer_id is unchanged in the
+    // non-overflow path. Assigned on the Proceed path below.
+    let response_pid = req.producer_id;
+    let response_epoch;
+
     let complete_snap: TxnEntry = {
         let mut entry = current_mutex.lock().await;
         match validate_complete_reacquire(
@@ -191,8 +199,10 @@ pub(crate) async fn handle(
                 // Another caller already drove this exact transition to
                 // completion (or we are an idempotent EndTxn retry that lost
                 // the race). The desired post-state is already persisted, so
-                // report success without re-writing.
-                return encode_ok(version);
+                // report success without re-writing. Return the persisted
+                // (possibly already-bumped) epoch so a KIP-890 client that
+                // retried picks up the authoritative value.
+                return encode_ok(version, entry.producer_id, entry.producer_epoch);
             }
             ReacquireDecision::Reject(code) => {
                 tracing::warn!(
@@ -210,6 +220,13 @@ pub(crate) async fn handle(
         }
         entry.state = complete;
         entry.last_update_ms = now_millis();
+        // KIP-890: at TV_2 bump the producer epoch on completion so a zombie
+        // holding the old epoch is fenced WITHOUT a fresh InitProducerId. The
+        // bump is applied AFTER the Phase-2 marker fan-out (markers were written
+        // with the producer's old/current epoch above); only the persisted and
+        // returned epoch reflects the bump. Below TV_2 the epoch is unchanged.
+        response_epoch = epoch_after_completion(txnv, entry.producer_epoch);
+        entry.producer_epoch = response_epoch;
         entry.clone()
         // Lock dropped here.
     };
@@ -227,7 +244,28 @@ pub(crate) async fn handle(
         return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
     }
 
-    encode_ok(version)
+    encode_ok(version, response_pid, response_epoch)
+}
+
+/// KIP-890: the producer epoch after a transaction completes. At `TV_2` the
+/// epoch is bumped by one on completion (fencing zombies without a new
+/// `InitProducerId`); below `TV_2` it is unchanged.
+///
+/// Overflow (`current_epoch == i16::MAX`) requires allocating a *new*
+/// `producer_id` and resetting the epoch to 0 (recording prev/next producer ids
+/// on the entry). That path is not yet implemented; a single-broker test never
+/// reaches `i16::MAX`, so we panic with a documented message rather than
+/// silently wrapping the epoch to a value a live producer could collide with.
+fn epoch_after_completion(txnv: TxnVersion, current_epoch: i16) -> i16 {
+    if txnv.verified() {
+        // TODO(KIP-890): epoch-overflow → new producer_id allocation
+        // (reset epoch to 0, record prev/next producer ids on the entry).
+        current_epoch
+            .checked_add(1)
+            .expect("KIP-890 epoch overflow: new producer_id allocation not yet implemented")
+    } else {
+        current_epoch
+    }
 }
 
 /// Decision for the Phase-3 (Complete) re-acquire re-validation. See
@@ -467,17 +505,31 @@ async fn send_write_txn_markers(
 // ── encoding helpers ──────────────────────────────────────────────────────────
 
 fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
-    encode_response(version, error_code)
+    // On the error path the producer_id/epoch fields are not meaningful;
+    // leave them at the response default (-1, -1).
+    encode_response(version, error_code, -1, -1)
 }
 
-fn encode_ok(version: i16) -> Result<Bytes, BrokerError> {
-    encode_response(version, codes::NONE)
+/// Encode a successful `EndTxn` response. `producer_id` / `producer_epoch` are
+/// the post-completion identity (the epoch is bumped at `TV_2`; see
+/// [`epoch_after_completion`]). They are only on the wire at v5 (KIP-890); at
+/// lower versions the producer never observes them, and the persisted bump
+/// fences a stale-epoch producer on its next coordinator call instead.
+fn encode_ok(version: i16, producer_id: i64, producer_epoch: i16) -> Result<Bytes, BrokerError> {
+    encode_response(version, codes::NONE, producer_id, producer_epoch)
 }
 
-fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
+fn encode_response(
+    version: i16,
+    error_code: i16,
+    producer_id: i64,
+    producer_epoch: i16,
+) -> Result<Bytes, BrokerError> {
     let resp = EndTxnResponse {
         throttle_time_ms: 0,
         error_code,
+        producer_id,
+        producer_epoch,
         ..Default::default()
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
@@ -490,6 +542,16 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
+
+    // ── KIP-890 TV_2 epoch-bump-on-completion: epoch_after_completion ───────
+
+    #[test]
+    fn epoch_bumps_only_at_tv2() {
+        use crate::txn::version::TxnVersion;
+        assert!(epoch_after_completion(TxnVersion::Classic, 3) == 3);
+        assert!(epoch_after_completion(TxnVersion::Flexible, 3) == 3);
+        assert!(epoch_after_completion(TxnVersion::Verified, 3) == 4);
+    }
 
     // ── Phase-3 re-validation: validate_complete_reacquire ──────────────────
 
