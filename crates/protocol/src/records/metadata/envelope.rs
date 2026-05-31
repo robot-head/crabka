@@ -1,4 +1,4 @@
-//! The KRaft metadata record-value envelope (`MetadataRecordSerde` /
+//! The `KRaft` metadata record-value envelope (`MetadataRecordSerde` /
 //! `ApiMessageAndVersion`): a record value is
 //! `frameVersion (uvarint, 0) + apiKey (uvarint) + apiVersion (uvarint) + body`.
 
@@ -6,7 +6,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
 
-/// Current KRaft metadata frame version (Kafka writes 0).
+/// Current `KRaft` metadata frame version (Kafka writes 0).
 pub const FRAME_VERSION: u32 = 0;
 
 /// Decoded envelope header (everything before the message body).
