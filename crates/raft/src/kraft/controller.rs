@@ -93,11 +93,21 @@ struct Engine {
     /// Outstanding `submit_change` waiters keyed by the end offset they need
     /// committed+applied. Resolved (Ok or per-record rejection) on apply.
     commit_waiters: Vec<CommitWaiter>,
+    /// Whether we held leadership as of the last reconcile, and at what epoch.
+    /// Used to detect a leadership-loss edge (Leader → non-Leader, or a
+    /// leader-epoch bump while still nominally leading) so we can fail parked
+    /// `submit_change` waiters instead of leaving them hung (FIX 1).
+    was_leader: bool,
+    held_epoch: LeaderEpoch,
 }
 
 /// A parked `submit_change`: it completes once the HWM reaches `need_offset`
 /// AND the records have been run through `validate`/`apply`.
 struct CommitWaiter {
+    /// Base (append) offset of this waiter's batch. Its appended range is
+    /// `[base_offset, need_offset)`; a committed-record rejection only attaches
+    /// to a waiter whose range actually contains the failing offset (FIX 2).
+    base_offset: i64,
     need_offset: i64,
     /// First per-record rejection observed at apply time, if any.
     rejection: Option<RaftError>,
@@ -158,6 +168,8 @@ impl KraftController {
 
         let core = QuorumStateMachine::new(me, initial_state, election_timeout_ms);
         let initial_leader = core.quorum_state().leader_id;
+        let initial_was_leader = core.role().is_leader();
+        let initial_epoch = core.quorum_state().leader_epoch;
 
         let (image_tx, image_rx) = watch::channel(Arc::new(image.clone()));
         let (leader_tx, leader_rx) = watch::channel(initial_leader);
@@ -188,6 +200,8 @@ impl KraftController {
             fetch_at: None,
             fetch_misses: 0,
             commit_waiters: Vec::new(),
+            was_leader: initial_was_leader,
+            held_epoch: initial_epoch,
         };
 
         tokio::spawn(engine.run(cmd_rx));
@@ -743,6 +757,27 @@ impl Engine {
             }
             Role::Resigned => {}
         }
+        self.fail_waiters_on_leadership_loss();
+    }
+
+    /// Detect a transition away from leadership — Leader → non-Leader, or a
+    /// leader-epoch bump while we still nominally lead — and fail every parked
+    /// `submit_change` waiter with `NotLeader` so the caller's future resolves
+    /// promptly instead of hanging until shutdown (FIX 1). Records appended at
+    /// our old epoch can no longer commit once we step down (a new leader may
+    /// truncate them), so the parked waiters are unresolvable and must error.
+    fn fail_waiters_on_leadership_loss(&mut self) {
+        let is_leader = self.core.role().is_leader();
+        let epoch = self.core.quorum_state().leader_epoch;
+        let lost_leadership = self.was_leader && (!is_leader || epoch != self.held_epoch);
+        if lost_leadership && !self.commit_waiters.is_empty() {
+            let current_leader = self.core.quorum_state().leader_id;
+            for w in self.commit_waiters.drain(..) {
+                let _ = w.reply.send(Err(RaftError::NotLeader { current_leader }));
+            }
+        }
+        self.was_leader = is_leader;
+        self.held_epoch = epoch;
     }
 
     /// Arm the fetch timer one election-timeout out from now (re-poll cadence).
@@ -819,6 +854,7 @@ impl Engine {
         // Park the waiter, then try to advance the HWM immediately: a single
         // voter commits its own append with no peer fetch.
         self.commit_waiters.push(CommitWaiter {
+            base_offset: base,
             need_offset,
             rejection: None,
             reply,
@@ -904,11 +940,17 @@ impl Engine {
         self.try_resolve_waiters();
     }
 
-    /// Attach a rejection to any waiter whose target offset covers
-    /// `record_offset`.
+    /// Attach a rejection to the waiter whose appended range
+    /// `[base_offset, need_offset)` actually contains `record_offset`. Gating on
+    /// both bounds (not just `need_offset > record_offset`) prevents a failing
+    /// record from bleeding its rejection onto later, unrelated waiters whose
+    /// own records committed fine (FIX 2).
     fn note_rejection(&mut self, record_offset: i64, err: &crabka_metadata::MetadataError) {
         for w in &mut self.commit_waiters {
-            if w.need_offset > record_offset && w.rejection.is_none() {
+            if w.base_offset <= record_offset
+                && record_offset < w.need_offset
+                && w.rejection.is_none()
+            {
                 w.rejection = Some(RaftError::Metadata(err.clone()));
             }
         }
@@ -1305,6 +1347,34 @@ mod tests {
         })
     }
 
+    /// Drive a voter to leadership in a multi-voter cluster under `NullPeerSender`
+    /// by injecting the vote responses it would have received: `ElectionTimeout`
+    /// starts a pre-vote round (epoch unchanged), a granted pre-vote from `helper`
+    /// promotes to `Candidate` (epoch +1) and broadcasts a real vote, and a
+    /// granted real vote from `helper` reaches majority and promotes to `Leader`.
+    async fn elect_leader_with_helper(ctrl: &KraftController, me: NodeId, helper: NodeId) {
+        ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
+        // Pre-vote round runs at the current (pre-bump) epoch 0.
+        ctrl.inject_event(Event::ReceiveVoteResponse {
+            from: helper,
+            epoch: 0,
+            vote_granted: true,
+            pre_vote: true,
+        })
+        .await
+        .unwrap();
+        // Candidate round runs at the bumped epoch 1.
+        ctrl.inject_event(Event::ReceiveVoteResponse {
+            from: helper,
+            epoch: 1,
+            vote_granted: true,
+            pre_vote: false,
+        })
+        .await
+        .unwrap();
+        await_leader(ctrl, Some(me)).await;
+    }
+
     async fn await_leader(ctrl: &KraftController, want: Option<NodeId>) {
         let mut rx = ctrl.watch_leader();
         for _ in 0..200 {
@@ -1455,12 +1525,137 @@ mod tests {
         ctrl.shutdown().await;
     }
 
+    /// FIX 1: a leader that parks a `submit_change` waiter and then steps down
+    /// (higher-epoch `BeginQuorumEpoch` forces Leader → Follower) must fail the
+    /// parked waiter promptly with `NotLeader` rather than leaving it hung until
+    /// engine shutdown. In a 3-voter cluster with a `NullPeerSender`, no follower
+    /// ever fetches, so the appended record never commits — the only way the
+    /// waiter resolves is the leadership-loss drain.
+    #[tokio::test]
+    async fn submit_waiter_fails_on_leadership_loss() {
+        let (ctrl, _dir) = build(1, &[1, 2, 3]);
+        elect_leader_with_helper(&ctrl, 1, 2).await;
+
+        // Park a submit on a separate task: it appends but cannot commit (no
+        // peer fetches under NullPeerSender), so it stays parked.
+        let ctrl2 = ctrl.clone();
+        let submit =
+            tokio::spawn(async move { ctrl2.submit_change(vec![topic_record("orders")]).await });
+
+        // Give the submit a moment to reach the engine and park its waiter.
+        tokio::time::sleep(StdDuration::from_millis(50)).await;
+
+        // A strictly-higher-epoch BeginQuorumEpoch from node 2 forces node 1 to
+        // step down from Leader to Follower.
+        ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {
+            leader_id: 2,
+            leader_epoch: 9,
+        })
+        .await
+        .unwrap();
+
+        // The parked submit must resolve promptly (bounded) with NotLeader.
+        let result = tokio::time::timeout(StdDuration::from_secs(5), submit)
+            .await
+            .expect("submit did not hang on leadership loss")
+            .expect("join");
+        assert!(
+            matches!(
+                result,
+                Err(RaftError::NotLeader {
+                    current_leader: Some(2)
+                })
+            ),
+            "got {result:?}"
+        );
+        ctrl.shutdown().await;
+    }
+
     #[tokio::test]
     async fn submit_change_on_non_leader_rejects() {
         let (ctrl, _dir) = build(1, &[1, 2, 3]);
         // Never elected; node 1 is Unattached → not leader.
         let r = ctrl.submit_change(vec![topic_record("t")]).await;
         assert!(matches!(r, Err(RaftError::NotLeader { .. })), "got {r:?}");
+        ctrl.shutdown().await;
+    }
+
+    fn topic_record_named(name: &str, id: u128) -> crabka_metadata::MetadataRecord {
+        crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
+            name: name.to_string(),
+            topic_id: uuid::Uuid::from_u128(id),
+            partitions: 1,
+            replication_factor: 1,
+        })
+    }
+
+    /// FIX 2: a committed record that fails apply-`validate` must only fail the
+    /// waiter whose appended range actually contains it, not every later waiter.
+    /// Park three submits in a 3-voter leader (no peer fetches → nothing commits
+    /// on its own): A creates "first" (valid), B re-creates "first" (duplicate →
+    /// rejected at apply), C creates "third" (valid). Then drive a single HWM
+    /// advance past all three via a follower fetch. B must get `Err`; C must get
+    /// `Ok` (not bled the rejection from B's earlier offset).
+    #[tokio::test]
+    async fn rejection_scoped_to_owning_waiter_range() {
+        let (ctrl, _dir) = build(1, &[1, 2, 3]);
+        elect_leader_with_helper(&ctrl, 1, 2).await;
+
+        let ca = ctrl.clone();
+        let cb = ctrl.clone();
+        let cc = ctrl.clone();
+        // A and B both create topic "first"; B is the duplicate that fails apply.
+        // C creates a distinct "third" and must commit cleanly.
+        let a =
+            tokio::spawn(
+                async move { ca.submit_change(vec![topic_record_named("first", 1)]).await },
+            );
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        let b =
+            tokio::spawn(
+                async move { cb.submit_change(vec![topic_record_named("first", 1)]).await },
+            );
+        tokio::time::sleep(StdDuration::from_millis(20)).await;
+        let c =
+            tokio::spawn(
+                async move { cc.submit_change(vec![topic_record_named("third", 3)]).await },
+            );
+        tokio::time::sleep(StdDuration::from_millis(40)).await;
+
+        // Drive the HWM past all appended batches by simulating a follower (node
+        // 2) that has fetched the whole log. With a 3-voter majority of 2, the
+        // leader's own log end plus node 2's fetch offset commits everything.
+        let qs = ctrl.quorum_state().await.unwrap();
+        ctrl.inject_event(Event::ReceiveFetch {
+            from: 2,
+            fetch_epoch: qs.leader_epoch,
+            fetch_offset: qs.log_end_offset,
+        })
+        .await
+        .unwrap();
+
+        let ra = tokio::time::timeout(StdDuration::from_secs(5), a)
+            .await
+            .expect("A did not hang")
+            .expect("join");
+        let rb = tokio::time::timeout(StdDuration::from_secs(5), b)
+            .await
+            .expect("B did not hang")
+            .expect("join");
+        let rc = tokio::time::timeout(StdDuration::from_secs(5), c)
+            .await
+            .expect("C did not hang")
+            .expect("join");
+
+        assert!(ra.is_ok(), "A (first valid) should commit: {ra:?}");
+        assert!(
+            matches!(rb, Err(RaftError::Metadata(_))),
+            "B (duplicate) should be rejected: {rb:?}"
+        );
+        assert!(
+            rc.is_ok(),
+            "C (distinct valid) must NOT bleed B's rejection: {rc:?}"
+        );
         ctrl.shutdown().await;
     }
 
