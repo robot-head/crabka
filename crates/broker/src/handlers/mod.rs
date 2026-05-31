@@ -128,6 +128,9 @@ pub(crate) mod renew_delegation_token;
 pub(crate) mod share_group_describe;
 // KIP-932 share-group membership (api_key 76).
 pub(crate) mod share_group_heartbeat;
+// KIP-932 ShareAcknowledge (api_key 79). Intercepted inline in
+// `network::dispatch` for the per-topic Read ACL gate.
+pub(crate) mod share_acknowledge;
 // KIP-932 ShareFetch (api_key 78). Intercepted inline in `network::dispatch`
 // for the per-topic Read ACL gate.
 pub(crate) mod share_fetch;
