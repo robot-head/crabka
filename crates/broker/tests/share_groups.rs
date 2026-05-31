@@ -1,0 +1,255 @@
+//! End-to-end integration tests for KIP-932 share-group membership,
+//! driven against an in-process Crabka broker via `crabka-client-core`.
+//!
+//! The typed client works because ApiVersions advertises api_keys 76/77;
+//! `ShareGroupHeartbeatRequest` / `ShareGroupDescribeRequest` impl
+//! `ProtocolRequest`, so `client.send(req)` returns the typed response and
+//! exercises the real wire path (version negotiation through ApiVersions —
+//! both share RPCs are MIN=MAX=1, so the client negotiates v1).
+
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
+use assert2::assert;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
+use crabka_client_core::Client;
+use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::share_group_describe_request::ShareGroupDescribeRequest;
+use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
+
+async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
+async fn connect(bootstrap: &str) -> Arc<Client> {
+    Arc::new(
+        Client::builder()
+            .bootstrap(bootstrap)
+            .client_id("c1")
+            .build()
+            .await
+            .unwrap(),
+    )
+}
+
+async fn create_topic(client: &Client, topic: &str, partitions: i32) {
+    let resp = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: topic.into(),
+                num_partitions: partitions,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("CreateTopics");
+    assert!(
+        resp.topics[0].error_code == 0,
+        "topic create failed: {resp:?}"
+    );
+}
+
+fn heartbeat(group: &str, member_id: &str, epoch: i32) -> ShareGroupHeartbeatRequest {
+    ShareGroupHeartbeatRequest {
+        group_id: group.into(),
+        member_id: member_id.into(),
+        member_epoch: epoch,
+        ..Default::default()
+    }
+}
+
+fn total_assigned(
+    resp: &crabka_protocol::owned::share_group_heartbeat_response::ShareGroupHeartbeatResponse,
+) -> usize {
+    resp.assignment
+        .as_ref()
+        .map(|a| a.topic_partitions.iter().map(|t| t.partitions.len()).sum())
+        .unwrap_or(0)
+}
+
+async fn describe(
+    client: &Client,
+    group: &str,
+) -> crabka_protocol::owned::share_group_describe_response::ShareGroupDescribeResponse {
+    client
+        .send(ShareGroupDescribeRequest {
+            group_ids: vec![group.into()],
+            include_authorized_operations: false,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+}
+
+/// Single member joins, gets a minted member id, advances to epoch 1, and is
+/// assigned every partition of the subscribed topic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn single_member_join_assignment() {
+    let (_b, bootstrap, _d) = boot().await;
+    let client = connect(&bootstrap).await;
+    create_topic(&client, "t1", 4).await;
+
+    let mut req = heartbeat("g1", "", 0);
+    req.subscribed_topic_names = Some(vec!["t1".into()]);
+    let resp = client.send(req).await.unwrap();
+
+    assert!(resp.error_code == 0, "join failed: {:?}", resp.error_code);
+    assert!(resp.member_id.is_some(), "broker must mint a member id");
+    assert!(
+        resp.member_epoch == 1,
+        "first join advances member to epoch 1, got {}",
+        resp.member_epoch
+    );
+    assert!(
+        total_assigned(&resp) == 4,
+        "single member must own all 4 partitions"
+    );
+}
+
+/// Two members join the same group; after both converge, ShareGroupDescribe
+/// reports one group with both members and a non-trivial group epoch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn two_members_then_describe() {
+    let (_b, bootstrap, _d) = boot().await;
+    let client = connect(&bootstrap).await;
+    create_topic(&client, "t2", 4).await;
+
+    let mut m1 = heartbeat("g1", "", 0);
+    m1.subscribed_topic_names = Some(vec!["t2".into()]);
+    let r1 = client.send(m1).await.unwrap();
+    assert!(r1.error_code == 0, "m1 join failed: {:?}", r1.error_code);
+    let mid1 = r1.member_id.clone().unwrap();
+
+    let mut m2 = heartbeat("g1", "", 0);
+    m2.subscribed_topic_names = Some(vec!["t2".into()]);
+    let r2 = client.send(m2).await.unwrap();
+    assert!(r2.error_code == 0, "m2 join failed: {:?}", r2.error_code);
+    let mid2 = r2.member_id.clone().unwrap();
+    assert!(mid1 != mid2, "members must have distinct ids");
+
+    // m1 re-heartbeats at its returned epoch so it learns the rebalanced
+    // assignment after m2 bumped the group epoch.
+    let mut m1b = heartbeat("g1", &mid1, r1.member_epoch);
+    m1b.subscribed_topic_names = Some(vec!["t2".into()]);
+    let r1b = client.send(m1b).await.unwrap();
+    assert!(r1b.error_code == 0, "m1 re-hb failed: {:?}", r1b.error_code);
+
+    let desc = describe(&client, "g1").await;
+    assert!(desc.groups.len() == 1, "expected exactly one group row");
+    let g = &desc.groups[0];
+    assert!(g.error_code == 0, "describe error: {:?}", g.error_code);
+    assert!(
+        g.members.len() == 2,
+        "describe must show both members, got {}",
+        g.members.len()
+    );
+    assert!(
+        g.group_epoch >= 1,
+        "group epoch must have advanced, got {}",
+        g.group_epoch
+    );
+}
+
+/// A member leaves via `member_epoch == -1`; the leave succeeds, the group is
+/// retained but reported with zero members (state "Empty").
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn member_leave_epoch_minus_one() {
+    let (_b, bootstrap, _d) = boot().await;
+    let client = connect(&bootstrap).await;
+    create_topic(&client, "t3", 2).await;
+
+    let mut join = heartbeat("g1", "", 0);
+    join.subscribed_topic_names = Some(vec!["t3".into()]);
+    let r = client.send(join).await.unwrap();
+    assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
+    let mid = r.member_id.clone().unwrap();
+
+    let leave = heartbeat("g1", &mid, -1);
+    let lr = client.send(leave).await.unwrap();
+    assert!(lr.error_code == 0, "leave failed: {:?}", lr.error_code);
+
+    let desc = describe(&client, "g1").await;
+    assert!(
+        desc.groups.len() == 1,
+        "group row still present after leave"
+    );
+    let g = &desc.groups[0];
+    // The empty group is retained (the actor stays alive with 0 members).
+    assert!(
+        g.error_code == 0,
+        "retained empty group describe error: {:?}",
+        g.error_code
+    );
+    assert!(
+        g.members.is_empty(),
+        "no members must remain after leave, got {}",
+        g.members.len()
+    );
+}
+
+/// Share-group state persists to `__consumer_offsets`; after a broker restart
+/// (Rejoin on the same data dir) the group + member are reconstructed via
+/// replay and visible through ShareGroupDescribe.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_survives_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let log_dir = dir.path().to_path_buf();
+
+    let member_id;
+    {
+        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
+            .await
+            .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        let client = connect(&bootstrap).await;
+        create_topic(&client, "t4", 2).await;
+
+        let mut join = heartbeat("g1", "", 0);
+        join.subscribed_topic_names = Some(vec!["t4".into()]);
+        let r = client.send(join).await.unwrap();
+        assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
+        member_id = r.member_id.clone().unwrap();
+
+        // Give the actor's async log-flush time to land in __consumer_offsets.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        broker.shutdown().await;
+    }
+
+    {
+        let mut cfg = BrokerConfig::for_tests(log_dir);
+        cfg.bootstrap_mode = BootstrapMode::Rejoin;
+        let broker = Broker::start(cfg).await.unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        let client = connect(&bootstrap).await;
+
+        let desc = describe(&client, "g1").await;
+        assert!(desc.groups.len() == 1, "group row after restart");
+        let g = &desc.groups[0];
+        assert!(
+            g.error_code == 0,
+            "recovered group describe error: {:?}",
+            g.error_code
+        );
+        assert!(
+            g.group_epoch >= 1,
+            "recovered group epoch must be >= 1, got {}",
+            g.group_epoch
+        );
+        assert!(
+            g.members.iter().any(|m| m.member_id == member_id),
+            "recovered group must contain the original member {member_id}, members: {:?}",
+            g.members.iter().map(|m| &m.member_id).collect::<Vec<_>>()
+        );
+    }
+}
