@@ -80,6 +80,8 @@ lru.workspace = true
 zerocopy.workspace = true
 # JSON Schema generation for FileConfig — consumed by crabka-docgen.
 schemars = { workspace = true }
+# KIP-714: stable subscription-id via CRC32C over sorted metric-prefix set.
+crc32c = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
