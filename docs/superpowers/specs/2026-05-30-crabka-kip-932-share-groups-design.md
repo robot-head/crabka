@@ -31,9 +31,9 @@ KIP-932 introduces three new server-side subsystems:
 - **All 24 share-group wire codecs are generated** into
   `crates/protocol/generated/` as a byproduct of the blanket protocol-coverage
   codegen. The messages decode/encode today; nothing handles them.
-- The **KIP-848 next-gen coordinator** actor framework
-  (`crates/broker/src/coordinator/next_gen/`): `NextGenCoordinator` with a
-  per-group tokio actor (`group_actor.rs`), `GroupState`, a `reconciler`, an
+- The **KIP-848 unified coordinator** actor framework
+  (`crates/broker/src/coordinator/unified/`): `GroupCoordinator` with a
+  per-group tokio actor (`actor.rs`), `GroupState` (`consumer_state.rs`), a `reconciler`, an
   `Assignor` trait (`UniformAssignor`, `RangeAssignor`), an `offsets_log`
   abstraction, and `__consumer_offsets` bootstrap + replay.
 - The `ConsumerGroupHeartbeat` handler
@@ -123,14 +123,16 @@ require a distinct lookup, it is a small additive change.)
 
 ## Architecture
 
-Share groups become a new **group variant** inside the existing `next_gen`
-coordinator, reusing its actor-per-group model, bootstrap/replay, offsets-log,
-and reconciler:
+Share groups become a new **group variant** inside the existing `unified`
+coordinator (`GroupCoordinator`), reusing its actor-per-group model,
+bootstrap/replay, offsets-log, and reconciler. (The implementation plan uses a
+parallel `unified/share/` actor rather than overloading the consumer-hardcoded
+actor.)
 
 ```
 ShareGroupHeartbeat(76) ─┐
-ShareGroupDescribe(77)  ─┼─► handlers/ ──► NextGenCoordinator.get_or_create(group_id)
-                         │                    └─► GroupActor { variant: Share(ShareGroupState) }
+ShareGroupDescribe(77)  ─┼─► handlers/ ──► GroupCoordinator.get_or_create_share(group_id)
+                         │                    └─► ShareGroupActor { ShareGroupState }
                          │                          ├─ membership: members, group epoch, member epochs
                          │                          ├─ reconciler ──► ShareGroupAssignor (overlapping)
                          │                          └─ persists ShareGroup* records ──► __consumer_offsets
@@ -143,7 +145,7 @@ rejected).
 
 ## Components
 
-### 1. `coordinator/next_gen/share/` module
+### 1. `coordinator/unified/share/` module
 
 - `ShareGroupState` — members map, group epoch, per-member epoch, subscribed
   topic set, target assignment, current assignments. Mirrors the consumer-group
@@ -191,7 +193,7 @@ ACL enforcement follows the principal/authorize pattern in `offset_commit.rs`.
 
 ### 4. Persistence (records in `__consumer_offsets`)
 
-Hand-written key/value codecs in `coordinator/next_gen/share/persistence.rs`,
+Hand-written key/value codecs in `coordinator/unified/share/persistence.rs`,
 following Kafka's coordinator-record layouts, written to and replayed from
 `__consumer_offsets` (no new topic in Slice A). Record types:
 
@@ -232,7 +234,7 @@ share consumer cannot make progress past join until Slice C, which is expected.)
 
 ### 7. Error codes
 
-Wire all five share error codes into `crates/protocol/src/error.rs` now (cheap,
+Wire all five share error codes into `crates/broker/src/codes.rs` now (cheap,
 non-conflicting leaf change): `INVALID_RECORD_STATE(121)`,
 `SHARE_SESSION_NOT_FOUND(122)`, `INVALID_SHARE_SESSION_EPOCH(123)`,
 `FENCED_STATE_EPOCH(124)`, `SHARE_SESSION_LIMIT_REACHED(133)`. Slice A actively
@@ -309,12 +311,12 @@ not Slice A.
 
 Non-overlapping task groups (per CLAUDE.md execution guidance):
 
-- **Wire/error (leaf):** `crates/protocol/src/error.rs` (+ codes), ApiVersions
-  advertisement table.
-- **Coordinator core:** `crates/broker/src/coordinator/next_gen/share/` (new
-  module: state, reconciler hook, assignor), `group_actor.rs` (variant enum +
-  message arms), `next_gen/mod.rs` (variant routing).
-- **Persistence:** `crates/broker/src/coordinator/next_gen/share/persistence.rs`
+- **Wire/error (leaf):** `crates/broker/src/codes.rs` (+ codes), ApiVersions
+  advertisement (`crates/broker/src/api_catalog.rs`).
+- **Coordinator core:** `crates/broker/src/coordinator/unified/share/` (new
+  module: state, actor, assignor), `unified/mod.rs` (`GroupType::Share`, share
+  registry + routing).
+- **Persistence:** `crates/broker/src/coordinator/unified/share/persistence.rs`
   (+ bootstrap replay key-dispatch).
 - **Handlers:** `crates/broker/src/handlers/share_group_heartbeat.rs`,
   `share_group_describe.rs`, `handlers/mod.rs` registration.
@@ -322,6 +324,6 @@ Non-overlapping task groups (per CLAUDE.md execution guidance):
   definition.
 - **Tests:** `crates/broker/tests/share_groups.rs`.
 
-The coordinator-core, group_actor, and next_gen/mod edits touch shared files and
-must be sequenced or assigned to one implementer; wire/error, config, and the
-handler files are largely independent and can run in parallel.
+The coordinator-core and `unified/mod.rs` edits touch shared files and must be
+sequenced or assigned to one implementer; wire/error, config, and the handler
+files are largely independent and can run in parallel.
