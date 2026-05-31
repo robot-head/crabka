@@ -1,0 +1,711 @@
+//! End-to-end integration tests for KIP-932 Slice D: share-group admin offset
+//! RPCs — `DescribeShareGroupOffsets` (api_key 90), `AlterShareGroupOffsets`
+//! (91), `DeleteShareGroupOffsets` (92).
+//!
+//! The typed client works because ApiVersions advertises api_keys 90/91/92 and
+//! all three requests impl `ProtocolRequest`, so `client.send(req)` exercises
+//! the real wire path (frame parse → handler → encode, version-negotiated).
+//!
+//! These tests prove:
+//! - Describe reflects the durable SPSO after a consume+Accept advances it, and
+//!   reports lag = HWM − SPSO for a locally-led partition;
+//! - Alter on an *empty* group resets the SPSO (state-epoch bump + re-init) AND
+//!   invalidates the share-partition leader cache so a subsequent ShareFetch
+//!   acquires starting at the new offset;
+//! - Alter on a *non-empty* (live-member) group is rejected with NON_EMPTY_GROUP;
+//! - Delete removes the durable share-state for a topic (Describe then reads the
+//!   partition as missing → start_offset -1);
+//! - Describe of an unknown topic returns UNKNOWN_TOPIC_OR_PARTITION per
+//!   partition.
+
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
+use assert2::assert;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crabka_broker::{Broker, BrokerConfig};
+use crabka_client_core::Client;
+use crabka_protocol::owned::alter_share_group_offsets_request::{
+    AlterShareGroupOffsetsRequest, AlterShareGroupOffsetsRequestPartition,
+    AlterShareGroupOffsetsRequestTopic,
+};
+use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::delete_share_group_offsets_request::{
+    DeleteShareGroupOffsetsRequest, DeleteShareGroupOffsetsRequestTopic,
+};
+use crabka_protocol::owned::describe_share_group_offsets_request::{
+    DescribeShareGroupOffsetsRequest, DescribeShareGroupOffsetsRequestGroup,
+    DescribeShareGroupOffsetsRequestTopic,
+};
+use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
+use crabka_protocol::owned::produce_request::{
+    PartitionProduceData, ProduceRequest, TopicProduceData,
+};
+use crabka_protocol::owned::share_acknowledge_request::{
+    AcknowledgePartition, AcknowledgeTopic, AcknowledgementBatch as AckAckBatch,
+    ShareAcknowledgeRequest,
+};
+use crabka_protocol::owned::share_acknowledge_response::ShareAcknowledgeResponse;
+use crabka_protocol::owned::share_fetch_request::{
+    AcknowledgementBatch as FetchAckBatch, FetchPartition, FetchTopic, ShareFetchRequest,
+};
+use crabka_protocol::owned::share_fetch_response::ShareFetchResponse;
+use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_protocol::records::{Record, RecordBatch};
+
+const NONE: i16 = 0;
+const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+const NON_EMPTY_GROUP: i16 = 68;
+
+const ACCEPT: i8 = 1;
+const ONE_MB: i32 = 1 << 20;
+
+// ────────────────────────────────────────────────────────────────────────
+// Harness (copied from tests/share_consume.rs — tests are separate
+// compilation units, each carries its own helper copies).
+// ────────────────────────────────────────────────────────────────────────
+
+async fn connect(bootstrap: &str) -> Arc<Client> {
+    Arc::new(
+        Client::builder()
+            .bootstrap(bootstrap)
+            .client_id("c1")
+            .build()
+            .await
+            .unwrap(),
+    )
+}
+
+async fn create_topic(
+    broker: &crabka_broker::BrokerHandle,
+    client: &Client,
+    topic: &str,
+    partitions: i32,
+) {
+    let resp = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: topic.into(),
+                num_partitions: partitions,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("CreateTopics");
+    assert!(
+        resp.topics[0].error_code == 0,
+        "topic create failed: {resp:?}"
+    );
+    for _ in 0..200 {
+        if broker.has_partition(topic, 0).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("partition {topic}:0 never materialized");
+}
+
+fn topic_id(broker: &crabka_broker::BrokerHandle, topic: &str) -> uuid::Uuid {
+    let image = broker.controller_image_for_test();
+    image
+        .topic(topic)
+        .map(|t| *t.topic_id.as_bytes())
+        .map(uuid::Uuid::from_bytes)
+        .expect("topic present in image")
+}
+
+fn wire(tid: uuid::Uuid) -> WireUuid {
+    WireUuid(*tid.as_bytes())
+}
+
+const SHARE_STATE_TOPIC: &str = "__share_group_state";
+const SHARE_STATE_PARTITIONS: i32 = 50;
+
+async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Client, key: &str) {
+    let resp = client
+        .send(FindCoordinatorRequest {
+            key_type: 2, // SHARE
+            coordinator_keys: vec![key.to_string()],
+            ..Default::default()
+        })
+        .await
+        .expect("FindCoordinator(SHARE)");
+    assert!(
+        resp.coordinators[0].error_code == 0,
+        "FindCoordinator(SHARE) error: {}",
+        resp.coordinators[0].error_code
+    );
+    for _ in 0..200 {
+        let mut have = 0;
+        for p in 0..SHARE_STATE_PARTITIONS {
+            if broker.has_partition(SHARE_STATE_TOPIC, p).await {
+                have += 1;
+            }
+        }
+        if have == SHARE_STATE_PARTITIONS {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("__share_group_state never fully materialized");
+}
+
+async fn wait_for_share_init(
+    broker: &crabka_broker::BrokerHandle,
+    group: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+) {
+    for _ in 0..100 {
+        if broker
+            .share_state_summary_for_test(group, tid, partition)
+            .await
+            .is_some()
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("share state for {group}:{tid}:{partition} never initialized");
+}
+
+async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32, n: i64) {
+    for _ in 0..40 {
+        let records: Vec<Record> = (0..n)
+            .map(|i| Record {
+                offset_delta: i32::try_from(i).unwrap(),
+                value: Some(bytes::Bytes::copy_from_slice(format!("v{i}").as_bytes())),
+                ..Default::default()
+            })
+            .collect();
+        let resp = client
+            .send(ProduceRequest {
+                transactional_id: None,
+                acks: -1,
+                timeout_ms: 5_000,
+                topic_data: vec![TopicProduceData {
+                    name: topic.to_string(),
+                    topic_id: wire(tid),
+                    partition_data: vec![PartitionProduceData {
+                        index: partition,
+                        records: Some(
+                            RecordBatch {
+                                last_offset_delta: i32::try_from(n - 1).unwrap(),
+                                records,
+                                ..Default::default()
+                            }
+                            .into(),
+                        ),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("Produce");
+        let p = &resp.responses[0].partition_responses[0];
+        if p.error_code == 0 {
+            return;
+        }
+        if p.error_code == 3 || p.error_code == 6 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        panic!("produce failed: {p:?}");
+    }
+    panic!("partition never became produceable for {topic}:{partition}");
+}
+
+/// Join `group` subscribed to `topic`, driving steady-state heartbeats so the
+/// lifecycle hook initializes the subscribed partitions' share state. Returns
+/// `(member_id, member_epoch)` so the caller can leave with the live epoch.
+async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
+    let resp = client
+        .send(ShareGroupHeartbeatRequest {
+            group_id: group.into(),
+            member_id: String::new(),
+            member_epoch: 0,
+            subscribed_topic_names: Some(vec![topic.into()]),
+            ..Default::default()
+        })
+        .await
+        .expect("ShareGroupHeartbeat");
+    assert!(resp.error_code == 0, "join failed: {:?}", resp.error_code);
+    let member_id = resp.member_id.expect("broker must mint a member id");
+    let mut epoch = resp.member_epoch;
+
+    for _ in 0..3 {
+        let hb = client
+            .send(ShareGroupHeartbeatRequest {
+                group_id: group.into(),
+                member_id: member_id.clone(),
+                member_epoch: epoch,
+                subscribed_topic_names: Some(vec![topic.into()]),
+                ..Default::default()
+            })
+            .await
+            .expect("ShareGroupHeartbeat steady-state");
+        epoch = hb.member_epoch;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    (member_id, epoch)
+}
+
+/// Leave the group via `member_epoch == -1`; the group is retained but reported
+/// with zero members (state "Empty").
+async fn leave(client: &Client, group: &str, member_id: &str) {
+    let resp = client
+        .send(ShareGroupHeartbeatRequest {
+            group_id: group.into(),
+            member_id: member_id.into(),
+            member_epoch: -1,
+            ..Default::default()
+        })
+        .await
+        .expect("ShareGroupHeartbeat leave");
+    assert!(resp.error_code == 0, "leave failed: {:?}", resp.error_code);
+}
+
+fn share_fetch_req(
+    group: &str,
+    member: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+    epoch: i32,
+    max_wait_ms: i32,
+    acks: Vec<FetchAckBatch>,
+) -> ShareFetchRequest {
+    ShareFetchRequest {
+        group_id: Some(group.into()),
+        member_id: Some(member.into()),
+        share_session_epoch: epoch,
+        max_wait_ms,
+        min_bytes: 1,
+        max_bytes: ONE_MB,
+        max_records: 500,
+        batch_size: 500,
+        share_acquire_mode: 0,
+        is_renew_ack: false,
+        topics: vec![FetchTopic {
+            topic_id: wire(tid),
+            partitions: vec![FetchPartition {
+                partition_index: partition,
+                partition_max_bytes: ONE_MB,
+                acknowledgement_batches: acks,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        forgotten_topics_data: vec![],
+        ..Default::default()
+    }
+}
+
+async fn share_fetch(
+    client: &Client,
+    group: &str,
+    member: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+    epoch: i32,
+    max_wait_ms: i32,
+) -> crabka_protocol::owned::share_fetch_response::PartitionData {
+    let req = share_fetch_req(group, member, tid, partition, epoch, max_wait_ms, vec![]);
+    let resp: ShareFetchResponse = client.send(req).await.expect("ShareFetch");
+    assert!(
+        resp.error_code == NONE,
+        "ShareFetch top-level error: {}",
+        resp.error_code
+    );
+    resp.responses[0].partitions[0].clone()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn share_ack(
+    client: &Client,
+    group: &str,
+    member: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+    epoch: i32,
+    first: i64,
+    last: i64,
+    ack_type: i8,
+) -> crabka_protocol::owned::share_acknowledge_response::PartitionData {
+    let count = usize::try_from(last - first + 1).unwrap();
+    let req = ShareAcknowledgeRequest {
+        group_id: Some(group.into()),
+        member_id: Some(member.into()),
+        share_session_epoch: epoch,
+        is_renew_ack: false,
+        topics: vec![AcknowledgeTopic {
+            topic_id: wire(tid),
+            partitions: vec![AcknowledgePartition {
+                partition_index: partition,
+                acknowledgement_batches: vec![AckAckBatch {
+                    first_offset: first,
+                    last_offset: last,
+                    acknowledge_types: vec![ack_type; count],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp: ShareAcknowledgeResponse = client.send(req).await.expect("ShareAcknowledge");
+    assert!(
+        resp.error_code == NONE,
+        "ShareAcknowledge top-level error: {}",
+        resp.error_code
+    );
+    resp.responses[0].partitions[0].clone()
+}
+
+fn acquired_count(p: &crabka_protocol::owned::share_fetch_response::PartitionData) -> i64 {
+    p.acquired_records
+        .iter()
+        .map(|r| r.last_offset - r.first_offset + 1)
+        .sum()
+}
+
+async fn fetch_until_acquired(
+    client: &Client,
+    group: &str,
+    member: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+    epoch: i32,
+) -> crabka_protocol::owned::share_fetch_response::PartitionData {
+    for _ in 0..40 {
+        let row = share_fetch(client, group, member, tid, partition, epoch, 0).await;
+        if row.error_code == NONE && acquired_count(&row) > 0 {
+            return row;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("share fetch never acquired any records for {group}:{tid}:{partition}");
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Admin-offset request helpers (the RPCs under test).
+// ────────────────────────────────────────────────────────────────────────
+
+/// `DescribeShareGroupOffsets` for a single `(group, topic, partitions)`.
+/// Returns the (single) topic row. `partitions` empty ⇒ "all initialized".
+async fn describe_offsets(
+    client: &Client,
+    group: &str,
+    topic: &str,
+    partitions: Vec<i32>,
+) -> crabka_protocol::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponseGroup
+{
+    let resp = client
+        .send(DescribeShareGroupOffsetsRequest {
+            groups: vec![DescribeShareGroupOffsetsRequestGroup {
+                group_id: group.into(),
+                topics: Some(vec![DescribeShareGroupOffsetsRequestTopic {
+                    topic_name: topic.into(),
+                    partitions,
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("DescribeShareGroupOffsets");
+    resp.groups[0].clone()
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Tests.
+// ────────────────────────────────────────────────────────────────────────
+
+/// Describe reflects the SPSO after a consume that Accepts all records: the
+/// SPSO advances to 3 and the (locally-led) partition reports lag 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_reflects_spso_after_consume() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    create_topic(&broker, &client, "t", 1).await;
+    let tid = topic_id(&broker, "t");
+    bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+    produce_n(&client, "t", tid, 0, 3).await;
+    let (member, _epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, "g1", tid, 0).await;
+
+    // Acquire 0..2, Accept all → SPSO advances to 3.
+    let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
+    assert!(acquired_count(&row) == 3, "must acquire all 3 offsets");
+    let ack = share_ack(&client, "g1", &member, tid, 0, 1, 0, 2, ACCEPT).await;
+    assert!(ack.error_code == NONE, "accept error: {}", ack.error_code);
+
+    // Let the persister land the advanced SPSO durably.
+    let group = describe_until(&client, "g1", "t", vec![0], 3).await;
+    let part = &group.topics[0].partitions[0];
+    assert!(
+        group.error_code == NONE,
+        "group error: {}",
+        group.error_code
+    );
+    assert!(group.topics[0].topic_name == "t");
+    assert!(
+        part.error_code == NONE,
+        "partition error: {}",
+        part.error_code
+    );
+    assert!(
+        part.start_offset == 3,
+        "SPSO must be 3 after Accept of 0..2, got {}",
+        part.start_offset
+    );
+    // HWM is 3 (3 produced), SPSO is 3, partition is local ⇒ lag 0.
+    assert!(
+        part.lag == 0,
+        "lag must be 0 (HWM 3 − SPSO 3), got {}",
+        part.lag
+    );
+}
+
+/// Poll Describe until the partition reports the expected SPSO (the persister
+/// write of the advanced SPSO is asynchronous after the Accept ack).
+async fn describe_until(
+    client: &Client,
+    group: &str,
+    topic: &str,
+    partitions: Vec<i32>,
+    want_spso: i64,
+) -> crabka_protocol::owned::describe_share_group_offsets_response::DescribeShareGroupOffsetsResponseGroup
+{
+    let mut last = describe_offsets(client, group, topic, partitions.clone()).await;
+    for _ in 0..40 {
+        if let Some(p) = last.topics.first().and_then(|t| t.partitions.first())
+            && p.start_offset == want_spso
+        {
+            return last;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        last = describe_offsets(client, group, topic, partitions.clone()).await;
+    }
+    last
+}
+
+/// Alter resets the SPSO of an empty group: the persister state is re-initialized
+/// at the requested offset, the leader cache is invalidated, and a subsequent
+/// ShareFetch acquires starting at the new offset.
+///
+/// The group has *no members* when Alter runs, so the share-state has never been
+/// seeded by the membership lifecycle (a member join/leave would reap the state
+/// when the group empties). Alter therefore initializes-from-absent at
+/// `state_epoch = 1` with `start_offset = 5`. A subsequent first-join then
+/// reconciles at `group_epoch = 1`; its lifecycle re-init (`initialize(1, 0)`) is
+/// *fenced* by the equal-or-higher durable `state_epoch`, so the Alter's SPSO
+/// survives and the first ShareFetch acquires from offset 5 — exercising the
+/// real acquire path against the reset (and invalidated) leader cache.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_resets_empty_group() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    create_topic(&broker, &client, "t", 1).await;
+    let tid = topic_id(&broker, "t");
+    // Make the share coordinator write-ready WITHOUT joining (no members).
+    bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+    // Produce 6 records so offset 5 exists.
+    produce_n(&client, "t", tid, 0, 6).await;
+
+    // Alter: reset SPSO to 5 on the empty (never-joined) group. This
+    // initializes-from-absent at state_epoch 1, and invalidates the (empty)
+    // leader cache. Retry while the persister leadership is still settling.
+    let mut altered = false;
+    for _ in 0..40 {
+        let resp = client
+            .send(AlterShareGroupOffsetsRequest {
+                group_id: "g1".into(),
+                topics: vec![AlterShareGroupOffsetsRequestTopic {
+                    topic_name: "t".into(),
+                    partitions: vec![AlterShareGroupOffsetsRequestPartition {
+                        partition_index: 0,
+                        start_offset: 5,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("AlterShareGroupOffsets");
+        if resp.error_code == NONE && resp.responses[0].partitions[0].error_code == NONE {
+            altered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(altered, "AlterShareGroupOffsets never succeeded");
+
+    // Describe now reports the new SPSO.
+    let group = describe_until(&client, "g1", "t", vec![0], 5).await;
+    assert!(
+        group.topics[0].partitions[0].start_offset == 5,
+        "SPSO must be 5 after Alter, got {}",
+        group.topics[0].partitions[0].start_offset
+    );
+
+    // Join and ShareFetch: must acquire starting at offset 5 (the reset SPSO).
+    // The first-join lifecycle re-init is fenced by the Alter's state_epoch, so
+    // the acquire reads the reset SPSO 5 via the invalidated leader cache.
+    let (member, _epoch) = join(&client, "g1", "t").await;
+    let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
+    assert!(
+        row.acquired_records[0].first_offset == 5,
+        "fetch after Alter must acquire from offset 5, got {:?}",
+        row.acquired_records
+    );
+}
+
+/// Alter on a non-empty (live-member) group is rejected top-level with
+/// NON_EMPTY_GROUP.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn alter_non_empty_group_fenced() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    create_topic(&broker, &client, "t", 1).await;
+    let tid = topic_id(&broker, "t");
+    bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+    produce_n(&client, "t", tid, 0, 3).await;
+
+    // Live member present (steady-state heartbeat), never leaves.
+    let (_member, _epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, "g1", tid, 0).await;
+
+    let resp = client
+        .send(AlterShareGroupOffsetsRequest {
+            group_id: "g1".into(),
+            topics: vec![AlterShareGroupOffsetsRequestTopic {
+                topic_name: "t".into(),
+                partitions: vec![AlterShareGroupOffsetsRequestPartition {
+                    partition_index: 0,
+                    start_offset: 1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("AlterShareGroupOffsets");
+    assert!(
+        resp.error_code == NON_EMPTY_GROUP,
+        "alter on non-empty group must be NON_EMPTY_GROUP (68), got {}",
+        resp.error_code
+    );
+}
+
+/// Delete removes the durable share-state for a topic of an empty group; a
+/// subsequent Describe reads the partition as missing (start_offset -1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_removes_topic() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    create_topic(&broker, &client, "t", 1).await;
+    let tid = topic_id(&broker, "t");
+    bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+    produce_n(&client, "t", tid, 0, 3).await;
+
+    // Initialize the topic's share state via the join lifecycle + a consume, then
+    // leave so the group is empty.
+    let (member, _epoch) = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, "g1", tid, 0).await;
+    let _ = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
+    leave(&client, "g1", &member).await;
+
+    let resp = client
+        .send(DeleteShareGroupOffsetsRequest {
+            group_id: "g1".into(),
+            topics: vec![DeleteShareGroupOffsetsRequestTopic {
+                topic_name: "t".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("DeleteShareGroupOffsets");
+    assert!(
+        resp.error_code == NONE,
+        "delete top-level error: {}",
+        resp.error_code
+    );
+    assert!(
+        resp.responses[0].topic_name == "t",
+        "delete response topic name mismatch: {}",
+        resp.responses[0].topic_name
+    );
+    assert!(
+        resp.responses[0].error_code == NONE,
+        "delete per-topic error: {}",
+        resp.responses[0].error_code
+    );
+
+    // Describe now reads the removed partition as missing → start_offset -1.
+    let group = describe_until(&client, "g1", "t", vec![0], -1).await;
+    let part = &group.topics[0].partitions[0];
+    assert!(
+        part.start_offset == -1,
+        "deleted state must read as missing (start_offset -1), got {}",
+        part.start_offset
+    );
+    assert!(
+        part.error_code == NONE,
+        "describe of missing partition is not an error, got {}",
+        part.error_code
+    );
+}
+
+/// Describe of an unknown topic returns UNKNOWN_TOPIC_OR_PARTITION per partition.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_unknown_topic() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    // The persister must exist for the handler to reach topic resolution; a
+    // FindCoordinator(SHARE) bootstrap makes the share coordinator available.
+    // The key needs a syntactically valid `group:topicId:partition` shape; the
+    // topic id need not refer to a real topic for the bootstrap to succeed.
+    let dummy = uuid::Uuid::new_v4();
+    bootstrap_share_state(&broker, &client, &format!("g1:{dummy}:0")).await;
+
+    let group = describe_offsets(&client, "g1", "nonexistent", vec![0]).await;
+    assert!(
+        group.error_code == NONE,
+        "group-level describe must succeed, got {}",
+        group.error_code
+    );
+    let part = &group.topics[0].partitions[0];
+    assert!(
+        part.error_code == UNKNOWN_TOPIC_OR_PARTITION,
+        "unknown topic must be UNKNOWN_TOPIC_OR_PARTITION (3), got {}",
+        part.error_code
+    );
+}
