@@ -12,6 +12,7 @@ use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 use crabka_protocol::owned::offset_commit_response::{
     OffsetCommitResponse, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
 };
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{Record, RecordBatch};
 use crabka_protocol::{Decode, Encode};
 use tokio::sync::oneshot;
@@ -36,7 +37,49 @@ pub(crate) async fn handle(
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
-    let req = OffsetCommitRequest::decode(&mut cur, version)?;
+    let mut req = OffsetCommitRequest::decode(&mut cur, version)?;
+
+    // ── KIP-516 (v10+): topic_id → name normalization ───────────
+    // At v10 the client sends `name` empty + `topic_id` set. The internal
+    // commit pipeline (and the `__consumer_offsets` record key) is
+    // name-keyed, so resolve id→name in place. Topics whose id is unknown
+    // are split off: they get UNKNOWN_TOPIC_ID on every partition and are
+    // not committed. `finalize` appends those rows to every response, and
+    // the response echoes each topic's `topic_id`.
+    let mut unknown_id_topics: Vec<OffsetCommitResponseTopic> = Vec::new();
+    {
+        let image = broker.controller.current_image();
+        let mut resolved = Vec::with_capacity(req.topics.len());
+        for mut topic in req.topics.drain(..) {
+            if topic.name.is_empty() && topic.topic_id != WireUuid::ZERO {
+                match image.topic_name_by_id(&uuid::Uuid::from_bytes(topic.topic_id.0)) {
+                    Some(name) => {
+                        topic.name = name.to_string();
+                        resolved.push(topic);
+                    }
+                    None => {
+                        unknown_id_topics.push(OffsetCommitResponseTopic {
+                            name: String::new(),
+                            topic_id: topic.topic_id,
+                            partitions: topic
+                                .partitions
+                                .iter()
+                                .map(|p| OffsetCommitResponsePartition {
+                                    partition_index: p.partition_index,
+                                    error_code: codes::UNKNOWN_TOPIC_ID,
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            ..Default::default()
+                        });
+                    }
+                }
+            } else {
+                resolved.push(topic);
+            }
+        }
+        req.topics = resolved;
+    }
 
     // ── ACL preamble ────────────────────────────────────────────
     // Step 1: `Read` on `Group(group_id)`. On Deny → whole-response
@@ -53,7 +96,7 @@ pub(crate) async fn handle(
         };
         if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
             let resp = build_response_all(&req, codes::GROUP_AUTHORIZATION_FAILED);
-            return encode(version, &resp);
+            return finalize(version, resp, unknown_id_topics.clone());
         }
     }
 
@@ -66,13 +109,13 @@ pub(crate) async fn handle(
             .get_or_create_classic(&req.group_id)
     }) else {
         let resp = build_response_all(&req, codes::UNKNOWN_SERVER_ERROR);
-        return encode(version, &resp);
+        return finalize(version, resp, unknown_id_topics.clone());
     };
 
     // Validate membership/epoch through the actor (kind-specific).
     if let Some(code) = validate(&handle, &req).await {
         let resp = build_response_all(&req, code);
-        return encode(version, &resp);
+        return finalize(version, resp, unknown_id_topics.clone());
     }
 
     // ── ACL preamble ────────────────────────────────────────────
@@ -115,6 +158,7 @@ pub(crate) async fn handle(
                 };
                 OffsetCommitResponseTopic {
                     name: t.name.clone(),
+                    topic_id: t.topic_id,
                     partitions: t
                         .partitions
                         .iter()
@@ -164,6 +208,7 @@ pub(crate) async fn handle(
                         };
                         OffsetCommitResponseTopic {
                             name: t.name.clone(),
+                            topic_id: t.topic_id,
                             partitions: t
                                 .partitions
                                 .iter()
@@ -182,7 +227,7 @@ pub(crate) async fn handle(
                     throttle_time_ms: 0,
                     ..Default::default()
                 };
-                return encode(version, &resp);
+                return finalize(version, resp, unknown_id_topics.clone());
             }
             update_committed(&allowed_req, &handle, now_ms).await;
         }
@@ -192,13 +237,13 @@ pub(crate) async fn handle(
             throttle_time_ms: 0,
             ..Default::default()
         };
-        return encode(version, &resp);
+        return finalize(version, resp, unknown_id_topics.clone());
     }
 
     // 2. Append a RecordBatch into `__consumer_offsets-0`.
     if let Err(code) = append_batch(&req, &broker.partitions, now_ms).await {
         let resp = build_response_all(&req, code);
-        return encode(version, &resp);
+        return finalize(version, resp, unknown_id_topics.clone());
     }
 
     // 3. Update in-memory state.
@@ -206,6 +251,18 @@ pub(crate) async fn handle(
 
     // 4. Uniform per-(topic, partition) success.
     let resp = build_response_all(&req, codes::NONE);
+    finalize(version, resp, unknown_id_topics)
+}
+
+/// Append the KIP-516 unknown-`topic_id` rows (if any) to the response and
+/// encode it. Every return path in `handle` flows through here so unknown-id
+/// topics surface `UNKNOWN_TOPIC_ID` even when the rest of the commit errors.
+fn finalize(
+    version: i16,
+    mut resp: OffsetCommitResponse,
+    unknown: Vec<OffsetCommitResponseTopic>,
+) -> Result<Bytes, BrokerError> {
+    resp.topics.extend(unknown);
     encode(version, &resp)
 }
 
@@ -357,6 +414,7 @@ fn build_response_all(req: &OffsetCommitRequest, code: i16) -> OffsetCommitRespo
         .iter()
         .map(|t| OffsetCommitResponseTopic {
             name: t.name.clone(),
+            topic_id: t.topic_id,
             partitions: t
                 .partitions
                 .iter()

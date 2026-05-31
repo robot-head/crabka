@@ -57,6 +57,10 @@ pub fn canonicalize_entity(mut tuple: Vec<(String, Option<String>)>) -> EntityKe
 pub struct MetadataImage {
     cluster_id: Uuid,
     topics: HashMap<String, TopicRecord>,
+    /// KIP-516 reverse index: topic UUID -> topic name. Maintained in
+    /// `apply()` alongside `topics`; rebuilt on snapshot replay because
+    /// every record (including snapshot installs) flows through `apply()`.
+    topic_ids: HashMap<Uuid, String>,
     partitions: HashMap<(String, i32), PartitionRecord>,
     brokers: HashMap<NodeId, BrokerRegistrationRecord>,
     topic_configs: HashMap<String, BTreeMap<String, String>>,
@@ -89,6 +93,7 @@ impl MetadataImage {
         Self {
             cluster_id,
             topics: HashMap::new(),
+            topic_ids: HashMap::new(),
             partitions: HashMap::new(),
             brokers: HashMap::new(),
             topic_configs: HashMap::new(),
@@ -117,6 +122,19 @@ impl MetadataImage {
     #[must_use]
     pub fn topic(&self, name: &str) -> Option<&TopicRecord> {
         self.topics.get(name)
+    }
+
+    /// KIP-516: resolve a topic by its UUID. O(1) via the `topic_ids` index.
+    #[must_use]
+    pub fn topic_by_id(&self, id: &Uuid) -> Option<&TopicRecord> {
+        let name = self.topic_ids.get(id)?;
+        self.topics.get(name)
+    }
+
+    /// KIP-516: resolve a topic name by its UUID.
+    #[must_use]
+    pub fn topic_name_by_id(&self, id: &Uuid) -> Option<&str> {
+        self.topic_ids.get(id).map(String::as_str)
     }
 
     #[must_use]
@@ -367,6 +385,14 @@ impl MetadataImage {
     pub fn apply(&mut self, rec: &MetadataRecord) {
         match rec {
             MetadataRecord::V1Topic(t) => {
+                // If a topic with this name already exists under a different
+                // id, drop the stale id entry before re-indexing.
+                if let Some(prev) = self.topics.get(&t.name)
+                    && prev.topic_id != t.topic_id
+                {
+                    self.topic_ids.remove(&prev.topic_id);
+                }
+                self.topic_ids.insert(t.topic_id, t.name.clone());
                 self.topics.insert(t.name.clone(), t.clone());
             }
             MetadataRecord::V1Partition(p) => {
@@ -377,6 +403,9 @@ impl MetadataImage {
                 self.brokers.insert(b.node_id, b.clone());
             }
             MetadataRecord::V1DeleteTopic(d) => {
+                if let Some(prev) = self.topics.get(&d.name) {
+                    self.topic_ids.remove(&prev.topic_id);
+                }
                 self.topics.remove(&d.name);
                 self.partitions.retain(|(t, _), _| t != &d.name);
                 self.topic_configs.remove(&d.name);
@@ -1875,5 +1904,31 @@ mod tests {
             },
         ));
         assert!(m.min_required_metadata_version() == DELEGATION_TOKEN_MIN_LEVEL);
+    }
+
+    #[test]
+    fn topic_by_id_resolves_and_drops_on_delete() {
+        use crate::records::{MetadataRecord, TopicRecord};
+        let mut img = MetadataImage::new(Uuid::nil());
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1122_3344_5566_7788);
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+
+        // Resolves by id to the same record `topic(name)` returns.
+        assert!(img.topic_by_id(&id).map(|t| t.name.as_str()) == Some("orders"));
+        assert!(img.topic_name_by_id(&id) == Some("orders"));
+
+        // After delete the id no longer resolves and the name index is gone.
+        img.apply(&MetadataRecord::V1DeleteTopic(
+            crate::records::DeleteTopicRecord {
+                name: "orders".into(),
+            },
+        ));
+        assert!(img.topic_by_id(&id).is_none());
+        assert!(img.topic_name_by_id(&id).is_none());
     }
 }

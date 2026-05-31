@@ -49,27 +49,44 @@ pub(crate) async fn handle(
     //     in the response. Deny topics are silently omitted so the
     //     broker doesn't leak their existence to unauthorized clients.
     //
-    // We collect candidate topic *names* up front (resolving topic_id
-    // only when needed for v ≥ 10 named requests) and batch-authorize
-    // them once.
+    // For a named request we resolve each requested `(name, topic_id)`
+    // pair up front via the KIP-516 strict resolver, carrying the outcome
+    // (`Ok(record)` or an error wire code) per request entry so the
+    // response loop below can echo errors without collapsing an unknown
+    // id to an empty name. The set of names we authorize is sourced from
+    // the *resolved* records (plus the requested name for the
+    // name-only-miss case), so a topic requested by id is still
+    // ACL-checked under its real name.
     let named = req.topics.is_some();
-    let candidate_topics: Vec<String> = match &req.topics {
+    let resolved: Vec<(
+        &crabka_protocol::owned::metadata_request::MetadataRequestTopic,
+        Result<&crabka_metadata::TopicRecord, i16>,
+    )> = match &req.topics {
         Some(list) => list
             .iter()
             .map(|t| {
-                if let Some(n) = t.name.as_ref()
-                    && !n.is_empty()
-                {
-                    n.clone()
-                } else if t.topic_id != WireUuid::ZERO {
-                    image
-                        .topics()
-                        .find(|tt| tt.topic_id.into_bytes() == t.topic_id.0)
-                        .map(|tt| tt.name.clone())
-                        .unwrap_or_default()
-                } else {
-                    String::new()
+                let name_str = t.name.as_deref().unwrap_or("");
+                (
+                    t,
+                    crate::topic_resolve::resolve(&image, name_str, t.topic_id),
+                )
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    // Names to batch-authorize: resolved records' real names, plus the
+    // requested name for a name-only miss (so the UNKNOWN_TOPIC_OR_PARTITION
+    // row still respects Deny → omit / auth-failed semantics). Topic-id
+    // errors carry no trustworthy name and are surfaced unconditionally.
+    let candidate_topics: Vec<String> = match &req.topics {
+        Some(_) => resolved
+            .iter()
+            .filter_map(|(t, r)| match r {
+                Ok(rec) => Some(rec.name.clone()),
+                Err(code) if *code == codes::UNKNOWN_TOPIC_OR_PARTITION => {
+                    t.name.clone().filter(|n| !n.is_empty())
                 }
+                Err(_) => None,
             })
             .collect(),
         None => image.topics().map(|t| t.name.clone()).collect(),
@@ -89,92 +106,128 @@ pub(crate) async fn handle(
         .map(|b| project_broker(b, &inter_broker_name))
         .collect();
 
-    let mut topics_out: Vec<MetadataResponseTopic> = Vec::with_capacity(candidate_topics.len());
-    for name in &candidate_topics {
-        let allowed = acl_by_name
-            .get(name.as_str())
+    let allowed = |name: &str| {
+        acl_by_name
+            .get(name)
             .copied()
             .unwrap_or(AuthorizationResult::Deny)
-            == AuthorizationResult::Allow;
-        if !allowed {
-            if named {
-                // Named-topic Deny: surface explicit auth-failed row so
-                // the client knows the request was rejected. Don't
-                // populate partitions / topic_id — we treat this as
-                // "you may not look at this topic".
-                topics_out.push(MetadataResponseTopic {
-                    error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                    name: Some(name.clone()),
-                    topic_id: WireUuid::ZERO,
-                    ..Default::default()
-                });
-            }
-            // Fetch-all Deny: silently omit (don't leak existence).
-            continue;
+            == AuthorizationResult::Allow
+    };
+    // Build a fully-populated success row for a known topic by name.
+    let success_row = |name: &str, rec: &crabka_metadata::TopicRecord| {
+        // Partitions are stored in a `HashMap`; sort by index so clients
+        // (and tests) see a deterministic ordering.
+        let mut sorted: Vec<_> = image.partitions_of(name).collect();
+        sorted.sort_by_key(|p| p.partition);
+        let partitions: Vec<MetadataResponsePartition> = sorted
+            .into_iter()
+            .map(|p| MetadataResponsePartition {
+                error_code: codes::NONE,
+                partition_index: p.partition,
+                leader_id: i32::try_from(p.leader).unwrap_or(i32::MAX),
+                leader_epoch: p.leader_epoch,
+                replica_nodes: p
+                    .replicas
+                    .iter()
+                    .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                    .collect(),
+                isr_nodes: p
+                    .isr
+                    .iter()
+                    .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
+                    .collect(),
+                ..Default::default()
+            })
+            .collect();
+        // KIP-430: per-topic bitfield, only when the client opted in.
+        // Schema gates the field on version (v8+) so the value is
+        // harmlessly dropped on the wire below v8.
+        let topic_authorized_operations = if req.include_topic_authorized_operations {
+            authorized_operations_bits(
+                broker.config.authorizer.as_ref(),
+                &image,
+                ctx.principal,
+                ctx.peer,
+                ResourceType::Topic,
+                name,
+            )
+        } else {
+            i32::MIN
+        };
+        MetadataResponseTopic {
+            error_code: codes::NONE,
+            name: Some(rec.name.clone()),
+            topic_id: WireUuid(rec.topic_id.into_bytes()),
+            partitions,
+            is_internal: false,
+            topic_authorized_operations,
+            ..Default::default()
         }
+    };
 
-        match image.topic(name) {
-            None => {
-                // Allowed but unknown — surface UNKNOWN_TOPIC_OR_PARTITION.
-                // This path is only reachable for `named` requests
-                // (the fetch-all `candidate_topics` is sourced from
-                // `image.topics()`, so every entry resolves).
-                topics_out.push(MetadataResponseTopic {
-                    error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
-                    name: Some(name.clone()),
-                    topic_id: WireUuid::ZERO,
-                    ..Default::default()
-                });
-            }
-            Some(t) => {
-                // Partitions are stored in a `HashMap`; sort by index so
-                // clients (and tests) see a deterministic ordering.
-                let mut sorted: Vec<_> = image.partitions_of(name).collect();
-                sorted.sort_by_key(|p| p.partition);
-                let partitions: Vec<MetadataResponsePartition> = sorted
-                    .into_iter()
-                    .map(|p| MetadataResponsePartition {
-                        error_code: codes::NONE,
-                        partition_index: p.partition,
-                        leader_id: i32::try_from(p.leader).unwrap_or(i32::MAX),
-                        leader_epoch: p.leader_epoch,
-                        replica_nodes: p
-                            .replicas
-                            .iter()
-                            .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
-                            .collect(),
-                        isr_nodes: p
-                            .isr
-                            .iter()
-                            .map(|&r| i32::try_from(r).unwrap_or(i32::MAX))
-                            .collect(),
+    let mut topics_out: Vec<MetadataResponseTopic> = Vec::with_capacity(candidate_topics.len());
+    if named {
+        // Named request: drive off the per-entry resolution outcome so
+        // KIP-516 topic-id errors echo the requested id rather than
+        // collapsing to an empty name.
+        for (t, outcome) in &resolved {
+            match outcome {
+                Ok(rec) => {
+                    if !allowed(&rec.name) {
+                        // Named-topic Deny: surface explicit auth-failed row.
+                        topics_out.push(MetadataResponseTopic {
+                            error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                            name: Some(rec.name.clone()),
+                            topic_id: WireUuid::ZERO,
+                            ..Default::default()
+                        });
+                        continue;
+                    }
+                    topics_out.push(success_row(&rec.name, rec));
+                }
+                Err(code) if *code == codes::UNKNOWN_TOPIC_OR_PARTITION => {
+                    // Name-only miss. Preserve the existing behavior: a
+                    // Deny on the requested name yields an auth-failed row
+                    // (don't reveal whether the topic exists); otherwise
+                    // surface UNKNOWN_TOPIC_OR_PARTITION.
+                    let name_str = t.name.as_deref().unwrap_or("");
+                    if !name_str.is_empty() && !allowed(name_str) {
+                        topics_out.push(MetadataResponseTopic {
+                            error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                            name: t.name.clone(),
+                            topic_id: WireUuid::ZERO,
+                            ..Default::default()
+                        });
+                        continue;
+                    }
+                    topics_out.push(MetadataResponseTopic {
+                        error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
+                        name: t.name.clone(),
+                        topic_id: t.topic_id,
                         ..Default::default()
-                    })
-                    .collect();
-                // KIP-430: per-topic bitfield, only when the client opted
-                // in. Schema gates the field on version (v8+) so the
-                // value is harmlessly dropped on the wire below v8.
-                let topic_authorized_operations = if req.include_topic_authorized_operations {
-                    authorized_operations_bits(
-                        broker.config.authorizer.as_ref(),
-                        &image,
-                        ctx.principal,
-                        ctx.peer,
-                        ResourceType::Topic,
-                        name.as_str(),
-                    )
-                } else {
-                    i32::MIN
-                };
-                topics_out.push(MetadataResponseTopic {
-                    error_code: codes::NONE,
-                    name: Some(name.clone()),
-                    topic_id: WireUuid(t.topic_id.into_bytes()),
-                    partitions,
-                    is_internal: false,
-                    topic_authorized_operations,
-                    ..Default::default()
-                });
+                    });
+                }
+                Err(code) => {
+                    // KIP-516: UNKNOWN_TOPIC_ID / INCONSISTENT_TOPIC_ID.
+                    // Echo the requested name (may be `None`) and id.
+                    topics_out.push(MetadataResponseTopic {
+                        error_code: *code,
+                        name: t.name.clone(),
+                        topic_id: t.topic_id,
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    } else {
+        // Fetch-all: only `Allow` topics appear; Deny topics are silently
+        // omitted so the broker doesn't leak their existence.
+        for name in &candidate_topics {
+            if !allowed(name) {
+                continue;
+            }
+            if let Some(rec) = image.topic(name) {
+                topics_out.push(success_row(name, rec));
             }
         }
     }

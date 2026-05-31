@@ -1,13 +1,10 @@
 //! `Consumer::commit_sync` and `commit_async`.
 
-use std::collections::HashMap;
-
-use crabka_protocol::owned::offset_commit_request::{
-    OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
-};
+use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 
 use crate::consumer::Consumer;
 use crate::error::ConsumerError;
+use crate::offset_wire::build_commit_topics;
 
 impl Consumer {
     /// Commit the current next-offsets for every assigned partition.
@@ -17,7 +14,8 @@ impl Consumer {
         if offsets.is_empty() {
             return Ok(());
         }
-        let topics = build_commit_topics(offsets);
+        let topic_ids = self.topic_ids.lock().await.clone();
+        let topics = build_commit_topics(offsets, &topic_ids);
 
         let resp = self
             .client
@@ -50,12 +48,14 @@ impl Consumer {
         let generation = self.generation_id;
         let member_id = self.member_id.clone();
         let offsets = self.next_offsets.clone();
+        let topic_ids = self.topic_ids.clone();
         tokio::spawn(async move {
             let snapshot = offsets.lock().await.clone();
             if snapshot.is_empty() {
                 return;
             }
-            let topics = build_commit_topics(snapshot);
+            let topic_ids = topic_ids.lock().await.clone();
+            let topics = build_commit_topics(snapshot, &topic_ids);
             let res = client
                 .send(OffsetCommitRequest {
                     group_id,
@@ -70,30 +70,4 @@ impl Consumer {
             }
         });
     }
-}
-
-pub(crate) fn build_commit_topics(
-    offsets: HashMap<(String, i32), i64>,
-) -> Vec<OffsetCommitRequestTopic> {
-    let mut by_topic: HashMap<String, Vec<(i32, i64)>> = HashMap::new();
-    for ((t, p), off) in offsets {
-        by_topic.entry(t).or_default().push((p, off));
-    }
-    by_topic
-        .into_iter()
-        .map(|(name, parts)| OffsetCommitRequestTopic {
-            name,
-            partitions: parts
-                .into_iter()
-                .map(|(p, off)| OffsetCommitRequestPartition {
-                    partition_index: p,
-                    committed_offset: off,
-                    committed_leader_epoch: -1,
-                    committed_metadata: Some(String::new()),
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        })
-        .collect()
 }

@@ -169,6 +169,7 @@ pub mod telemetry;
 pub mod throttle;
 pub(crate) mod time_util;
 pub(crate) mod tls_reload;
+pub(crate) mod topic_resolve;
 mod txn;
 pub(crate) mod unclean_recovery;
 

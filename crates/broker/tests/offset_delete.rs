@@ -16,15 +16,40 @@ use crabka_protocol::Encode;
 use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
+use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
 use crabka_protocol::owned::offset_commit_request::{
     OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
 };
 use crabka_protocol::owned::offset_delete_request::{
     OffsetDeleteRequest, OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
 };
-use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
+use crabka_protocol::owned::offset_fetch_request::{
+    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
+};
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 const OFFSET_ABSENT_SENTINEL: i64 = -1; // OffsetFetch returns -1 when no offset is committed.
+
+/// Resolve a topic's UUID via Metadata. KIP-516: OffsetCommit/OffsetFetch
+/// negotiate to v10/v8+, which key by `topic_id` on the wire.
+async fn topic_id_for(p: &support::InProcess, name: &str) -> WireUuid {
+    let resp = p
+        .client
+        .send(MetadataRequest {
+            topics: Some(vec![MetadataRequestTopic {
+                name: Some(name.into()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        })
+        .await
+        .expect("Metadata for topic_id");
+    resp.topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(name))
+        .map(|t| t.topic_id)
+        .unwrap_or_default()
+}
 
 async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
     let resp = p
@@ -45,6 +70,7 @@ async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
 }
 
 async fn commit_offset(p: &support::InProcess, group: &str, topic: &str, partition: i32, off: i64) {
+    let id = topic_id_for(p, topic).await;
     let resp = p
         .client
         .send(OffsetCommitRequest {
@@ -53,6 +79,7 @@ async fn commit_offset(p: &support::InProcess, group: &str, topic: &str, partiti
             member_id: String::new(),
             topics: vec![OffsetCommitRequestTopic {
                 name: topic.into(),
+                topic_id: id,
                 partitions: vec![OffsetCommitRequestPartition {
                     partition_index: partition,
                     committed_offset: off,
@@ -73,20 +100,25 @@ async fn commit_offset(p: &support::InProcess, group: &str, topic: &str, partiti
 }
 
 async fn fetch_offset(p: &support::InProcess, group: &str, topic: &str, partition: i32) -> i64 {
+    let id = topic_id_for(p, topic).await;
     let resp = p
         .client
         .send(OffsetFetchRequest {
-            group_id: group.into(),
-            topics: Some(vec![OffsetFetchRequestTopic {
-                name: topic.into(),
-                partition_indexes: vec![partition],
+            groups: vec![OffsetFetchRequestGroup {
+                group_id: group.into(),
+                topics: Some(vec![OffsetFetchRequestTopics {
+                    name: topic.into(),
+                    topic_id: id,
+                    partition_indexes: vec![partition],
+                    ..Default::default()
+                }]),
                 ..Default::default()
-            }]),
+            }],
             ..Default::default()
         })
         .await
         .expect("OffsetFetch");
-    resp.topics[0].partitions[0].committed_offset
+    resp.groups[0].topics[0].partitions[0].committed_offset
 }
 
 /// T1 — happy path: commit an offset for an Empty group, delete it,
