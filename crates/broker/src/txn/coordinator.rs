@@ -95,6 +95,20 @@ impl TxnCoordinator {
         self.pid_to_tid.get(&pid).map(|e| e.value().clone())
     }
 
+    /// Evict the stale `prev_producer_id -> tid` mapping after a KIP-890
+    /// epoch-overflow roll. When the producer epoch is exhausted the `EndTxn`
+    /// completion path allocates a new `producer_id` and records the prior id
+    /// as `entry.prev_producer_id` (see `next_producer_identity`); without this
+    /// the old id's mapping would leak one entry per roll. Idempotent: a no-op
+    /// once the old id is gone, and skipped for entries that never rolled
+    /// (`prev == -1`). pids are globally unique, so the prior id only ever
+    /// mapped to this tid — removing it can't affect another transaction.
+    fn evict_rolled_pid(pid_to_tid: &DashMap<i64, String>, entry: &TxnEntry) {
+        if entry.prev_producer_id >= 0 && entry.prev_producer_id != entry.producer_id {
+            pid_to_tid.remove(&entry.prev_producer_id);
+        }
+    }
+
     /// Snapshot every locally-coordinated `TxnEntry`. Used by the KIP-664
     /// admin handlers (`ListTransactions`, `DescribeTransactions`) to
     /// expose the in-memory txn-state map. Each entry is locked + cloned
@@ -153,6 +167,7 @@ impl TxnCoordinator {
 
         part.produce_batch(batch).await?;
 
+        Self::evict_rolled_pid(&self.pid_to_tid, &entry);
         self.pid_to_tid
             .insert(entry.producer_id, entry.transactional_id.clone());
         self.state.insert(tid, Arc::new(Mutex::new(entry)));
@@ -257,5 +272,56 @@ impl TxnCoordinator {
             "TxnCoordinator recovery complete"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(pid: i64, prev: i64) -> TxnEntry {
+        let mut e = TxnEntry::new_empty("tid-a".into(), pid, 0, 60_000, 0);
+        e.prev_producer_id = prev;
+        e
+    }
+
+    #[test]
+    fn evict_rolled_pid_drops_only_the_prior_id_on_a_roll() {
+        let map: DashMap<i64, String> = DashMap::new();
+        map.insert(1000, "tid-a".into()); // the pre-roll mapping
+
+        // A roll: new pid 2000, prev = 1000. The stale 1000 mapping is evicted;
+        // put then inserts 2000 (mirrored here).
+        TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
+        map.insert(2000, "tid-a".into());
+
+        assert!(
+            map.get(&1000).is_none(),
+            "stale pre-roll pid must be evicted"
+        );
+        assert!(map.get(&2000).map(|e| e.value().clone()) == Some("tid-a".into()));
+    }
+
+    #[test]
+    fn evict_rolled_pid_is_noop_without_a_roll() {
+        let map: DashMap<i64, String> = DashMap::new();
+        map.insert(1000, "tid-a".into());
+        // Never rolled: prev == -1 → nothing evicted.
+        TxnCoordinator::evict_rolled_pid(&map, &entry(1000, -1));
+        assert!(map.get(&1000).is_some());
+        // prev == current (defensive): nothing evicted.
+        TxnCoordinator::evict_rolled_pid(&map, &entry(1000, 1000));
+        assert!(map.get(&1000).is_some());
+    }
+
+    #[test]
+    fn evict_rolled_pid_is_idempotent_after_the_id_is_gone() {
+        let map: DashMap<i64, String> = DashMap::new();
+        map.insert(2000, "tid-a".into());
+        // prev=1000 already absent → repeated evictions are harmless no-ops.
+        TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
+        TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
+        assert!(map.get(&1000).is_none());
+        assert!(map.get(&2000).is_some());
     }
 }
