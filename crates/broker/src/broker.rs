@@ -1329,6 +1329,7 @@ impl Broker {
         let next_gen_coord =
             std::sync::Arc::new(crate::coordinator::unified::GroupCoordinator::new(
                 config.next_gen_consumer_group.clone(),
+                config.share_group.clone(),
                 std::sync::Arc::new(crate::coordinator::unified::ImageMetadataProvider {
                     controller: controller.clone(),
                 }),

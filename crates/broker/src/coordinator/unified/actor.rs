@@ -880,6 +880,7 @@ mod tests {
         let log = Arc::new(InMemoryOffsetsLog::default());
         let coord = Arc::new(GroupCoordinator::new(
             NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             empty_metadata(),
             log.clone(),
         ));
@@ -1292,7 +1293,12 @@ mod tests {
             .unwrap();
 
         let log = Arc::new(InMemoryOffsetsLog::default());
-        let coord = Arc::new(GroupCoordinator::new(config, empty_metadata(), log));
+        let coord = Arc::new(GroupCoordinator::new(
+            config,
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            empty_metadata(),
+            log,
+        ));
         let handle = coord.get_or_create("g");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
