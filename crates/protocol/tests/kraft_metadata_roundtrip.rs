@@ -76,3 +76,12 @@ fn startup_log_roundtrips() {
 fn topic_log_roundtrips() {
     assert_log_roundtrips(include_bytes!("fixtures/topic_log.bin"));
 }
+
+/// A real `apache/kafka:4.0.0` metadata log after `kafka-configs --alter` on a
+/// topic and a client quota — exercises `ConfigRecord` (apiKey 4) and
+/// `ClientQuotaRecord` (apiKey 14), the new Slice-3d-1 dispatch variants, against
+/// genuine JVM bytes (alongside the common Topic/Partition/RegisterBroker/… set).
+#[test]
+fn config_quota_log_roundtrips() {
+    assert_log_roundtrips(include_bytes!("fixtures/config_quota_log.bin"));
+}
