@@ -74,6 +74,35 @@ impl KraftLog {
     ) -> Result<Vec<RecordBatch>, RaftError> {
         Ok(self.log.read(offset, max_bytes)?.batches)
     }
+
+    /// Serve KIP-595 `Fetch`: verbatim batch bytes in `[offset, min(hwm, log_end))`.
+    ///
+    /// # Errors
+    /// Returns [`RaftError`] if the underlying raw read fails.
+    pub fn read_committed(&self, offset: i64, max_bytes: usize) -> Result<RawRead, RaftError> {
+        let limit = self.hwm.min(self.log.log_end_offset());
+        Ok(self.log.read_raw(offset, limit, max_bytes)?)
+    }
+
+    /// Advance the high watermark (monotonic; never past the log end).
+    pub fn advance_hwm(&mut self, new_hwm: i64) {
+        let clamped = new_hwm.min(self.log.log_end_offset());
+        if clamped > self.hwm {
+            self.hwm = clamped;
+        }
+        debug_assert!(self.hwm <= self.log.log_end_offset());
+    }
+
+    /// Truncate the log so no record at offset `>= offset` remains; clamp HWM down.
+    ///
+    /// # Errors
+    /// Returns [`RaftError`] if the underlying truncation fails.
+    pub fn truncate_to(&mut self, offset: i64) -> Result<(), RaftError> {
+        debug_assert!(offset >= self.log.log_start_offset());
+        self.log.truncate_to(offset)?;
+        self.hwm = self.hwm.min(offset);
+        Ok(())
+    }
 }
 
 impl LogView for KraftLog {
@@ -188,5 +217,44 @@ mod tests {
     fn empty_log_last_epoch_is_zero() {
         let (log, _dir) = open_tmp();
         assert!(LogView::last_epoch(&log) == 0);
+    }
+
+    #[test]
+    fn read_committed_never_returns_bytes_past_hwm() {
+        let (mut log, _dir) = open_tmp();
+        for _ in 0..5 {
+            log.append(&mut batch(0, 1, b"x")).unwrap();
+        } // offsets 0..5
+        log.advance_hwm(3);
+        let r = log.read_committed(0, 1 << 20).unwrap();
+        // bytes contain only batches with base_offset < 3 (offsets 0,1,2)
+        let decoded = log.read_decoded(0, 1 << 20).unwrap();
+        let committed: Vec<_> = decoded.into_iter().filter(|b| b.base_offset < 3).collect();
+        assert!(committed.len() == 3);
+        assert!(r.start_offset == 0);
+        // total committed bytes equals the size of the first 3 batches
+        assert!(!r.bytes.is_empty());
+    }
+
+    #[test]
+    fn advance_hwm_is_monotonic_and_clamped_to_log_end() {
+        let (mut log, _dir) = open_tmp();
+        log.append(&mut batch(0, 1, b"x")).unwrap(); // log_end = 1
+        log.advance_hwm(5); // clamp to log_end
+        assert!(log.hwm() == 1);
+        log.advance_hwm(0); // never regress
+        assert!(log.hwm() == 1);
+    }
+
+    #[test]
+    fn truncate_to_drops_log_end_and_hwm() {
+        let (mut log, _dir) = open_tmp();
+        for _ in 0..5 {
+            log.append(&mut batch(0, 1, b"x")).unwrap();
+        }
+        log.advance_hwm(5);
+        log.truncate_to(2).unwrap();
+        assert!(log.log_end_offset() == 2);
+        assert!(log.hwm() == 2); // hwm clamped down to the truncation point
     }
 }
