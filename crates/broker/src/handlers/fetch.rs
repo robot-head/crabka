@@ -166,9 +166,8 @@ pub(crate) async fn handle(
                 t.topic.clone()
             } else if t.topic_id != WireUuid::ZERO {
                 image
-                    .topics()
-                    .find(|tt| tt.topic_id.into_bytes() == t.topic_id.0)
-                    .map(|tt| tt.name.clone())
+                    .topic_name_by_id(&uuid::Uuid::from_bytes(t.topic_id.0))
+                    .map(str::to_string)
                     .unwrap_or_default()
             } else {
                 String::new()

@@ -132,3 +132,67 @@ async fn offset_fetch_unknown_topic_id_returns_unknown_topic_id() {
     let t = grp.topics.first().expect("a topic row");
     assert!(t.partitions.first().expect("a partition").error_code == 100);
 }
+
+/// Fetch-all (null `topics`) at v10 must echo each topic's `topic_id`, since
+/// the name is dropped from the wire at v10 and the client matches by id.
+#[tokio::test]
+async fn offset_fetch_all_echoes_topic_id() {
+    let p = support::start().await;
+    p.client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: "fa_topic".into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("create topic");
+    let id = topic_id_for(&p.client, "fa_topic").await;
+
+    p.client
+        .send(OffsetCommitRequest {
+            group_id: "g3".into(),
+            topics: vec![OffsetCommitRequestTopic {
+                name: String::new(),
+                topic_id: id,
+                partitions: vec![OffsetCommitRequestPartition {
+                    partition_index: 0,
+                    committed_offset: 7,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("offset commit");
+
+    // Fetch-all: `topics: None` for the group.
+    let resp = p
+        .client
+        .send(OffsetFetchRequest {
+            groups: vec![OffsetFetchRequestGroup {
+                group_id: "g3".into(),
+                topics: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("offset fetch");
+    let grp = resp
+        .groups
+        .iter()
+        .find(|g| g.group_id == "g3")
+        .expect("group g3");
+    let t = grp
+        .topics
+        .iter()
+        .find(|t| t.topic_id == id)
+        .expect("topic row with echoed id");
+    assert!(t.partitions.first().expect("a partition").committed_offset == 7);
+}
