@@ -14,8 +14,8 @@
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::{
-    AclOperation, BrokerConfigRecord, MetadataImage, MetadataRecord, NodeId, ResourceType,
-    TopicConfigRecord,
+    AclOperation, BrokerConfigRecord, ClientMetricsConfigRecord, MetadataImage, MetadataRecord,
+    NodeId, ResourceType, TopicConfigRecord,
 };
 use crabka_protocol::owned::incremental_alter_configs_request::{
     AlterConfigsResource, IncrementalAlterConfigsRequest,
@@ -34,6 +34,7 @@ use crate::error::BrokerError;
 
 const RESOURCE_TYPE_TOPIC: i8 = 2;
 const RESOURCE_TYPE_BROKER: i8 = 4;
+const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
 const OP_SET: i8 = 0;
 const OP_DELETE: i8 = 1;
 
@@ -104,16 +105,18 @@ pub(crate) async fn handle(
                     operation: AclOperation::AlterConfigs,
                 },
             ),
-            RESOURCE_TYPE_BROKER => broker.config.authorizer.authorize(
-                &image,
-                &AuthorizationRequest {
-                    principal: ctx.principal,
-                    host: ctx.peer,
-                    resource_type: ResourceType::Cluster,
-                    resource_name: "kafka-cluster",
-                    operation: AclOperation::AlterConfigs,
-                },
-            ),
+            RESOURCE_TYPE_BROKER | RESOURCE_TYPE_CLIENT_METRICS => {
+                broker.config.authorizer.authorize(
+                    &image,
+                    &AuthorizationRequest {
+                        principal: ctx.principal,
+                        host: ctx.peer,
+                        resource_type: ResourceType::Cluster,
+                        resource_name: "kafka-cluster",
+                        operation: AclOperation::AlterConfigs,
+                    },
+                )
+            }
             _ => {
                 out.error_code = codes::INVALID_RESOURCE_TYPE;
                 out.error_message = Some(format!(
@@ -195,6 +198,13 @@ pub(crate) async fn handle(
             }
             RESOURCE_TYPE_BROKER => {
                 handle_broker_scoped(&resource, &image, &mut out, &mut to_submit);
+                if out.error_code != codes::NONE {
+                    responses.push(out);
+                    continue;
+                }
+            }
+            RESOURCE_TYPE_CLIENT_METRICS => {
+                handle_client_metrics_scoped(&resource, &image, &mut out, &mut to_submit);
                 if out.error_code != codes::NONE {
                     responses.push(out);
                     continue;
@@ -309,6 +319,62 @@ fn handle_broker_scoped(
             }));
         }
     }
+}
+
+/// Merge per-key ops into a client-metrics subscription's override map and
+/// stage a `V1ClientMetricsConfig` record. SET validates per KIP-714;
+/// DELETE drops the override (effective value reverts to its default at
+/// read time); APPEND/SUBTRACT are rejected.
+fn handle_client_metrics_scoped(
+    resource: &AlterConfigsResource,
+    image: &MetadataImage,
+    out: &mut AlterConfigsResourceResponse,
+    to_submit: &mut Vec<MetadataRecord>,
+) {
+    if resource.resource_name.is_empty() {
+        out.error_code = codes::INVALID_REQUEST;
+        out.error_message = Some("client-metrics subscription name must not be empty".into());
+        return;
+    }
+    let mut merged = image
+        .client_metrics_config(&resource.resource_name)
+        .cloned()
+        .unwrap_or_default();
+    for cfg in &resource.configs {
+        match cfg.config_operation {
+            OP_SET => {
+                let value = cfg.value.clone().unwrap_or_default();
+                if let Err(reason) = crate::client_metrics::config::validate(&cfg.name, &value) {
+                    out.error_code = codes::INVALID_CONFIG;
+                    out.error_message = Some(reason);
+                    return;
+                }
+                merged.insert(cfg.name.clone(), value);
+            }
+            OP_DELETE => {
+                if !crate::client_metrics::config::is_recognized(&cfg.name) {
+                    out.error_code = codes::INVALID_CONFIG;
+                    out.error_message = Some(format!("unrecognized config key `{}`", cfg.name));
+                    return;
+                }
+                merged.remove(&cfg.name);
+            }
+            op => {
+                out.error_code = codes::INVALID_CONFIG;
+                out.error_message = Some(format!(
+                    "config_operation={op} (APPEND/SUBTRACT) not supported for client-metrics key `{}`",
+                    cfg.name
+                ));
+                return;
+            }
+        }
+    }
+    to_submit.push(MetadataRecord::V1ClientMetricsConfig(
+        ClientMetricsConfigRecord {
+            name: resource.resource_name.clone(),
+            configs: merged,
+        },
+    ));
 }
 
 #[cfg(test)]
@@ -497,5 +563,102 @@ mod tests {
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
         assert!(out.error_code == codes::INVALID_CONFIG);
         assert!(to_submit.is_empty());
+    }
+
+    #[test]
+    fn client_metrics_set_produces_record() {
+        use crabka_protocol::owned::incremental_alter_configs_request::AlterableConfig;
+        let img = MetadataImage::new(uuid::Uuid::nil());
+        let resource = AlterConfigsResource {
+            resource_type: RESOURCE_TYPE_CLIENT_METRICS,
+            resource_name: "sub-a".into(),
+            configs: vec![
+                AlterableConfig {
+                    name: "interval.ms".into(),
+                    config_operation: OP_SET,
+                    value: Some("60000".into()),
+                    ..Default::default()
+                },
+                AlterableConfig {
+                    name: "metrics".into(),
+                    config_operation: OP_SET,
+                    value: Some("org.apache.kafka.consumer.".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut out = AlterConfigsResourceResponse::default();
+        let mut to_submit = Vec::new();
+        handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
+        assert!(out.error_code == codes::NONE);
+        assert!(to_submit.len() == 1);
+        match &to_submit[0] {
+            MetadataRecord::V1ClientMetricsConfig(rec) => {
+                assert!(rec.name == "sub-a");
+                assert!(rec.configs.get("interval.ms").map(String::as_str) == Some("60000"));
+            }
+            other => panic!("expected V1ClientMetricsConfig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn client_metrics_bad_interval_rejected() {
+        use crabka_protocol::owned::incremental_alter_configs_request::AlterableConfig;
+        let img = MetadataImage::new(uuid::Uuid::nil());
+        let resource = AlterConfigsResource {
+            resource_type: RESOURCE_TYPE_CLIENT_METRICS,
+            resource_name: "sub-a".into(),
+            configs: vec![AlterableConfig {
+                name: "interval.ms".into(),
+                config_operation: OP_SET,
+                value: Some("5".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut out = AlterConfigsResourceResponse::default();
+        let mut to_submit = Vec::new();
+        handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
+        assert!(out.error_code == codes::INVALID_CONFIG);
+        assert!(to_submit.is_empty());
+    }
+
+    #[test]
+    fn client_metrics_delete_drops_key() {
+        use crabka_metadata::ClientMetricsConfigRecord;
+        use crabka_protocol::owned::incremental_alter_configs_request::AlterableConfig;
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        let mut existing = std::collections::BTreeMap::new();
+        existing.insert("interval.ms".to_string(), "60000".to_string());
+        existing.insert("metrics".to_string(), "a.".to_string());
+        img.apply(&MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: "sub-a".into(),
+                configs: existing,
+            },
+        ));
+        let resource = AlterConfigsResource {
+            resource_type: RESOURCE_TYPE_CLIENT_METRICS,
+            resource_name: "sub-a".into(),
+            configs: vec![AlterableConfig {
+                name: "interval.ms".into(),
+                config_operation: OP_DELETE,
+                value: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut out = AlterConfigsResourceResponse::default();
+        let mut to_submit = Vec::new();
+        handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
+        assert!(out.error_code == codes::NONE);
+        match &to_submit[0] {
+            MetadataRecord::V1ClientMetricsConfig(rec) => {
+                assert!(!rec.configs.contains_key("interval.ms"));
+                assert!(rec.configs.get("metrics").map(String::as_str) == Some("a."));
+            }
+            other => panic!("expected V1ClientMetricsConfig, got {other:?}"),
+        }
     }
 }
