@@ -393,10 +393,11 @@ pub async fn run(args: FormatArgs) -> i32 {
             return EXIT_BOOTSTRAP_FAIL;
         }
     };
-    records.push(MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
-        name: crabka_metadata::metadata_version::METADATA_VERSION_FEATURE.to_string(),
-        level: release_level,
-    }));
+    // KIP-584 / KIP-1022 bootstrap: finalize every registered feature at its
+    // per-release default, derived from the bootstrap metadata.version. A 4.0
+    // format thus seeds metadata.version, group.version, etc. at their 4.0
+    // defaults so a fresh cluster engages each feature with no manual step.
+    records.extend(bootstrap_feature_records(release_level));
 
     // Build the seed records. Each `--add-scram` is hashed *here* (CLI
     // side) using `hash_scram_password_with_salt` from `crabka-security`
@@ -491,6 +492,22 @@ fn write_bootstrap_files(
     Ok(())
 }
 
+/// Build the bootstrap [`FeatureLevelRecord`]s seeded by `crabka format`:
+/// one per registered feature, each at its per-release default derived from
+/// the bootstrap `metadata.version` level. Shared by `run()` and tests so the
+/// set stays correct as features are added to the registry.
+fn bootstrap_feature_records(bootstrap_mv: i16) -> Vec<MetadataRecord> {
+    crabka_metadata::feature_registry()
+        .iter()
+        .map(|feat| {
+            MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: feat.name().to_string(),
+                level: feat.default_level(bootstrap_mv),
+            })
+        })
+        .collect()
+}
+
 /// Tiny self-contained base64 encoder (standard alphabet, padded). We
 /// don't pull in the `base64` crate just for the manifest mirror — the
 /// records are only base64'd for human readability; the authoritative
@@ -539,6 +556,27 @@ mod tests {
         assert!(resolve_release_level("3.7-IV4").unwrap() == 19);
         assert!(resolve_release_level("2.8").is_err()); // below MIN / unknown
         assert!(resolve_release_level("9.9-IV0").is_err()); // unknown
+    }
+
+    #[test]
+    fn bootstrap_seeds_every_registered_feature_at_release_default() {
+        let bootstrap_mv = crabka_metadata::metadata_version::from_version_string("4.0")
+            .unwrap()
+            .feature_level();
+        // Exercises the exact helper `run()` uses, so it tracks the registry
+        // as features are added in later tasks.
+        let records = bootstrap_feature_records(bootstrap_mv);
+        for feat in crabka_metadata::feature_registry() {
+            let found = records.iter().find_map(|r| match r {
+                MetadataRecord::V1FeatureLevel(f) if f.name == feat.name() => Some(f.level),
+                _ => None,
+            });
+            assert!(
+                found == Some(feat.default_level(bootstrap_mv)),
+                "feature {} not seeded at its release default",
+                feat.name()
+            );
+        }
     }
 
     // The no-flag default path (`Ok(None) => METADATA_VERSION_MAX` in `run()`)
