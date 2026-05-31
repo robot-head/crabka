@@ -76,6 +76,28 @@ impl KraftLog {
     }
 }
 
+impl LogView for KraftLog {
+    fn end_offset(&self) -> i64 {
+        self.log.log_end_offset()
+    }
+    fn last_epoch(&self) -> LeaderEpoch {
+        // crabka-log epochs are i32 and non-negative; 0 for an empty log.
+        u32::try_from(self.log.epoch_checkpoint().latest_epoch().unwrap_or(0)).unwrap_or(0)
+    }
+    fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+        let log_end = self.log.log_end_offset();
+        let epoch_i32 = i32::try_from(epoch).ok()?;
+        match self
+            .log
+            .epoch_checkpoint()
+            .end_offset_for_epoch(epoch_i32, log_end)
+        {
+            -1 => None,
+            off => Some(off),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +161,32 @@ mod tests {
         log.append_at(&mut batch(0, 2, b"x"), 0).unwrap();
         assert!(log.log_end_offset() == 1);
         assert!(log.read_decoded(0, 1 << 20).unwrap()[0].partition_leader_epoch == 2);
+    }
+
+    #[test]
+    fn logview_reports_end_offset_and_last_epoch() {
+        let (mut log, _dir) = open_tmp();
+        log.append(&mut batch(0, 1, b"a")).unwrap();
+        log.append(&mut batch(0, 3, b"b")).unwrap(); // epoch jumps to 3
+        assert!(LogView::end_offset(&log) == 2);
+        assert!(LogView::last_epoch(&log) == 3);
+    }
+
+    #[test]
+    fn logview_end_offset_for_epoch_maps_unknown_to_none() {
+        let (mut log, _dir) = open_tmp();
+        log.append(&mut batch(0, 1, b"a")).unwrap(); // epoch 1 @ [0,1)
+        log.append(&mut batch(0, 2, b"b")).unwrap(); // epoch 2 @ [1,2)
+        // epoch 1 ends where epoch 2 starts (offset 1); epoch 2 is current → end 2.
+        assert!(LogView::end_offset_for_epoch(&log, 1) == Some(1));
+        assert!(LogView::end_offset_for_epoch(&log, 2) == Some(2));
+        // unknown future epoch → None
+        assert!(LogView::end_offset_for_epoch(&log, 9).is_none());
+    }
+
+    #[test]
+    fn empty_log_last_epoch_is_zero() {
+        let (log, _dir) = open_tmp();
+        assert!(LogView::last_epoch(&log) == 0);
     }
 }
