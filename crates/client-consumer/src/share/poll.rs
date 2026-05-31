@@ -212,10 +212,28 @@ impl ShareConsumer {
     ///
     /// The ack is flushed on the next [`poll`](ShareConsumer::poll) (piggybacked)
     /// or [`commit`](ShareConsumer::commit) (standalone `ShareAcknowledge`).
-    /// In Implicit mode this is a no-op (records are auto-accepted on the next
-    /// poll); we still record it so an application can mix in a `Release`/`Reject`
-    /// if desired, but the canonical path is Explicit mode.
-    pub fn acknowledge(&mut self, record: &ShareConsumerRecord, ack: ShareAckType) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsumerError::IllegalState`] in
+    /// [`Implicit`](super::types::ShareAckMode::Implicit) mode: there, every
+    /// delivered record is auto-`Accept`ed on the next poll/close, so an explicit
+    /// `acknowledge()` cannot be honored (staging it would silently leak into
+    /// `pending_acks`, which the implicit path never flushes). This mirrors the
+    /// JVM `KafkaShareConsumer`, which raises `IllegalStateException` if you
+    /// explicitly acknowledge while in implicit acknowledgement mode.
+    pub fn acknowledge(
+        &mut self,
+        record: &ShareConsumerRecord,
+        ack: ShareAckType,
+    ) -> Result<(), ConsumerError> {
+        if self.ack_mode == ShareAckMode::Implicit {
+            return Err(ConsumerError::IllegalState(
+                "acknowledge() is not allowed in implicit ack mode; \
+                 records are auto-accepted on the next poll/close"
+                    .into(),
+            ));
+        }
         let topic_id = self.topic_id_for(&record.topic);
         self.pending_acks.push((
             topic_id,
@@ -224,6 +242,7 @@ impl ShareConsumer {
             record.offset,
             ack.wire(),
         ));
+        Ok(())
     }
 
     /// Flush staged explicit acknowledgements via a standalone
