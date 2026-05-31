@@ -4990,3 +4990,60 @@ introspection metadata).
 - Reference docs:
   [`docs/superpowers/specs/2026-05-30-crabka-kip-848-unified-coordinator-64d-b-design.md`],
   [`docs/superpowers/plans/2026-05-30-crabka-kip-848-unified-coordinator-64d-b.md`].
+## Slice — Generalized feature-versioning framework + group.version (KIP-584/848/1022) (2026-05-30)
+
+- **Goal.** Generalize the single-feature (`metadata.version`) KIP-584
+  machinery into an N-feature framework and land `group.version` (KIP-848) on
+  it with full faithful gating. Spec:
+  `docs/superpowers/specs/2026-05-30-feature-versioning-framework-group-txn-design.md`;
+  plan: `docs/superpowers/plans/2026-05-30-feature-framework-and-group-version.md`.
+- **`Feature` trait + registry (`crabka_metadata::feature`).** Each feature
+  owns its versioning facts — `supported_range`, `default_level(bootstrap_mv)`,
+  `min_required_floor(image)`, KIP-1022 `dependencies(level)`, optional
+  `level_name`. A static `feature_registry()` is the single source of truth
+  consumed by `ApiVersions`, `UpdateFeatures`, `crabka format` bootstrap, and
+  the Raft range guards. `metadata.version` was refactored onto the trait with
+  no behavior change.
+- **Registry-sourced everywhere.** `ApiVersions` advertises every registered
+  feature; `UpdateFeatures` validates per-feature floor + dependencies
+  generically (the `metadata.version` special-case is gone); the Raft
+  state-machine range guard iterates all finalized features and aborts on any
+  *present, out-of-range* level (unknown/future feature names are ignored —
+  forward-compat, pinned by test).
+- **`group.version` (KIP-848).** Registered at range `0..=1`; per-release
+  default `1` once bootstrap `metadata.version >= 22` (`4.0-IV0`); empty
+  `dependencies()` (Kafka 4.0 declares no hard `UpdateFeatures` dependency — the
+  MV threshold is a bootstrap-default input only, verified empirically against
+  cp-kafka 4.0). Next-gen `ConsumerGroupHeartbeat`/`ConsumerGroupDescribe` are
+  gated on a finalized `group.version >= 1` with **absence treated as
+  disabled** (reject with `UNSUPPORTED_VERSION` → classic fallback, matching
+  Kafka). Classic group RPCs are never gated.
+- **Multi-feature bootstrap.** A shared `crabka_metadata::bootstrap_feature_records`
+  seeds one `V1FeatureLevel` per registered feature at its per-release default;
+  used by both `crabka format` and the broker's standalone self-bootstrap, so a
+  freshly-formatted *and* a standalone/in-process broker finalize
+  `group.version=1` (at `metadata.version` MAX) and engage KIP-848 with no
+  manual step.
+- **Empirical pins (cp-kafka 4.0).** group.version `0..=1`, default 1, GA at
+  metadata.version 22; the `metadata.version` 7..25 table re-confirmed
+  byte-for-byte. Findings:
+  `docs/superpowers/notes/2026-05-30-kafka-feature-pins.md`.
+- **Deferred (by design).** `group.version` downgrade floor is the supported
+  min — live next-gen group state lives in the coordinator / `__consumer_offsets`,
+  not the `MetadataImage`, so an image-derived floor can't be computed.
+  `transaction.version` (KIP-890) is the companion plan
+  (`docs/superpowers/plans/2026-05-30-transaction-version-downlevel.md`);
+  `kraft.version` (KIP-853 unification) and ELR (KIP-966) are later slices. The
+  full Docker `jvm_acceptance` re-baseline — which flips the README KIP-584 row
+  to ✅ — is deferred to the `transaction.version` plan so all advertised
+  features are re-verified together. The README KIP-848 row stays ⚠️ pending
+  the unified-coordinator work (separate slice); this slice closed only the
+  feature-finalization/gating gap.
+- **Tests.** `crabka_metadata` feature/registry/bootstrap unit tests; broker
+  `features`/`update_features` unit tests; generalized range-guard predicate
+  test incl. the forward-compat ignore-unknown case; new
+  `crates/broker/tests/group_version.rs` (next-gen accepted at gv=1; rejected
+  once downgraded to 0). Full `cargo test --workspace` green
+  (`transactions.rs` has a known pre-existing parallel-load flake that passes
+  in isolation); `cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo fmt --all --check` clean.

@@ -763,18 +763,12 @@ impl Feature for GroupVersionFeature {
     // lives in the coordinator / __consumer_offsets, NOT the MetadataImage, so
     // a live-state-aware downgrade floor cannot be computed here. Deferred —
     // see the spec's Slice-A note.
-    fn dependencies(&self, level: i16) -> &'static [(&'static str, i16)] {
-        // group.version=1 depends on metadata.version >= the GA level.
-        if level >= crate::group_version::GROUP_VERSION_MAX {
-            const DEPS: &[(&str, i16)] = &[(
-                crate::metadata_version::METADATA_VERSION_FEATURE,
-                crate::group_version::GROUP_VERSION_GA_METADATA_LEVEL,
-            )];
-            DEPS
-        } else {
-            &[]
-        }
-    }
+    //
+    // dependencies: EMPTY. Empirically (Task 0 / cp-kafka 4.0) Kafka declares
+    // no hard UpdateFeatures dependency for group.version — the
+    // metadata.version GA threshold is a *bootstrap-default* input (used in
+    // default_level above), NOT a finalize-time floor. So we inherit the
+    // trait's empty `dependencies()` default and do NOT override it.
 }
 ```
 
@@ -807,10 +801,12 @@ In `crates/metadata/src/lib.rs`: add `pub mod group_version;` (near `pub mod met
     }
 
     #[test]
-    fn group_version_one_depends_on_metadata_version() {
+    fn group_version_declares_no_hard_dependencies() {
+        // Kafka 4.0 declares no UpdateFeatures dependency for group.version
+        // (the metadata.version threshold only drives the bootstrap default).
         let f = feature("group.version").unwrap();
-        assert!(!f.dependencies(1).is_empty());
         assert!(f.dependencies(0).is_empty());
+        assert!(f.dependencies(1).is_empty());
     }
 ```
 
