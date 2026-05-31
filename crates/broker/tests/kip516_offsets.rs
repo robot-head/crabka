@@ -133,9 +133,9 @@ async fn offset_fetch_unknown_topic_id_returns_unknown_topic_id() {
     assert!(t.partitions.first().expect("a partition").error_code == 100);
 }
 
-/// OffsetCommit v10 with a mix of a known topic_id and an unknown one: the
-/// known topic commits (error 0), the unknown topic_id is not committed and
-/// comes back as UNKNOWN_TOPIC_ID with its id echoed.
+/// `OffsetCommit` v10 with a mix of a known `topic_id` and an unknown one: the
+/// known topic commits (error 0), the unknown `topic_id` is not committed and
+/// comes back as `UNKNOWN_TOPIC_ID` with its id echoed.
 #[tokio::test]
 async fn offset_commit_unknown_topic_id_returns_unknown_topic_id() {
     let p = support::start().await;
