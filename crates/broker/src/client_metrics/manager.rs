@@ -124,6 +124,7 @@ impl ClientMetricsManager {
         client_instance_id: Uuid,
         subscription_id_in: i32,
         terminating: bool,
+        compression_supported: bool,
         payload_len: usize,
     ) -> PushDecision {
         let now = Instant::now();
@@ -131,18 +132,24 @@ impl ClientMetricsManager {
             .instances
             .lock()
             .expect("client-metrics mutex poisoned");
+
+        // 1. Unknown instance → INVALID_REQUEST.
         let Some(inst) = guard.get_mut(&client_instance_id) else {
             return PushDecision::Reject {
                 error_code: crate::codes::INVALID_REQUEST,
                 throttle_ms: 0,
             };
         };
+
+        // 2. Instance already terminating → INVALID_REQUEST.
         if inst.terminating {
             return PushDecision::Reject {
                 error_code: crate::codes::INVALID_REQUEST,
                 throttle_ms: 0,
             };
         }
+
+        // 3. Subscription-id mismatch → UNKNOWN_SUBSCRIPTION_ID.
         if subscription_id_in != inst.subscription_id {
             inst.last_error = crate::codes::UNKNOWN_SUBSCRIPTION_ID;
             return PushDecision::Reject {
@@ -150,15 +157,8 @@ impl ClientMetricsManager {
                 throttle_ms: 0,
             };
         }
-        // payload_len is always << i32::MAX in practice (max is telemetry_max_bytes
-        // which is i32); the cast is safe for any realistic telemetry payload.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        if payload_len as i32 > self.telemetry_max_bytes {
-            return PushDecision::Reject {
-                error_code: crate::codes::TELEMETRY_TOO_LARGE,
-                throttle_ms: 0,
-            };
-        }
+
+        // 4. Throttle check (Kafka order: throttle before codec/size).
         let interval_elapsed = inst
             .last_push
             .is_none_or(|lp| now.duration_since(lp) >= inst.push_interval);
@@ -172,6 +172,29 @@ impl ClientMetricsManager {
                 throttle_ms,
             };
         }
+
+        // 5. Unsupported compression codec → UNSUPPORTED_COMPRESSION_TYPE.
+        //    Do NOT update last_push on this path.
+        if !compression_supported {
+            return PushDecision::Reject {
+                error_code: crate::codes::UNSUPPORTED_COMPRESSION_TYPE,
+                throttle_ms: 0,
+            };
+        }
+
+        // 6. Payload oversize → TELEMETRY_TOO_LARGE.
+        //    Do NOT update last_push on this path.
+        // payload_len is always << i32::MAX in practice (max is telemetry_max_bytes
+        // which is i32); the cast is safe for any realistic telemetry payload.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        if payload_len as i32 > self.telemetry_max_bytes {
+            return PushDecision::Reject {
+                error_code: crate::codes::TELEMETRY_TOO_LARGE,
+                throttle_ms: 0,
+            };
+        }
+
+        // 7. Success: update state and return accepted metrics.
         inst.last_push = Some(now);
         inst.last_error = crate::codes::NONE;
         let metrics = inst.metrics.clone();
@@ -445,31 +468,45 @@ mod tests {
             source_port: 1,
         };
         let assigned = m.assign(&img, &attrs);
-        // First push after assign is allowed.
+        // First push after assign is allowed (compression_supported=true).
         assert!(matches!(
-            m.authorize_push(id, assigned.subscription_id, false, 10),
+            m.authorize_push(id, assigned.subscription_id, false, true, 10),
             PushDecision::Accept { .. }
         ));
-        // Immediate second push (interval not elapsed, no new get) is throttled.
+        // Immediate second push (interval not elapsed, no new get) is throttled —
+        // even if the payload would also be oversized; throttle wins per Kafka order.
         assert!(matches!(
-            m.authorize_push(id, assigned.subscription_id, false, 10),
+            m.authorize_push(id, assigned.subscription_id, false, true, 10),
+            PushDecision::Reject { error_code, .. } if error_code == crate::codes::THROTTLING_QUOTA_EXCEEDED
+        ));
+        // Ordering assertion: oversized payload that is ALSO interval-not-elapsed
+        // must return THROTTLING_QUOTA_EXCEEDED (throttle before size in ladder).
+        assert!(matches!(
+            m.authorize_push(id, assigned.subscription_id, false, true, 2048),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::THROTTLING_QUOTA_EXCEEDED
         ));
         // Wrong subscription id → UNKNOWN_SUBSCRIPTION_ID.
         assert!(matches!(
-            m.authorize_push(id, assigned.subscription_id ^ 0x5555, false, 10),
+            m.authorize_push(id, assigned.subscription_id ^ 0x5555, false, true, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::UNKNOWN_SUBSCRIPTION_ID
         ));
         // Unknown instance → INVALID_REQUEST.
         assert!(matches!(
-            m.authorize_push(Uuid::from_u128(999), 0, false, 10),
+            m.authorize_push(Uuid::from_u128(999), 0, false, true, 10),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::INVALID_REQUEST
         ));
-        // Oversized payload → TELEMETRY_TOO_LARGE (re-assign to get a fresh get timestamp first).
+        // Re-assign to get a fresh get-timestamp (acts as a new allowance).
         let assigned2 = m.assign(&img, &attrs);
+        // Oversized payload with fresh get → TELEMETRY_TOO_LARGE.
         assert!(matches!(
-            m.authorize_push(id, assigned2.subscription_id, false, 2048),
+            m.authorize_push(id, assigned2.subscription_id, false, true, 2048),
             PushDecision::Reject { error_code, .. } if error_code == crate::codes::TELEMETRY_TOO_LARGE
+        ));
+        // Unsupported compression with fresh get + small payload → UNSUPPORTED_COMPRESSION_TYPE.
+        let assigned3 = m.assign(&img, &attrs);
+        assert!(matches!(
+            m.authorize_push(id, assigned3.subscription_id, false, false, 10),
+            PushDecision::Reject { error_code, .. } if error_code == crate::codes::UNSUPPORTED_COMPRESSION_TYPE
         ));
     }
 }

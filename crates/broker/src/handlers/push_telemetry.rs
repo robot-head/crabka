@@ -40,6 +40,7 @@ pub(crate) async fn handle(
         instance,
         req.subscription_id,
         req.terminating,
+        codec.is_some(),
         req.metrics.len(),
     ) {
         PushDecision::Reject {
@@ -49,9 +50,12 @@ pub(crate) async fn handle(
             error_code = ec;
             throttle_time_ms = throttle_ms;
         }
-        PushDecision::Accept { .. } => match codec {
-            None => error_code = codes::UNSUPPORTED_COMPRESSION_TYPE,
-            Some(ct) => match crabka_compression::decompress(ct, &req.metrics) {
+        PushDecision::Accept { .. } => {
+            // authorize_push guarantees compression is supported on Accept.
+            // A terminating push that later fails to decode still fences the
+            // instance and drops those metrics (best-effort, matches Kafka).
+            let ct = codec.expect("authorize_push guarantees a supported codec on Accept");
+            match crabka_compression::decompress(ct, &req.metrics) {
                 Ok(raw) => match otlp::decode_metrics(&raw) {
                     Ok(md) => {
                         let instance_str = instance.to_string();
@@ -62,8 +66,8 @@ pub(crate) async fn handle(
                     Err(e) => tracing::debug!(error = %e, "client-metrics OTLP decode failed"),
                 },
                 Err(e) => tracing::debug!(error = %e, "client-metrics decompress failed"),
-            },
-        },
+            }
+        }
     }
 
     let resp = PushTelemetryResponse {

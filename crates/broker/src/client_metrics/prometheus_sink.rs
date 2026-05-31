@@ -77,24 +77,36 @@ impl Collector for ClientMetricsCollector {
     fn encode(&self, mut encoder: DescriptorEncoder) -> Result<(), std::fmt::Error> {
         let now = Instant::now();
         let guard = self.points.lock().expect("prom sink mutex poisoned");
+
+        // Group live series by sanitized metric name so that encode_descriptor
+        // is called exactly once per name. prometheus-client 0.24 emits a
+        // # HELP / # TYPE line on every encode_descriptor call, so calling it
+        // N times for N series sharing the same name would produce duplicate
+        // descriptor lines → invalid OpenMetrics output.
+        let mut by_name: HashMap<String, Vec<(&str, &str, f64)>> = HashMap::new();
         for ((metric, instance, client), sp) in guard.iter() {
             if now.duration_since(sp.at) >= self.ttl {
                 continue;
             }
-            let name = sanitize(metric);
-            let gauge = ConstGauge::new(sp.value);
+            by_name.entry(sanitize(metric)).or_default().push((
+                instance.as_str(),
+                client.as_str(),
+                sp.value,
+            ));
+        }
+
+        for (name, series) in &by_name {
             let mut metric_encoder = encoder.encode_descriptor(
-                &name,
+                name,
                 "client-reported metric (KIP-714)",
                 None,
                 MetricType::Gauge,
             )?;
-            let labels = [
-                ("client_instance_id", instance.as_str()),
-                ("client_id", client.as_str()),
-            ];
-            let family_encoder = metric_encoder.encode_family(&labels)?;
-            gauge.encode(family_encoder)?;
+            for (instance, client, value) in series {
+                let labels = [("client_instance_id", *instance), ("client_id", *client)];
+                let family_encoder = metric_encoder.encode_family(&labels)?;
+                ConstGauge::new(*value).encode(family_encoder)?;
+            }
         }
         Ok(())
     }
@@ -155,6 +167,44 @@ mod tests {
             "got:\n{buf}"
         );
         assert!(buf.contains("42"), "value missing:\n{buf}");
+    }
+
+    #[test]
+    fn multiple_series_same_metric_encode_once() {
+        use prometheus_client::registry::Registry;
+        let sink = ClientMetricsCollector::new(std::time::Duration::from_mins(1));
+        sink.ingest(&[
+            DataPoint {
+                metric: "org.apache.kafka.consumer.fetch.size".into(),
+                client_instance_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(),
+                client_id: "c1".into(),
+                value: 1.0,
+            },
+            DataPoint {
+                metric: "org.apache.kafka.consumer.fetch.size".into(),
+                client_instance_id: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into(),
+                client_id: "c2".into(),
+                value: 2.0,
+            },
+        ]);
+        let mut reg = Registry::default();
+        reg.register_collector(Box::new(sink));
+        let mut buf = String::new();
+        // Must succeed (no duplicate-descriptor parse error) ...
+        prometheus_client::encoding::text::encode(&mut buf, &reg).expect("encode");
+        // ... and emit exactly ONE HELP line for the metric name.
+        let help_count = buf
+            .matches("# HELP crabka_client_org_apache_kafka_consumer_fetch_size")
+            .count();
+        assert!(
+            help_count == 1,
+            "expected exactly one HELP line, got {help_count}:\n{buf}"
+        );
+        // Both series present.
+        assert!(
+            buf.contains("c1") && buf.contains("c2"),
+            "both series must render:\n{buf}"
+        );
     }
 
     #[test]
