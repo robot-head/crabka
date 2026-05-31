@@ -50,6 +50,8 @@ pub struct Broker {
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
     pub(crate) txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
     pub(crate) share_coordinator: Arc<crate::share_coordinator::coordinator::ShareCoordinator>,
+    pub(crate) share_partition_leaders:
+        Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     /// Handle for the periodic disk-usage scanner spawned when
@@ -1420,8 +1422,24 @@ impl Broker {
             ),
         );
         if let Some(coord) = group_manager.next_gen() {
-            coord.set_share_persister(share_persister);
+            coord.set_share_persister(share_persister.clone());
         }
+
+        // 4a'''. Share-partition leader manager (KIP-932 Slice C): owns the
+        //        in-memory acquisition state machines for the (group, topic,
+        //        partition) triples this broker leads, loading/persisting them
+        //        through the same `SharePersister`. A background sweeper expires
+        //        acquisition locks so unacknowledged records redeliver.
+        let share_partition_leaders = Arc::new(
+            crate::share_partition::manager::SharePartitionLeaderManager::new(
+                config.node_id,
+                partitions.clone(),
+                controller.clone(),
+                share_persister.clone(),
+                Arc::new((*config.share_group).clone()),
+            ),
+        );
+        share_partition_leaders.spawn_lock_sweeper();
 
         // 4b. Spawn the replicator supervisor. Started AFTER the controller
         //    is up and self-registration succeeded so the supervisor's
@@ -2193,6 +2211,7 @@ impl Broker {
             producer_state,
             txn_coordinator,
             share_coordinator,
+            share_partition_leaders,
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             disk_scanner_handle: tokio::sync::Mutex::new(disk_scanner_handle),

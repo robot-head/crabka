@@ -28,6 +28,13 @@ use crabka_protocol::owned::delete_share_group_state_request::{
 use crabka_protocol::owned::initialize_share_group_state_request::{
     InitializeShareGroupStateRequest, InitializeStateData, PartitionData as InitPartitionData,
 };
+use crabka_protocol::owned::read_share_group_state_request::{
+    PartitionData as ReadPartitionData, ReadShareGroupStateRequest, ReadStateData,
+};
+use crabka_protocol::owned::write_share_group_state_request::{
+    PartitionData as WritePartitionData, StateBatch as ProtoStateBatch,
+    WriteShareGroupStateRequest, WriteStateData,
+};
 use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
 use crabka_security::ListenerProtocol;
 
@@ -36,6 +43,8 @@ use crate::metadata_source::MetadataSource;
 use crate::network::client::InterBrokerClient;
 use crate::share_coordinator::bootstrap;
 use crate::share_coordinator::coordinator::ShareCoordinator;
+use crate::share_coordinator::persistence::StateBatch;
+use crate::share_coordinator::state::SharePartitionState;
 
 /// Group-coordinator-side client for the share-state persister. Constructed in
 /// `Broker::start` once both the [`ShareCoordinator`] and the `GroupCoordinator`
@@ -189,13 +198,164 @@ impl SharePersister {
         Ok(())
     }
 
+    /// Read the durable share state for `(group, topic_id, partition)`. Local
+    /// when this broker leads the target `__share_group_state` partition, else
+    /// routed to the leader via RPC and decoded from the typed response.
+    ///
+    /// # Errors
+    ///
+    /// As [`SharePersister::initialize`] (connect/send on the remote path).
+    // Consumed by `SharePartitionLeaderManager::get_or_load`, which the
+    // ShareFetch/ShareAcknowledge handlers (Slice C T4/T5) drive; allow until
+    // they wire in.
+    #[allow(dead_code)]
+    pub(crate) async fn read_state(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+    ) -> Result<Option<SharePartitionState>, BrokerError> {
+        self.ensure_topic_and_refresh().await?;
+
+        let state_partition = self
+            .share_coordinator
+            .state_partition_for(group, &topic_id, partition);
+        if self.share_coordinator.is_leader(state_partition).await {
+            return Ok(self
+                .share_coordinator
+                .read(group, topic_id, partition)
+                .await);
+        }
+
+        let req = ReadShareGroupStateRequest {
+            group_id: group.to_string(),
+            topics: vec![ReadStateData {
+                topic_id: ProtoUuid(*topic_id.as_bytes()),
+                partitions: vec![ReadPartitionData {
+                    partition,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let resp = self.send_to_leader_resp(state_partition, req).await?;
+        // Map the per-partition result into a `SharePartitionState`. A
+        // non-zero error_code or an absent partition entry is treated as
+        // "no state" (the caller starts from an empty acquisition window).
+        let part_result = resp
+            .results
+            .into_iter()
+            .flat_map(|t| t.partitions)
+            .find(|p| p.partition == partition);
+        let Some(pr) = part_result else {
+            return Ok(None);
+        };
+        if pr.error_code != 0 {
+            return Ok(None);
+        }
+        Ok(Some(SharePartitionState {
+            state_epoch: pr.state_epoch,
+            leader_epoch: 0,
+            start_offset: pr.start_offset,
+            delivery_complete_count: 0,
+            state_batches: pr
+                .state_batches
+                .into_iter()
+                .map(|b| StateBatch {
+                    first_offset: b.first_offset,
+                    last_offset: b.last_offset,
+                    delivery_state: b.delivery_state,
+                    delivery_count: b.delivery_count,
+                })
+                .collect(),
+            snapshot_epoch: 0,
+            last_snapshot_offset: 0,
+            updates_since_snapshot: 0,
+        }))
+    }
+
+    /// Persist a `WriteShareGroupState` delta for `(group, topic_id,
+    /// partition)`. Local when this broker leads the target
+    /// `__share_group_state` partition, else routed to the leader via RPC.
+    ///
+    /// # Errors
+    ///
+    /// As [`SharePersister::initialize`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn write_state(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+        state_epoch: i32,
+        leader_epoch: i32,
+        start_offset: i64,
+        delivery_complete_count: i32,
+        batches: Vec<StateBatch>,
+    ) -> Result<(), BrokerError> {
+        self.ensure_topic_and_refresh().await?;
+
+        let state_partition = self
+            .share_coordinator
+            .state_partition_for(group, &topic_id, partition);
+        if self.share_coordinator.is_leader(state_partition).await {
+            return self
+                .share_coordinator
+                .write(
+                    group,
+                    topic_id,
+                    partition,
+                    state_epoch,
+                    leader_epoch,
+                    start_offset,
+                    delivery_complete_count,
+                    batches,
+                )
+                .await
+                .map_err(|code| {
+                    BrokerError::Share(format!(
+                        "WriteShareGroupState {group}:{topic_id}:{partition} fenced (code {code})"
+                    ))
+                });
+        }
+
+        let req = WriteShareGroupStateRequest {
+            group_id: group.to_string(),
+            topics: vec![WriteStateData {
+                topic_id: ProtoUuid(*topic_id.as_bytes()),
+                partitions: vec![WritePartitionData {
+                    partition,
+                    state_epoch,
+                    leader_epoch,
+                    start_offset,
+                    delivery_complete_count,
+                    state_batches: batches
+                        .into_iter()
+                        .map(|b| ProtoStateBatch {
+                            first_offset: b.first_offset,
+                            last_offset: b.last_offset,
+                            delivery_state: b.delivery_state,
+                            delivery_count: b.delivery_count,
+                            ..Default::default()
+                        })
+                        .collect(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        self.send_to_leader(state_partition, req).await
+    }
+
     /// Resolve the leader of `__share_group_state`-`state_partition` from the
-    /// metadata image and send `req` to it over the inter-broker client.
-    /// Mirrors the endpoint resolution in `txn::handlers::end_txn`.
-    async fn send_to_leader<R>(&self, state_partition: i32, req: R) -> Result<(), BrokerError>
-    where
-        R: crabka_client_core::ProtocolRequest,
-    {
+    /// metadata image and open an inter-broker connection to it. Mirrors the
+    /// endpoint resolution in `txn::handlers::end_txn`.
+    async fn connect_to_leader(
+        &self,
+        state_partition: i32,
+    ) -> Result<crabka_client_core::Connection, BrokerError> {
         let image = self.controller.current_image();
         let pr = image
             .partition(bootstrap::TOPIC, state_partition)
@@ -224,8 +384,7 @@ impl SharePersister {
             client_id: format!("crabka-broker-share-{}", self.node_id),
             ..crabka_client_core::ConnectionOptions::default()
         };
-        let conn = self
-            .inter_broker_client
+        self.inter_broker_client
             .connect_as_connection(
                 &host,
                 port,
@@ -234,14 +393,40 @@ impl SharePersister {
                 opts,
             )
             .await
-            .map_err(|e| {
-                BrokerError::Share(format!("share-state connect to {host}:{port}: {e}"))
-            })?;
+            .map_err(|e| BrokerError::Share(format!("share-state connect to {host}:{port}: {e}")))
+    }
+
+    /// Send `req` to the `state_partition` leader, discarding the response.
+    async fn send_to_leader<R>(&self, state_partition: i32, req: R) -> Result<(), BrokerError>
+    where
+        R: crabka_client_core::ProtocolRequest,
+    {
+        let conn = self.connect_to_leader(state_partition).await?;
         let _resp = conn
             .send(req)
             .await
-            .map_err(|e| BrokerError::Share(format!("share-state RPC to {host}:{port}: {e}")))?;
+            .map_err(|e| BrokerError::Share(format!("share-state RPC: {e}")))?;
         conn.close();
         Ok(())
+    }
+
+    /// Send `req` to the `state_partition` leader and return the typed
+    /// response.
+    #[allow(dead_code)]
+    async fn send_to_leader_resp<R>(
+        &self,
+        state_partition: i32,
+        req: R,
+    ) -> Result<R::Response, BrokerError>
+    where
+        R: crabka_client_core::ProtocolRequest,
+    {
+        let conn = self.connect_to_leader(state_partition).await?;
+        let resp = conn
+            .send(req)
+            .await
+            .map_err(|e| BrokerError::Share(format!("share-state RPC: {e}")))?;
+        conn.close();
+        Ok(resp)
     }
 }
