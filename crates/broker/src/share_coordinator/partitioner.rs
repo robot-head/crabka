@@ -7,7 +7,6 @@
 // `murmur2` is exercised by `partition_for_share_key`; the constants and the
 // helper become live once the share coordinator / FindCoordinator path call
 // it in later tasks.
-#![allow(dead_code)]
 
 const SEED: u32 = 0x9747_b28c;
 const M: u32 = 0x5bd1_e995;

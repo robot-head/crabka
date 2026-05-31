@@ -15,7 +15,6 @@
 
 // The state-machine methods are consumed by the persister RPC handlers
 // (Task 8) and the lifecycle hook (Task 11), which land in later slices.
-#![allow(dead_code)]
 
 use std::collections::HashSet;
 use std::sync::Arc;

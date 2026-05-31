@@ -1,8 +1,6 @@
 //! Lazy creation of the `__share_group_state` internal topic (KIP-932).
 //! Mirrors the `__transaction_state` bootstrap.
 
-#![allow(dead_code)] // wired in by the FindCoordinator-SHARE handler / coordinator
-
 use std::sync::Arc;
 
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
