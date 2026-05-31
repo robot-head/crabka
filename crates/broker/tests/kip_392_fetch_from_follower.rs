@@ -58,10 +58,12 @@ const N_RECORDS: i32 = 5;
 const RACK_A: &str = "rack-a"; // broker 1 (leader)
 const RACK_B: &str = "rack-b"; // broker 2 (follower)
 
-/// Boot a 2-broker cluster where each broker carries a distinct `rack` and
-/// the `RackAware` replica selector. Mirrors
-/// `support::start_n_node`'s bootstrap-then-join pattern, but injects the
-/// KIP-392 config before `Broker::start`. `racks[i]` is broker `i+1`'s rack.
+/// Boot an `n`-broker cluster where each broker carries a distinct `rack` and
+/// the `RackAware` replica selector, via KIP-595 Slice 3c static multi-voter
+/// bootstrap (all brokers boot in `Bootstrap` mode with the same static voter
+/// set and elect among themselves — no add_learner / change_membership).
+/// Injects the KIP-392 config before `Broker::start`. `racks[i]` is broker
+/// `i+1`'s rack.
 async fn start_rack_aware_cluster(racks: &[&str]) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
     support::init_tracing();
     let n = racks.len();
@@ -71,53 +73,34 @@ async fn start_rack_aware_cluster(racks: &[&str]) -> Vec<(BrokerHandle, BrokerCo
         .map(|i| (u64::try_from(i + 1).unwrap(), controller_addrs[i]))
         .collect();
 
-    let with_rack = |i: usize, mode: BootstrapMode, dir: &std::path::Path| -> BrokerConfig {
-        let mut cfg =
-            support::broker_config(i, &client_addrs, &controller_addrs, &voters, dir, mode);
+    let with_rack = |i: usize, dir: &std::path::Path| -> BrokerConfig {
+        let mut cfg = support::broker_config(
+            i,
+            &client_addrs,
+            &controller_addrs,
+            &voters,
+            dir,
+            BootstrapMode::Bootstrap,
+        );
         cfg.rack = Some(racks[i].to_string());
         cfg.replica_selector = ReplicaSelectorKind::RackAware;
         cfg
     };
 
-    // Phase 1: bootstrap broker 0 alone.
-    let dir0 = TempDir::new().unwrap();
-    let cfg0 = with_rack(0, BootstrapMode::Bootstrap, dir0.path());
-    let broker0 = Broker::start(cfg0.clone())
-        .await
-        .expect("bootstrap broker 0");
-
-    // Phase 2: spawn brokers 1..n in Join mode; their Broker::start blocks
-    // on watch_leader until we promote them below.
-    let mut join_handles = Vec::with_capacity(n.saturating_sub(1));
-    let mut join_metas: Vec<(TempDir, BrokerConfig)> = Vec::with_capacity(n.saturating_sub(1));
-    for i in 1..n {
+    // Start all n brokers statically; they elect among themselves over the wire.
+    let mut handles = Vec::with_capacity(n);
+    let mut metas: Vec<(TempDir, BrokerConfig)> = Vec::with_capacity(n);
+    for i in 0..n {
         let dir = TempDir::new().unwrap();
-        let cfg = with_rack(i, BootstrapMode::Join, dir.path());
+        let cfg = with_rack(i, dir.path());
         let cfg_clone = cfg.clone();
-        join_handles.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));
-        join_metas.push((dir, cfg));
+        handles.push(tokio::spawn(async move { Broker::start(cfg_clone).await }));
+        metas.push((dir, cfg));
     }
-
-    // Phase 3: add each joiner as a learner, then promote all to voters.
-    for (idx, addr) in controller_addrs.iter().enumerate().skip(1).take(n - 1) {
-        broker0
-            .add_learner(u64::try_from(idx + 1).unwrap(), *addr)
-            .await
-            .expect("add_learner");
-    }
-    let target_voters: BTreeSet<u64> = (1..=u64::try_from(n).unwrap()).collect();
-    broker0
-        .change_membership(target_voters)
-        .await
-        .expect("change_membership");
 
     let mut out = Vec::with_capacity(n);
-    out.push((broker0, cfg0, dir0));
-    for (h, (dir, cfg)) in join_handles.into_iter().zip(join_metas) {
-        let broker = h
-            .await
-            .expect("broker spawn join")
-            .expect("join broker start");
+    for (h, (dir, cfg)) in handles.into_iter().zip(metas) {
+        let broker = h.await.expect("broker spawn").expect("static broker start");
         out.push((broker, cfg, dir));
     }
     out

@@ -2585,7 +2585,6 @@ mod two_broker_sasl {
         PartitionProduceData, ProduceRequest, TopicProduceData,
     };
     use crabka_protocol::records::{Record, RecordBatch};
-    use std::collections::BTreeSet;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
@@ -2695,20 +2694,13 @@ mod two_broker_sasl {
             &controller_addrs,
             &voters,
             dir1.path(),
-            BootstrapMode::Join,
+            BootstrapMode::Bootstrap,
         );
+        // KIP-595 Slice 3c static bootstrap: both brokers boot with the same
+        // static voter set and elect among themselves over the SASL controller
+        // wire — no add_learner / change_membership (KIP-853, Slice 5).
         let cfg1_for_spawn = cfg1.clone();
         let join_handle = tokio::spawn(async move { Broker::start(cfg1_for_spawn).await });
-
-        broker0
-            .add_learner(2, controller_addrs[1])
-            .await
-            .expect("add_learner");
-        let target: BTreeSet<u64> = [1u64, 2u64].into_iter().collect();
-        broker0
-            .change_membership(target)
-            .await
-            .expect("change_membership");
 
         let broker1 = join_handle
             .await

@@ -657,8 +657,10 @@ async fn auto_rebalance_restores_preferred_leader() {
 
     // ── Phase 1: start a 3-broker cluster with rebalance enabled. ─────────
     // We can't pass rebalance config overrides through `start_n_node`, so we
-    // replicate the bootstrap-then-join pattern from support::start_n_node
-    // and apply the rebalance fields after building each BrokerConfig.
+    // replicate its static multi-voter bring-up here and apply the rebalance
+    // fields after building each BrokerConfig. All three brokers boot in
+    // `Bootstrap` mode with the same static voter set (KIP-595 Slice 3c);
+    // KIP-853 auto-join is Slice 5.
     let (client_addrs, controller_addrs) = support::bind_and_drop_ports(3).await;
     let voters: Vec<(u64, std::net::SocketAddr)> = (0u64..3)
         .map(|i| (i + 1, controller_addrs[usize::try_from(i).unwrap()]))
@@ -686,7 +688,7 @@ async fn auto_rebalance_restores_preferred_leader() {
         &controller_addrs,
         &voters,
         dir1.path(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
     cfg1.auto_leader_rebalance_enable = true;
     cfg1.leader_imbalance_check_interval_secs = 1;
@@ -698,32 +700,18 @@ async fn auto_rebalance_restores_preferred_leader() {
         &controller_addrs,
         &voters,
         dir2.path(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
     cfg2.auto_leader_rebalance_enable = true;
     cfg2.leader_imbalance_check_interval_secs = 1;
     cfg2.leader_imbalance_per_broker_percentage = 0;
 
-    // Phase 1a: bootstrap broker 1 alone.
-    let h0 = Broker::start(cfg0.clone()).await.expect("broker 1 start");
-
-    // Phase 1b: spawn brokers 2 & 3 in Join mode.
+    // Start all three statically; they elect among themselves over the wire.
     let cfg1_clone = cfg1.clone();
     let cfg2_clone = cfg2.clone();
     let join1 = tokio::spawn(async move { Broker::start(cfg1_clone).await });
     let join2 = tokio::spawn(async move { Broker::start(cfg2_clone).await });
-
-    // Phase 1c: add learners then promote to voters.
-    h0.add_learner(2, controller_addrs[1])
-        .await
-        .expect("add_learner 2");
-    h0.add_learner(3, controller_addrs[2])
-        .await
-        .expect("add_learner 3");
-    h0.change_membership([1u64, 2, 3].into_iter().collect())
-        .await
-        .expect("change_membership");
-
+    let h0 = Broker::start(cfg0.clone()).await.expect("broker 1 start");
     let h1 = join1.await.expect("spawn join1").expect("broker 2 start");
     let h2 = join2.await.expect("spawn join2").expect("broker 3 start");
 
