@@ -1122,23 +1122,11 @@ impl Broker {
                     );
                     crabka_metadata::VoterSet::from_voters([self_voter])
                 };
-                // Only a fresh `Bootstrap` node seeds the metadata log; a
-                // `Rejoin` node already has the committed `V1Voters` /
-                // `V1KRaftVersion` records on disk and must not re-submit them.
-                if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
-                    bootstrap_records.insert(
-                        0,
-                        crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
-                            voters: voters.clone(),
-                        }),
-                    );
-                    bootstrap_records.insert(
-                        0,
-                        crabka_metadata::MetadataRecord::V1KRaftVersion(
-                            crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
-                        ),
-                    );
-                }
+                // The engine reconstructs its voter set from `initial_voters`
+                // (config-derived) every boot under KIP-595 static voters, so the
+                // `V1Voters` / `V1KRaftVersion` raft-control records are NOT seeded
+                // onto the KIP-631-framed metadata log here (they have no KIP-631
+                // counterpart; dynamic reconfiguration is a later slice).
                 initial_voters = voters;
             }
 
@@ -1330,16 +1318,31 @@ impl Broker {
             if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
                 && !bootstrap_records.is_empty()
             {
-                tracing::info!(
-                    count = bootstrap_records.len(),
-                    "submitting bootstrap records"
-                );
-                controller
-                    .submit_change(bootstrap_records)
-                    .await
-                    .map_err(|e| {
-                        BrokerError::Replication(format!("bootstrap submit failed: {e}"))
-                    })?;
+                // KIP-853 raft-control records (`V1Voters` / `V1KRaftVersion`)
+                // have no KIP-631 metadata-log counterpart and are never carried
+                // on the KIP-631-framed metadata log in this slice — the engine
+                // reconstructs its voter set from `initial_voters` (config) every
+                // boot. Drop them from the metadata-log submit; only the genuine
+                // metadata records (ACLs, SCRAM, quotas, …) are seeded.
+                bootstrap_records.retain(|r| {
+                    !matches!(
+                        r,
+                        crabka_metadata::MetadataRecord::V1Voters(_)
+                            | crabka_metadata::MetadataRecord::V1KRaftVersion(_)
+                    )
+                });
+                if !bootstrap_records.is_empty() {
+                    tracing::info!(
+                        count = bootstrap_records.len(),
+                        "submitting bootstrap records"
+                    );
+                    controller
+                        .submit_change(bootstrap_records)
+                        .await
+                        .map_err(|e| {
+                            BrokerError::Replication(format!("bootstrap submit failed: {e}"))
+                        })?;
+                }
             }
         }
 

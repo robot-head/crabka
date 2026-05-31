@@ -718,7 +718,7 @@ mod bootstrap_mode_tests {
 
     #[tokio::test]
     async fn metadata_records_serves_committed_topic() {
-        use crabka_metadata::{MetadataRecord, TopicRecord, from_kafka_record};
+        use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord, from_kraft_value};
         use crabka_protocol::records::RecordBatch;
 
         let dir = TempDir::new().unwrap();
@@ -742,12 +742,19 @@ mod bootstrap_mode_tests {
 
         let slice = ctrl.metadata_records(0, usize::MAX).await;
         assert!(slice.high_watermark >= 1);
+        let image = MetadataImage::new(Uuid::nil());
         let mut buf: &[u8] = &slice.records;
         let mut found = false;
         while !buf.is_empty() {
             let batch = RecordBatch::decode(&mut buf).expect("decode");
+            if batch.attributes.is_control_batch() {
+                continue;
+            }
             for r in &batch.records {
-                if let Ok(MetadataRecord::V1Topic(t)) = from_kafka_record(r)
+                let Some(value) = r.value.as_ref() else {
+                    continue;
+                };
+                if let Ok(MetadataRecord::V1Topic(t)) = from_kraft_value(value, &image)
                     && t.name == "t"
                 {
                     found = true;
@@ -760,7 +767,7 @@ mod bootstrap_mode_tests {
 
     #[tokio::test]
     async fn fetch_metadata_from_returns_committed_records() {
-        use crabka_metadata::{MetadataRecord, TopicRecord, from_kafka_record};
+        use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord, from_kraft_value};
         use crabka_protocol::records::RecordBatch;
 
         let dir = TempDir::new().unwrap();
@@ -790,12 +797,19 @@ mod bootstrap_mode_tests {
         assert!(resp.error_code == 0);
         assert!(resp.high_watermark >= 1);
 
+        let image = MetadataImage::new(Uuid::nil());
         let mut buf: &[u8] = &resp.records;
         let mut found = false;
         while !buf.is_empty() {
             let batch = RecordBatch::decode(&mut buf).expect("decode");
+            if batch.attributes.is_control_batch() {
+                continue;
+            }
             for r in &batch.records {
-                if let Ok(MetadataRecord::V1Topic(t)) = from_kafka_record(r)
+                let Some(value) = r.value.as_ref() else {
+                    continue;
+                };
+                if let Ok(MetadataRecord::V1Topic(t)) = from_kraft_value(value, &image)
                     && t.name == "fetched"
                 {
                     found = true;

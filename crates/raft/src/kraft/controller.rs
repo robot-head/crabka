@@ -37,8 +37,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
-use crabka_metadata::{MetadataImage, from_kafka_record};
-use crabka_protocol::records::RecordBatch;
+use crabka_metadata::{MetadataImage, from_kraft_value, to_kraft_values};
+use crabka_protocol::records::{Record, RecordBatch};
 
 use crate::error::RaftError;
 use crate::kraft::action::{Action, TimerKind};
@@ -890,33 +890,45 @@ impl Engine {
             return;
         }
 
-        // Pre-validate against the current image (fail fast, before appending a
-        // batch that would be rejected on apply). Validate against a scratch
-        // clone so a batch mixing topic+partition is validated as a sequence.
+        // Pre-validate and translate to KIP-631 value blobs in ONE pass against
+        // an evolving scratch image, so config-diff / ACL-resolution in
+        // `to_kraft_values` see in-batch prior records (a batch mixing
+        // topic+partition is validated and encoded as a sequence).
         let mut scratch = self.image.clone();
+        let mut value_blobs: Vec<bytes::Bytes> = Vec::new();
         for r in &records {
             if let Err(e) = scratch.validate(r) {
                 let _ = reply.send(Err(RaftError::Metadata(e)));
                 return;
             }
+            match to_kraft_values(r, &scratch) {
+                Ok(mut blobs) => value_blobs.append(&mut blobs),
+                Err(e) => {
+                    let _ = reply.send(Err(RaftError::ChangeRejected(format!("encode: {e}"))));
+                    return;
+                }
+            }
             scratch.apply(r);
         }
 
+        // Every record fanned out to nothing (e.g. an empty config clear): the
+        // submit is a committed no-op. Reply success without appending a batch.
+        if value_blobs.is_empty() {
+            let _ = reply.send(Ok(()));
+            return;
+        }
+
         let leader_epoch = self.core.quorum_state().leader_epoch;
-        let kafka_records: Result<Vec<_>, _> = records
+        let kafka_records: Vec<Record> = value_blobs
             .iter()
-            .map(crabka_metadata::to_kafka_record)
+            .map(|blob| Record {
+                value: Some(blob.clone()),
+                ..Default::default()
+            })
             .collect();
-        let kafka_records = match kafka_records {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = reply.send(Err(RaftError::ChangeRejected(format!("encode: {e}"))));
-                return;
-            }
-        };
         let mut batch = RecordBatch {
             partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
-            last_offset_delta: i32::try_from(kafka_records.len().saturating_sub(1)).unwrap_or(0),
+            last_offset_delta: i32::try_from(value_blobs.len().saturating_sub(1)).unwrap_or(0),
             records: kafka_records,
             ..Default::default()
         };
@@ -927,7 +939,7 @@ impl Engine {
                 return;
             }
         };
-        let need_offset = base + i64::try_from(records.len().max(1)).unwrap_or(1);
+        let need_offset = base + i64::try_from(value_blobs.len()).unwrap_or(1);
 
         // Park the waiter, then try to advance the HWM immediately: a single
         // voter commits its own append with no peer fetch.
@@ -948,15 +960,27 @@ impl Engine {
     /// Test-only: append a metadata batch and commit it through the real apply
     /// pipeline. Returns the appended base offset (or -1 on failure).
     #[cfg(test)]
+    #[allow(clippy::needless_pass_by_value)]
     fn test_append_and_commit(&mut self, records: Vec<crabka_metadata::MetadataRecord>) -> i64 {
         let leader_epoch = self.core.quorum_state().leader_epoch;
-        let kafka_records: Vec<_> = records
-            .into_iter()
-            .filter_map(|r| crabka_metadata::to_kafka_record(&r).ok())
+        let mut scratch = self.image.clone();
+        let mut blobs: Vec<bytes::Bytes> = Vec::new();
+        for r in &records {
+            if let Ok(mut bs) = to_kraft_values(r, &scratch) {
+                blobs.append(&mut bs);
+            }
+            scratch.apply(r);
+        }
+        let kafka_records: Vec<Record> = blobs
+            .iter()
+            .map(|blob| Record {
+                value: Some(blob.clone()),
+                ..Default::default()
+            })
             .collect();
         let mut batch = RecordBatch {
             partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
-            last_offset_delta: i32::try_from(kafka_records.len().saturating_sub(1)).unwrap_or(0),
+            last_offset_delta: i32::try_from(blobs.len().saturating_sub(1)).unwrap_or(0),
             records: kafka_records,
             ..Default::default()
         };
@@ -988,9 +1012,17 @@ impl Engine {
                     if batch.base_offset < prev_hwm || batch.base_offset >= applied_hwm {
                         continue;
                     }
+                    // The LeaderChange control batch carries no metadata records;
+                    // never feed it to the metadata decoder.
+                    if batch.attributes.is_control_batch() {
+                        continue;
+                    }
                     for rec in &batch.records {
-                        if let Ok(meta) = from_kafka_record(rec) {
-                            match self.image.validate(&meta) {
+                        let Some(value) = rec.value.as_ref() else {
+                            continue;
+                        };
+                        match from_kraft_value(value, &self.image) {
+                            Ok(meta) => match self.image.validate(&meta) {
                                 Ok(()) => {
                                     self.image.apply(&meta);
                                     changed = true;
@@ -1005,6 +1037,9 @@ impl Engine {
                                         "kraft: rejected committed record on apply"
                                     );
                                 }
+                            },
+                            Err(e) => {
+                                tracing::debug!(?e, "kraft: failed to decode committed record");
                             }
                         }
                     }
@@ -1407,8 +1442,14 @@ fn replay_committed(log: &KraftLog, image: &mut MetadataImage, from: i64) {
     match log.read_decoded(from, MAX_APPLY_BYTES) {
         Ok(batches) => {
             for batch in &batches {
+                if batch.attributes.is_control_batch() {
+                    continue;
+                }
                 for rec in &batch.records {
-                    if let Ok(meta) = from_kafka_record(rec)
+                    let Some(value) = rec.value.as_ref() else {
+                        continue;
+                    };
+                    if let Ok(meta) = from_kraft_value(value, image)
                         && image.validate(&meta).is_ok()
                     {
                         image.apply(&meta);
@@ -1606,13 +1647,13 @@ mod tests {
         (ctrl, dir)
     }
 
-    fn topic_record(name: &str) -> crabka_metadata::MetadataRecord {
-        crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
-            name: name.to_string(),
-            topic_id: uuid::Uuid::from_u128(1),
-            partitions: 1,
-            replication_factor: 1,
-        })
+    /// A realistic single-partition create batch: a `V1Topic` plus its one
+    /// `V1Partition`. KIP-631 framing derives the topic's partition count from
+    /// the partition records (the `TopicRecord` wire shape carries no count), so
+    /// a bare `V1Topic` would round-trip back to zero partitions and fail
+    /// validation on apply.
+    fn topic_record(name: &str) -> Vec<crabka_metadata::MetadataRecord> {
+        topic_record_named(name, 1)
     }
 
     /// Drive a voter to leadership in a multi-voter cluster under `NullPeerSender`
@@ -1679,7 +1720,7 @@ mod tests {
         assert!(ctrl.current_image().topic("t").is_none());
 
         let off = ctrl
-            .test_append_and_commit(vec![topic_record("t")])
+            .test_append_and_commit(topic_record("t"))
             .await
             .unwrap();
         assert!(off >= 0);
@@ -1696,12 +1737,12 @@ mod tests {
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
         await_leader(&ctrl, Some(1)).await;
 
-        ctrl.test_append_and_commit(vec![topic_record("t")])
+        ctrl.test_append_and_commit(topic_record("t"))
             .await
             .unwrap();
         assert!(ctrl.current_image().topic("t").is_some());
 
-        ctrl.test_append_and_commit(vec![topic_record("t")])
+        ctrl.test_append_and_commit(topic_record("t"))
             .await
             .unwrap();
         assert!(ctrl.current_image().topic("t").is_some());
@@ -1768,7 +1809,7 @@ mod tests {
 
         tokio::time::timeout(
             StdDuration::from_secs(5),
-            ctrl.submit_change(vec![topic_record("orders")]),
+            ctrl.submit_change(topic_record("orders")),
         )
         .await
         .expect("submit did not hang")
@@ -1787,8 +1828,8 @@ mod tests {
         ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
         await_leader(&ctrl, Some(1)).await;
 
-        ctrl.submit_change(vec![topic_record("t")]).await.unwrap();
-        let dup = ctrl.submit_change(vec![topic_record("t")]).await;
+        ctrl.submit_change(topic_record("t")).await.unwrap();
+        let dup = ctrl.submit_change(topic_record("t")).await;
         assert!(matches!(dup, Err(RaftError::Metadata(_))), "got {dup:?}");
         ctrl.shutdown().await;
     }
@@ -1807,8 +1848,7 @@ mod tests {
         // Park a submit on a separate task: it appends but cannot commit (no
         // peer fetches under NullPeerSender), so it stays parked.
         let ctrl2 = ctrl.clone();
-        let submit =
-            tokio::spawn(async move { ctrl2.submit_change(vec![topic_record("orders")]).await });
+        let submit = tokio::spawn(async move { ctrl2.submit_change(topic_record("orders")).await });
 
         // Give the submit a moment to reach the engine and park its waiter.
         tokio::time::sleep(StdDuration::from_millis(50)).await;
@@ -1843,18 +1883,30 @@ mod tests {
     async fn submit_change_on_non_leader_rejects() {
         let (ctrl, _dir) = build(1, &[1, 2, 3]);
         // Never elected; node 1 is Unattached → not leader.
-        let r = ctrl.submit_change(vec![topic_record("t")]).await;
+        let r = ctrl.submit_change(topic_record("t")).await;
         assert!(matches!(r, Err(RaftError::NotLeader { .. })), "got {r:?}");
         ctrl.shutdown().await;
     }
 
-    fn topic_record_named(name: &str, id: u128) -> crabka_metadata::MetadataRecord {
-        crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
-            name: name.to_string(),
-            topic_id: uuid::Uuid::from_u128(id),
-            partitions: 1,
-            replication_factor: 1,
-        })
+    fn topic_record_named(name: &str, id: u128) -> Vec<crabka_metadata::MetadataRecord> {
+        vec![
+            crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
+                name: name.to_string(),
+                topic_id: uuid::Uuid::from_u128(id),
+                partitions: 1,
+                replication_factor: 1,
+            }),
+            crabka_metadata::MetadataRecord::V1Partition(crabka_metadata::PartitionRecord {
+                topic: name.to_string(),
+                partition: 0,
+                leader: 1,
+                replicas: vec![1],
+                isr: vec![1],
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+            }),
+        ]
     }
 
     /// FIX 2: a committed record that fails apply-`validate` must only fail the
@@ -1874,20 +1926,11 @@ mod tests {
         let cc = ctrl.clone();
         // A and B both create topic "first"; B is the duplicate that fails apply.
         // C creates a distinct "third" and must commit cleanly.
-        let a =
-            tokio::spawn(
-                async move { ca.submit_change(vec![topic_record_named("first", 1)]).await },
-            );
+        let a = tokio::spawn(async move { ca.submit_change(topic_record_named("first", 1)).await });
         tokio::time::sleep(StdDuration::from_millis(20)).await;
-        let b =
-            tokio::spawn(
-                async move { cb.submit_change(vec![topic_record_named("first", 1)]).await },
-            );
+        let b = tokio::spawn(async move { cb.submit_change(topic_record_named("first", 1)).await });
         tokio::time::sleep(StdDuration::from_millis(20)).await;
-        let c =
-            tokio::spawn(
-                async move { cc.submit_change(vec![topic_record_named("third", 3)]).await },
-            );
+        let c = tokio::spawn(async move { cc.submit_change(topic_record_named("third", 3)).await });
         tokio::time::sleep(StdDuration::from_millis(40)).await;
 
         // Drive the HWM past all appended batches by simulating a follower (node
@@ -1951,9 +1994,7 @@ mod tests {
             );
             ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
             await_leader(&ctrl, Some(1)).await;
-            ctrl.submit_change(vec![topic_record("recovered")])
-                .await
-                .unwrap();
+            ctrl.submit_change(topic_record("recovered")).await.unwrap();
             assert!(ctrl.current_image().topic("recovered").is_some());
             ctrl.trigger_snapshot().await.unwrap();
             ctrl.shutdown().await;

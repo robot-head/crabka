@@ -383,6 +383,23 @@ impl MetadataImage {
             MetadataRecord::V1Partition(p) => {
                 self.partitions
                     .insert((p.topic.clone(), p.partition), p.clone());
+                // Keep the owning topic's denormalized partition count / RF in
+                // sync with the partitions map. KIP-631 framing carries no
+                // partition count on `TopicRecord`, so a freshly-decoded
+                // `V1Topic` lands with partitions=0; the partition records that
+                // follow it in log order restore the real count here, making the
+                // denormalized fields a true derived cache of the partitions map.
+                if let Some(t) = self.topics.get_mut(&p.topic) {
+                    t.partitions = i32::try_from(
+                        self.partitions
+                            .keys()
+                            .filter(|(topic, _)| topic == &p.topic)
+                            .count(),
+                    )
+                    .unwrap_or(t.partitions);
+                    t.replication_factor =
+                        i16::try_from(p.replicas.len()).unwrap_or(t.replication_factor);
+                }
             }
             MetadataRecord::V1BrokerRegistration(b) => {
                 self.brokers.insert(b.node_id, b.clone());
@@ -643,9 +660,12 @@ impl MetadataImage {
                     }
                     return Ok(());
                 }
-                if t.partitions <= 0 {
-                    return Err(MetadataError::InvalidRecord("partitions must be > 0"));
-                }
+                // A new topic is valid regardless of the `TopicRecord.partitions`
+                // count: KIP-631 framing does not carry that field, so a
+                // freshly-decoded `V1Topic` round-trips back as partitions=0 with
+                // the real count arriving via the following `V1Partition` records.
+                // Partition-count validity (`> 0`) is enforced at the CreateTopics
+                // request boundary, not on the metadata-record apply path.
                 Ok(())
             }
             MetadataRecord::V1Partition(p) => {

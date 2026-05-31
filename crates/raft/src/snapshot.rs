@@ -7,12 +7,11 @@
 //! [`SnapshotReader::read_records`].
 
 use bytes::{BufMut, Bytes, BytesMut};
-use serde_wincode::SerdeCompat;
-use wincode::{Deserialize as _, Serialize as _};
 
-use crabka_metadata::{MetadataImage, MetadataRecord};
+use crabka_metadata::{MetadataImage, MetadataRecord, from_kraft_value, to_kraft_values};
 use crabka_protocol::records::header::Attributes;
 use crabka_protocol::records::{Record, RecordBatch};
+use uuid::Uuid;
 
 use crate::error::RaftError;
 
@@ -57,18 +56,28 @@ impl SnapshotWriter {
         header_value.put_i64(last_contained_log_timestamp);
         encode_control_batch(&mut out, 0, header_key, header_value)?;
 
-        // (2) Data batch at base_offset 1: one record per MetadataRecord.
-        if !records.is_empty() {
-            let last_offset_delta = i32::try_from(records.len() - 1).unwrap_or(i32::MAX);
-            let mut data_records = Vec::with_capacity(records.len());
-            for (i, rec) in records.iter().enumerate() {
-                let payload = <SerdeCompat<MetadataRecord>>::serialize(rec)?;
-                data_records.push(Record {
+        // (2) Data batch at base_offset 1: one record per KIP-631 value blob.
+        // Each `MetadataRecord` is translated against the very image being
+        // snapshotted (a whole-map V1TopicConfig diffs against its own image and
+        // so emits all-sets-no-tombstones — correct for a from-scratch snapshot).
+        let mut value_blobs: Vec<Bytes> = Vec::new();
+        for rec in &records {
+            let mut blobs = to_kraft_values(rec, image)
+                .map_err(|e| RaftError::ChangeRejected(format!("snapshot encode: {e}")))?;
+            value_blobs.append(&mut blobs);
+        }
+        let total_blobs = value_blobs.len();
+        if total_blobs > 0 {
+            let last_offset_delta = i32::try_from(total_blobs - 1).unwrap_or(i32::MAX);
+            let data_records = value_blobs
+                .into_iter()
+                .enumerate()
+                .map(|(i, blob)| Record {
                     offset_delta: i32::try_from(i).unwrap_or(i32::MAX),
-                    value: Some(Bytes::from(payload)),
+                    value: Some(blob),
                     ..Default::default()
-                });
-            }
+                })
+                .collect();
             let data_batch = RecordBatch {
                 base_offset: 1,
                 last_offset_delta,
@@ -79,10 +88,10 @@ impl SnapshotWriter {
         }
 
         // (3) Footer control batch.
-        let footer_base_offset = if records.is_empty() {
+        let footer_base_offset = if total_blobs == 0 {
             1
         } else {
-            1 + i64::try_from(records.len()).unwrap_or(i64::MAX)
+            1 + i64::try_from(total_blobs).unwrap_or(i64::MAX)
         };
         let mut footer_key = Vec::with_capacity(4);
         footer_key.put_i16(SNAPSHOT_FOOTER_VERSION);
@@ -130,6 +139,11 @@ impl SnapshotReader {
     pub(crate) fn read_records(bytes: &[u8]) -> Result<Vec<MetadataRecord>, RaftError> {
         let mut cursor: &[u8] = bytes;
         let mut records = Vec::new();
+        // A context image accumulating decoded records in log order so each
+        // subsequent `from_kraft_value` resolves topic ids / whole-map config
+        // merges / ACL ids against prior records. The cluster id is irrelevant
+        // to translation, so a nil placeholder suffices.
+        let mut ctx = MetadataImage::new(Uuid::nil());
         while !cursor.is_empty() {
             let batch = RecordBatch::decode(&mut cursor)?;
             if batch.attributes.is_control_batch() {
@@ -139,7 +153,10 @@ impl SnapshotReader {
                 let Some(value) = rec.value.as_ref() else {
                     continue;
                 };
-                records.push(<SerdeCompat<MetadataRecord>>::deserialize(value)?);
+                let decoded = from_kraft_value(value, &ctx)
+                    .map_err(|e| RaftError::ChangeRejected(format!("snapshot decode: {e}")))?;
+                ctx.apply(&decoded);
+                records.push(decoded);
             }
         }
         Ok(records)
@@ -161,19 +178,36 @@ mod tests {
     use super::*;
     use assert2::assert;
 
-    use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
     use uuid::Uuid;
 
     #[test]
     fn writer_reader_round_trips_image() {
         let cid = Uuid::new_v4();
         let mut image = MetadataImage::new(cid);
+        // A realistic topic: the `V1Topic` plus its partition records. KIP-631
+        // framing carries no partition count on the `TopicRecord`, so the round
+        // trip derives partitions/RF from the partition records — a bare
+        // `V1Topic` (declaring partitions but with no `V1Partition`s) would not
+        // round-trip its declared count.
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
             name: "orders".into(),
             topic_id: Uuid::new_v4(),
             partitions: 3,
             replication_factor: 2,
         }));
+        for p in 0..3 {
+            image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: "orders".into(),
+                partition: p,
+                leader: 1,
+                replicas: vec![1, 2],
+                isr: vec![1, 2],
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+            }));
+        }
 
         let bytes = SnapshotWriter::serialize(&image, 1_700_000_000_000).unwrap();
         let records = SnapshotReader::read_records(&bytes).unwrap();
