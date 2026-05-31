@@ -158,6 +158,9 @@ fn admin_apis() -> Vec<ApiVersion> {
         // KIP-848 next-gen consumer group protocol.
         v!(consumer_group_heartbeat_request),
         v!(consumer_group_describe_request),
+        // KIP-932 share-group membership protocol.
+        v!(share_group_heartbeat_request),
+        v!(share_group_describe_request),
         // GetReplicaLogInfo (KIP-966) — inter-broker RPC the controller's
         // unclean recovery manager uses to read each replica's LEO + leader
         // epoch. Advertised so InterBrokerClient version negotiation succeeds.
@@ -175,6 +178,16 @@ fn admin_apis() -> Vec<ApiVersion> {
 mod tests {
     use super::*;
     use assert2::assert;
+
+    #[test]
+    fn share_group_apis_are_advertised() {
+        let apis = supported_apis();
+        let keys: Vec<i16> = apis.iter().map(|a| a.api_key).collect();
+        assert!(keys.contains(&76));
+        assert!(keys.contains(&77));
+        let hb = apis.iter().find(|a| a.api_key == 76).unwrap();
+        assert!(hb.min_version == 1 && hb.max_version == 1);
+    }
 
     #[test]
     fn supported_apis_is_nonempty_and_sane() {

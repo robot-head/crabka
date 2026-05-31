@@ -13,6 +13,13 @@ pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MAX;
 /// Minimum supported `metadata.version` level.
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MIN;
 
+/// The `share.version` feature name (KIP-932).
+pub(crate) use crabka_metadata::metadata_version::SHARE_VERSION_FEATURE as SHARE_VERSION;
+/// Maximum supported `share.version` level.
+pub(crate) use crabka_metadata::metadata_version::SHARE_VERSION_MAX;
+/// Minimum supported `share.version` level.
+pub(crate) use crabka_metadata::metadata_version::SHARE_VERSION_MIN;
+
 /// One row of the supported-feature table.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SupportedFeature {
@@ -23,11 +30,18 @@ pub(crate) struct SupportedFeature {
 
 /// The features this broker supports finalizing.
 pub(crate) fn supported_features() -> &'static [SupportedFeature] {
-    const TABLE: &[SupportedFeature] = &[SupportedFeature {
-        name: METADATA_VERSION,
-        min_version: METADATA_VERSION_MIN,
-        max_version: METADATA_VERSION_MAX,
-    }];
+    const TABLE: &[SupportedFeature] = &[
+        SupportedFeature {
+            name: METADATA_VERSION,
+            min_version: METADATA_VERSION_MIN,
+            max_version: METADATA_VERSION_MAX,
+        },
+        SupportedFeature {
+            name: SHARE_VERSION,
+            min_version: SHARE_VERSION_MIN,
+            max_version: SHARE_VERSION_MAX,
+        },
+    ];
     TABLE
 }
 
@@ -60,6 +74,13 @@ mod tests {
         assert!(f.min_version == 7);
         assert!(f.max_version == 25);
         assert!(lookup("not.a.feature").is_none());
+    }
+
+    #[test]
+    fn share_version_is_supported() {
+        let f = lookup(SHARE_VERSION).expect("share.version supported");
+        assert!(f.min_version == 0);
+        assert!(f.max_version == 1);
     }
 
     #[test]
