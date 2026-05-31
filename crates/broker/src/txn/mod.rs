@@ -10,3 +10,6 @@ pub(crate) mod marker;
 pub(crate) mod partitioner;
 pub(crate) mod state;
 pub(crate) mod util;
+// TxnVersion + resolver are wired by the later codec/epoch/verify tasks.
+#[allow(dead_code)]
+pub(crate) mod version;
