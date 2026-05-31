@@ -4,9 +4,9 @@
 //! generated RPC codecs against genuine JVM wire.
 //!
 //! Fixtures (frame minus the 4-byte length prefix) captured per the slice-2
-//! plan. Captured versions: Vote v2, BeginQuorumEpoch v1, EndQuorumEpoch v1,
-//! DescribeQuorum v2, Fetch v17 — all flexible at these versions, so the
-//! RequestHeader is v2 and the ResponseHeader is v1.
+//! plan. Captured versions: `Vote` v2, `BeginQuorumEpoch` v1, `EndQuorumEpoch`
+//! v1, `DescribeQuorum` v2, `Fetch` v17 — all flexible at these versions, so the
+//! `RequestHeader` is v2 and the `ResponseHeader` is v1.
 
 use assert2::assert;
 use bytes::BytesMut;
@@ -14,7 +14,7 @@ use crabka_protocol::owned::request_header::RequestHeader;
 use crabka_protocol::owned::response_header::ResponseHeader;
 use crabka_protocol::{Decode, Encode};
 
-/// Header version for a flexible message: RequestHeader v2 / ResponseHeader v1.
+/// Header version for a flexible message: `RequestHeader` v2 / `ResponseHeader` v1.
 const FLEX_REQ_HDR: i16 = 2;
 const FLEX_RESP_HDR: i16 = 1;
 
