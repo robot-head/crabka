@@ -36,6 +36,11 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = DeleteShareGroupOffsetsRequest::decode(&mut cur, version)?;
 
+    // Feature gate: a broker with share groups disabled does not implement the RPC.
+    if !broker.config.share_group.enable {
+        return encode_top_level(version, codes::UNSUPPORTED_VERSION);
+    }
+
     let image = broker.controller.current_image();
     let ng_opt = broker.group_manager.next_gen().cloned();
     let gid = req.group_id;

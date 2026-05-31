@@ -58,6 +58,7 @@ use crabka_protocol::records::{Record, RecordBatch};
 
 const NONE: i16 = 0;
 const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+const UNSUPPORTED_VERSION: i16 = 35;
 const NON_EMPTY_GROUP: i16 = 68;
 
 const ACCEPT: i8 = 1;
@@ -707,5 +708,24 @@ async fn describe_unknown_topic() {
         part.error_code == UNKNOWN_TOPIC_OR_PARTITION,
         "unknown topic must be UNKNOWN_TOPIC_OR_PARTITION (3), got {}",
         part.error_code
+    );
+}
+
+/// With `share_group.enable = false` the admin offset RPCs are not implemented:
+/// DescribeShareGroupOffsets marks each requested group `UNSUPPORTED_VERSION`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_offsets_rejected_when_share_disabled() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    cfg.share_group.enable = false;
+    let broker = Broker::start(cfg).await.unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    create_topic(&broker, &client, "t", 1).await;
+
+    let group = describe_offsets(&client, "g1", "t", vec![0]).await;
+    assert!(
+        group.error_code == UNSUPPORTED_VERSION,
+        "share-disabled describe must be UNSUPPORTED_VERSION (35), got {}",
+        group.error_code
     );
 }

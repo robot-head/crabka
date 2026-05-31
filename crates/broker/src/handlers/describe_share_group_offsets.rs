@@ -33,6 +33,28 @@ pub(crate) async fn handle(
     let mut cur: &[u8] = req_bytes;
     let req = DescribeShareGroupOffsetsRequest::decode(&mut cur, version)?;
 
+    // Feature gate: a broker with share groups disabled does not implement the
+    // RPC. The response has no top-level error code, so mark every requested
+    // group with UNSUPPORTED_VERSION.
+    if !broker.config.share_group.enable {
+        let groups = req
+            .groups
+            .iter()
+            .map(|g| DescribeShareGroupOffsetsResponseGroup {
+                group_id: g.group_id.clone(),
+                error_code: codes::UNSUPPORTED_VERSION,
+                ..Default::default()
+            })
+            .collect();
+        let resp = DescribeShareGroupOffsetsResponse {
+            groups,
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+        resp.encode(&mut buf, version)?;
+        return Ok(buf.freeze());
+    }
+
     let image = broker.controller.current_image();
     let ng_opt = broker.group_manager.next_gen().cloned();
 
