@@ -187,10 +187,10 @@ pub mod api_key {
 /// Task 3); this module maps each variant to/from the genuine generated
 /// KIP-595 message **bodies** (header-less — the framing layer in `server.rs` /
 /// `network.rs` adds the request/response header). Captured wire versions:
-/// Vote v2, Begin/End QuorumEpoch v1, Fetch v17. Crabka-to-Crabka replication
+/// Vote v2, Begin/End `QuorumEpoch` v1, Fetch v17. Crabka-to-Crabka replication
 /// rides these exact bytes, so a JVM voter (Slice 6) can interoperate.
 ///
-/// The metadata log is the single KRaft topic `__cluster_metadata`, partition
+/// The metadata log is the single `KRaft` topic `__cluster_metadata`, partition
 /// 0; every RPC body therefore carries exactly one topic / one partition.
 /// `pre_vote` has no field in the JVM `VoteResponse`, so the responder echoes it
 /// back in an internal tagged field ([`PRE_VOTE_ECHO_TAG`]) that a JVM peer
@@ -218,7 +218,7 @@ pub mod wire {
 
     use super::{LeaderEpoch, LogOffsetMetadata, NodeId};
 
-    /// KRaft metadata log topic name.
+    /// `KRaft` metadata log topic name.
     const METADATA_TOPIC: &str = "__cluster_metadata";
     /// The single metadata partition.
     const METADATA_PARTITION: i32 = 0;
@@ -281,7 +281,7 @@ pub mod wire {
         },
     }
 
-    /// `LeaderEpoch` (u32) <-> wire `i32` (KRaft uses i32 leaderEpoch).
+    /// `LeaderEpoch` (u32) <-> wire `i32` (`KRaft` uses an i32 `leaderEpoch`).
     #[allow(clippy::cast_possible_wrap)]
     fn epoch_to_wire(e: LeaderEpoch) -> i32 {
         i32::try_from(e).unwrap_or(i32::MAX)
@@ -597,7 +597,7 @@ pub mod wire {
                 .0
                 .iter()
                 .find(|f| f.tag == PRE_VOTE_ECHO_TAG)
-                .map_or(false, |f| f.bytes.first().copied() == Some(1));
+                .is_some_and(|f| f.bytes.first().copied() == Some(1));
             Some(PeerResponse::Vote {
                 epoch: epoch_from_wire(p.leader_epoch),
                 granted: p.vote_granted,

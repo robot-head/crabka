@@ -123,7 +123,9 @@ impl ControllerHandle {
     /// engine writes a bare KIP-630 checkpoint, no `.meta` sidecar).
     #[must_use]
     pub fn read_snapshot_range(&self, position: i64, max_bytes: i32) -> SnapshotRange {
-        let Some((id, bytes)) = load_latest_checkpoint(&self.data_dir) else {
+        let Some((id, bytes)) =
+            load_latest_checkpoint(&crate::kraft::checkpoint_dir(&self.data_dir))
+        else {
             return SnapshotRange::NoSnapshot;
         };
         let pos = usize::try_from(position.max(0)).unwrap_or(0);
@@ -240,6 +242,7 @@ impl ControllerHandle {
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
+    #[allow(clippy::unused_async)] // async to match the stable handle API
     pub async fn change_membership(
         &self,
         _new_voters: std::collections::BTreeSet<NodeId>,
@@ -251,6 +254,7 @@ impl ControllerHandle {
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
+    #[allow(clippy::unused_async)] // async to match the stable handle API
     pub async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
         Err(RaftError::Unsupported("dynamic reconfig: Slice 5"))
     }
@@ -259,6 +263,7 @@ impl ControllerHandle {
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
+    #[allow(clippy::unused_async)] // async to match the stable handle API
     pub async fn add_voter(
         &self,
         _req: crate::reconfig::AddVoter,
@@ -270,6 +275,7 @@ impl ControllerHandle {
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
+    #[allow(clippy::unused_async)] // async to match the stable handle API
     pub async fn remove_voter(
         &self,
         _req: crate::reconfig::RemoveVoter,
@@ -281,6 +287,7 @@ impl ControllerHandle {
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
+    #[allow(clippy::unused_async)] // async to match the stable handle API
     pub async fn update_voter(
         &self,
         _req: crate::reconfig::UpdateVoter,
@@ -639,7 +646,7 @@ fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
     std::fs::read_dir(dir).is_ok_and(|entries| {
         entries
             .flatten()
-            .any(|e| e.file_name().to_str().is_some_and(|n| n.ends_with(".log")))
+            .any(|e| e.path().extension().is_some_and(|ext| ext == "log"))
     })
 }
 

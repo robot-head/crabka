@@ -65,6 +65,17 @@ const HEARTBEAT_DIVISOR: u64 = 3;
 /// Filename of the node-local durable quorum-state file.
 const QUORUM_STATE_FILE: &str = "quorum-state";
 
+/// Subdirectory under the data dir holding KIP-630 `.checkpoint` artifacts for
+/// the single metadata partition. Matches the on-disk layout the broker's
+/// `FetchSnapshot` handler and broker-only observers expect.
+const METADATA_SUBDIR: &str = "@metadata-0";
+
+/// The checkpoint directory for a controller rooted at `data_dir`.
+#[must_use]
+pub fn checkpoint_dir(data_dir: &std::path::Path) -> PathBuf {
+    data_dir.join(METADATA_SUBDIR)
+}
+
 /// All consensus state owned by the single engine task.
 struct Engine {
     me: NodeId,
@@ -254,7 +265,7 @@ impl KraftController {
         // (the HWM is not persisted separately; the log only holds committed
         // metadata in this slice, so we apply the full log end).
         let mut image = MetadataImage::new(cluster_id);
-        if let Some(bytes) = load_latest_checkpoint(&data_dir)? {
+        if let Some(bytes) = load_latest_checkpoint(&checkpoint_dir(&data_dir))? {
             let records = crate::snapshot::SnapshotReader::read_records(&bytes)?;
             image = MetadataImage::from_records(cluster_id, &records);
             // Checkpoints in this slice cover the in-memory image, not a log
@@ -1043,7 +1054,7 @@ impl Engine {
         let bytes = crate::snapshot::SnapshotWriter::serialize(&self.image, 0)?;
         let end_offset = self.log.hwm();
         let epoch = i32::try_from(self.core.quorum_state().leader_epoch).unwrap_or(i32::MAX);
-        write_checkpoint(&self.data_dir, end_offset, epoch, &bytes)
+        write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset, epoch, &bytes)
     }
 
     /// Persist the durable quorum state atomically (Task 5).

@@ -1,6 +1,6 @@
 //! Metadata Raft quorum for Crabka.
 //!
-//! `crabka-raft` runs a hand-rolled KIP-595 KRaft consensus engine (the
+//! `crabka-raft` runs a hand-rolled KIP-595 `KRaft` consensus engine (the
 //! [`kraft::KraftController`]) over Crabka's storage ([`crabka_log`]) and
 //! transport ([`crabka_client_core`]). The public entry point is
 //! [`Controller::start`], which spawns the engine, opens a TCP listener serving

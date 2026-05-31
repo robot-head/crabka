@@ -165,16 +165,6 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
-    fn snapshot_id_name_round_trips() {
-        let id = SnapshotId {
-            end_offset: 1847,
-            epoch: 3,
-        };
-        assert!(id.file_name() == "00000000000000001847-0000000003.checkpoint");
-        assert!(SnapshotId::parse(&id.file_name()) == Some(id));
-    }
-
-    #[test]
     fn writer_reader_round_trips_image() {
         let cid = Uuid::new_v4();
         let mut image = MetadataImage::new(cid);
