@@ -443,6 +443,7 @@ impl Engine {
         match cmd {
             Command::Shutdown => {}
             Command::Event(event) => self.on_event(event),
+            Command::FetchResponse { from, body } => self.on_fetch_response(from, &body),
             Command::Inbound(inbound) => self.on_inbound(inbound),
             Command::Timer(tick) => self.on_timer(tick),
             Command::SubmitChange { records, reply } => self.on_submit_change(records, reply),
@@ -608,10 +609,23 @@ impl Engine {
                     self.execute(actions);
                     self.reconcile_timers(prev_role);
                     self.publish_leader();
+                    // Serve the follower the batch bytes it is missing: every
+                    // batch at/after its `fetch_offset` up to our log end (KRaft
+                    // replicates up to the leader's log end, not just the HWM —
+                    // the HWM rides separately in the response). Only the leader
+                    // serves records; a divergent fetch sends none (the follower
+                    // truncates first, then re-fetches).
+                    let records = if diverging.is_some() || !self.core.role().is_leader() {
+                        bytes::Bytes::new()
+                    } else {
+                        self.serve_fetch_records(fetch_offset)
+                    };
                     let resp = wire::PeerResponse::Fetch {
                         leader_id: self.me,
                         leader_epoch: self.core.quorum_state().leader_epoch,
                         diverging,
+                        hwm: self.log.hwm(),
+                        records,
                     };
                     let _ = reply.send(resp.encode());
                 }
@@ -1067,6 +1081,96 @@ impl Engine {
         self.spawn_send(leader_id, api_key::FETCH, body);
     }
 
+    /// (Leader side) serialize every log batch at/after `fetch_offset` up to our
+    /// log end into a length-prefixed run of `RecordBatch::encode` blobs for the
+    /// fetching follower. `KRaft` replicates up to the leader's log end (not just
+    /// the HWM — the HWM is carried separately in the response and gates apply on
+    /// the follower); this is what moves real record bytes so multi-voter
+    /// `submit_change` waiters can commit once a majority has fetched.
+    fn serve_fetch_records(&self, fetch_offset: i64) -> bytes::Bytes {
+        let log_end = self.log.log_end_offset();
+        if fetch_offset < 0 || fetch_offset >= log_end {
+            return bytes::Bytes::new();
+        }
+        let batches = match self.log.read_decoded(fetch_offset, MAX_APPLY_BYTES) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(?e, "kraft: serve_fetch read failed");
+                return bytes::Bytes::new();
+            }
+        };
+        encode_batches(&batches)
+    }
+
+    /// (Follower side) apply the leader's Fetch response: truncate on a
+    /// divergence hint, append the carried batches at their leader-assigned
+    /// offsets, advance our HWM to `min(leader_hwm, own log_end)`, apply the
+    /// newly-committed records to the image, then feed the core
+    /// `ReceiveFetchResponse` (which re-arms the fetch timer / re-fetches).
+    fn on_fetch_response(&mut self, from: NodeId, body: &[u8]) {
+        let Some(wire::PeerResponse::Fetch {
+            leader_id,
+            leader_epoch,
+            diverging,
+            hwm,
+            records,
+        }) = wire::PeerResponse::decode(body)
+        else {
+            return;
+        };
+        let _ = from;
+
+        if let Some(point) = diverging {
+            // Diverged: truncate to the leader's hint. The follower will
+            // re-fetch from the truncation point on the next cycle. We still
+            // feed the core event below so it processes the divergence too.
+            if let Err(e) = self.log.truncate_to(point.offset) {
+                tracing::error!(?e, "kraft: follower truncate failed");
+            }
+        } else if !records.is_empty() {
+            // Append the carried batches at their leader-assigned offsets. A
+            // batch already present (base_offset < our log end) is skipped:
+            // `append_at` requires the offset to equal our current log end.
+            match decode_batches(&records) {
+                Ok(batches) => {
+                    for mut batch in batches {
+                        let at = batch.base_offset;
+                        let log_end = self.log.log_end_offset();
+                        if at < log_end {
+                            continue; // already have it
+                        }
+                        if at > log_end {
+                            // Gap: we are missing earlier records. Stop; the next
+                            // fetch (from our true log end) will refill in order.
+                            break;
+                        }
+                        if let Err(e) = self.log.append_at(&mut batch, at) {
+                            tracing::error!(?e, at, "kraft: follower append_at failed");
+                            break;
+                        }
+                    }
+                }
+                Err(e) => tracing::error!(?e, "kraft: follower decode batches failed"),
+            }
+            // Advance the HWM to the leader's, clamped to our log end, and apply
+            // newly-committed records to the image.
+            let target = hwm.min(self.log.log_end_offset());
+            self.advance_and_apply(target);
+        } else {
+            // No records but the leader's HWM may have moved past what we already
+            // have (e.g. the leader committed entries we already replicated).
+            let target = hwm.min(self.log.log_end_offset());
+            self.advance_and_apply(target);
+        }
+
+        // Feed the core so it re-arms its fetch timer / issues the next fetch.
+        self.on_event(Event::ReceiveFetchResponse {
+            leader_id,
+            leader_epoch,
+            diverging,
+        });
+    }
+
     /// Fire-and-forget a peer send: spawn a task that performs the RPC, decodes
     /// the response into the matching `Receive*Response` core event, and posts
     /// it back to the loop. The loop NEVER awaits a peer RPC inline.
@@ -1076,7 +1180,18 @@ impl Engine {
         tokio::spawn(async move {
             match peers.send(peer, api_key, body).await {
                 Ok(resp_body) => {
-                    if let Some(event) = response_to_event(peer, &resp_body) {
+                    // A Fetch response carries log records the follower must
+                    // truncate/append/apply before the core sees it, so it goes
+                    // through the dedicated `FetchResponse` command. Every other
+                    // response decodes to a pure `Receive*Response` event.
+                    if api_key == self::api_key::FETCH {
+                        let _ = cmd_tx
+                            .send(Command::FetchResponse {
+                                from: peer,
+                                body: resp_body,
+                            })
+                            .await;
+                    } else if let Some(event) = response_to_event(peer, &resp_body) {
                         let _ = cmd_tx.send(Command::Event(event)).await;
                     }
                 }
@@ -1093,9 +1208,11 @@ impl Engine {
     }
 }
 
-/// Decode a peer response body into the matching `Receive*Response` event.
-/// `peer` is the responder, used to fill `from`/`leader_id`. Returns `None` for
-/// `Ack` (Begin/End acks produce no core event) and undecodable bodies.
+/// Decode a non-Fetch peer response body into the matching `Receive*Response`
+/// event. `peer` is the responder, used to fill `from`. Returns `None` for
+/// `Ack` (Begin/End acks produce no core event), `Fetch` (handled by the
+/// dedicated [`Engine::on_fetch_response`] path, which must touch the log before
+/// the core sees the event), and undecodable bodies.
 fn response_to_event(peer: NodeId, body: &[u8]) -> Option<Event> {
     match wire::PeerResponse::decode(body)? {
         wire::PeerResponse::Vote {
@@ -1108,16 +1225,7 @@ fn response_to_event(peer: NodeId, body: &[u8]) -> Option<Event> {
             vote_granted: granted,
             pre_vote,
         }),
-        wire::PeerResponse::Fetch {
-            leader_id,
-            leader_epoch,
-            diverging,
-        } => Some(Event::ReceiveFetchResponse {
-            leader_id,
-            leader_epoch,
-            diverging,
-        }),
-        wire::PeerResponse::Ack { .. } => None,
+        wire::PeerResponse::Fetch { .. } | wire::PeerResponse::Ack { .. } => None,
     }
 }
 
@@ -1131,6 +1239,38 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
 }
 
 const MAX_APPLY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Encode a run of `RecordBatch`es into one contiguous `Bytes` blob (each batch
+/// is self-describing via its `batch_length` header, so they concatenate and
+/// decode back in order — see [`decode_batches`]). Used by the leader's Fetch
+/// serve path to ship replicated record bytes to a follower.
+fn encode_batches(batches: &[RecordBatch]) -> bytes::Bytes {
+    let mut out = bytes::BytesMut::new();
+    for batch in batches {
+        if let Err(e) = batch.encode(&mut out) {
+            tracing::error!(?e, "kraft: encode batch for fetch serve failed");
+        }
+    }
+    out.freeze()
+}
+
+/// Decode the contiguous `Bytes` blob produced by [`encode_batches`] back into a
+/// `Vec<RecordBatch>` (each batch's `base_offset` is preserved). Used by the
+/// follower's Fetch-response apply path.
+fn decode_batches(mut buf: &[u8]) -> Result<Vec<RecordBatch>, RaftError> {
+    let mut out = Vec::new();
+    while !buf.is_empty() {
+        match RecordBatch::decode(&mut buf) {
+            Ok(batch) => out.push(batch),
+            Err(e) => {
+                return Err(RaftError::ChangeRejected(format!(
+                    "decode replicated batch: {e}"
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
 
 /// Build the leader's `LeaderChange` marker batch for `epoch`.
 fn leader_change_batch(epoch: LeaderEpoch) -> RecordBatch {

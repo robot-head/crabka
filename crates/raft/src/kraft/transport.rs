@@ -57,6 +57,17 @@ pub enum Command {
     /// loop feeds peer-RPC responses back to itself as the matching
     /// `Receive*Response` event — the fire-and-forget feedback path).
     Event(Event),
+    /// A Fetch RESPONSE the follower received from the leader. Unlike other peer
+    /// responses (which decode to a pure core event), a Fetch response carries
+    /// log records the follower must truncate/append/apply BEFORE feeding the
+    /// `ReceiveFetchResponse` event to the core — so it gets its own command
+    /// rather than going through the pure `Event` feedback path.
+    FetchResponse {
+        /// The leader that answered (the responder peer).
+        from: NodeId,
+        /// The raw encoded [`wire::PeerResponse::Fetch`] body.
+        body: Bytes,
+    },
     /// A timer (election / fetch / heartbeat) fired. The loop maps it to the
     /// right core event after consulting liveness state (a fetch tick re-polls
     /// rather than electing unless the leader has been missed enough times).
@@ -203,6 +214,14 @@ pub mod wire {
             leader_id: NodeId,
             leader_epoch: LeaderEpoch,
             diverging: Option<LogOffsetMetadata>,
+            /// Leader's high watermark at serve time. The follower advances its
+            /// own HWM to `min(hwm, own log_end)` after appending the records.
+            hwm: i64,
+            /// Verbatim `RecordBatch`-encoded bytes for the batches at/after the
+            /// follower's `fetch_offset`, up to the leader's log end (a
+            /// length-prefixed run of `RecordBatch::encode` blobs). Empty when
+            /// the follower is already caught up or the fetch diverged.
+            records: Bytes,
         },
     }
 
@@ -305,29 +324,32 @@ pub mod wire {
         #[must_use]
         pub fn encode(&self) -> Bytes {
             let mut b = BytesMut::new();
-            match *self {
+            match self {
                 PeerResponse::Vote {
                     epoch,
                     granted,
                     pre_vote,
                 } => {
                     b.put_u8(TAG_VOTE);
-                    b.put_u32(epoch);
-                    b.put_u8(u8::from(granted));
-                    b.put_u8(u8::from(pre_vote));
+                    b.put_u32(*epoch);
+                    b.put_u8(u8::from(*granted));
+                    b.put_u8(u8::from(*pre_vote));
                 }
                 PeerResponse::Ack { epoch } => {
                     b.put_u8(TAG_ACK);
-                    b.put_u32(epoch);
+                    b.put_u32(*epoch);
                 }
                 PeerResponse::Fetch {
                     leader_id,
                     leader_epoch,
                     diverging,
+                    hwm,
+                    records,
                 } => {
                     b.put_u8(TAG_FETCH);
-                    b.put_u64(leader_id);
-                    b.put_u32(leader_epoch);
+                    b.put_u64(*leader_id);
+                    b.put_u32(*leader_epoch);
+                    b.put_i64(*hwm);
                     match diverging {
                         Some(p) => {
                             b.put_u8(1);
@@ -336,6 +358,8 @@ pub mod wire {
                         }
                         None => b.put_u8(0),
                     }
+                    b.put_u32(u32::try_from(records.len()).unwrap_or(u32::MAX));
+                    b.extend_from_slice(records);
                 }
             }
             b.freeze()
@@ -360,6 +384,7 @@ pub mod wire {
                 TAG_FETCH => {
                     let leader_id = buf.get_u64();
                     let leader_epoch = buf.get_u32();
+                    let hwm = buf.get_i64();
                     let diverging = if buf.get_u8() != 0 {
                         Some(LogOffsetMetadata {
                             offset: buf.get_i64(),
@@ -368,10 +393,17 @@ pub mod wire {
                     } else {
                         None
                     };
+                    let rec_len = buf.get_u32() as usize;
+                    if buf.remaining() < rec_len {
+                        return None;
+                    }
+                    let records = Bytes::copy_from_slice(&buf[..rec_len]);
                     Some(PeerResponse::Fetch {
                         leader_id,
                         leader_epoch,
                         diverging,
+                        hwm,
+                        records,
                     })
                 }
                 _ => None,
@@ -429,11 +461,15 @@ pub mod wire {
                         offset: 5,
                         epoch: 1,
                     }),
+                    hwm: 0,
+                    records: Bytes::new(),
                 },
                 PeerResponse::Fetch {
                     leader_id: 2,
                     leader_epoch: 5,
                     diverging: None,
+                    hwm: 7,
+                    records: Bytes::from_static(b"\x01\x02\x03"),
                 },
             ] {
                 let enc = resp.encode();
