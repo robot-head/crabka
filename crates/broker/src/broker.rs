@@ -1044,32 +1044,80 @@ impl Broker {
         {
             let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
 
-            // KIP-853 standalone self-bootstrap: a `Bootstrap` node with no
-            // seeded `VotersRecord` (an in-process/single-node start that
-            // didn't run `format --standalone`) forms a single-voter cluster
-            // of itself. Seed both the openraft membership (`initial_voters`)
-            // and the metadata log (a `V1Voters` record submitted after
-            // election in step 2b) so the two stay in lockstep. Multi-node
-            // clusters seed voters via `format` or grow via auto-join
-            // (`BootstrapMode::Join`), so neither path lands here.
+            // KIP-595 static bootstrap: a `Bootstrap` node with no seeded
+            // `VotersRecord` (an in-process start that didn't run
+            // `format --standalone`) seeds its initial voter set from
+            // `controller_quorum_voters`. Two shapes:
+            //
+            //   * Single-voter (`len <= 1`): standalone self-bootstrap — form a
+            //     single-voter cluster of *this* node and self-elect on the
+            //     first election timeout.
+            //   * Multi-voter (`len > 1`): static N-voter bootstrap — seed the
+            //     full configured voter set so every node starts with
+            //     voters={all configured} and elects among themselves over the
+            //     real KIP-595 wire. No auto-join (that's KIP-853, Slice 5);
+            //     every node runs this identically with the same configured set.
+            //
+            // Either way we seed both the engine's `initial_voters` and the
+            // metadata log (a `V1Voters` + `V1KRaftVersion` pair submitted
+            // through raft after election in step 2b) so the two stay in
+            // lockstep.
             if initial_voters.is_empty()
                 && matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
             {
-                let self_voter = crabka_metadata::Voter {
-                    id: config.node_id,
-                    directory_id: config.directory_id,
-                    endpoints: vec![crabka_metadata::VoterEndpoint {
-                        name: "CONTROLLER".to_string(),
-                        host: config.controller_listen_addr.ip().to_string(),
-                        port: config.controller_listen_addr.port(),
-                    }],
-                    kraft_version: crabka_metadata::KRaftVersionRange::default(),
+                let voters = if config.controller_quorum_voters.len() > 1 {
+                    // Static N-voter set: one `Voter` per configured
+                    // `(node_id, controller_addr)`. The engine identifies
+                    // voters by node id for dialing (CONTROLLER endpoint) and
+                    // for vote-grant tallying; `directory_id` is carried in the
+                    // records but is not used by the engine's vote/peer logic
+                    // (verified against `kraft/network.rs::controller_addr` and
+                    // `kraft/core.rs`, which key on `NodeId` and use
+                    // `Uuid::nil()` for vote keys). So `directory_id` only needs
+                    // to be exact for self; peers get a deterministic
+                    // placeholder until KIP-853/JVM-interop (Slice 5/6) makes
+                    // peer directory ids load-bearing.
+                    let voters: Vec<crabka_metadata::Voter> = config
+                        .controller_quorum_voters
+                        .iter()
+                        .map(|&(node_id, addr)| crabka_metadata::Voter {
+                            id: node_id,
+                            directory_id: if node_id == config.node_id {
+                                config.directory_id
+                            } else {
+                                uuid::Uuid::nil()
+                            },
+                            endpoints: vec![crabka_metadata::VoterEndpoint {
+                                name: "CONTROLLER".to_string(),
+                                host: addr.ip().to_string(),
+                                port: addr.port(),
+                            }],
+                            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+                        })
+                        .collect();
+                    tracing::info!(
+                        node_id = config.node_id,
+                        voter_count = voters.len(),
+                        "KIP-595 static multi-voter bootstrap: seeding full configured voter set"
+                    );
+                    crabka_metadata::VoterSet::from_voters(voters)
+                } else {
+                    let self_voter = crabka_metadata::Voter {
+                        id: config.node_id,
+                        directory_id: config.directory_id,
+                        endpoints: vec![crabka_metadata::VoterEndpoint {
+                            name: "CONTROLLER".to_string(),
+                            host: config.controller_listen_addr.ip().to_string(),
+                            port: config.controller_listen_addr.port(),
+                        }],
+                        kraft_version: crabka_metadata::KRaftVersionRange::default(),
+                    };
+                    tracing::info!(
+                        node_id = config.node_id,
+                        "KIP-595 standalone self-bootstrap: forming single-voter cluster"
+                    );
+                    crabka_metadata::VoterSet::from_voters([self_voter])
                 };
-                let voters = crabka_metadata::VoterSet::from_voters([self_voter]);
-                tracing::info!(
-                    node_id = config.node_id,
-                    "KIP-853 standalone self-bootstrap: forming single-voter cluster"
-                );
                 bootstrap_records.insert(
                     0,
                     crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
