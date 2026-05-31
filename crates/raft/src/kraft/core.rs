@@ -473,11 +473,18 @@ impl QuorumStateMachine {
                 id: candidate,
                 directory_id: uuid::Uuid::nil(),
             });
+            let deadline = self.election_deadline(now);
             self.role = Role::Voted {
-                election_deadline: self.election_deadline(now),
+                election_deadline: deadline,
             };
             actions.push(Action::PersistQuorumState);
             actions.push(Action::TransitionedTo(self.role.name()));
+            // Arm the election timer: if the candidate we voted for dies, this
+            // node must time out and start its own election (else deadlock).
+            actions.push(Action::ResetTimer {
+                kind: TimerKind::Election,
+                deadline,
+            });
         }
         actions.push(Action::ReplyVote {
             to: from,
@@ -502,6 +509,12 @@ impl QuorumStateMachine {
         };
         actions.push(Action::PersistQuorumState);
         actions.push(Action::TransitionedTo("Unattached"));
+        // Arm the election timer so a fenced/stepped-down node will eventually
+        // re-elect if no leader emerges (without this it would deadlock).
+        actions.push(Action::ResetTimer {
+            kind: TimerKind::Election,
+            deadline,
+        });
     }
 }
 
