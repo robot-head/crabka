@@ -23,7 +23,7 @@ pub use core::QuorumStateMachine;
 pub use event::Event;
 pub use log::KraftLog;
 pub use role::Role;
-pub use transport::{Command, Inbound, NullPeerSender, PeerSender};
+pub use transport::{Command, Inbound, NullPeerSender, PeerSender, QuorumStateSnapshot, TimerTick};
 pub use types::{
     LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant,
 };
