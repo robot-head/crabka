@@ -23,9 +23,24 @@ pub(crate) fn handle(
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
     let coordinator = broker.group_coordinator.clone();
+    let image = broker.controller.current_image();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ConsumerGroupHeartbeatRequest::decode(&mut cur, version)?;
+
+        // KIP-848 / KIP-584: the next-gen protocol is gated on a finalized
+        // group.version >= 1. Below that (or unfinalized on an old-release
+        // cluster) reject so the client falls back to the classic protocol.
+        // require_feature is permissive when unfinalized.
+        if crate::features::require_feature(
+            &image,
+            crabka_metadata::group_version::GROUP_VERSION_FEATURE,
+            1,
+        )
+        .is_err()
+        {
+            return encode(version, &error(codes::UNSUPPORTED_VERSION));
+        }
 
         if !coordinator.config.next_gen_enabled() {
             return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
