@@ -12,16 +12,25 @@
 
 use bytes::{Bytes, BytesMut};
 
+use crate::owned::access_control_entry_record::AccessControlEntryRecord;
 use crate::owned::begin_transaction_record::BeginTransactionRecord;
 use crate::owned::broker_registration_change_record::BrokerRegistrationChangeRecord;
+use crate::owned::client_quota_record::ClientQuotaRecord;
+use crate::owned::config_record::ConfigRecord;
+use crate::owned::delegation_token_record::DelegationTokenRecord;
 use crate::owned::end_transaction_record::EndTransactionRecord;
 use crate::owned::feature_level_record::FeatureLevelRecord;
 use crate::owned::no_op_record::NoOpRecord;
 use crate::owned::partition_record::PartitionRecord;
 use crate::owned::register_broker_record::RegisterBrokerRecord;
 use crate::owned::register_controller_record::RegisterControllerRecord;
+use crate::owned::remove_access_control_entry_record::RemoveAccessControlEntryRecord;
+use crate::owned::remove_delegation_token_record::RemoveDelegationTokenRecord;
 use crate::owned::remove_topic_record::RemoveTopicRecord;
+use crate::owned::remove_user_scram_credential_record::RemoveUserScramCredentialRecord;
 use crate::owned::topic_record::TopicRecord;
+use crate::owned::unregister_broker_record::UnregisterBrokerRecord;
+use crate::owned::user_scram_credential_record::UserScramCredentialRecord;
 use crate::records::metadata::envelope::{decode_value_header, encode_value};
 use crate::{Decode, Encode, ProtocolError};
 
@@ -38,6 +47,15 @@ pub enum KraftMetadataRecord {
     RegisterController(RegisterControllerRecord), // apiKey 7
     BrokerRegistrationChange(BrokerRegistrationChangeRecord), // apiKey 8
     FeatureLevel(FeatureLevelRecord),             // apiKey 12
+    UnregisterBroker(UnregisterBrokerRecord),     // apiKey 1
+    Config(ConfigRecord),                         // apiKey 4
+    DelegationToken(DelegationTokenRecord),       // apiKey 10
+    UserScramCredential(UserScramCredentialRecord), // apiKey 11
+    ClientQuota(ClientQuotaRecord),               // apiKey 14
+    AccessControlEntry(AccessControlEntryRecord), // apiKey 18
+    RemoveAccessControlEntry(RemoveAccessControlEntryRecord), // apiKey 19
+    RemoveUserScramCredential(RemoveUserScramCredentialRecord), // apiKey 22
+    RemoveDelegationToken(RemoveDelegationTokenRecord), // apiKey 26
     /// A record this build does not model. Body is the post-envelope bytes.
     Unknown {
         api_key: u32,
@@ -79,6 +97,15 @@ impl KraftMetadataRecord {
             Self::BeginTransaction(_) => 23,
             Self::EndTransaction(_) => 24,
             Self::RegisterController(_) => 27,
+            Self::UnregisterBroker(_) => 1,
+            Self::Config(_) => 4,
+            Self::DelegationToken(_) => 10,
+            Self::UserScramCredential(_) => 11,
+            Self::ClientQuota(_) => 14,
+            Self::AccessControlEntry(_) => 18,
+            Self::RemoveAccessControlEntry(_) => 19,
+            Self::RemoveUserScramCredential(_) => 22,
+            Self::RemoveDelegationToken(_) => 26,
             Self::Unknown { api_key, .. } => *api_key,
         }
     }
@@ -106,6 +133,15 @@ impl KraftMetadataRecord {
             Self::RegisterController(r) => r.encode(&mut body, v)?,
             Self::BrokerRegistrationChange(r) => r.encode(&mut body, v)?,
             Self::FeatureLevel(r) => r.encode(&mut body, v)?,
+            Self::UnregisterBroker(r) => r.encode(&mut body, v)?,
+            Self::Config(r) => r.encode(&mut body, v)?,
+            Self::DelegationToken(r) => r.encode(&mut body, v)?,
+            Self::UserScramCredential(r) => r.encode(&mut body, v)?,
+            Self::ClientQuota(r) => r.encode(&mut body, v)?,
+            Self::AccessControlEntry(r) => r.encode(&mut body, v)?,
+            Self::RemoveAccessControlEntry(r) => r.encode(&mut body, v)?,
+            Self::RemoveUserScramCredential(r) => r.encode(&mut body, v)?,
+            Self::RemoveDelegationToken(r) => r.encode(&mut body, v)?,
             Self::Unknown { body: raw, .. } => {
                 return Ok(encode_value(api_key, api_version_to_u32(api_version), raw));
             }
@@ -140,6 +176,19 @@ impl KraftMetadataRecord {
             23 => Self::BeginTransaction(BeginTransactionRecord::decode(&mut cur, v)?),
             24 => Self::EndTransaction(EndTransactionRecord::decode(&mut cur, v)?),
             27 => Self::RegisterController(RegisterControllerRecord::decode(&mut cur, v)?),
+            1 => Self::UnregisterBroker(UnregisterBrokerRecord::decode(&mut cur, v)?),
+            4 => Self::Config(ConfigRecord::decode(&mut cur, v)?),
+            10 => Self::DelegationToken(DelegationTokenRecord::decode(&mut cur, v)?),
+            11 => Self::UserScramCredential(UserScramCredentialRecord::decode(&mut cur, v)?),
+            14 => Self::ClientQuota(ClientQuotaRecord::decode(&mut cur, v)?),
+            18 => Self::AccessControlEntry(AccessControlEntryRecord::decode(&mut cur, v)?),
+            19 => {
+                Self::RemoveAccessControlEntry(RemoveAccessControlEntryRecord::decode(&mut cur, v)?)
+            }
+            22 => Self::RemoveUserScramCredential(RemoveUserScramCredentialRecord::decode(
+                &mut cur, v,
+            )?),
+            26 => Self::RemoveDelegationToken(RemoveDelegationTokenRecord::decode(&mut cur, v)?),
             other => {
                 // Unknown records keep their raw post-envelope bytes verbatim,
                 // so trailing bytes are intentional here (not checked below).
@@ -207,5 +256,62 @@ mod tests {
         }
         // Unknown re-encodes byte-identically too.
         assert!(decoded.encode_value(ver).expect("re-encode") == value);
+    }
+
+    #[test]
+    fn config_record_value_roundtrips() {
+        use crate::owned::config_record::ConfigRecord;
+        let rec = KraftMetadataRecord::Config(ConfigRecord::default());
+        let (decoded, ver) =
+            KraftMetadataRecord::decode_value(&rec.encode_value(0).unwrap()).unwrap();
+        assert!(decoded.encode_value(ver).unwrap() == rec.encode_value(0).unwrap());
+        assert!(decoded.api_key() == 4);
+    }
+
+    #[test]
+    fn all_new_records_have_correct_api_keys() {
+        use crate::owned::{
+            access_control_entry_record::AccessControlEntryRecord,
+            client_quota_record::ClientQuotaRecord, config_record::ConfigRecord,
+            delegation_token_record::DelegationTokenRecord,
+            remove_access_control_entry_record::RemoveAccessControlEntryRecord,
+            remove_delegation_token_record::RemoveDelegationTokenRecord,
+            remove_user_scram_credential_record::RemoveUserScramCredentialRecord,
+            unregister_broker_record::UnregisterBrokerRecord,
+            user_scram_credential_record::UserScramCredentialRecord,
+        };
+        assert!(
+            KraftMetadataRecord::UnregisterBroker(UnregisterBrokerRecord::default()).api_key() == 1
+        );
+        assert!(KraftMetadataRecord::Config(ConfigRecord::default()).api_key() == 4);
+        assert!(
+            KraftMetadataRecord::DelegationToken(DelegationTokenRecord::default()).api_key() == 10
+        );
+        assert!(
+            KraftMetadataRecord::UserScramCredential(UserScramCredentialRecord::default())
+                .api_key()
+                == 11
+        );
+        assert!(KraftMetadataRecord::ClientQuota(ClientQuotaRecord::default()).api_key() == 14);
+        assert!(
+            KraftMetadataRecord::AccessControlEntry(AccessControlEntryRecord::default()).api_key()
+                == 18
+        );
+        assert!(
+            KraftMetadataRecord::RemoveAccessControlEntry(RemoveAccessControlEntryRecord::default())
+                .api_key() == 19
+        );
+        assert!(
+            KraftMetadataRecord::RemoveUserScramCredential(
+                RemoveUserScramCredentialRecord::default()
+            )
+            .api_key()
+                == 22
+        );
+        assert!(
+            KraftMetadataRecord::RemoveDelegationToken(RemoveDelegationTokenRecord::default())
+                .api_key()
+                == 26
+        );
     }
 }
