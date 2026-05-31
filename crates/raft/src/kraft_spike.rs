@@ -26,7 +26,7 @@ use crabka_protocol::owned::fetch_request::FetchRequest;
 use crabka_protocol::owned::fetch_response::{
     FetchResponse, FetchableTopicResponse, LeaderIdAndEpoch, PartitionData,
 };
-use crabka_protocol::records::{Attributes, Record, RecordBatch, RecordsPayload};
+use crabka_protocol::records::RecordsPayload;
 use crabka_protocol::{Decode, Encode};
 
 /// Observer's `Fetch` version (flexible; `ResponseHeader` v1).
@@ -43,57 +43,28 @@ const SPIKE_LEADER_ID: i32 = 1;
 /// Fresh single-voter cluster leader epoch.
 const SPIKE_LEADER_EPOCH: i32 = 1;
 
-// --- Step B: bootstrap log batch ---------------------------------------
+// --- Step B: bootstrap log bytes ---------------------------------------
 
-/// The records the spike serves at offset 0. A single non-control data
-/// record carrying a `FeatureLevelRecord`-style value (`metadata.version`
-/// level, as the captured JVM bootstrap log does). The exact byte-for-byte
-/// JVM record framing is refined later during live iteration — for the spike
-/// this only needs to be a structurally valid, non-empty record.
-fn bootstrap_records() -> Vec<Record> {
-    // Value: a placeholder feature-level payload. Non-empty so the batch has
-    // body bytes and a meaningful CRC; the live-iteration step replaces this
-    // with byte-exact JVM `FEATURE_LEVEL_RECORD` bytes.
-    let mut value = BytesMut::with_capacity(2);
-    value.put_i16(METADATA_VERSION_LEVEL);
-    vec![Record {
-        attributes: 0,
-        timestamp_delta: 0,
-        offset_delta: 0,
-        key: None,
-        value: Some(value.freeze()),
-        headers: Vec::new(),
-    }]
-}
+/// Real `apache/kafka:4.0.0` metadata-log bytes — offsets 0..=5: the
+/// `LEADER_CHANGE` control batch + the bootstrap feature-level transaction
+/// (`metadata.version`=25, `group.version`=1, `transaction.version`=2) —
+/// captured verbatim from a freshly-formatted JVM node (cut at a batch
+/// boundary, 284 bytes).
+///
+/// Replaying the JVM's own bytes back to a JVM observer is the truest
+/// decode-only test: it exercises the `Fetch`/`ApiVersions` WIRE end to end
+/// without yet hand-encoding KRaft metadata records (that is slice 1's job).
+/// See `docs/superpowers/specs/2026-05-30-kraft-wire-findings.md`.
+const SPIKE_METADATA_LOG: &[u8] = include_bytes!("kraft_spike_metadata_log.bin");
 
-/// Build the bootstrap metadata log: a single structurally valid v2
-/// `RecordBatch` at `base_offset` 0 with `partition_leader_epoch` =
-/// [`SPIKE_LEADER_EPOCH`], magic 2, and a correct CRC-32C (computed by
-/// `RecordBatch::encode`).
+/// Log-end offset of [`SPIKE_METADATA_LOG`] — one past the last record offset
+/// (5). Reported as the Fetch high watermark so the observer treats the served
+/// records as committed and stops fetching once it has caught up to offset 6.
+const SPIKE_LOG_END_OFFSET: i64 = 6;
+
+/// The metadata-log bytes the spike serves (the embedded JVM capture).
 pub(crate) fn bootstrap_log_batch() -> Bytes {
-    let batch = RecordBatch {
-        base_offset: 0,
-        partition_leader_epoch: SPIKE_LEADER_EPOCH,
-        attributes: Attributes::default(),
-        last_offset_delta: 0,
-        base_timestamp: 0,
-        max_timestamp: 0,
-        producer_id: -1,
-        producer_epoch: -1,
-        base_sequence: -1,
-        records: bootstrap_records(),
-    };
-    let mut buf = BytesMut::with_capacity(batch.encoded_len());
-    batch
-        .encode(&mut buf)
-        .expect("bootstrap batch encodes (no compression, in-range lengths)");
-    buf.freeze()
-}
-
-/// Number of records the bootstrap log contains (used as the Fetch
-/// high-watermark / log-end-offset for offset 0).
-fn bootstrap_record_count() -> i64 {
-    i64::try_from(bootstrap_records().len()).unwrap_or(i64::MAX)
+    Bytes::from_static(SPIKE_METADATA_LOG)
 }
 
 // --- Step C: ApiVersions responder -------------------------------------
@@ -146,7 +117,6 @@ pub(crate) fn api_versions_response_frame(correlation_id: i32, req_version: i16)
 /// (the observer has already consumed them) but the same high watermark is
 /// reported.
 fn metadata_partition(fetch_offset: i64) -> PartitionData {
-    let hwm = bootstrap_record_count();
     let records = if fetch_offset == 0 {
         Some(RecordsPayload::Raw(bootstrap_log_batch()))
     } else {
@@ -155,8 +125,8 @@ fn metadata_partition(fetch_offset: i64) -> PartitionData {
     PartitionData {
         partition_index: 0,
         error_code: 0,
-        high_watermark: hwm,
-        last_stable_offset: hwm,
+        high_watermark: SPIKE_LOG_END_OFFSET,
+        last_stable_offset: SPIKE_LOG_END_OFFSET,
         log_start_offset: 0,
         aborted_transactions: None,
         preferred_read_replica: -1,
@@ -237,19 +207,22 @@ mod tests {
     use bytes::Buf;
 
     #[test]
-    fn bootstrap_batch_is_structurally_valid_v2() {
+    fn embedded_metadata_log_is_a_valid_v2_batch() {
+        use crabka_protocol::records::RecordBatch;
         let bytes = bootstrap_log_batch();
+        // The embedded JVM capture is 284 bytes: a LEADER_CHANGE control batch
+        // (offset 0) followed by the bootstrap feature-level transaction
+        // (offsets 1..=5).
+        assert!(bytes.len() == 284);
         // magic byte sits at offset 16 (base_offset 8 + batch_length 4 +
         // partition_leader_epoch 4).
         assert!(bytes[16] == 2);
-        // Re-decode the batch to prove the CRC and framing are valid.
+        // Re-decode the first batch (the control LEADER_CHANGE batch) to prove
+        // the CRC and framing are valid.
         let mut cur: &[u8] = &bytes;
-        let batch = RecordBatch::decode(&mut cur).expect("bootstrap batch re-decodes");
+        let batch = RecordBatch::decode(&mut cur).expect("first batch re-decodes");
         assert!(batch.base_offset == 0);
         assert!(batch.partition_leader_epoch == SPIKE_LEADER_EPOCH);
-        assert!(!batch.records.is_empty());
-        assert!(batch.records[0].value.is_some());
-        assert!(batch.records[0].key.is_none());
     }
 
     #[test]
@@ -304,7 +277,7 @@ mod tests {
         let resp = FetchResponse::decode(&mut cur, FETCH_REQ_VERSION).expect("fetch body decodes");
         let partition = &resp.responses[0].partitions[0];
         assert!(partition.records.is_none());
-        assert!(partition.high_watermark == bootstrap_record_count());
+        assert!(partition.high_watermark == SPIKE_LOG_END_OFFSET);
     }
 
     #[test]

@@ -136,9 +136,17 @@ where
                         continue;
                     }
                     if api_key == 1 {
-                        let fetch_offset =
+                        let fetch_offset = if let Some(offset) =
                             crate::kraft_spike::fetch_offset_from_request(&body, api_version)
-                                .unwrap_or(0);
+                        {
+                            offset
+                        } else {
+                            tracing::warn!(
+                                api_version,
+                                "kraft-spike: FetchRequest decode failed, defaulting to offset 0"
+                            );
+                            0
+                        };
                         tracing::info!(
                             fetch_offset,
                             api_version,
