@@ -250,6 +250,13 @@ pub(crate) fn build_table() -> HandlerTable {
     // KIP-932 ShareGroupHeartbeat (api_key 76). Plain 4-arg handler:
     // share-group membership needs no per-connection ACL context.
     t.register(76, share_group_heartbeat::handle);
+    // KIP-932 share-state persister RPCs (api keys 83–87). Inter-broker
+    // handlers, gated per-partition on local share-state leadership.
+    t.register(83, crate::share_coordinator::handlers::initialize::handle);
+    t.register(84, crate::share_coordinator::handlers::read::handle);
+    t.register(85, crate::share_coordinator::handlers::write::handle);
+    t.register(86, crate::share_coordinator::handlers::delete::handle);
+    t.register(87, crate::share_coordinator::handlers::read_summary::handle);
     // KIP-714 (client metrics push). Both handlers are no-ops: get returns
     // an empty subscription so JVM clients skip push; push silently
     // discards anything that races the subscription re-fetch.
