@@ -1,4 +1,4 @@
-//! Hand-rolled KRaft consensus core (KIP-595 + KIP-996). Pure, deterministic,
+//! Hand-rolled `KRaft` consensus core (KIP-595 + KIP-996). Pure, deterministic,
 //! sans-IO: an `on_event` state machine over `QuorumState` + `Role`. Not wired
 //! to the controller/wire/log in slice 3a (openraft remains the live engine);
 //! 3b/3c integrate it and ultimately replace openraft.

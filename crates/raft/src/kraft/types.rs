@@ -1,4 +1,4 @@
-//! Core data types for the KRaft consensus state machine (KIP-595/996).
+//! Core data types for the `KRaft` consensus state machine (KIP-595/996).
 //! Pure, sans-IO: no clock, no wire, no log bytes.
 
 use crabka_metadata::voters::VoterSet;
@@ -18,7 +18,7 @@ impl SimInstant {
     }
 }
 
-/// KRaft leader epoch (the `i32` "leaderEpoch" on the wire; `u32` internally is
+/// `KRaft` leader epoch (the `i32` "leaderEpoch" on the wire; `u32` internally is
 /// fine because epochs only ever increase from 0).
 pub type LeaderEpoch = u32;
 
