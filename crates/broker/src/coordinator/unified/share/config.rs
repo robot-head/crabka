@@ -12,6 +12,9 @@ pub struct ShareGroupConfig {
     pub max_heartbeat_interval: Duration,
     pub max_groups: usize,
     pub max_size: usize,
+    pub record_lock_duration: Duration,
+    pub max_delivery_attempts: i16,
+    pub max_inflight_records: i32,
 }
 
 impl Default for ShareGroupConfig {
@@ -26,6 +29,9 @@ impl Default for ShareGroupConfig {
             max_heartbeat_interval: Duration::from_secs(15),
             max_groups: 0,
             max_size: 200,
+            record_lock_duration: Duration::from_secs(30),
+            max_delivery_attempts: 5,
+            max_inflight_records: 200,
         }
     }
 }
@@ -41,5 +47,13 @@ mod tests {
         assert!(c.heartbeat_interval == Duration::from_secs(5));
         assert!(c.session_timeout == Duration::from_secs(45));
         assert!(c.max_size == 200);
+    }
+
+    #[test]
+    fn slice_c_defaults() {
+        let c = ShareGroupConfig::default();
+        assert!(c.record_lock_duration == std::time::Duration::from_secs(30));
+        assert!(c.max_delivery_attempts == 5);
+        assert!(c.max_inflight_records == 200);
     }
 }
