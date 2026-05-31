@@ -373,6 +373,14 @@ impl MetadataImage {
             .copied()
     }
 
+    /// KIP-584: the finalized level for an arbitrary feature, or `None` if it
+    /// has not been finalized. Generic counterpart to
+    /// [`Self::finalized_metadata_version`].
+    #[must_use]
+    pub fn finalized_feature(&self, name: &str) -> Option<i16> {
+        self.feature_levels.get(name).copied()
+    }
+
     /// The minimum `metadata.version` level the live image requires: the
     /// floor a downgrade must not drop below. Rises with feature-gated
     /// state present in the image (`KRaft` SCRAM creds, delegation tokens).
@@ -826,6 +834,17 @@ mod tests {
         let m = img();
         assert!(m.finalized_features().is_empty());
         assert!(m.finalized_features_epoch() == -1);
+    }
+
+    #[test]
+    fn finalized_feature_reads_arbitrary_name() {
+        let mut m = MetadataImage::new(uuid::Uuid::nil());
+        assert!(m.finalized_feature("transaction.version").is_none());
+        m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "transaction.version".into(),
+            level: 2,
+        }));
+        assert!(m.finalized_feature("transaction.version") == Some(2));
     }
 
     #[test]

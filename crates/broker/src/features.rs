@@ -1,19 +1,20 @@
-//! KIP-584 supported-feature table. Drives both the `ApiVersions`
-//! `supported_features` advertisement and the `UpdateFeatures` validation
-//! path so the two can never disagree about what this broker supports.
-//!
-//! The canonical `metadata.version` string/level table lives in
-//! [`crabka_metadata::metadata_version`]; this module re-exports the three
-//! constants so local code keeps its short `crate::features::*` paths.
+//! KIP-584 supported-feature surface for the broker. Re-exports the
+//! `crabka_metadata` feature registry and derives the `ApiVersions`
+//! advertisement rows from it, so the advertised and validated feature sets
+//! can never disagree. Behavioral gating helpers (`require_feature`) live here
+//! because they return broker error codes.
 
-/// The `metadata.version` feature name (KIP-584 / KIP-778).
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_FEATURE as METADATA_VERSION;
-/// Maximum supported `metadata.version` level.
+// Re-exported for `ApiVersions` tests / range-bound assertions; consumed only
+// from `#[cfg(test)]` modules, so the non-test lib target sees them as unused.
+#[allow(unused_imports)]
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MAX;
-/// Minimum supported `metadata.version` level.
+#[allow(unused_imports)]
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MIN;
 
-/// One row of the supported-feature table.
+use crabka_metadata::MetadataImage;
+
+/// One row of the `ApiVersions.supported_features` advertisement.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SupportedFeature {
     pub name: &'static str,
@@ -21,30 +22,63 @@ pub(crate) struct SupportedFeature {
     pub max_version: i16,
 }
 
-/// The features this broker supports finalizing.
-pub(crate) fn supported_features() -> &'static [SupportedFeature] {
-    const TABLE: &[SupportedFeature] = &[SupportedFeature {
-        name: METADATA_VERSION,
-        min_version: METADATA_VERSION_MIN,
-        max_version: METADATA_VERSION_MAX,
-    }];
-    TABLE
-}
-
-/// Look up a supported feature by name.
-pub(crate) fn lookup(name: &str) -> Option<SupportedFeature> {
-    supported_features()
+/// The features this broker supports finalizing, derived from the
+/// `crabka_metadata` registry (single source of truth).
+pub(crate) fn supported_features() -> Vec<SupportedFeature> {
+    crabka_metadata::feature_registry()
         .iter()
-        .copied()
-        .find(|f| f.name == name)
+        .map(|f| {
+            let (min_version, max_version) = f.supported_range();
+            SupportedFeature {
+                name: f.name(),
+                min_version,
+                max_version,
+            }
+        })
+        .collect()
 }
 
-/// True when a feature requiring `required_level` must be blocked given
-/// the `finalized` metadata.version. A missing finalized level (`None`,
-/// `MetadataVersion.UNKNOWN`) is permissive — there is no level to gate
-/// against — matching the runtime range guard's treatment.
-pub(crate) fn metadata_version_blocks(finalized: Option<i16>, required_level: i16) -> bool {
-    finalized.is_some_and(|level| level < required_level)
+/// Look up a supported feature by name. Pairs with `supported_features` as the
+/// module's feature-surface API; the `UpdateFeatures` handler now resolves the
+/// registry feature directly, so the non-test lib target sees this as unused.
+#[allow(dead_code)]
+pub(crate) fn lookup(name: &str) -> Option<SupportedFeature> {
+    crabka_metadata::feature(name).map(|f| {
+        let (min_version, max_version) = f.supported_range();
+        SupportedFeature {
+            name: f.name(),
+            min_version,
+            max_version,
+        }
+    })
+}
+
+/// KIP-584 admission gate. `Err(UNSUPPORTED_VERSION)` when `name` is finalized
+/// below `required_level`. Permissive when the feature is unfinalized (no level
+/// to gate against) — matching the range guard's treatment of a missing level.
+pub(crate) fn require_feature(
+    image: &MetadataImage,
+    name: &str,
+    required_level: i16,
+) -> Result<(), i16> {
+    let finalized = image.finalized_features().get(name).copied();
+    if finalized.is_some_and(|level| level < required_level) {
+        Err(crate::codes::UNSUPPORTED_VERSION)
+    } else {
+        Ok(())
+    }
+}
+
+/// True when `name` is finalized at >= `level`, treating an UNFINALIZED feature
+/// as level 0 (disabled). Use for features where absence means "off" (e.g.
+/// `group.version` → next-gen disabled), unlike `require_feature` which is
+/// permissive on absence (used for metadata.version-gated RPCs on legacy images).
+pub(crate) fn feature_enabled(
+    image: &crabka_metadata::MetadataImage,
+    name: &str,
+    level: i16,
+) -> bool {
+    image.finalized_features().get(name).copied().unwrap_or(0) >= level
 }
 
 #[cfg(test)]
@@ -53,19 +87,43 @@ mod tests {
     use assert2::assert;
 
     #[test]
-    fn metadata_version_is_supported() {
+    fn feature_enabled_treats_absence_as_disabled() {
+        use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        assert!(!feature_enabled(&image, "group.version", 1)); // absent → disabled
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "group.version".into(),
+            level: 1,
+        }));
+        assert!(feature_enabled(&image, "group.version", 1)); // present at 1 → enabled
+    }
+
+    #[test]
+    fn supported_features_include_metadata_version() {
         let f = lookup(METADATA_VERSION).expect("metadata.version supported");
-        assert!(f.min_version == crabka_metadata::metadata_version::METADATA_VERSION_MIN);
-        assert!(f.max_version == crabka_metadata::metadata_version::METADATA_VERSION_MAX);
-        assert!(f.min_version == 7);
-        assert!(f.max_version == 25);
+        assert!(f.min_version == METADATA_VERSION_MIN);
+        assert!(f.max_version == METADATA_VERSION_MAX);
         assert!(lookup("not.a.feature").is_none());
     }
 
     #[test]
-    fn metadata_version_blocks_is_permissive_on_unknown() {
-        assert!(!metadata_version_blocks(None, 11));
-        assert!(metadata_version_blocks(Some(10), 11));
-        assert!(!metadata_version_blocks(Some(11), 11));
+    fn require_feature_is_permissive_on_unfinalized() {
+        let image = MetadataImage::new(uuid::Uuid::nil());
+        assert!(require_feature(&image, METADATA_VERSION, 11).is_ok());
+    }
+
+    #[test]
+    fn require_feature_gates_below_level() {
+        use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: METADATA_VERSION.to_string(),
+            level: 10,
+        }));
+        assert!(
+            require_feature(&image, METADATA_VERSION, 11) == Err(crate::codes::UNSUPPORTED_VERSION)
+        );
+        assert!(require_feature(&image, METADATA_VERSION, 10).is_ok());
+        assert!(require_feature(&image, METADATA_VERSION, 7).is_ok());
     }
 }

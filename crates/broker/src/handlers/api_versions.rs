@@ -38,7 +38,17 @@ fn supported_feature_keys() -> Vec<SupportedFeatureKey> {
         .iter()
         .map(|f| SupportedFeatureKey {
             name: f.name.to_string(),
-            min_version: f.min_version,
+            // Kafka's wire invariant: `SupportedVersionRange` (and the JVM
+            // client's `NodeApiVersions` parser) requires `minVersion >= 1`,
+            // so the ApiVersions `SupportedFeatures` advertisement clamps the
+            // min to 1. Features whose registry min is 0 (e.g. `group.version`,
+            // `transaction.version`, where level 0 means "disabled") are still
+            // *finalizable* at 0 via `UpdateFeatures` — 0 is only inexpressible
+            // on this specific wire field. Advertising min=0 here makes a
+            // pre-4.0 JVM admin client throw `IllegalArgumentException` and
+            // fail the whole ApiVersions handshake; real cp-kafka 4.0 advertises
+            // min=1 for the same reason.
+            min_version: f.min_version.max(1),
             max_version: f.max_version,
             ..Default::default()
         })

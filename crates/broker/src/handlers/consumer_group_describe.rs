@@ -24,6 +24,7 @@ pub(crate) fn handle(
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
     let coordinator = broker.group_coordinator.clone();
+    let image = broker.controller.current_image();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ConsumerGroupDescribeRequest::decode(&mut cur, version)?;
@@ -36,6 +37,18 @@ pub(crate) fn handle(
                 error_code: codes::NONE,
                 ..Default::default()
             };
+            // KIP-848 / KIP-584: next-gen describe requires finalized
+            // group.version >= 1; below that — including UNFINALIZED, which
+            // means disabled — reject (consistent with the heartbeat fallback).
+            if !crate::features::feature_enabled(
+                &image,
+                crabka_metadata::group_version::GROUP_VERSION_FEATURE,
+                1,
+            ) {
+                row.error_code = codes::UNSUPPORTED_VERSION;
+                described.push(row);
+                continue;
+            }
             if !next_gen_enabled {
                 row.error_code = codes::GROUP_ID_NOT_FOUND;
                 described.push(row);

@@ -102,9 +102,9 @@ pub(crate) async fn handle(
             // and it ensures we don't race with the replicator-supervisor
             // loop when a `FindCoordinator(TRANSACTION)` call that
             // triggered `__transaction_state` bootstrap just happened.
-            coord
-                .refresh_leader_partitions(&controller.current_image())
-                .await;
+            let image = controller.current_image();
+            let txnv = crate::txn::version::resolve_txn_version(&image);
+            coord.refresh_leader_partitions(&image).await;
 
             // Verify we're the coordinator for this tid.
             if coord.is_coordinator_for(tid).await {
@@ -126,7 +126,7 @@ pub(crate) async fn handle(
                     &log_dir_status,
                 )
                 .map_err(BrokerError::Txn)?;
-                handle_transactional(&coord, tid, &req).await?
+                handle_transactional(&coord, tid, &req, txnv).await?
             } else {
                 InitProducerIdResponse {
                     error_code: codes::NOT_COORDINATOR,
@@ -161,6 +161,7 @@ async fn handle_transactional(
     coord: &Arc<TxnCoordinator>,
     tid: &str,
     req: &InitProducerIdRequest,
+    txnv: crate::txn::version::TxnVersion,
 ) -> Result<InitProducerIdResponse, BrokerError> {
     let now_ms = now_millis();
     let txn_timeout = req.transaction_timeout_ms.clamp(1_000, 15 * 60 * 1_000);
@@ -170,7 +171,7 @@ async fn handle_transactional(
             // Fresh tid — allocate a new producer id.
             let (pid, epoch) = coord.producer_ids.allocate();
             let entry = TxnEntry::new_empty(tid.to_string(), pid, epoch, txn_timeout, now_ms);
-            coord.put(entry).await?;
+            coord.put(entry, txnv).await?;
             Ok(InitProducerIdResponse {
                 error_code: codes::NONE,
                 producer_id: pid,
@@ -190,7 +191,7 @@ async fn handle_transactional(
                     e.last_update_ms = now_ms;
                     let entry_clone = e.clone();
                     drop(e); // release lock while we fan out markers
-                    coord.put(entry_clone.clone()).await?;
+                    coord.put(entry_clone.clone(), txnv).await?;
                     dispatch_abort_markers(coord, &entry_clone).await?;
                     // Re-acquire + transition to CompleteAbort.
                     let mut e2 = existing.lock().await;
@@ -198,12 +199,12 @@ async fn handle_transactional(
                     e2.last_update_ms = now_millis();
                     let snap = e2.clone();
                     drop(e2);
-                    coord.put(snap).await?;
+                    coord.put(snap, txnv).await?;
                 }
             }
 
             // Bump epoch on the existing entry. Persist a new TxnEntry with
-            // new epoch, Empty state, cleared partitions + offset_commit_groups.
+            // new epoch, Empty state, cleared partitions.
             let mut e3 = existing.lock().await;
             let new_epoch = e3.producer_epoch.checked_add(1).unwrap_or(0);
             *e3 = TxnEntry::new_empty(
@@ -215,7 +216,7 @@ async fn handle_transactional(
             );
             let snap = e3.clone();
             drop(e3);
-            coord.put(snap.clone()).await?;
+            coord.put(snap.clone(), txnv).await?;
             Ok(InitProducerIdResponse {
                 error_code: codes::NONE,
                 producer_id: snap.producer_id,

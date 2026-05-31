@@ -439,7 +439,6 @@ async fn process_partition(
                             | crate::txn::state::TxnState::CompleteAbort
                     ) {
                         entry.partitions.clear();
-                        entry.offset_commit_groups.clear();
                     }
                     entry.state = crate::txn::state::TxnState::Ongoing;
                     entry.partitions.insert(tp);
@@ -447,7 +446,8 @@ async fn process_partition(
                     let snap = entry.clone();
                     // Lock must be dropped before the async put.
                     drop(entry);
-                    txn_coordinator.put(snap).await?;
+                    let txnv = crate::txn::version::resolve_txn_version(image);
+                    txn_coordinator.put(snap, txnv).await?;
                 }
                 // else: partition already registered in an active txn — fall through.
             }

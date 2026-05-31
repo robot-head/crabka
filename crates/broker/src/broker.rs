@@ -1090,6 +1090,14 @@ impl Broker {
                     ),
                 );
                 initial_voters = voters;
+
+                // KIP-584/1022: a standalone self-bootstrap finalizes every
+                // feature at the newest release's default (metadata.version MAX),
+                // matching a freshly-formatted 4.0 cluster — so e.g. group.version=1
+                // is finalized and the next-gen group protocol is enabled.
+                bootstrap_records.extend(crabka_metadata::bootstrap_feature_records(
+                    crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+                ));
             }
 
             let controller_cfg = crabka_raft::ControllerConfig {

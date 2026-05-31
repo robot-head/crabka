@@ -76,10 +76,13 @@ pub(crate) async fn handle(
     ) == AuthorizationResult::Allow;
 
     // KIP-554/KIP-778: KRaft SCRAM requires metadata.version >= 3.5-IV2.
-    if crate::features::metadata_version_blocks(
-        image.finalized_metadata_version(),
+    if crate::features::require_feature(
+        &image,
+        crate::features::METADATA_VERSION,
         crabka_metadata::metadata_version::SCRAM_MIN_LEVEL,
-    ) {
+    )
+    .is_err()
+    {
         let msg = "SCRAM is not enabled at the cluster's metadata.version.";
         let mut results = Vec::new();
         for d in &req.deletions {
@@ -291,17 +294,26 @@ mod tests {
     #[test]
     fn scram_gate_permits_unknown_and_at_or_above_level() {
         use crabka_metadata::metadata_version::SCRAM_MIN_LEVEL;
-        assert!(!crate::features::metadata_version_blocks(
-            None,
-            SCRAM_MIN_LEVEL
-        ));
-        assert!(crate::features::metadata_version_blocks(
-            Some(10),
-            SCRAM_MIN_LEVEL
-        ));
-        assert!(!crate::features::metadata_version_blocks(
-            Some(11),
-            SCRAM_MIN_LEVEL
-        ));
+        use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+
+        let gate = |level: Option<i16>| {
+            let mut image = MetadataImage::new(uuid::Uuid::nil());
+            if let Some(level) = level {
+                image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                    name: crate::features::METADATA_VERSION.to_string(),
+                    level,
+                }));
+            }
+            crate::features::require_feature(
+                &image,
+                crate::features::METADATA_VERSION,
+                SCRAM_MIN_LEVEL,
+            )
+            .is_err()
+        };
+
+        assert!(!gate(None));
+        assert!(gate(Some(10)));
+        assert!(!gate(Some(11)));
     }
 }

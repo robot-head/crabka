@@ -82,6 +82,10 @@ pub const INVALID_TXN_STATE: i16 = 24;
 pub const INVALID_TXN_TIMEOUT: i16 = 48;
 pub const CONCURRENT_TRANSACTIONS: i16 = 49;
 pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
+/// `TRANSACTION_ABORTABLE` (120, KIP-890) — the operation failed but the
+/// transaction can still be aborted by the client; e.g. `AddPartitionsToTxn`
+/// verify-only found a partition that is not part of the ongoing transaction.
+pub const TRANSACTION_ABORTABLE: i16 = 120;
 
 /// `FENCED_INSTANCE_ID` (82, KIP-345) — another client is currently pinned
 /// to the same `group.instance.id`. The losing client must exit; the broker

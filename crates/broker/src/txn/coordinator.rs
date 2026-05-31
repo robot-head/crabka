@@ -4,9 +4,8 @@
 //! corresponding `__transaction_state` partition. Recovers state on
 //! `Broker::start` by replaying those partitions.
 
-// `is_coordinator_for`, `get`, `put`, and `TxnCoordinator` itself are
-// consumed by the transaction wire handlers. Remove this attribute once
-// those land.
+// `is_coordinator_for`, `get`, and a couple of admin helpers are consumed by
+// the transaction wire handlers. Remove this attribute once those land.
 #![allow(dead_code)]
 
 use std::collections::HashSet;
@@ -14,10 +13,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use serde_wincode::SerdeCompat;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
-use wincode::{Deserialize as _, Serialize as _};
 
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
@@ -98,6 +95,20 @@ impl TxnCoordinator {
         self.pid_to_tid.get(&pid).map(|e| e.value().clone())
     }
 
+    /// Evict the stale `prev_producer_id -> tid` mapping after a KIP-890
+    /// epoch-overflow roll. When the producer epoch is exhausted the `EndTxn`
+    /// completion path allocates a new `producer_id` and records the prior id
+    /// as `entry.prev_producer_id` (see `next_producer_identity`); without this
+    /// the old id's mapping would leak one entry per roll. Idempotent: a no-op
+    /// once the old id is gone, and skipped for entries that never rolled
+    /// (`prev == -1`). pids are globally unique, so the prior id only ever
+    /// mapped to this tid — removing it can't affect another transaction.
+    fn evict_rolled_pid(pid_to_tid: &DashMap<i64, String>, entry: &TxnEntry) {
+        if entry.prev_producer_id >= 0 && entry.prev_producer_id != entry.producer_id {
+            pid_to_tid.remove(&entry.prev_producer_id);
+        }
+    }
+
     /// Snapshot every locally-coordinated `TxnEntry`. Used by the KIP-664
     /// admin handlers (`ListTransactions`, `DescribeTransactions`) to
     /// expose the in-memory txn-state map. Each entry is locked + cloned
@@ -121,11 +132,19 @@ impl TxnCoordinator {
     /// log, then update the in-memory map. The batch is appended via the
     /// partition's writer task (ordered with all other produce appends).
     ///
+    /// `txnv` is the finalized `transaction.version` resolved from the live
+    /// metadata image at the caller; it selects the byte-exact Kafka
+    /// `TransactionLogValue` format (v0 for `TV_0`, v1 for `TV >= 1`).
+    ///
     /// # Errors
     ///
     /// Returns [`BrokerError::Txn`] if the partition is not locally held
     /// or the append fails.
-    pub(crate) async fn put(&self, entry: TxnEntry) -> Result<(), BrokerError> {
+    pub(crate) async fn put(
+        &self,
+        entry: TxnEntry,
+        txnv: crate::txn::version::TxnVersion,
+    ) -> Result<(), BrokerError> {
         let tid = entry.transactional_id.clone();
         let p = self.partition_for(&tid);
         let part = self
@@ -133,22 +152,22 @@ impl TxnCoordinator {
             .get(bootstrap::TOPIC, p)
             .ok_or_else(|| BrokerError::Txn(format!("__transaction_state-{p} not local")))?;
 
-        // Serialize the entry using the serde-wincode codec (same as TxnEntry
-        // test in state.rs).
-        let payload = <SerdeCompat<TxnEntry>>::serialize(&entry)
-            .map_err(|e| BrokerError::Txn(e.to_string()))?;
+        // Byte-exact Kafka TransactionLogKey(v0) + TransactionLogValue(v0/v1).
+        let key = crate::txn::log_record::encode_key(&tid);
+        let value = crate::txn::log_record::encode_value(&entry, txnv.flexible_records());
 
         let mut batch = RecordBatch::default();
         batch.records.push(Record {
             offset_delta: 0,
-            key: Some(Bytes::from(tid.clone().into_bytes())),
-            value: Some(Bytes::from(payload)),
+            key: Some(Bytes::from(key)),
+            value: Some(Bytes::from(value)),
             ..Default::default()
         });
         batch.last_offset_delta = 0;
 
         part.produce_batch(batch).await?;
 
+        Self::evict_rolled_pid(&self.pid_to_tid, &entry);
         self.pid_to_tid
             .insert(entry.producer_id, entry.transactional_id.clone());
         self.state.insert(tid, Arc::new(Mutex::new(entry)));
@@ -204,22 +223,44 @@ impl TxnCoordinator {
 
                 for batch in &out.batches {
                     for rec in &batch.records {
-                        let Some(tid_bytes) = rec.key.as_ref() else {
-                            continue;
-                        };
-                        let Some(value) = rec.value.as_ref() else {
-                            continue;
-                        };
-                        let Ok(entry) = <SerdeCompat<TxnEntry>>::deserialize(value) else {
+                        let Some(key_bytes) = rec.key.as_ref() else {
                             warn!(
                                 partition = p,
-                                "invalid TxnEntry in __transaction_state; skipping record"
+                                "__transaction_state record missing key; skipping"
                             );
                             continue;
                         };
-                        let tid = String::from_utf8_lossy(tid_bytes).into_owned();
-                        self.pid_to_tid.insert(entry.producer_id, tid.clone());
-                        self.state.insert(tid, Arc::new(Mutex::new(entry)));
+                        let tid = match crate::txn::log_record::decode_key(key_bytes) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                warn!(
+                                    partition = p,
+                                    error = %e,
+                                    "invalid TransactionLogKey in __transaction_state; skipping"
+                                );
+                                continue;
+                            }
+                        };
+                        let Some(value_bytes) = rec.value.as_ref() else {
+                            // Tombstone (null value) deletes txn state for this tid.
+                            self.state.remove(&tid);
+                            continue;
+                        };
+                        let entry = match crate::txn::log_record::decode_value(value_bytes, tid) {
+                            Ok(e) => e,
+                            Err(e) => {
+                                warn!(
+                                    partition = p,
+                                    error = %e,
+                                    "invalid TransactionLogValue in __transaction_state; skipping"
+                                );
+                                continue;
+                            }
+                        };
+                        self.pid_to_tid
+                            .insert(entry.producer_id, entry.transactional_id.clone());
+                        self.state
+                            .insert(entry.transactional_id.clone(), Arc::new(Mutex::new(entry)));
                     }
                     offset = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
                 }
@@ -231,5 +272,56 @@ impl TxnCoordinator {
             "TxnCoordinator recovery complete"
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(pid: i64, prev: i64) -> TxnEntry {
+        let mut e = TxnEntry::new_empty("tid-a".into(), pid, 0, 60_000, 0);
+        e.prev_producer_id = prev;
+        e
+    }
+
+    #[test]
+    fn evict_rolled_pid_drops_only_the_prior_id_on_a_roll() {
+        let map: DashMap<i64, String> = DashMap::new();
+        map.insert(1000, "tid-a".into()); // the pre-roll mapping
+
+        // A roll: new pid 2000, prev = 1000. The stale 1000 mapping is evicted;
+        // put then inserts 2000 (mirrored here).
+        TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
+        map.insert(2000, "tid-a".into());
+
+        assert!(
+            map.get(&1000).is_none(),
+            "stale pre-roll pid must be evicted"
+        );
+        assert!(map.get(&2000).map(|e| e.value().clone()) == Some("tid-a".into()));
+    }
+
+    #[test]
+    fn evict_rolled_pid_is_noop_without_a_roll() {
+        let map: DashMap<i64, String> = DashMap::new();
+        map.insert(1000, "tid-a".into());
+        // Never rolled: prev == -1 → nothing evicted.
+        TxnCoordinator::evict_rolled_pid(&map, &entry(1000, -1));
+        assert!(map.get(&1000).is_some());
+        // prev == current (defensive): nothing evicted.
+        TxnCoordinator::evict_rolled_pid(&map, &entry(1000, 1000));
+        assert!(map.get(&1000).is_some());
+    }
+
+    #[test]
+    fn evict_rolled_pid_is_idempotent_after_the_id_is_gone() {
+        let map: DashMap<i64, String> = DashMap::new();
+        map.insert(2000, "tid-a".into());
+        // prev=1000 already absent → repeated evictions are harmless no-ops.
+        TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
+        TxnCoordinator::evict_rolled_pid(&map, &entry(2000, 1000));
+        assert!(map.get(&1000).is_none());
+        assert!(map.get(&2000).is_some());
     }
 }

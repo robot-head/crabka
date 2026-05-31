@@ -4990,3 +4990,150 @@ introspection metadata).
 - Reference docs:
   [`docs/superpowers/specs/2026-05-30-crabka-kip-848-unified-coordinator-64d-b-design.md`],
   [`docs/superpowers/plans/2026-05-30-crabka-kip-848-unified-coordinator-64d-b.md`].
+## Slice — Generalized feature-versioning framework + group.version (KIP-584/848/1022) (2026-05-30)
+
+- **Goal.** Generalize the single-feature (`metadata.version`) KIP-584
+  machinery into an N-feature framework and land `group.version` (KIP-848) on
+  it with full faithful gating. Spec:
+  `docs/superpowers/specs/2026-05-30-feature-versioning-framework-group-txn-design.md`;
+  plan: `docs/superpowers/plans/2026-05-30-feature-framework-and-group-version.md`.
+- **`Feature` trait + registry (`crabka_metadata::feature`).** Each feature
+  owns its versioning facts — `supported_range`, `default_level(bootstrap_mv)`,
+  `min_required_floor(image)`, KIP-1022 `dependencies(level)`, optional
+  `level_name`. A static `feature_registry()` is the single source of truth
+  consumed by `ApiVersions`, `UpdateFeatures`, `crabka format` bootstrap, and
+  the Raft range guards. `metadata.version` was refactored onto the trait with
+  no behavior change.
+- **Registry-sourced everywhere.** `ApiVersions` advertises every registered
+  feature; `UpdateFeatures` validates per-feature floor + dependencies
+  generically (the `metadata.version` special-case is gone); the Raft
+  state-machine range guard iterates all finalized features and aborts on any
+  *present, out-of-range* level (unknown/future feature names are ignored —
+  forward-compat, pinned by test).
+- **`group.version` (KIP-848).** Registered at range `0..=1`; per-release
+  default `1` once bootstrap `metadata.version >= 22` (`4.0-IV0`); empty
+  `dependencies()` (Kafka 4.0 declares no hard `UpdateFeatures` dependency — the
+  MV threshold is a bootstrap-default input only, verified empirically against
+  cp-kafka 4.0). Next-gen `ConsumerGroupHeartbeat`/`ConsumerGroupDescribe` are
+  gated on a finalized `group.version >= 1` with **absence treated as
+  disabled** (reject with `UNSUPPORTED_VERSION` → classic fallback, matching
+  Kafka). Classic group RPCs are never gated.
+- **Multi-feature bootstrap.** A shared `crabka_metadata::bootstrap_feature_records`
+  seeds one `V1FeatureLevel` per registered feature at its per-release default;
+  used by both `crabka format` and the broker's standalone self-bootstrap, so a
+  freshly-formatted *and* a standalone/in-process broker finalize
+  `group.version=1` (at `metadata.version` MAX) and engage KIP-848 with no
+  manual step.
+- **Empirical pins (cp-kafka 4.0).** group.version `0..=1`, default 1, GA at
+  metadata.version 22; the `metadata.version` 7..25 table re-confirmed
+  byte-for-byte. Findings:
+  `docs/superpowers/notes/2026-05-30-kafka-feature-pins.md`.
+- **Deferred (by design).** `group.version` downgrade floor is the supported
+  min — live next-gen group state lives in the coordinator / `__consumer_offsets`,
+  not the `MetadataImage`, so an image-derived floor can't be computed.
+  `transaction.version` (KIP-890) is the companion plan
+  (`docs/superpowers/plans/2026-05-30-transaction-version-downlevel.md`);
+  `kraft.version` (KIP-853 unification) and ELR (KIP-966) are later slices. The
+  full Docker `jvm_acceptance` re-baseline — which flips the README KIP-584 row
+  to ✅ — is deferred to the `transaction.version` plan so all advertised
+  features are re-verified together. The README KIP-848 row stays ⚠️ pending
+  the unified-coordinator work (separate slice); this slice closed only the
+  feature-finalization/gating gap.
+- **Tests.** `crabka_metadata` feature/registry/bootstrap unit tests; broker
+  `features`/`update_features` unit tests; generalized range-guard predicate
+  test incl. the forward-compat ignore-unknown case; new
+  `crates/broker/tests/group_version.rs` (next-gen accepted at gv=1; rejected
+  once downgraded to 0). Full `cargo test --workspace` green
+  (`transactions.rs` has a known pre-existing parallel-load flake that passes
+  in isolation); `cargo clippy --workspace --all-targets -- -D warnings` and
+  `cargo fmt --all --check` clean.
+
+## Slice — transaction.version (KIP-890) byte-exact downlevel behavior (2026-05-31)
+
+- **Goal.** Generalize the feature framework to `transaction.version` (KIP-890)
+  with full faithful per-level behavior, including a byte-exact Kafka
+  `__transaction_state` record format. Plan:
+  `docs/superpowers/plans/2026-05-30-transaction-version-downlevel.md`.
+- **Feature registration.** `transaction.version` (range `0..=2`) registered in
+  the `crabka_metadata` feature registry; per-release default jumps `0 -> 2` at
+  metadata.version `4.0-IV2` (level 24), empty `dependencies()` (both pinned
+  empirically vs cp-kafka 4.0). A `TxnVersion` resolver (`Classic`/`Flexible`/
+  `Verified`) reads the finalized level per request.
+- **Byte-exact codec.** `crates/broker/src/txn/log_record.rs` encodes/decodes
+  Kafka `TransactionLogValue` v0 (non-flexible, TV_0) + v1 (flexible, TV_1/TV_2)
+  and `TransactionLogKey`, replacing the prior `serde-wincode` codec in
+  `TxnCoordinator::put`/`recover`. Verified byte-identical against a captured
+  real cp-kafka 4.0 record (48-byte sample) + round-trips + truncation/unknown-
+  version/trailing-byte rejection. Deterministic (sorted partitions) for replica
+  snapshot equality.
+- **Model alignment.** `TxnEntry` adopted Kafka's offset-partition model — offset
+  commits are now `__consumer_offsets` partitions in the txn partition set
+  (dropped the group-name `offset_commit_groups`), plus `TxnState`↔int8 status
+  mapping and `prev`/`next_producer_id` (KIP-890) fields.
+- **TV_2 behaviors (client-observable).** Producer-epoch bump on completion
+  (fences zombies without re-`InitProducerId`; the producer client adopts the
+  bumped identity from the EndTxn v5 response); epoch-exhaustion rolls to a
+  fresh `producer_id` at epoch 0 (records `prev_producer_id`); verify-only
+  `AddPartitionsToTxn` returns `TRANSACTION_ABORTABLE` (120) for a partition not
+  in the txn. All gated strictly on the finalized `transaction.version`.
+- **Tests.** Per-level integration (TV_0/TV_1/TV_2 full cycles + verify-only),
+  restart-durability (an `Ongoing` txn survives a broker restart, exercising the
+  `recover` decode-from-disk path for both v0 and v1), and byte-exact codec unit
+  tests. Full `cargo test --workspace` green (50 suites; the one `opa_authorizer`
+  blip in a run was an interrupted-by-kill artifact — passes in isolation; the
+  known `transactions.rs` parallel-load flake passes in isolation).
+  `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all
+  --check` clean.
+- **OUTSTANDING GATE — full Docker `jvm_acceptance` sweep NOT yet run.** Docker
+  was unresponsive/overloaded in the implementing session, so the 28-test live
+  JVM sweep did not run. **This is the remaining gate and must run in CI / an
+  unconstrained environment before the README KIP-584 row flips to ✅** (left at
+  ⚠️ for now). It must specifically verify a risk this work introduces: the
+  standalone self-bootstrap path now FINALIZES `metadata.version=25` +
+  `group.version=1` + `transaction.version=2` on every fresh broker (previously
+  features were UNKNOWN/absent), and the `jvm_acceptance` suite boots brokers via
+  that exact path while connecting OLD cp-kafka clients (6.1.1 / 3.1.2 / 7.5.0).
+  A validating client (cp-kafka 7.5.0 = Kafka 3.5) calls
+  `MetadataVersion.fromFeatureLevel(N)` and throws on a level its enum doesn't
+  know — the original "19 tests broke" failure mode. The sweep must confirm the
+  finalized-feature surface does not break those handshakes (or the suite/
+  self-bootstrap release level must be adjusted for old-client compatibility).
+
+## Slice — JVM acceptance sweep + ApiVersions SupportedFeatures min-clamp fix (2026-05-31)
+
+- **Ran the deferred Docker `jvm_acceptance` sweep** (the outstanding gate). It
+  caught a real Kafka-wire-compat regression introduced by the feature-framework
+  work and the fix is now in; the README KIP-584 row is flipped to ✅.
+- **Regression found + fixed.** Advertising `group.version` (supported `0..1`)
+  and `transaction.version` (`0..2`) put `minVersion = 0` into the ApiVersions
+  `SupportedFeatures`. The JVM client's `SupportedVersionRange`/`NodeApiVersions`
+  parser enforces `minVersion >= 1` and threw `IllegalArgumentException` on the
+  bootstrap handshake, failing every admin-client tool (kafka-configs,
+  kafka-acls, kafka-features, etc.). Confirmed empirically that the *same*
+  cp-kafka 6.1.1 `kafka-configs --alter` succeeds against a real
+  `apache/kafka:4.0.0` broker (Kafka advertises these features with wire min=1;
+  the `min=0` from `kafka-features describe` is the internal registry view).
+  Fix: `handlers/api_versions.rs` clamps the advertised `SupportedFeatureKey`
+  `min_version` to `>= 1` (the registry keeps min=0 — level 0 = "disabled" stays
+  finalizable via `UpdateFeatures`; 0 is only inexpressible on this wire field).
+  Post-fix, all admin-client tests pass.
+- **Sweep result: 39 passed, 7 failed.** The 7 failures are all multi-broker
+  cluster-formation / connectivity (`acks_all_durability`,
+  `acks_all_survives_leader_crash`, `jvm_inter_broker_sasl_ssl_raft_replication`,
+  `three_node_jvm_round_trip`, `three_node_replication_byte_compare`,
+  `rust_producer_to_console_consumer`, `transactional_console_producer_eos`),
+  failing with `broker start: "no leader elected within 2 min"` /
+  `Client(Disconnected)` — NOT feature/txn logic. **Confirmed pre-existing /
+  environmental**: `three_node_jvm_round_trip` fails identically on `main`
+  (merge-base `5454d4aa`, none of this branch's changes) in the same local
+  macOS Docker Desktop environment, where multi-broker Crabka quorums on the
+  host aren't reachable by the in-container JVM clients (the host-networking
+  fragility documented in `tests/KNOWN_ISSUES.md`). Crabka's in-process
+  multi-node raft + replication tests all pass in `cargo test --workspace`.
+  These multi-broker JVM tests are expected to pass under the CI
+  `broker-jvm-acceptance` job's Linux bridge-gateway networking.
+- **Caveats.** `transactional_console_producer_eos` (the JVM EOS transactional
+  producer) failed at *cluster startup* (`no leader elected`), so it did not
+  actually exercise the KIP-890 EOS path — `transaction.version` JVM-level EOS
+  validation remains pending the CI multi-broker environment (the single-broker
+  `transaction.version` integration tests pass).

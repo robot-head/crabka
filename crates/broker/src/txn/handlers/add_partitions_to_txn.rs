@@ -58,6 +58,7 @@ pub(crate) async fn handle(
     // Refresh leader-partition view from the current metadata image
     // before checking coordinator-ness, to avoid a race.
     let image = controller.current_image();
+    let txnv = crate::txn::version::resolve_txn_version(&image);
     coord.refresh_leader_partitions(&image).await;
 
     if version >= 4 {
@@ -66,6 +67,7 @@ pub(crate) async fn handle(
             version,
             &req,
             &image,
+            txnv,
             authorizer,
             ctx.principal,
             ctx.peer,
@@ -77,6 +79,7 @@ pub(crate) async fn handle(
             version,
             &req,
             &image,
+            txnv,
             authorizer,
             ctx.principal,
             ctx.peer,
@@ -87,11 +90,13 @@ pub(crate) async fn handle(
 
 // ── v4+ path ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_v4(
     coord: &crate::txn::coordinator::TxnCoordinator,
     version: i16,
     req: &AddPartitionsToTxnRequest,
     image: &MetadataImage,
+    txnv: crate::txn::version::TxnVersion,
     authorizer: &dyn Authorizer,
     principal: &Principal,
     peer: &SocketAddr,
@@ -120,6 +125,8 @@ async fn handle_v4(
                 txn.producer_epoch,
                 &txn.topics,
                 &denied,
+                txnv,
+                txn.verify_only,
             )
             .await
         };
@@ -140,11 +147,13 @@ async fn handle_v4(
 
 // ── v0-3 path ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_v3(
     coord: &crate::txn::coordinator::TxnCoordinator,
     version: i16,
     req: &AddPartitionsToTxnRequest,
     image: &MetadataImage,
+    txnv: crate::txn::version::TxnVersion,
     authorizer: &dyn Authorizer,
     principal: &Principal,
     peer: &SocketAddr,
@@ -171,6 +180,9 @@ async fn handle_v3(
             req.v3_and_below_producer_epoch,
             &req.v3_and_below_topics,
             &denied,
+            txnv,
+            // v0-3 has no `verify_only` field (predates KIP-890); always add.
+            false,
         )
         .await
     };
@@ -219,6 +231,7 @@ fn denied_topics(
 /// Returns per-topic, per-partition result entries. Topics named in
 /// `denied` short-circuit with `TOPIC_AUTHORIZATION_FAILED`; the remaining
 /// topics go through the state-machine check and partition registration.
+#[allow(clippy::too_many_arguments)]
 async fn process_one_txn(
     coord: &crate::txn::coordinator::TxnCoordinator,
     tid: &str,
@@ -226,6 +239,8 @@ async fn process_one_txn(
     producer_epoch: i16,
     topics: &[AddPartitionsToTxnTopic],
     denied: &std::collections::HashSet<String>,
+    txnv: crate::txn::version::TxnVersion,
+    verify_only: bool,
 ) -> Vec<AddPartitionsToTxnTopicResult> {
     // Topics allowed to proceed past the per-topic Write ACL gate.
     let allowed_topics: Vec<&AddPartitionsToTxnTopic> = topics
@@ -249,6 +264,16 @@ async fn process_one_txn(
         return per_topic_with_denied(topics, denied, codes::INVALID_PRODUCER_EPOCH);
     }
 
+    // 2a. KIP-890 TV_2 server-side verification: confirm each requested
+    //     partition is already part of the producer's ongoing txn; never add,
+    //     never touch state, never persist. Absent partitions get
+    //     TRANSACTION_ABORTABLE so the client aborts. Below TV_2, or with
+    //     verify_only=false, this is skipped and the classic add path runs
+    //     unchanged (verify_only is ignored, matching pre-KIP-890 behavior).
+    if txnv.verified() && verify_only {
+        return verify_partitions(&entry, topics, denied);
+    }
+
     // 3. State machine: Empty/Ongoing → Ongoing.
     //    CompleteCommit/CompleteAbort → Ongoing is also allowed to support
     //    re-use of a transactional_id without an intervening InitProducerId.
@@ -266,7 +291,6 @@ async fn process_one_txn(
         // Starting a new transaction after a completed one: discard the stale
         // partition set so the new transaction starts clean.
         entry.partitions.clear();
-        entry.offset_commit_groups.clear();
     }
 
     // 4. Register partitions for ALLOWED topics only.
@@ -284,7 +308,7 @@ async fn process_one_txn(
     drop(entry);
 
     // 5. Persist.
-    if let Err(e) = coord.put(snap).await {
+    if let Err(e) = coord.put(snap, txnv).await {
         tracing::error!(tid, error = %e, "AddPartitionsToTxn: failed to persist TxnEntry");
         return per_topic_with_denied(topics, denied, codes::UNKNOWN_SERVER_ERROR);
     }
@@ -294,6 +318,61 @@ async fn process_one_txn(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// KIP-890 `TV_2` verify-only per-partition decision: `NONE (0)` if the
+/// partition is already part of the ongoing transaction, else
+/// `TRANSACTION_ABORTABLE (120)`. Matches cp-kafka 4.0's verify-only path:
+/// `if txnMetadata.topicPartitions.contains(part) NONE else TRANSACTION_ABORTABLE`.
+fn verify_partition_code(entry: &crate::txn::state::TxnEntry, tp: &TopicPartition) -> i16 {
+    if entry.partitions.contains(tp) {
+        codes::NONE
+    } else {
+        codes::TRANSACTION_ABORTABLE
+    }
+}
+
+/// Build the verify-only response. Same shape as the add path's
+/// `per_topic_with_denied`, but each partition carries the verify result
+/// rather than a single shared code. Denied topics still short-circuit to
+/// `TOPIC_AUTHORIZATION_FAILED` on every partition row.
+fn verify_partitions(
+    entry: &crate::txn::state::TxnEntry,
+    topics: &[AddPartitionsToTxnTopic],
+    denied: &std::collections::HashSet<String>,
+) -> Vec<AddPartitionsToTxnTopicResult> {
+    topics
+        .iter()
+        .map(|t| {
+            let topic_denied = denied.contains(&t.name);
+            AddPartitionsToTxnTopicResult {
+                name: t.name.clone(),
+                results_by_partition: t
+                    .partitions
+                    .iter()
+                    .map(|&p| {
+                        let row_code = if topic_denied {
+                            codes::TOPIC_AUTHORIZATION_FAILED
+                        } else {
+                            verify_partition_code(
+                                entry,
+                                &TopicPartition {
+                                    topic: t.name.clone(),
+                                    partition: p,
+                                },
+                            )
+                        };
+                        AddPartitionsToTxnPartitionResult {
+                            partition_index: p,
+                            partition_error_code: row_code,
+                            ..Default::default()
+                        }
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+        })
+        .collect()
+}
 
 /// Build a per-topic/per-partition result list. Topics named in `denied`
 /// get `TOPIC_AUTHORIZATION_FAILED (29)` on every partition row; the rest
@@ -356,4 +435,28 @@ fn encode_response(resp: &AddPartitionsToTxnResponse, version: i16) -> Result<By
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::*;
+    use crate::txn::state::TxnEntry;
+
+    #[test]
+    fn verify_only_codes_present_vs_absent() {
+        let mut e = TxnEntry::new_empty("t".into(), 1, 0, 30_000, 0);
+        let present = TopicPartition {
+            topic: "a".into(),
+            partition: 0,
+        };
+        e.partitions.insert(present.clone());
+        let absent = TopicPartition {
+            topic: "b".into(),
+            partition: 0,
+        };
+        assert!(verify_partition_code(&e, &present) == codes::NONE);
+        assert!(verify_partition_code(&e, &absent) == codes::TRANSACTION_ABORTABLE);
+    }
 }
