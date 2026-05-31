@@ -50,7 +50,6 @@ pub enum ShareAckType {
 impl ShareAckType {
     /// The `i8` wire value carried in `ShareFetch` / `ShareAcknowledge`
     /// acknowledgement batches.
-    #[allow(dead_code)] // consumed by acknowledge() in Task E2.
     pub(crate) fn wire(self) -> i8 {
         match self {
             ShareAckType::Accept => 1,

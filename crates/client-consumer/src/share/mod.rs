@@ -6,13 +6,15 @@
 //! multiple members of the group; records are acquired (not assigned) per
 //! `ShareFetch` and acknowledged individually (KIP-932 queues).
 //!
-//! This module currently provides the membership skeleton: the
-//! `ShareGroupHeartbeat` join + a background heartbeat loop that tracks the
-//! member epoch and live assignment. `poll()` / `acknowledge()` (`ShareFetch` +
-//! `ShareAcknowledge`) land in a follow-up task.
+//! Membership runs over a `ShareGroupHeartbeat` join + background heartbeat loop
+//! that tracks the member epoch and live assignment; `poll()` issues
+//! `ShareFetch` over the live assignment and acknowledgement (implicit/explicit)
+//! is carried back via `ShareFetch` piggyback or a standalone
+//! `ShareAcknowledge`.
 
 mod consumer;
 mod coordinator;
+mod poll;
 mod types;
 
 pub use consumer::ShareConsumer;

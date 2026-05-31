@@ -25,16 +25,21 @@ use crate::error::ConsumerError;
 
 /// A share-group consumer. Construct via [`ShareConsumer::builder`].
 ///
-/// Membership skeleton only for now: it joins the group and keeps the
-/// membership alive via a background heartbeat. `poll()` / `acknowledge()`
-/// (`ShareFetch` + `ShareAcknowledge`) arrive in a follow-up task; the fields they
-/// need (`share_session_epoch`, `pending_acks`, `prev_delivered`) are carried
-/// here already so the data path can be added without reshaping the struct.
-#[allow(dead_code)] // poll()/acknowledge() (Task E2) consume the data-path fields.
+/// It joins the group and keeps the membership alive via a background
+/// heartbeat; [`poll`](ShareConsumer::poll) issues `ShareFetch` over the live
+/// assignment and returns acquired records, and acknowledgement (implicit or
+/// explicit, per [`ShareAckMode`]) is carried back to the broker via the next
+/// `ShareFetch` (piggybacked) or a standalone `ShareAcknowledge`
+/// ([`commit`](ShareConsumer::commit)).
 pub struct ShareConsumer {
     pub(crate) client: Client,
     pub(crate) group_id: String,
     pub(crate) member_id: String,
+    /// The live member epoch, owned and advanced by the background heartbeat
+    /// loop (which holds the other `Arc`). The consumer keeps this clone so the
+    /// shared cell outlives the heartbeat task; `poll()` does not read it (the
+    /// data path keys off the share-session epoch, not the member epoch).
+    #[allow(dead_code)]
     pub(crate) member_epoch: Arc<Mutex<i32>>,
     /// Live assignment as `(topic_id, topic_name, partition)`, updated by the
     /// heartbeat loop.
@@ -206,12 +211,33 @@ impl ShareConsumer {
             .collect()
     }
 
-    /// Stop heartbeating and leave the group.
+    /// Stop heartbeating, acknowledge outstanding records, and leave the group.
     ///
-    /// Cancels the heartbeat task and awaits it; the task sends a best-effort
-    /// leave heartbeat (`member_epoch = -1`) on its way out so the broker
-    /// evicts this member promptly rather than waiting out the session timeout.
+    /// First flushes any outstanding acknowledgements via a standalone
+    /// `ShareAcknowledge`: in Implicit mode the previous poll's delivered ranges
+    /// are auto-`Accept`ed; in Explicit mode any staged `acknowledge()` calls are
+    /// sent. Then cancels the heartbeat task and awaits it; the task sends a
+    /// best-effort leave heartbeat (`member_epoch = -1`) on its way out so the
+    /// broker evicts this member promptly rather than waiting out the session
+    /// timeout. A flush failure is best-effort (logged) so close still leaves.
     pub async fn close(&mut self) -> Result<(), ConsumerError> {
+        // Roll the previous poll's implicit Accepts into the explicit ack queue
+        // so the final flush below covers both modes in one ShareAcknowledge.
+        if self.ack_mode == ShareAckMode::Implicit {
+            for (tid, partition, first, last) in std::mem::take(&mut self.prev_delivered) {
+                self.pending_acks.push((
+                    tid,
+                    partition,
+                    first,
+                    last,
+                    super::types::ShareAckType::Accept.wire(),
+                ));
+            }
+        }
+        if let Err(e) = self.flush_pending_acks().await {
+            tracing::warn!(error = %e, "share consumer close: final acknowledge failed");
+        }
+
         self.shutdown.cancel();
         if let Some(h) = self.hb_handle.take() {
             let _ = h.await;
