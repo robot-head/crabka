@@ -178,11 +178,12 @@ pub(crate) async fn handle(
         return encode_err(version, codes::INVALID_PRODUCER_ID_MAPPING);
     };
 
-    // The (pid, epoch) returned to the producer. At TV_2 the epoch is bumped
-    // by one on completion (see `epoch_after_completion`); below TV_2 it is the
-    // producer's current epoch unchanged. The producer_id is unchanged in the
-    // non-overflow path. Assigned on the Proceed path below.
-    let response_pid = req.producer_id;
+    // The (pid, epoch) returned to the producer (see `next_producer_identity`).
+    // At TV_2 the epoch is bumped by one on completion; on epoch exhaustion the
+    // producer rolls to a new producer_id at epoch 0. Below TV_2 both are the
+    // producer's current values unchanged. Both are assigned on the Proceed
+    // path below (the other re-acquire branches return early).
+    let response_pid;
     let response_epoch;
 
     let complete_snap: TxnEntry = {
@@ -224,9 +225,24 @@ pub(crate) async fn handle(
         // holding the old epoch is fenced WITHOUT a fresh InitProducerId. The
         // bump is applied AFTER the Phase-2 marker fan-out (markers were written
         // with the producer's old/current epoch above); only the persisted and
-        // returned epoch reflects the bump. Below TV_2 the epoch is unchanged.
-        response_epoch = epoch_after_completion(txnv, entry.producer_epoch);
-        entry.producer_epoch = response_epoch;
+        // returned identity reflects it. On epoch exhaustion the producer rolls
+        // to a freshly-allocated producer_id at epoch 0. Below TV_2 both are
+        // unchanged.
+        let (new_pid, new_epoch) = next_producer_identity(
+            txnv,
+            entry.producer_id,
+            entry.producer_epoch,
+            &coord.producer_ids,
+        );
+        if new_pid != entry.producer_id {
+            // Epoch rolled over to a new producer_id: record the prior id so the
+            // transition is traceable on the entry (KIP-890 PreviousProducerId).
+            entry.prev_producer_id = entry.producer_id;
+        }
+        entry.producer_id = new_pid;
+        entry.producer_epoch = new_epoch;
+        response_pid = new_pid;
+        response_epoch = new_epoch;
         entry.clone()
         // Lock dropped here.
     };
@@ -247,24 +263,30 @@ pub(crate) async fn handle(
     encode_ok(version, response_pid, response_epoch)
 }
 
-/// KIP-890: the producer epoch after a transaction completes. At `TV_2` the
-/// epoch is bumped by one on completion (fencing zombies without a new
-/// `InitProducerId`); below `TV_2` it is unchanged.
+/// KIP-890: the `(producer_id, producer_epoch)` a producer continues with after
+/// a transaction completes.
 ///
-/// Overflow (`current_epoch == i16::MAX`) requires allocating a *new*
-/// `producer_id` and resetting the epoch to 0 (recording prev/next producer ids
-/// on the entry). That path is not yet implemented; a single-broker test never
-/// reaches `i16::MAX`, so we panic with a documented message rather than
-/// silently wrapping the epoch to a value a live producer could collide with.
-fn epoch_after_completion(txnv: TxnVersion, current_epoch: i16) -> i16 {
-    if txnv.verified() {
-        // TODO(KIP-890): epoch-overflow → new producer_id allocation
-        // (reset epoch to 0, record prev/next producer ids on the entry).
-        current_epoch
-            .checked_add(1)
-            .expect("KIP-890 epoch overflow: new producer_id allocation not yet implemented")
-    } else {
-        current_epoch
+/// - Below `TV_2`: unchanged — the epoch only moves on `InitProducerId` reuse.
+/// - `TV_2`, normal: same `producer_id`, `epoch + 1` — bumping on completion
+///   fences a zombie holding the old epoch without a fresh `InitProducerId`.
+/// - `TV_2`, epoch exhaustion (`epoch == i16::MAX`): the epoch can't bump, so a
+///   *new* `producer_id` is allocated (`epoch` reset to 0). The caller records
+///   the old id as the entry's `prev_producer_id` so the transition is
+///   traceable. The `EndTxn` v5 response returns the new pair and the producer
+///   adopts it for its next transaction.
+fn next_producer_identity(
+    txnv: TxnVersion,
+    pid: i64,
+    epoch: i16,
+    ids: &crate::producer_id_manager::ProducerIdManager,
+) -> (i64, i16) {
+    if !txnv.verified() {
+        return (pid, epoch);
+    }
+    match epoch.checked_add(1) {
+        Some(bumped) => (pid, bumped),
+        // Epoch exhausted: roll to a fresh producer_id at epoch 0 (KIP-890).
+        None => ids.allocate(),
     }
 }
 
@@ -543,14 +565,33 @@ mod tests {
     use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
 
-    // ── KIP-890 TV_2 epoch-bump-on-completion: epoch_after_completion ───────
+    // ── KIP-890 TV_2 completion identity: next_producer_identity ────────────
 
     #[test]
     fn epoch_bumps_only_at_tv2() {
         use crate::txn::version::TxnVersion;
-        assert!(epoch_after_completion(TxnVersion::Classic, 3) == 3);
-        assert!(epoch_after_completion(TxnVersion::Flexible, 3) == 3);
-        assert!(epoch_after_completion(TxnVersion::Verified, 3) == 4);
+        let ids = crate::producer_id_manager::ProducerIdManager::new();
+        // Below TV_2: pid + epoch unchanged.
+        assert!(next_producer_identity(TxnVersion::Classic, 7, 3, &ids) == (7, 3));
+        assert!(next_producer_identity(TxnVersion::Flexible, 7, 3, &ids) == (7, 3));
+        // TV_2 non-overflow: same pid, epoch + 1.
+        assert!(next_producer_identity(TxnVersion::Verified, 7, 3, &ids) == (7, 4));
+    }
+
+    #[test]
+    fn epoch_overflow_at_tv2_allocates_new_pid_at_epoch_zero() {
+        use crate::txn::version::TxnVersion;
+        let ids = crate::producer_id_manager::ProducerIdManager::new();
+        // At i16::MAX the epoch can't bump: a fresh producer_id is allocated
+        // (monotonic from PID_BASE) and the epoch resets to 0. No panic.
+        let (new_pid, new_epoch) = next_producer_identity(TxnVersion::Verified, 7, i16::MAX, &ids);
+        assert!(new_pid != 7);
+        assert!(new_epoch == 0);
+        // The allocator hands out a distinct pid on the next overflow too.
+        let (next_pid, _) = next_producer_identity(TxnVersion::Verified, 7, i16::MAX, &ids);
+        assert!(next_pid != new_pid);
+        // Below TV_2 at i16::MAX: no roll, epoch stays (no bump path taken).
+        assert!(next_producer_identity(TxnVersion::Classic, 7, i16::MAX, &ids) == (7, i16::MAX));
     }
 
     // ── Phase-3 re-validation: validate_complete_reacquire ──────────────────
