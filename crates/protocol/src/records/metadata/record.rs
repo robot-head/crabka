@@ -67,16 +67,18 @@ impl KraftMetadataRecord {
     #[must_use]
     pub fn api_key(&self) -> u32 {
         match self {
+            // apiKeys are Kafka's actual metadata-record keys (NOT sequential):
+            // see metadata/src/main/resources/common/metadata/*.json.
             Self::RegisterBroker(_) => 0,
-            Self::Topic(_) => 1,
-            Self::Partition(_) => 2,
-            Self::RemoveTopic(_) => 3,
-            Self::BeginTransaction(_) => 4,
-            Self::EndTransaction(_) => 5,
-            Self::NoOp(_) => 6,
-            Self::RegisterController(_) => 7,
-            Self::BrokerRegistrationChange(_) => 8,
+            Self::Topic(_) => 2,
+            Self::Partition(_) => 3,
+            Self::RemoveTopic(_) => 9,
             Self::FeatureLevel(_) => 12,
+            Self::BrokerRegistrationChange(_) => 17,
+            Self::NoOp(_) => 20,
+            Self::BeginTransaction(_) => 23,
+            Self::EndTransaction(_) => 24,
+            Self::RegisterController(_) => 27,
             Self::Unknown { api_key, .. } => *api_key,
         }
     }
@@ -127,17 +129,17 @@ impl KraftMetadataRecord {
         let v = api_version_to_i16(hdr.api_version)?;
         let rec = match hdr.api_key {
             0 => Self::RegisterBroker(RegisterBrokerRecord::decode(&mut cur, v)?),
-            1 => Self::Topic(TopicRecord::decode(&mut cur, v)?),
-            2 => Self::Partition(PartitionRecord::decode(&mut cur, v)?),
-            3 => Self::RemoveTopic(RemoveTopicRecord::decode(&mut cur, v)?),
-            4 => Self::BeginTransaction(BeginTransactionRecord::decode(&mut cur, v)?),
-            5 => Self::EndTransaction(EndTransactionRecord::decode(&mut cur, v)?),
-            6 => Self::NoOp(NoOpRecord::decode(&mut cur, v)?),
-            7 => Self::RegisterController(RegisterControllerRecord::decode(&mut cur, v)?),
-            8 => {
+            2 => Self::Topic(TopicRecord::decode(&mut cur, v)?),
+            3 => Self::Partition(PartitionRecord::decode(&mut cur, v)?),
+            9 => Self::RemoveTopic(RemoveTopicRecord::decode(&mut cur, v)?),
+            12 => Self::FeatureLevel(FeatureLevelRecord::decode(&mut cur, v)?),
+            17 => {
                 Self::BrokerRegistrationChange(BrokerRegistrationChangeRecord::decode(&mut cur, v)?)
             }
-            12 => Self::FeatureLevel(FeatureLevelRecord::decode(&mut cur, v)?),
+            20 => Self::NoOp(NoOpRecord::decode(&mut cur, v)?),
+            23 => Self::BeginTransaction(BeginTransactionRecord::decode(&mut cur, v)?),
+            24 => Self::EndTransaction(EndTransactionRecord::decode(&mut cur, v)?),
+            27 => Self::RegisterController(RegisterControllerRecord::decode(&mut cur, v)?),
             other => {
                 // Unknown records keep their raw post-envelope bytes verbatim,
                 // so trailing bytes are intentional here (not checked below).

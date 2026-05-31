@@ -1,13 +1,15 @@
 //! The `KRaft` metadata record-value envelope (`MetadataRecordSerde` /
 //! `ApiMessageAndVersion`): a record value is
-//! `frameVersion (uvarint, 0) + apiKey (uvarint) + apiVersion (uvarint) + body`.
+//! `frameVersion (uvarint, 1) + apiKey (uvarint) + apiVersion (uvarint) + body`.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use crate::primitives::varint::{get_uvarint, put_uvarint, uvarint_len};
 
-/// Current `KRaft` metadata frame version (Kafka writes 0).
-pub const FRAME_VERSION: u32 = 0;
+/// Current `KRaft` metadata frame version. Kafka writes 1 (verified against
+/// apache/kafka:4.0.0 `__cluster_metadata` record values — the leading byte is
+/// `0x01`).
+pub const FRAME_VERSION: u32 = 1;
 
 /// Decoded envelope header (everything before the message body).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +68,7 @@ mod tests {
         assert!(value.len() == 3 + body.len());
         let mut cur: &[u8] = &value;
         let hdr = decode_value_header(&mut cur).expect("decode header");
-        assert!(hdr.frame_version == 0);
+        assert!(hdr.frame_version == 1);
         assert!(hdr.api_key == 12);
         assert!(hdr.api_version == 0);
         assert!(cur == body);
