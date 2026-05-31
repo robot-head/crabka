@@ -65,7 +65,7 @@ struct SharePartitionState {
 ```
 
 **Wire `delivery_state` mapping** (for persistence/Read): `0=Available`, `1=Acquired`,
-`2=Acknowledged`, `3=Archived` (use the same i8 codes Slice B's `StateBatch` carries —
+`2=Acknowledged`, `4=Archived` (Kafka's codes, skipping 3; use the same i8 codes Slice B's `StateBatch` carries —
 confirm against `ShareCoordinator`/Kafka; `Acquired` is **transient**: on persist it is
 written as `Available` with its delivery count, and on load `Acquired`→`Available`).
 
