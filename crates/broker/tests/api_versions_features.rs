@@ -62,14 +62,17 @@ async fn v3_response_advertises_supported_and_bootstrapped_finalized_features() 
         .iter()
         .find(|f| f.name == "group.version")
         .expect("group.version advertised in supported_features");
-    assert!(gv.min_version == 0, "{resp:?}");
+    // Wire min is clamped to 1 (Kafka SupportedVersionRange requires >= 1),
+    // even though the registry min is 0 (level 0 = "disabled", finalizable via
+    // UpdateFeatures). Advertising min=0 here breaks pre-4.0 JVM admin clients.
+    assert!(gv.min_version == 1, "{resp:?}");
     assert!(gv.max_version == 1, "{resp:?}");
     let tv = resp
         .supported_features
         .iter()
         .find(|f| f.name == "transaction.version")
         .expect("transaction.version advertised in supported_features");
-    assert!(tv.min_version == 0, "{resp:?}");
+    assert!(tv.min_version == 1, "{resp:?}");
     assert!(tv.max_version == 2, "{resp:?}");
 
     // A self-bootstrapped broker finalizes the release defaults.
