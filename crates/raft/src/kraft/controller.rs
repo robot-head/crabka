@@ -1489,10 +1489,19 @@ fn load_quorum_state(
         id: voted_id,
         directory_id: Uuid::from_bytes(dir_bytes),
     });
+    // Leadership is VOLATILE, not durable: Raft persists only currentTerm
+    // (`leader_epoch`) and votedFor (`voted_key`), never the current leader. A
+    // restarted node must NOT trust a persisted `leader_id` — especially an
+    // ex-leader, which would otherwise come back believing it is still the
+    // leader (stale `leader_id == self`), publish itself via `watch_leader`,
+    // and never re-discover the real leader elected while it was down. Start
+    // with no known leader; the node re-attaches via the current leader's
+    // `BeginQuorumEpoch` heartbeat (higher epoch → Follower) or a re-election.
+    let _ = leader_id;
     Ok(Some(QuorumState {
         cluster_id: Uuid::from_bytes(cid),
         leader_epoch,
-        leader_id,
+        leader_id: None,
         voted_key,
         voters: voters.clone(),
     }))
@@ -1983,7 +1992,10 @@ mod tests {
             .unwrap()
             .expect("present");
         assert!(loaded.leader_epoch == 5);
-        assert!(loaded.leader_id == Some(2));
+        // Leadership is volatile (Raft persists only currentTerm + votedFor):
+        // `leader_id` is deliberately cleared on load so a restarted ex-leader
+        // re-discovers the current leader instead of trusting stale state.
+        assert!(loaded.leader_id.is_none());
         assert!(loaded.voted_key.map(|k| k.id) == Some(3));
         assert!(loaded.cluster_id == cid);
     }
