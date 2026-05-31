@@ -26,7 +26,9 @@ pub use acl::{AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionTyp
 pub use error::MetadataError;
 pub use image::{DelegationToken, EntityKey, MetadataImage, ThrottleKind, canonicalize_entity};
 pub use kafka_record::{KafkaRecordError, from_kafka_record, to_kafka_record};
-pub use kraft_translate::{TranslateError, from_kraft, to_kraft, to_kraft_records};
+pub use kraft_translate::{
+    TranslateError, from_kraft, from_kraft_value, to_kraft, to_kraft_records, to_kraft_values,
+};
 pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
     DelegationTokenRecord, DeleteDelegationTokenRecord, DeleteScramCredentialRecord,

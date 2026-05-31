@@ -13,15 +13,27 @@
 //!
 //! - `V1Voters` / `V1KRaftVersion` are KIP-853 raft *control* records,
 //!   not metadata records — they have no entry in the
-//!   [`KraftMetadataRecord`] dispatch. The engine keeps the wincode path
-//!   for just these two.
-//! - `V1DeleteAccessControlEntry(AclEntryFilter)` cannot round-trip:
-//!   KIP-631's `RemoveAccessControlEntryRecord` carries only an
-//!   `id: Uuid` (Kafka resolves a delete *filter* to the concrete set of
-//!   matching ACL ids against the image and writes one tombstone per id).
-//!   A multi-axis filter does not fit in 16 bytes, so this is treated as
-//!   [`TranslateError::NoCounterpart`]; resolving filters to id tombstones
-//!   is the engine's job, out of scope for the pure translation layer.
+//!   [`KraftMetadataRecord`] dispatch and are never submitted through the
+//!   translation boundary in this slice (reconfiguration is Slice 5), so
+//!   [`to_kraft`] returns [`TranslateError::NoCounterpart`] for them.
+//!
+//! ## Fan-out / image-keyed mappings
+//!
+//! - `V1TopicConfig` is whole-map authoritative; KIP-631 has only per-key
+//!   `ConfigRecord`s. [`to_kraft_records`] diffs the new map against the
+//!   image's current overrides and emits a *set* per present key plus a
+//!   *tombstone* (`value: None`) per dropped key; [`from_kraft`] merges one
+//!   key's delta back onto the image map and re-emits the whole map (so
+//!   `MetadataImage::apply`'s replace semantics are unchanged). Records must
+//!   apply in log order against a live image.
+//! - `V1DeleteAccessControlEntry(AclEntryFilter)`: KIP-631's
+//!   `RemoveAccessControlEntryRecord` deletes by `id: Uuid` only. Crabka does
+//!   not model ACL ids, so [`to_kraft_records`] resolves the filter against
+//!   the image to the matching entries and emits one `RemoveAccessControlEntry`
+//!   per match, keyed by a deterministic content-hash id (the same id the add
+//!   path stamps); [`from_kraft`] rescans the image by that hash to recover the
+//!   entry and emit a pinned filter. Self-consistent within Crabka; Slice 6
+//!   swaps in Kafka's real id scheme for cross-impl fidelity.
 //!
 //! ## Lossy / awkward mappings (documented)
 //!
@@ -37,6 +49,7 @@
 //!   round-trips; `KafkaPrincipal`s map through their `Type:Name` string
 //!   form.
 
+use bytes::Bytes;
 use crabka_protocol::owned::access_control_entry_record::AccessControlEntryRecord;
 use crabka_protocol::owned::client_quota_record::{
     ClientQuotaRecord as KClientQuotaRecord, EntityData,
@@ -48,6 +61,7 @@ use crabka_protocol::owned::partition_record::PartitionRecord as KPartitionRecor
 use crabka_protocol::owned::register_broker_record::{
     BrokerEndpoint as KBrokerEndpoint, RegisterBrokerRecord,
 };
+use crabka_protocol::owned::remove_access_control_entry_record::RemoveAccessControlEntryRecord;
 use crabka_protocol::owned::remove_topic_record::RemoveTopicRecord;
 use crabka_protocol::owned::remove_user_scram_credential_record::RemoveUserScramCredentialRecord;
 use crabka_protocol::owned::topic_record::TopicRecord as KTopicRecord;
@@ -59,7 +73,9 @@ use crabka_protocol::records::metadata::KraftMetadataRecord;
 use crabka_security::{KafkaPrincipal, ListenerProtocol, SaslMechanism};
 
 use crate::MetadataImage;
-use crate::acl::{AclEntry, AclOperation, PatternType, PermissionType, ResourceType};
+use crate::acl::{
+    AclEntry, AclEntryFilter, AclOperation, PatternType, PermissionType, ResourceType,
+};
 use crate::records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientQuotaRecord,
     DelegationTokenRecord, DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord,
@@ -77,6 +93,15 @@ pub enum TranslateError {
     UnknownTopicName(String),
     #[error("invalid {field}: {detail}")]
     Invalid { field: &'static str, detail: String },
+    #[error("KIP-631 value encode failed: {0}")]
+    Encode(String),
+    #[error("KIP-631 value decode failed: {0}")]
+    Decode(String),
+    /// A `RemoveAccessControlEntry{{id}}` referenced an ACL id absent from the
+    /// image. On the Crabka-only path the matching add always precedes the
+    /// remove in log order, so this means a corrupt / out-of-order log.
+    #[error("unknown ACL id {0} on decode")]
+    UnknownAclId(uuid::Uuid),
 }
 
 // ----- uuid bridging -----
@@ -215,6 +240,67 @@ fn permission_from_wire(b: i8) -> Result<PermissionType, TranslateError> {
     }
 }
 
+// ----- ACL content-hash id (KIP-631 keys ACLs by Uuid; Crabka keys by content) -----
+//
+// KIP-631's `AccessControlEntryRecord` carries a controller-assigned `id`, and
+// `RemoveAccessControlEntryRecord` deletes by that id alone. Crabka's image does
+// not model ACL ids (it keys entries by their full tuple), so to keep the log
+// genuinely id-keyed and round-trippable we synthesize a *deterministic*
+// 128-bit id from the entry's canonical content. The add path stamps this id;
+// the delete path resolves a filter to matching entries and emits one
+// `RemoveAccessControlEntry{id}` each; decode rescans the image by the same hash
+// to recover the entry. The derivation is self-consistent within Crabka — Slice
+// 6 replaces it with Kafka's real id scheme for cross-impl fidelity.
+fn acl_id(e: &AclEntry) -> KUuid {
+    // Canonical byte encoding: the four enum axes (i8) then the three string
+    // axes, each length-prefixed and separated, so distinct entries never alias.
+    let mut buf: Vec<u8> = vec![
+        resource_type_to_wire(e.resource_type).cast_unsigned(),
+        pattern_type_to_wire(e.pattern_type).cast_unsigned(),
+        operation_to_wire(e.operation).cast_unsigned(),
+        permission_to_wire(e.permission_type).cast_unsigned(),
+    ];
+    for s in [&e.resource_name, &e.principal, &e.host] {
+        buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+        buf.extend_from_slice(s.as_bytes());
+    }
+    KUuid(fnv1a_128(&buf))
+}
+
+/// FNV-1a over 128 bits: two independent 64-bit FNV-1a lanes (distinct offset
+/// bases) concatenated. Deterministic and dependency-free (unlike `DefaultHasher`,
+/// whose output is not guaranteed stable across toolchains).
+fn fnv1a_128(bytes: &[u8]) -> [u8; 16] {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let lane = |mut h: u64| -> u64 {
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(PRIME);
+        }
+        h
+    };
+    let hi = lane(0xcbf2_9ce4_8422_2325);
+    let lo = lane(0x1099_5663_8a1b_c7e9);
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&hi.to_be_bytes());
+    out[8..].copy_from_slice(&lo.to_be_bytes());
+    out
+}
+
+/// A filter pinned to exactly one entry (every axis set). Used on decode of a
+/// `RemoveAccessControlEntry` so `apply` removes precisely the resolved entry.
+fn exact_filter(e: &AclEntry) -> AclEntryFilter {
+    AclEntryFilter {
+        resource_type: Some(e.resource_type),
+        resource_name: Some(e.resource_name.clone()),
+        pattern_type: Some(e.pattern_type),
+        principal: Some(e.principal.clone()),
+        host: Some(e.host.clone()),
+        operation: Some(e.operation),
+        permission_type: Some(e.permission_type),
+    }
+}
+
 // ----- security_protocol (Kafka SecurityProtocol == ListenerProtocol ordinal) -----
 
 fn protocol_to_wire(p: ListenerProtocol) -> i16 {
@@ -303,6 +389,53 @@ pub fn to_kraft_records(
     Ok(to_kraft_iter(rec, image)?.collect())
 }
 
+/// The engine/snapshot framing entrypoint: translate one [`MetadataRecord`] to
+/// the KIP-631 value byte blobs to put on the log — one per fanned-out record
+/// (most records yield one; a `V1TopicConfig` yields one per key ± tombstones,
+/// a `V1DeleteAccessControlEntry` one per matched ACL), each enveloped at
+/// apiVersion 0. Yields an empty `Vec` when a record fans out to nothing (an
+/// empty config clear with no prior keys, or a delete-ACL filter matching
+/// nothing) — callers treat an all-empty batch as a committed no-op.
+///
+/// apiVersion 0 is the "defaulted KIP-631 framing" of Slice 3d-2: the core
+/// fields Crabka populates all exist at v0; the higher-version KIP-631 extras
+/// (broker incarnation/epoch, partition ELR, …) stay defaulted. Slice 6 lifts
+/// the version for cross-impl JVM fidelity.
+///
+/// # Errors
+/// Propagates [`to_kraft_records`] errors, plus [`TranslateError::Encode`] if
+/// the KIP-631 value encoder fails.
+pub fn to_kraft_values(
+    rec: &MetadataRecord,
+    image: &MetadataImage,
+) -> Result<Vec<Bytes>, TranslateError> {
+    to_kraft_records(rec, image)?
+        .iter()
+        .map(|kr| {
+            kr.encode_value(0)
+                .map_err(|e| TranslateError::Encode(e.to_string()))
+        })
+        .collect()
+}
+
+/// The inverse framing entrypoint: decode one KIP-631 value blob back to a
+/// [`MetadataRecord`], resolving image-keyed fields (topic ids, the whole-map
+/// config merge, ACL ids) against `image`. The caller must apply decoded
+/// records to `image` in log order so each subsequent decode sees the
+/// up-to-date state.
+///
+/// # Errors
+/// [`TranslateError::Decode`] if the envelope/body is malformed, plus any
+/// [`from_kraft`] error (unknown topic/ACL id, unmodeled record).
+pub fn from_kraft_value(
+    value: &[u8],
+    image: &MetadataImage,
+) -> Result<MetadataRecord, TranslateError> {
+    let (rec, _version) = KraftMetadataRecord::decode_value(value)
+        .map_err(|e| TranslateError::Decode(e.to_string()))?;
+    from_kraft(&rec, image)
+}
+
 #[allow(clippy::too_many_lines)] // exhaustive match over MetadataRecord
 fn to_kraft_iter(
     rec: &MetadataRecord,
@@ -362,7 +495,7 @@ fn to_kraft_iter(
         MetadataRecord::V1AccessControlEntry(e) => {
             vec![KraftMetadataRecord::AccessControlEntry(
                 AccessControlEntryRecord {
-                    id: KUuid::ZERO,
+                    id: acl_id(e),
                     resource_type: resource_type_to_wire(e.resource_type),
                     resource_name: e.resource_name.clone(),
                     pattern_type: pattern_type_to_wire(e.pattern_type),
@@ -426,32 +559,56 @@ fn to_kraft_iter(
             })]
         }
         MetadataRecord::V1TopicConfig(c) => {
-            if c.overrides.is_empty() {
-                // An empty override map clears the topic's configs. There is
-                // no per-key Config record to emit; represent the clear as a
-                // single tombstone-less empty fan-out is impossible, so emit
-                // nothing. (The engine handles whole-map clears separately;
-                // round-trip tests only exercise non-empty maps.)
-                Vec::new()
-            } else {
-                c.overrides
-                    .iter()
-                    .map(|(k, v)| {
-                        KraftMetadataRecord::Config(ConfigRecord {
-                            resource_type: 2, // TOPIC
-                            resource_name: c.topic.clone(),
-                            name: k.clone(),
-                            value: Some(v.clone()),
-                            ..Default::default()
-                        })
-                    })
-                    .collect()
+            // Crabka's `V1TopicConfig` is whole-map authoritative; KIP-631 has
+            // only per-key `ConfigRecord`s. Diff the new map against the image's
+            // current overrides: emit a *set* for every key in the new map and a
+            // *tombstone* (`value: None`) for every key the new map drops. Empty
+            // new map + existing keys => all tombstones (a clear). The records
+            // apply in order against a live image (engine + snapshot), so the
+            // merged result reproduces the new map exactly.
+            let empty = std::collections::BTreeMap::new();
+            let old = image.topic_config(&c.topic).unwrap_or(&empty);
+            let mut out = Vec::with_capacity(c.overrides.len());
+            for (k, v) in &c.overrides {
+                out.push(KraftMetadataRecord::Config(ConfigRecord {
+                    resource_type: 2, // TOPIC
+                    resource_name: c.topic.clone(),
+                    name: k.clone(),
+                    value: Some(v.clone()),
+                    ..Default::default()
+                }));
             }
+            for k in old.keys() {
+                if !c.overrides.contains_key(k) {
+                    out.push(KraftMetadataRecord::Config(ConfigRecord {
+                        resource_type: 2, // TOPIC
+                        resource_name: c.topic.clone(),
+                        name: k.clone(),
+                        value: None, // tombstone: removed key
+                        ..Default::default()
+                    }));
+                }
+            }
+            out
+        }
+        MetadataRecord::V1DeleteAccessControlEntry(filter) => {
+            // KIP-631 deletes ACLs by id. Resolve the filter against the image
+            // to the concrete matching entries and emit one
+            // `RemoveAccessControlEntry{id}` per match (id = content-hash, the
+            // same id the add path stamped). A filter matching nothing yields no
+            // records (the original apply is a no-op anyway).
+            image
+                .all_acls()
+                .filter(|e| filter.matches(e))
+                .map(|e| {
+                    KraftMetadataRecord::RemoveAccessControlEntry(RemoveAccessControlEntryRecord {
+                        id: acl_id(e),
+                        ..Default::default()
+                    })
+                })
+                .collect()
         }
         // ----- no KIP-631 metadata counterpart -----
-        MetadataRecord::V1DeleteAccessControlEntry(_) => {
-            return Err(TranslateError::NoCounterpart("V1DeleteAccessControlEntry"));
-        }
         MetadataRecord::V1Voters(_) => {
             return Err(TranslateError::NoCounterpart("V1Voters"));
         }
@@ -639,7 +796,7 @@ pub fn from_kraft(
                 token_id: t.token_id.clone(),
             }),
         ),
-        KraftMetadataRecord::Config(c) => config_from_kraft(c),
+        KraftMetadataRecord::Config(c) => config_from_kraft(c, image),
         KraftMetadataRecord::Topic(t) => Ok(MetadataRecord::V1Topic(topic_from_kraft(t, image))),
         KraftMetadataRecord::Partition(p) => {
             Ok(MetadataRecord::V1Partition(partition_from_kraft(p, image)?))
@@ -648,6 +805,20 @@ pub fn from_kraft(
             let id = from_kuuid(t.topic_id);
             let name = topic_name_for_id(image, id).ok_or(TranslateError::UnknownTopicId(id))?;
             Ok(MetadataRecord::V1DeleteTopic(DeleteTopicRecord { name }))
+        }
+        KraftMetadataRecord::RemoveAccessControlEntry(r) => {
+            // Resolve the id back to the concrete entry by rescanning the image
+            // for the entry whose content-hash matches, then emit a pinned
+            // (every-axis) filter so `apply` removes exactly that entry. The
+            // matching add always precedes this remove in log order, so the
+            // entry is present when this decodes.
+            let entry = image
+                .all_acls()
+                .find(|e| acl_id(e) == r.id)
+                .ok_or_else(|| TranslateError::UnknownAclId(from_kuuid(r.id)))?;
+            Ok(MetadataRecord::V1DeleteAccessControlEntry(exact_filter(
+                entry,
+            )))
         }
         other => Err(TranslateError::NoCounterpart(kraft_variant_name(other))),
     }
@@ -788,10 +959,14 @@ fn delegation_token_from_kraft(
     })
 }
 
-fn config_from_kraft(c: &ConfigRecord) -> Result<MetadataRecord, TranslateError> {
+fn config_from_kraft(
+    c: &ConfigRecord,
+    image: &MetadataImage,
+) -> Result<MetadataRecord, TranslateError> {
     match c.resource_type {
         0 => {
-            // BROKER
+            // BROKER — `V1BrokerConfig` is already per-key (Some=set, None=delete),
+            // so a single `ConfigRecord` maps 1:1 (the image merges per-key).
             let node_id = c
                 .resource_name
                 .parse::<u64>()
@@ -806,10 +981,24 @@ fn config_from_kraft(c: &ConfigRecord) -> Result<MetadataRecord, TranslateError>
             }))
         }
         2 => {
-            // TOPIC — decode to a single-key singleton; the image merges.
-            let mut overrides = std::collections::BTreeMap::new();
-            if let Some(v) = &c.value {
-                overrides.insert(c.name.clone(), v.clone());
+            // TOPIC — `V1TopicConfig` is whole-map (replace) authoritative, so
+            // merge this one key's delta onto the image's current overrides and
+            // emit the resulting whole map. `Some(v)` sets the key; `None` (a
+            // tombstone) removes it. Applying the emitted record (replace) lands
+            // the merged map. Decoding successive Config records against the
+            // live image (engine apply / snapshot read) reproduces the original
+            // whole map exactly.
+            let mut overrides = image
+                .topic_config(&c.resource_name)
+                .cloned()
+                .unwrap_or_default();
+            match &c.value {
+                Some(v) => {
+                    overrides.insert(c.name.clone(), v.clone());
+                }
+                None => {
+                    overrides.remove(&c.name);
+                }
             }
             Ok(MetadataRecord::V1TopicConfig(TopicConfigRecord {
                 topic: c.resource_name.clone(),
@@ -951,16 +1140,70 @@ mod tests {
         round_trip(&rec, &img());
     }
 
+    fn acl(rt: ResourceType, name: &str, principal: &str) -> AclEntry {
+        AclEntry {
+            resource_type: rt,
+            resource_name: name.into(),
+            pattern_type: PatternType::Literal,
+            principal: principal.into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        }
+    }
+
     #[test]
-    fn delete_access_control_entry_has_no_counterpart() {
-        let rec = MetadataRecord::V1DeleteAccessControlEntry(AclEntryFilter {
+    fn distinct_acls_get_distinct_ids() {
+        let a = acl(ResourceType::Topic, "foo", "User:alice");
+        let b = acl(ResourceType::Topic, "foo", "User:bob");
+        let c = acl(ResourceType::Group, "foo", "User:alice");
+        assert!(acl_id(&a) != acl_id(&b));
+        assert!(acl_id(&a) != acl_id(&c));
+        // Deterministic: same entry hashes identically.
+        assert!(acl_id(&a) == acl_id(&a.clone()));
+    }
+
+    #[test]
+    fn delete_acl_filter_resolves_to_remove_records_and_round_trips() {
+        // Image holds three ACLs; a Topic-only filter deletes the two Topic
+        // entries and leaves the Group entry.
+        let mut image = img();
+        let e1 = acl(ResourceType::Topic, "foo", "User:alice");
+        let e2 = acl(ResourceType::Topic, "bar", "User:bob");
+        let e3 = acl(ResourceType::Group, "cg", "User:alice");
+        for e in [&e1, &e2, &e3] {
+            image.apply(&MetadataRecord::V1AccessControlEntry(e.clone()));
+        }
+        let del = MetadataRecord::V1DeleteAccessControlEntry(AclEntryFilter {
             resource_type: Some(ResourceType::Topic),
             ..AclEntryFilter::default()
         });
-        assert!(
-            to_kraft(&rec, &img())
-                == Err(TranslateError::NoCounterpart("V1DeleteAccessControlEntry"))
-        );
+        let records = to_kraft_records(&del, &image).unwrap();
+        assert!(records.len() == 2); // e1, e2 — not e3
+        // Each RemoveAccessControlEntry decodes back to a pinned filter that
+        // removes exactly its entry. Applying both clears e1+e2, keeps e3.
+        for k in &records {
+            let back = from_kraft(k, &image).unwrap();
+            image.apply(&back);
+        }
+        assert!(image.all_acls().count() == 1);
+        let survivor = image.all_acls().next().unwrap();
+        assert!(*survivor == e3);
+    }
+
+    #[test]
+    fn delete_acl_filter_matching_nothing_yields_no_records() {
+        let mut image = img();
+        image.apply(&MetadataRecord::V1AccessControlEntry(acl(
+            ResourceType::Topic,
+            "foo",
+            "User:alice",
+        )));
+        let del = MetadataRecord::V1DeleteAccessControlEntry(AclEntryFilter {
+            resource_type: Some(ResourceType::Group),
+            ..AclEntryFilter::default()
+        });
+        assert!(to_kraft_records(&del, &image).unwrap().is_empty());
     }
 
     #[test]
@@ -1135,6 +1378,80 @@ mod tests {
                 other => panic!("expected V1TopicConfig singleton, got {other:?}"),
             }
         }
+    }
+
+    /// Seed `image` with topic `t` and the config map `kv`.
+    fn seed_topic_config(image: &mut MetadataImage, kv: &[(&str, &str)]) {
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: uuid::Uuid::from_u128(7),
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        image.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides: kv
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect(),
+        }));
+    }
+
+    #[test]
+    fn topic_config_change_emits_set_and_tombstone_and_merges_back() {
+        // Current config {a:1, b:2}; new config {a:9} (a changed, b dropped).
+        let mut image = img();
+        seed_topic_config(&mut image, &[("a", "1"), ("b", "2")]);
+        let submit = MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides: [("a".to_string(), "9".to_string())].into(),
+        });
+        let records = to_kraft_records(&submit, &image).unwrap();
+        // One set (a=9) + one tombstone (b removed).
+        assert!(records.len() == 2);
+        // Apply the fanned records in order against the live image; the merge
+        // reproduces the new whole map exactly.
+        for k in &records {
+            let back = from_kraft(k, &image).unwrap();
+            image.apply(&back);
+        }
+        let want: std::collections::BTreeMap<String, String> =
+            [("a".to_string(), "9".to_string())].into();
+        assert!(image.topic_config("t") == Some(&want));
+    }
+
+    #[test]
+    fn topic_config_clear_emits_tombstones_for_every_key() {
+        // Current {a:1, b:2}; an empty new map clears all → two tombstones.
+        let mut image = img();
+        seed_topic_config(&mut image, &[("a", "1"), ("b", "2")]);
+        let submit = MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "t".into(),
+            overrides: std::collections::BTreeMap::new(),
+        });
+        let records = to_kraft_records(&submit, &image).unwrap();
+        assert!(records.len() == 2);
+        for k in &records {
+            let back = from_kraft(k, &image).unwrap();
+            image.apply(&back);
+        }
+        // All overrides gone (apply of an empty whole-map removes the entry).
+        assert!(image.topic_config("t").is_none());
+    }
+
+    #[test]
+    fn to_kraft_values_round_trips_through_value_bytes() {
+        // The crate framing entrypoints: a record encodes to KIP-631 value
+        // bytes and decodes back identically (single-output record).
+        let image = img();
+        let rec = MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        });
+        let values = to_kraft_values(&rec, &image).unwrap();
+        assert!(values.len() == 1);
+        let back = from_kraft_value(&values[0], &image).unwrap();
+        assert!(back == rec);
     }
 
     #[test]
