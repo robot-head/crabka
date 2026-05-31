@@ -15,7 +15,6 @@ use crabka_client_core::Client;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
 use crabka_protocol::owned::join_group_response::JoinGroupResponse;
 use crabka_protocol::owned::metadata_request::MetadataRequest;
-use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
 use crabka_protocol::owned::sync_group_response::SyncGroupResponse;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -287,35 +286,25 @@ impl Consumer {
             for (t, p) in &assigned_partitions {
                 by_topic.entry(t.clone()).or_default().push(*p);
             }
-            let topics: Vec<OffsetFetchRequestTopic> = by_topic
-                .into_iter()
-                .map(|(name, partition_indexes)| OffsetFetchRequestTopic {
-                    name,
-                    partition_indexes,
-                    ..Default::default()
-                })
-                .collect();
             let of = client
-                .send(OffsetFetchRequest {
-                    group_id: group_id.clone(),
-                    topics: Some(topics),
-                    ..Default::default()
-                })
+                .send(crate::offset_wire::build_offset_fetch(
+                    &group_id, &by_topic, &topic_ids,
+                ))
                 .await?;
-            for t in &of.topics {
-                for p in &t.partitions {
-                    let committed = p.committed_offset;
-                    let starting = if committed >= 0 {
-                        committed
-                    } else {
-                        match auto_offset_reset {
-                            AutoOffsetReset::Earliest => 0,
-                            // Resolved by poll() on first call.
-                            AutoOffsetReset::Latest => i64::MAX,
-                        }
-                    };
-                    next_offsets.insert((t.name.clone(), p.partition_index), starting);
-                }
+            let id_to_name = crate::offset_wire::id_to_name(&topic_ids);
+            for (name, partition_index, committed) in
+                crate::offset_wire::parse_offset_fetch(&of, &id_to_name)
+            {
+                let starting = if committed >= 0 {
+                    committed
+                } else {
+                    match auto_offset_reset {
+                        AutoOffsetReset::Earliest => 0,
+                        // Resolved by poll() on first call.
+                        AutoOffsetReset::Latest => i64::MAX,
+                    }
+                };
+                next_offsets.insert((name, partition_index), starting);
             }
         }
 
