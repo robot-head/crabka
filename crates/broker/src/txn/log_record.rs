@@ -25,7 +25,6 @@
 //! flexible: arrays use compact `uvarint(n+1)` lengths (0 = null), strings use
 //! compact `uvarint(len+1)` lengths, and every struct ends with a
 //! tagged-field section.
-#![allow(dead_code)] // wired by 3d.
 
 use std::collections::{BTreeMap, HashSet};
 

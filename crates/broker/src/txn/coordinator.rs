@@ -4,9 +4,8 @@
 //! corresponding `__transaction_state` partition. Recovers state on
 //! `Broker::start` by replaying those partitions.
 
-// `is_coordinator_for`, `get`, `put`, and `TxnCoordinator` itself are
-// consumed by the transaction wire handlers. Remove this attribute once
-// those land.
+// `is_coordinator_for`, `get`, and a couple of admin helpers are consumed by
+// the transaction wire handlers. Remove this attribute once those land.
 #![allow(dead_code)]
 
 use std::collections::HashSet;
@@ -14,10 +13,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use serde_wincode::SerdeCompat;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
-use wincode::{Deserialize as _, Serialize as _};
 
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
@@ -121,11 +118,19 @@ impl TxnCoordinator {
     /// log, then update the in-memory map. The batch is appended via the
     /// partition's writer task (ordered with all other produce appends).
     ///
+    /// `txnv` is the finalized `transaction.version` resolved from the live
+    /// metadata image at the caller; it selects the byte-exact Kafka
+    /// `TransactionLogValue` format (v0 for `TV_0`, v1 for `TV >= 1`).
+    ///
     /// # Errors
     ///
     /// Returns [`BrokerError::Txn`] if the partition is not locally held
     /// or the append fails.
-    pub(crate) async fn put(&self, entry: TxnEntry) -> Result<(), BrokerError> {
+    pub(crate) async fn put(
+        &self,
+        entry: TxnEntry,
+        txnv: crate::txn::version::TxnVersion,
+    ) -> Result<(), BrokerError> {
         let tid = entry.transactional_id.clone();
         let p = self.partition_for(&tid);
         let part = self
@@ -133,16 +138,15 @@ impl TxnCoordinator {
             .get(bootstrap::TOPIC, p)
             .ok_or_else(|| BrokerError::Txn(format!("__transaction_state-{p} not local")))?;
 
-        // Serialize the entry using the serde-wincode codec (same as TxnEntry
-        // test in state.rs).
-        let payload = <SerdeCompat<TxnEntry>>::serialize(&entry)
-            .map_err(|e| BrokerError::Txn(e.to_string()))?;
+        // Byte-exact Kafka TransactionLogKey(v0) + TransactionLogValue(v0/v1).
+        let key = crate::txn::log_record::encode_key(&tid);
+        let value = crate::txn::log_record::encode_value(&entry, txnv.flexible_records());
 
         let mut batch = RecordBatch::default();
         batch.records.push(Record {
             offset_delta: 0,
-            key: Some(Bytes::from(tid.clone().into_bytes())),
-            value: Some(Bytes::from(payload)),
+            key: Some(Bytes::from(key)),
+            value: Some(Bytes::from(value)),
             ..Default::default()
         });
         batch.last_offset_delta = 0;
@@ -204,22 +208,44 @@ impl TxnCoordinator {
 
                 for batch in &out.batches {
                     for rec in &batch.records {
-                        let Some(tid_bytes) = rec.key.as_ref() else {
-                            continue;
-                        };
-                        let Some(value) = rec.value.as_ref() else {
-                            continue;
-                        };
-                        let Ok(entry) = <SerdeCompat<TxnEntry>>::deserialize(value) else {
+                        let Some(key_bytes) = rec.key.as_ref() else {
                             warn!(
                                 partition = p,
-                                "invalid TxnEntry in __transaction_state; skipping record"
+                                "__transaction_state record missing key; skipping"
                             );
                             continue;
                         };
-                        let tid = String::from_utf8_lossy(tid_bytes).into_owned();
-                        self.pid_to_tid.insert(entry.producer_id, tid.clone());
-                        self.state.insert(tid, Arc::new(Mutex::new(entry)));
+                        let tid = match crate::txn::log_record::decode_key(key_bytes) {
+                            Ok(t) => t,
+                            Err(e) => {
+                                warn!(
+                                    partition = p,
+                                    error = %e,
+                                    "invalid TransactionLogKey in __transaction_state; skipping"
+                                );
+                                continue;
+                            }
+                        };
+                        let Some(value_bytes) = rec.value.as_ref() else {
+                            // Tombstone (null value) deletes txn state for this tid.
+                            self.state.remove(&tid);
+                            continue;
+                        };
+                        let entry = match crate::txn::log_record::decode_value(value_bytes, tid) {
+                            Ok(e) => e,
+                            Err(e) => {
+                                warn!(
+                                    partition = p,
+                                    error = %e,
+                                    "invalid TransactionLogValue in __transaction_state; skipping"
+                                );
+                                continue;
+                            }
+                        };
+                        self.pid_to_tid
+                            .insert(entry.producer_id, entry.transactional_id.clone());
+                        self.state
+                            .insert(entry.transactional_id.clone(), Arc::new(Mutex::new(entry)));
                     }
                     offset = batch.base_offset + i64::from(batch.last_offset_delta) + 1;
                 }

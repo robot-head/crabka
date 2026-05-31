@@ -59,6 +59,7 @@ pub(crate) async fn handle(
     // Refresh leader-partition view from the current metadata image
     // before checking coordinator-ness.
     let image = controller.current_image();
+    let txnv = crate::txn::version::resolve_txn_version(&image);
     coord.refresh_leader_partitions(&image).await;
 
     let tid = req.transactional_id.as_str();
@@ -119,7 +120,7 @@ pub(crate) async fn handle(
         // Lock dropped here.
     };
 
-    if let Err(e) = coord.put(prepare_snap.clone()).await {
+    if let Err(e) = coord.put(prepare_snap.clone(), txnv).await {
         tracing::error!(
             tid,
             state = ?prepare,
@@ -216,7 +217,7 @@ pub(crate) async fn handle(
     // FINAL put: move `complete_snap` in (no use-after-move below) to avoid the
     // redundant full `TxnEntry` clone (incl. the partition / offset-commit-group
     // sets) that the intermediate phases pay.
-    if let Err(e) = coord.put(complete_snap).await {
+    if let Err(e) = coord.put(complete_snap, txnv).await {
         tracing::error!(
             tid,
             state = ?complete,

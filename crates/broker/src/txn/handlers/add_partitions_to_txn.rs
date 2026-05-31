@@ -58,6 +58,7 @@ pub(crate) async fn handle(
     // Refresh leader-partition view from the current metadata image
     // before checking coordinator-ness, to avoid a race.
     let image = controller.current_image();
+    let txnv = crate::txn::version::resolve_txn_version(&image);
     coord.refresh_leader_partitions(&image).await;
 
     if version >= 4 {
@@ -66,6 +67,7 @@ pub(crate) async fn handle(
             version,
             &req,
             &image,
+            txnv,
             authorizer,
             ctx.principal,
             ctx.peer,
@@ -77,6 +79,7 @@ pub(crate) async fn handle(
             version,
             &req,
             &image,
+            txnv,
             authorizer,
             ctx.principal,
             ctx.peer,
@@ -87,11 +90,13 @@ pub(crate) async fn handle(
 
 // ── v4+ path ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_v4(
     coord: &crate::txn::coordinator::TxnCoordinator,
     version: i16,
     req: &AddPartitionsToTxnRequest,
     image: &MetadataImage,
+    txnv: crate::txn::version::TxnVersion,
     authorizer: &dyn Authorizer,
     principal: &Principal,
     peer: &SocketAddr,
@@ -120,6 +125,7 @@ async fn handle_v4(
                 txn.producer_epoch,
                 &txn.topics,
                 &denied,
+                txnv,
             )
             .await
         };
@@ -140,11 +146,13 @@ async fn handle_v4(
 
 // ── v0-3 path ─────────────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_v3(
     coord: &crate::txn::coordinator::TxnCoordinator,
     version: i16,
     req: &AddPartitionsToTxnRequest,
     image: &MetadataImage,
+    txnv: crate::txn::version::TxnVersion,
     authorizer: &dyn Authorizer,
     principal: &Principal,
     peer: &SocketAddr,
@@ -171,6 +179,7 @@ async fn handle_v3(
             req.v3_and_below_producer_epoch,
             &req.v3_and_below_topics,
             &denied,
+            txnv,
         )
         .await
     };
@@ -219,6 +228,7 @@ fn denied_topics(
 /// Returns per-topic, per-partition result entries. Topics named in
 /// `denied` short-circuit with `TOPIC_AUTHORIZATION_FAILED`; the remaining
 /// topics go through the state-machine check and partition registration.
+#[allow(clippy::too_many_arguments)]
 async fn process_one_txn(
     coord: &crate::txn::coordinator::TxnCoordinator,
     tid: &str,
@@ -226,6 +236,7 @@ async fn process_one_txn(
     producer_epoch: i16,
     topics: &[AddPartitionsToTxnTopic],
     denied: &std::collections::HashSet<String>,
+    txnv: crate::txn::version::TxnVersion,
 ) -> Vec<AddPartitionsToTxnTopicResult> {
     // Topics allowed to proceed past the per-topic Write ACL gate.
     let allowed_topics: Vec<&AddPartitionsToTxnTopic> = topics
@@ -283,7 +294,7 @@ async fn process_one_txn(
     drop(entry);
 
     // 5. Persist.
-    if let Err(e) = coord.put(snap).await {
+    if let Err(e) = coord.put(snap, txnv).await {
         tracing::error!(tid, error = %e, "AddPartitionsToTxn: failed to persist TxnEntry");
         return per_topic_with_denied(topics, denied, codes::UNKNOWN_SERVER_ERROR);
     }

@@ -35,10 +35,11 @@ pub(crate) fn handle(
         let req = AddOffsetsToTxnRequest::decode(&mut cur, version)?;
 
         // Refresh leader-partition view from the current metadata image
-        // before checking coordinator-ness, to avoid a race.
-        coord
-            .refresh_leader_partitions(&controller.current_image())
-            .await;
+        // before checking coordinator-ness, to avoid a race. Resolve the
+        // finalized transaction.version from the same image read.
+        let image = controller.current_image();
+        let txnv = crate::txn::version::resolve_txn_version(&image);
+        coord.refresh_leader_partitions(&image).await;
 
         let tid = req.transactional_id.as_str();
 
@@ -85,7 +86,7 @@ pub(crate) fn handle(
         // Drop lock before the async persist call.
         drop(entry);
 
-        if let Err(e) = coord.put(snap).await {
+        if let Err(e) = coord.put(snap, txnv).await {
             tracing::error!(
                 tid,
                 group_id = %req.group_id,
