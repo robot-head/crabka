@@ -94,7 +94,7 @@ impl QuorumStateMachine {
                 pre_vote,
                 now,
             ),
-            Event::ElectionTimeout => self.handle_election_timeout(now),
+            Event::ElectionTimeout => self.handle_election_timeout(log, now),
             Event::ReceiveVoteResponse {
                 from,
                 epoch,
@@ -108,7 +108,7 @@ impl QuorumStateMachine {
             Event::ReceiveEndQuorumEpoch {
                 leader_id,
                 leader_epoch,
-            } => self.handle_end_quorum_epoch(leader_id, leader_epoch, now),
+            } => self.handle_end_quorum_epoch(log, leader_id, leader_epoch, now),
             Event::ReceiveFetch {
                 from,
                 fetch_epoch,
@@ -119,7 +119,7 @@ impl QuorumStateMachine {
                 leader_epoch,
                 diverging,
             } => self.handle_fetch_response(leader_id, leader_epoch, diverging, now),
-            Event::FetchTimeout => self.handle_fetch_timeout(now),
+            Event::FetchTimeout => self.handle_fetch_timeout(log, now),
         }
     }
 
@@ -167,10 +167,22 @@ impl QuorumStateMachine {
     }
 
     /// The HWM as the `majority()`-th largest match offset across the leader's
-    /// own log end and every follower's acknowledged fetch offset. Never
-    /// regresses (the caller only adopts a strictly larger value).
+    /// own log end and every follower's acknowledged fetch offset, gated on the
+    /// current leader epoch (Raft Fig.8 / KIP-595 leader completeness): the HWM
+    /// may only advance once a *current-epoch* entry has been majority-replicated.
+    /// We approximate that here by requiring the majority offset to be strictly
+    /// past `epoch_start_offset` (where this leader's first current-epoch record
+    /// sits). Otherwise the HWM is left unchanged. Never regresses.
+    ///
+    /// NOTE: full per-offset epoch validation against the real log lands in 3b;
+    /// 3a uses the tracked `epoch_start_offset` as a faithful stand-in.
     fn recompute_high_watermark(&self, log_end: i64) -> i64 {
-        let Role::Leader { replicas, .. } = &self.role else {
+        let Role::Leader {
+            replicas,
+            high_watermark,
+            epoch_start_offset,
+        } = &self.role
+        else {
             return 0;
         };
         let mut match_offsets: Vec<i64> = Vec::with_capacity(replicas.len() + 1);
@@ -180,7 +192,23 @@ impl QuorumStateMachine {
         }
         // Sort descending; the majority-th largest sits at index `majority - 1`.
         match_offsets.sort_unstable_by(|a, b| b.cmp(a));
-        match_offsets[self.state.majority() - 1]
+        let majority_offset = match_offsets[self.state.majority() - 1];
+        // Leader-completeness gate: only commit once the current-epoch entry at
+        // `epoch_start_offset` is itself majority-replicated. Until then, hold.
+        let new_hwm = if majority_offset > *epoch_start_offset {
+            majority_offset
+        } else {
+            *high_watermark
+        };
+        debug_assert!(
+            new_hwm <= log_end,
+            "HWM {new_hwm} must not exceed leader log end {log_end}"
+        );
+        debug_assert!(
+            new_hwm >= *high_watermark,
+            "HWM {new_hwm} must not regress below {high_watermark}"
+        );
+        new_hwm
     }
 
     /// (Follower side) the leader answered our Fetch. A diverging hint means we
@@ -207,9 +235,9 @@ impl QuorumStateMachine {
 
     /// The fetch timer fired: a follower/observer lost contact with the leader.
     /// A voter starts an election; an observer just keeps trying to find a leader.
-    fn handle_fetch_timeout(&mut self, now: SimInstant) -> Vec<Action> {
+    fn handle_fetch_timeout(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         if self.is_voter() {
-            self.start_election(now)
+            self.start_election(log, now)
         } else {
             Vec::new()
         }
@@ -224,7 +252,11 @@ impl QuorumStateMachine {
         leader_epoch: LeaderEpoch,
         now: SimInstant,
     ) -> Vec<Action> {
-        if leader_epoch < self.state.leader_epoch {
+        // Accept a strictly-higher epoch, or an equal epoch only if we do not
+        // already know a leader for it (one leader per epoch). Otherwise ignore.
+        let accept = leader_epoch > self.state.leader_epoch
+            || (leader_epoch == self.state.leader_epoch && self.state.leader_id.is_none());
+        if !accept {
             return Vec::new();
         }
         self.state.leader_epoch = leader_epoch;
@@ -258,6 +290,7 @@ impl QuorumStateMachine {
     /// timer); an observer simply detaches and keeps observing.
     fn handle_end_quorum_epoch(
         &mut self,
+        log: &dyn LogView,
         _leader_id: NodeId,
         leader_epoch: LeaderEpoch,
         now: SimInstant,
@@ -266,7 +299,7 @@ impl QuorumStateMachine {
             return Vec::new();
         }
         if self.is_voter() {
-            self.start_election(now)
+            self.start_election(log, now)
         } else {
             let mut actions = Vec::new();
             self.transition_to_unattached(self.state.leader_epoch, now, &mut actions);
@@ -276,18 +309,18 @@ impl QuorumStateMachine {
 
     /// The election timer fired. A voter begins a KIP-996 pre-vote round
     /// (becomes `Prospective`); an observer never elects.
-    fn handle_election_timeout(&mut self, now: SimInstant) -> Vec<Action> {
+    fn handle_election_timeout(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         if !self.is_voter() {
             return Vec::new();
         }
-        self.start_election(now)
+        self.start_election(log, now)
     }
 
     /// Shared election-start path (used by `ElectionTimeout` and a resigning
     /// leader's `EndQuorumEpoch`): become `Prospective` and broadcast a
     /// non-binding pre-vote at the *current* epoch (epoch is not bumped until the
     /// pre-vote succeeds).
-    fn start_election(&mut self, now: SimInstant) -> Vec<Action> {
+    fn start_election(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         let mut granted = BTreeSet::new();
         granted.insert(self.me);
         let deadline = self.election_deadline(now);
@@ -308,7 +341,7 @@ impl QuorumStateMachine {
         ];
         // A lone voter wins its own pre-vote immediately.
         if self.tally_prevote_reached_majority() {
-            actions.extend(self.promote_to_candidate(now));
+            actions.extend(self.promote_to_candidate(log, now));
         }
         actions
     }
@@ -332,10 +365,10 @@ impl QuorumStateMachine {
             return Vec::new();
         }
         match (&mut self.role, pre_vote) {
-            (Role::Prospective { granted, .. }, true) => {
+            (Role::Prospective { granted, .. }, true) if epoch == self.state.leader_epoch => {
                 granted.insert(from);
                 if self.tally_prevote_reached_majority() {
-                    self.promote_to_candidate(now)
+                    self.promote_to_candidate(log, now)
                 } else {
                     Vec::new()
                 }
@@ -369,8 +402,8 @@ impl QuorumStateMachine {
     }
 
     /// Pre-vote succeeded: bump the epoch, self-vote, and broadcast a real vote.
-    fn promote_to_candidate(&mut self, now: SimInstant) -> Vec<Action> {
-        self.state.leader_epoch += 1;
+    fn promote_to_candidate(&mut self, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
+        self.state.leader_epoch = self.state.leader_epoch.saturating_add(1);
         self.state.leader_id = None;
         self.state.voted_key = Some(ReplicaKey {
             id: self.me,
@@ -397,17 +430,17 @@ impl QuorumStateMachine {
         ];
         // A lone voter wins its own election immediately.
         if self.tally_candidate_reached_majority() {
-            actions.extend(self.promote_to_leader_inner());
+            actions.extend(self.promote_to_leader_inner(log));
         }
         actions
     }
 
     /// Real vote succeeded: become leader for the current epoch.
-    fn promote_to_leader(&mut self, _log: &dyn LogView) -> Vec<Action> {
-        self.promote_to_leader_inner()
+    fn promote_to_leader(&mut self, log: &dyn LogView) -> Vec<Action> {
+        self.promote_to_leader_inner(log)
     }
 
-    fn promote_to_leader_inner(&mut self) -> Vec<Action> {
+    fn promote_to_leader_inner(&mut self, log: &dyn LogView) -> Vec<Action> {
         let epoch = self.state.leader_epoch;
         self.state.leader_id = Some(self.me);
         let mut replicas = BTreeMap::new();
@@ -416,9 +449,13 @@ impl QuorumStateMachine {
                 replicas.insert(id, ReplicaProgress::default());
             }
         }
+        // The leader's `LeaderChange` / first current-epoch record sits at the
+        // current log end. The HWM may only advance past this offset (Fig.8).
+        let epoch_start_offset = log.end_offset();
         self.role = Role::Leader {
             replicas,
             high_watermark: 0,
+            epoch_start_offset,
         };
         vec![
             Action::AppendLeaderChange { epoch },
@@ -539,6 +576,28 @@ mod tests {
         fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
             if epoch <= self.last_epoch {
                 Some(self.end)
+            } else {
+                None
+            }
+        }
+    }
+    /// A `LogView` whose `end_offset` can change between calls, so a test can
+    /// model a leader promoted at a small log end (low `epoch_start_offset`)
+    /// and then growing before followers fetch.
+    struct CellLog {
+        end: std::cell::Cell<i64>,
+        last_epoch: LeaderEpoch,
+    }
+    impl LogView for CellLog {
+        fn end_offset(&self) -> i64 {
+            self.end.get()
+        }
+        fn last_epoch(&self) -> LeaderEpoch {
+            self.last_epoch
+        }
+        fn end_offset_for_epoch(&self, epoch: LeaderEpoch) -> Option<i64> {
+            if epoch <= self.last_epoch {
+                Some(self.end.get())
             } else {
                 None
             }
@@ -916,11 +975,15 @@ mod tests {
     #[test]
     fn leader_advances_hwm_at_majority_fetch_offset() {
         let mut m = machine(1, &[1, 2, 3]);
-        let log = FakeLog {
-            end: 10,
-            last_epoch: 1,
+        // The log end is 0 at promotion so the leader's `epoch_start_offset` is
+        // 0; the leader-completeness gate then permits advancing the HWM to any
+        // majority offset > 0. After promotion the log grows to end 10, which is
+        // what followers replicate against.
+        let log = CellLog {
+            end: std::cell::Cell::new(0),
+            last_epoch: 0,
         };
-        // drive to leader
+        // drive to leader (epoch_start_offset captured as end_offset() == 0)
         m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
         m.on_event(
             Event::ReceiveVoteResponse {
@@ -942,7 +1005,15 @@ mod tests {
             &log,
             SimInstant(2002),
         );
-        // leader end offset 10. follower 2 fetches at 8, follower 3 at 4.
+        assert!(matches!(
+            m.role(),
+            Role::Leader {
+                epoch_start_offset: 0,
+                ..
+            }
+        ));
+        // Leader's log now ends at 10. follower 2 fetches at 8, follower 3 at 4.
+        log.end.set(10);
         let a2 = m.on_event(
             Event::ReceiveFetch {
                 from: 2,
@@ -952,7 +1023,7 @@ mod tests {
             &log,
             SimInstant(2100),
         );
-        // majority of {self=10, 2=8} = 8 → HWM advances to 8
+        // majority of {self=10, 2=8} = 8, and 8 > epoch_start_offset 0 → advances
         assert!(
             a2.iter()
                 .any(|a| matches!(a, Action::AdvanceHighWatermark(8)))
@@ -969,6 +1040,65 @@ mod tests {
         // sorted match offsets {10,8,4}; majority (2nd highest) = 8 → no regress
         if let Role::Leader { high_watermark, .. } = m.role() {
             assert!(*high_watermark == 8);
+        } else {
+            panic!()
+        }
+    }
+
+    #[test]
+    fn leader_holds_hwm_for_prior_epoch_entries_until_current_epoch_committed() {
+        // Leader-completeness (Raft Fig.8): a leader promoted at log end 10
+        // (epoch_start_offset = 10) must NOT advance the HWM to a majority
+        // offset that only covers prior-epoch entries (8 < 10).
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 10,
+            last_epoch: 1,
+        };
+        m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 0,
+                vote_granted: true,
+                pre_vote: true,
+            },
+            &log,
+            SimInstant(2001),
+        );
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 1,
+                vote_granted: true,
+                pre_vote: false,
+            },
+            &log,
+            SimInstant(2002),
+        );
+        assert!(matches!(
+            m.role(),
+            Role::Leader {
+                epoch_start_offset: 10,
+                ..
+            }
+        ));
+        // follower 2 fetches at 8: majority of {10, 8} = 8, but 8 <= 10 → hold.
+        let a2 = m.on_event(
+            Event::ReceiveFetch {
+                from: 2,
+                fetch_epoch: 1,
+                fetch_offset: 8,
+            },
+            &log,
+            SimInstant(2100),
+        );
+        assert!(
+            !a2.iter()
+                .any(|a| matches!(a, Action::AdvanceHighWatermark(_)))
+        );
+        if let Role::Leader { high_watermark, .. } = m.role() {
+            assert!(*high_watermark == 0);
         } else {
             panic!()
         }

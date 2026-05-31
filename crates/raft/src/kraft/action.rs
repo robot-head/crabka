@@ -23,6 +23,8 @@ pub enum Action {
     /// New leader announces its epoch to all voters.
     SendBeginQuorumEpoch { epoch: LeaderEpoch },
     /// Resigning leader tells voters to elect.
+    // NOTE: emitted in a later sub-slice (alongside `Role::Resigned`); the 3a
+    // core only *receives* `EndQuorumEpoch`, so nothing produces this yet.
     SendEndQuorumEpoch { epoch: LeaderEpoch },
     /// Follower/observer should fetch from this leader.
     SendFetch { leader_id: NodeId },

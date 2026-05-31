@@ -36,8 +36,16 @@ pub enum Role {
     Leader {
         replicas: BTreeMap<NodeId, ReplicaProgress>,
         high_watermark: i64,
+        /// Log end offset at the moment of promotion, i.e. where this leader's
+        /// `LeaderChange` / first current-epoch record sits. The HWM may only
+        /// advance past this offset, enforcing Raft Fig.8 leader completeness:
+        /// a current-epoch entry must be majority-replicated before commit.
+        epoch_start_offset: i64,
     },
     /// Stepping down; emitting `EndQuorumEpoch`.
+    // NOTE: `Resigned` (and `Action::SendEndQuorumEpoch`) are produced in a
+    // later sub-slice; the 3a core only *receives* `EndQuorumEpoch`, so there is
+    // intentionally no transition into this variant yet.
     Resigned,
     /// Not in the voter set; only ever fetches.
     Observer {
