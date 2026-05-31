@@ -596,6 +596,77 @@ async fn reject_archives() {
     );
 }
 
+/// Regression: a `ShareFetch` whose acquired offset begins a *later* record
+/// batch (a leading multi-record batch was already consumed/archived) must
+/// still return that offset's record bytes — not an empty payload.
+///
+/// `ShareFetch.partition_max_bytes` is a v0-only field; at the supported
+/// versions (v1+) it is absent and decodes to 0. The read path must not use
+/// that 0 as the log-read byte budget: a 0 budget reads only one batch header,
+/// which cannot skip the leading batch to reach the acquired offset, so the
+/// acquired record is returned with no bytes (and stays locked). The read must
+/// fall back to the request-level `max_bytes`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acquire_past_leading_batch_returns_bytes() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    create_topic(&broker, &client, "t", 1).await;
+    let tid = topic_id(&broker, "t");
+    bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+    // One 3-record batch at offsets 0..2.
+    produce_n(&client, "t", tid, 0, 3).await;
+    let member = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, "g1", tid, 0).await;
+
+    // Acquire 0..2 and Reject them → archived, SPSO advances to 3.
+    let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
+    assert!(acquired_count(&row) == 3, "acquire all 3");
+    let ack = share_ack(&client, "g1", &member, tid, 0, 1, 0, 2, REJECT).await;
+    assert!(ack.error_code == NONE, "reject error: {}", ack.error_code);
+
+    // A separate single-record batch at offset 3 (this starts a new batch; the
+    // acquired range 3..3 begins past the leading 0..2 batch).
+    produce_n(&client, "t", tid, 0, 1).await;
+
+    // Acquire offset 3 — the payload must carry the record bytes.
+    let mut row3 = share_fetch(&client, "g1", &member, tid, 0, 2, 0).await;
+    for epoch in 3..18 {
+        if acquired_count(&row3) > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        row3 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
+    }
+    assert!(
+        acquired_count(&row3) == 1,
+        "offset 3 must be acquired, got {:?}",
+        row3.acquired_records
+    );
+    assert!(
+        row3.acquired_records[0].first_offset == 3,
+        "acquired offset must be 3, got {:?}",
+        row3.acquired_records
+    );
+    let batches = row3
+        .records
+        .as_ref()
+        .and_then(|r| r.as_v2())
+        .expect("acquired offset 3 must carry decodable v2 record bytes");
+    let values: Vec<String> = batches
+        .iter()
+        .flat_map(|b| b.records.iter())
+        .filter_map(|r| r.value.as_ref())
+        .map(|v| String::from_utf8_lossy(v).into_owned())
+        .collect();
+    assert!(
+        values == vec!["v0"],
+        "offset 3's record bytes must be returned, got {values:?}"
+    );
+}
+
 /// An acquired-but-unacknowledged lock that expires is reverted by the
 /// background sweep, so the next fetch re-delivers at an incremented count.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

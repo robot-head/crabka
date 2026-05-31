@@ -326,7 +326,19 @@ async fn acquire_pass(
             // Read [first, last+1) clamped at the HWM. `last` is always < hwm
             // because `materialize` only ever extends the window up to hwm-1.
             let limit = (last + 1).min(hwm);
-            let bytes = read_acquired_bytes(&part, first, limit, p.partition_max_bytes).await?;
+            // `partition_max_bytes` is a v0-only ShareFetch field; at the
+            // supported versions (v1+, KIP-932) it is absent and decodes to 0.
+            // A 0 read budget makes `read_raw` read only one batch header's
+            // worth of bytes, which cannot skip a leading multi-record batch to
+            // reach an acquired offset that starts a later batch — yielding an
+            // empty read for a genuinely acquired range. Fall back to the
+            // request-level `max_bytes` budget when no per-partition cap is set.
+            let read_budget = if p.partition_max_bytes > 0 {
+                p.partition_max_bytes
+            } else {
+                max_bytes
+            };
+            let bytes = read_acquired_bytes(&part, first, limit, read_budget).await?;
             p.out.records = bytes.map(RecordsPayload::Raw);
             p.out.acquired_records = acquired
                 .iter()
