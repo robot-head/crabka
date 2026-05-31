@@ -122,6 +122,8 @@ pub(crate) mod produce;
 pub(crate) mod push_telemetry;
 pub(crate) mod remove_raft_voter;
 pub(crate) mod renew_delegation_token;
+// KIP-932 share-group membership (api_key 76).
+pub(crate) mod share_group_heartbeat;
 pub(crate) mod sync_group;
 // KIP-185 admin RPC to permanently drop a broker registration (api_key 64).
 pub(crate) mod unregister_broker;
@@ -241,6 +243,9 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(93, get_replica_log_info::handle);
     t.register(68, consumer_group_heartbeat::handle);
     t.register(69, consumer_group_describe::handle);
+    // KIP-932 ShareGroupHeartbeat (api_key 76). Plain 4-arg handler:
+    // share-group membership needs no per-connection ACL context.
+    t.register(76, share_group_heartbeat::handle);
     // KIP-714 (client metrics push). Both handlers are no-ops: get returns
     // an empty subscription so JVM clients skip push; push silently
     // discards anything that races the subscription re-fetch.
