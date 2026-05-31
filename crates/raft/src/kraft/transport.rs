@@ -49,6 +49,16 @@ pub enum Command {
     /// the loop feeds peer-RPC responses back to itself as the matching
     /// `Receive*Response` event in later tasks).
     Event(Event),
+    /// Test-only: append a metadata batch to the log (as the leader's
+    /// `submit_change` will in Task 4) and drive commit through the real
+    /// apply pipeline. Exercises the Task 2 `AppendLeaderChange`/`advance_hwm`/
+    /// decode/`validate`/`apply`/publish path without the network or Task 4's
+    /// submit machinery. Replies with the appended base offset.
+    #[cfg(test)]
+    TestAppendAndCommit {
+        records: Vec<crabka_metadata::MetadataRecord>,
+        reply: oneshot::Sender<i64>,
+    },
     /// Stop the loop.
     Shutdown,
 }

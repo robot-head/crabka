@@ -166,6 +166,22 @@ impl KraftController {
     pub async fn shutdown(&self) {
         let _ = self.cmd_tx.send(Command::Shutdown).await;
     }
+
+    /// Test-only: append `records` as a committed batch and apply them through
+    /// the real pipeline; returns the appended base offset. See
+    /// [`Command::TestAppendAndCommit`].
+    #[cfg(test)]
+    async fn test_append_and_commit(
+        &self,
+        records: Vec<crabka_metadata::MetadataRecord>,
+    ) -> Result<i64, RaftError> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(Command::TestAppendAndCommit { records, reply })
+            .await
+            .map_err(|_| RaftError::Shutdown)?;
+        rx.await.map_err(|_| RaftError::Shutdown)
+    }
 }
 
 impl Engine {
@@ -185,6 +201,11 @@ impl Engine {
                 Command::Shutdown => break,
                 Command::Event(event) => self.on_event(event).await,
                 Command::Inbound(inbound) => self.on_inbound(inbound).await,
+                #[cfg(test)]
+                Command::TestAppendAndCommit { records, reply } => {
+                    let off = self.test_append_and_commit(records);
+                    let _ = reply.send(off);
+                }
             }
         }
     }
@@ -285,6 +306,34 @@ impl Engine {
     fn append_leader_change(&mut self, epoch: LeaderEpoch) -> Result<i64, RaftError> {
         let mut batch = leader_change_batch(epoch);
         self.log.append(&mut batch)
+    }
+
+    /// Test-only: append a metadata batch and commit it through the real apply
+    /// pipeline. Returns the appended base offset (or -1 on encode/append
+    /// failure). See [`Command::TestAppendAndCommit`].
+    #[cfg(test)]
+    fn test_append_and_commit(&mut self, records: Vec<crabka_metadata::MetadataRecord>) -> i64 {
+        let leader_epoch = self.core.quorum_state().leader_epoch;
+        let kafka_records: Vec<_> = records
+            .into_iter()
+            .filter_map(|r| crabka_metadata::to_kafka_record(&r).ok())
+            .collect();
+        let mut batch = RecordBatch {
+            partition_leader_epoch: i32::try_from(leader_epoch).unwrap_or(i32::MAX),
+            last_offset_delta: i32::try_from(kafka_records.len().saturating_sub(1)).unwrap_or(0),
+            records: kafka_records,
+            ..Default::default()
+        };
+        let base = match self.log.append(&mut batch) {
+            Ok(off) => off,
+            Err(e) => {
+                tracing::error!(?e, "kraft: test append failed");
+                return -1;
+            }
+        };
+        // Commit everything appended so far through the real apply path.
+        self.advance_and_apply(self.log.log_end_offset());
+        base
     }
 
     /// Advance the HWM and apply the records newly committed by it
@@ -436,16 +485,104 @@ mod tests {
         (ctrl, dir)
     }
 
+    fn topic_record(name: &str) -> crabka_metadata::MetadataRecord {
+        crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
+            name: name.to_string(),
+            topic_id: uuid::Uuid::from_u128(1),
+            partitions: 1,
+            replication_factor: 1,
+        })
+    }
+
+    /// Wait until the leader watch reports `want`, or fail after `tries`.
+    async fn await_leader(ctrl: &KraftController, want: Option<NodeId>) {
+        let mut rx = ctrl.watch_leader();
+        for _ in 0..50 {
+            if *rx.borrow() == want {
+                return;
+            }
+            // changed() resolves when the loop publishes the next leader value.
+            if rx.changed().await.is_err() {
+                break;
+            }
+        }
+        assert!(*rx.borrow() == want, "leader did not reach {want:?}");
+    }
+
     /// Task 1 contract: a single-voter engine starts and reports no leader at
     /// the moment of construction (the watch seeds from `initial_state`, which
     /// is `Unattached` / `leader_id == None`).
     #[tokio::test]
     async fn single_voter_engine_starts_with_no_initial_leader() {
         let (ctrl, _dir) = build(1, &[1]);
-        // The watch is seeded from the initial QuorumState before the loop's
-        // bootstrap runs, so the initial published leader is None.
+        // The watch is seeded from the initial QuorumState before the loop runs,
+        // so the initial published leader is None.
         let initial = *ctrl.watch_leader().borrow();
         assert!(initial.is_none());
+        ctrl.shutdown().await;
+    }
+
+    /// Task 2: an injected `ElectionTimeout` drives the loop through the core
+    /// (single voter wins its own pre-vote + vote) and the executed actions
+    /// (`AppendLeaderChange` + `PersistQuorumState`), and the engine publishes
+    /// the new leader. Proves event -> core -> execute -> publish.
+    #[tokio::test]
+    async fn injected_election_makes_single_voter_leader() {
+        let (ctrl, _dir) = build(1, &[1]);
+        ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
+        await_leader(&ctrl, Some(1)).await;
+        ctrl.shutdown().await;
+    }
+
+    /// Task 2: a committed metadata batch flows through `advance_hwm` ->
+    /// decode -> `validate` -> `apply` -> publish, mutating the image and the
+    /// published watch. Drives the apply pipeline directly (`submit_change` is
+    /// Task 4).
+    #[tokio::test]
+    async fn committed_batch_applies_to_image() {
+        let (ctrl, _dir) = build(1, &[1]);
+        // Become leader so there is a leader epoch to stamp the batch with.
+        ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
+        await_leader(&ctrl, Some(1)).await;
+
+        // Image starts without the topic.
+        assert!(ctrl.current_image().topic("t").is_none());
+
+        // Append + commit a topic record through the real apply pipeline.
+        let off = ctrl
+            .test_append_and_commit(vec![topic_record("t")])
+            .await
+            .unwrap();
+        assert!(off >= 0);
+
+        // The committed record applied to the image and the watch republished.
+        let mut img_rx = ctrl.watch_image();
+        // The apply already happened before the reply was sent, so the latest
+        // borrow reflects it.
+        assert!(img_rx.borrow_and_update().topic("t").is_some());
+        assert!(ctrl.current_image().topic("t").is_some());
+        ctrl.shutdown().await;
+    }
+
+    /// Task 2: a duplicate record is rejected by `MetadataImage::validate` on
+    /// the apply path and does not corrupt the image (the topic stays a single
+    /// definition; the second apply is a no-op).
+    #[tokio::test]
+    async fn duplicate_committed_record_rejected_on_apply() {
+        let (ctrl, _dir) = build(1, &[1]);
+        ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
+        await_leader(&ctrl, Some(1)).await;
+
+        ctrl.test_append_and_commit(vec![topic_record("t")])
+            .await
+            .unwrap();
+        assert!(ctrl.current_image().topic("t").is_some());
+
+        // Re-submitting the same topic: validate() rejects it, apply skipped.
+        ctrl.test_append_and_commit(vec![topic_record("t")])
+            .await
+            .unwrap();
+        assert!(ctrl.current_image().topic("t").is_some());
         ctrl.shutdown().await;
     }
 }
