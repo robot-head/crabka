@@ -3,4 +3,5 @@
 
 pub(crate) mod config;
 pub(crate) mod manager;
+pub(crate) mod otlp;
 pub(crate) use manager::ClientMetricsManager;
