@@ -227,10 +227,14 @@ by extending the bootstrap key-dispatch to recognise the share record keys.
 
 ### 6. ApiVersions
 
-Advertise apiKeys **76 and 77** (v1) when the share feature is enabled.
-ShareFetch/Acknowledge and the persister/admin RPCs stay unadvertised until their
-slices land. (Advertising a subset is correct for an incremental build; a real
-share consumer cannot make progress past join until Slice C, which is expected.)
+Advertise apiKeys **76 and 77** (v1) in the API catalog, matching how Kafka (and
+Crabka's existing KIP-848 APIs) advertise statically: the API is always listed,
+and enablement is enforced at the **handler** (`ShareGroupHeartbeat` returns
+`UNSUPPORTED_VERSION` when `group.share.enable` is off), not by conditioning the
+ApiVersions list. ShareFetch/Acknowledge and the persister/admin RPCs stay
+unadvertised until their slices land. (Advertising a subset of share RPCs is
+correct for an incremental build; a real share consumer cannot make progress past
+join until Slice C, which is expected.)
 
 ### 7. Error codes
 
@@ -304,8 +308,9 @@ not Slice A.
 4. No codegen drift (`regenerate.sh` + `git diff` clean).
 5. A two-member share group joins, reconciles, is described, members leave, and
    state survives restart — all exercised by `tests/share_groups.rs`.
-6. Share RPCs (76, 77) advertised in ApiVersions only when `share.version` is on;
-   return `UNSUPPORTED_VERSION` when off.
+6. Share RPCs (76, 77) advertised in the API catalog (statically, as Kafka does);
+   `ShareGroupHeartbeat` returns `UNSUPPORTED_VERSION` when `group.share.enable`
+   is off (handler-level enforcement, not ApiVersions conditioning).
 
 ## File-set sketch (for parallel-batch implementation)
 
