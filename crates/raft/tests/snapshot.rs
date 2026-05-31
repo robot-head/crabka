@@ -64,27 +64,23 @@ async fn snapshot_then_restart_recovers_image() {
         wait_for_leader(&controller).await;
 
         controller
-            .submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
-                name: "t".into(),
-                topic_id: Uuid::new_v4(),
-                partitions: 1,
-                replication_factor: 1,
-            })])
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: Uuid::new_v4(),
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                // KIP-584 finalized feature: must survive snapshot + restart.
+                // A dropped feature level reverts metadata.version to UNKNOWN.
+                MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                    name: "metadata.version".into(),
+                    level: 25,
+                }),
+            ])
             .await
             .expect("submit topic");
         assert!(controller.current_image().topic("t").is_some());
-
-        // Finalize a KIP-584 feature so the snapshot carries finalized
-        // features + their epoch. Regression guard: `to_records` once dropped
-        // every V1FeatureLevel, so metadata.version reverted to UNKNOWN after a
-        // restart and the range guard / SCRAM gates silently went permissive.
-        controller
-            .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
-                name: "metadata.version".into(),
-                level: 25,
-            })])
-            .await
-            .expect("submit feature level");
         assert!(controller.current_image().finalized_metadata_version() == Some(25));
 
         controller
