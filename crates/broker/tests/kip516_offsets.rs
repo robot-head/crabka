@@ -133,6 +133,73 @@ async fn offset_fetch_unknown_topic_id_returns_unknown_topic_id() {
     assert!(t.partitions.first().expect("a partition").error_code == 100);
 }
 
+/// OffsetCommit v10 with a mix of a known topic_id and an unknown one: the
+/// known topic commits (error 0), the unknown topic_id is not committed and
+/// comes back as UNKNOWN_TOPIC_ID with its id echoed.
+#[tokio::test]
+async fn offset_commit_unknown_topic_id_returns_unknown_topic_id() {
+    let p = support::start().await;
+    p.client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: "oc_known".into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("create topic");
+    let known = topic_id_for(&p.client, "oc_known").await;
+    let bogus = WireUuid(uuid::Uuid::from_u128(0x0bad_0bad).into_bytes());
+
+    let resp = p
+        .client
+        .send(OffsetCommitRequest {
+            group_id: "gc".into(),
+            topics: vec![
+                OffsetCommitRequestTopic {
+                    name: String::new(),
+                    topic_id: known,
+                    partitions: vec![OffsetCommitRequestPartition {
+                        partition_index: 0,
+                        committed_offset: 5,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                OffsetCommitRequestTopic {
+                    name: String::new(),
+                    topic_id: bogus,
+                    partitions: vec![OffsetCommitRequestPartition {
+                        partition_index: 0,
+                        committed_offset: 9,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .await
+        .expect("offset commit");
+
+    let ok = resp
+        .topics
+        .iter()
+        .find(|t| t.topic_id == known)
+        .expect("known topic row");
+    assert!(ok.partitions[0].error_code == 0);
+    let bad = resp
+        .topics
+        .iter()
+        .find(|t| t.topic_id == bogus)
+        .expect("unknown topic row echoing its id");
+    assert!(bad.partitions[0].error_code == 100); // UNKNOWN_TOPIC_ID
+}
+
 /// Fetch-all (null `topics`) at v10 must echo each topic's `topic_id`, since
 /// the name is dropped from the wire at v10 and the client matches by id.
 #[tokio::test]
