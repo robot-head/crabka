@@ -95,8 +95,75 @@ impl QuorumStateMachine {
                 vote_granted,
                 pre_vote,
             } => self.handle_vote_response(log, from, epoch, vote_granted, pre_vote, now),
-            // remaining arms added in Tasks 5-6
+            Event::ReceiveBeginQuorumEpoch {
+                leader_id,
+                leader_epoch,
+            } => self.handle_begin_quorum_epoch(leader_id, leader_epoch, now),
+            Event::ReceiveEndQuorumEpoch {
+                leader_id,
+                leader_epoch,
+            } => self.handle_end_quorum_epoch(leader_id, leader_epoch, now),
+            // remaining arms added in Task 6
             _ => Vec::new(),
+        }
+    }
+
+    /// A leader announced its epoch. If it is at least our current epoch, follow
+    /// it (becoming `Follower`/an attached `Observer`); a stale (lower-epoch)
+    /// announcement is ignored.
+    fn handle_begin_quorum_epoch(
+        &mut self,
+        leader_id: NodeId,
+        leader_epoch: LeaderEpoch,
+        now: SimInstant,
+    ) -> Vec<Action> {
+        if leader_epoch < self.state.leader_epoch {
+            return Vec::new();
+        }
+        self.state.leader_epoch = leader_epoch;
+        self.state.leader_id = Some(leader_id);
+        self.state.voted_key = None;
+        let fetch_deadline = now.saturating_add_ms(self.election_timeout_ms);
+        self.role = if self.is_voter() {
+            Role::Follower {
+                leader_id,
+                fetch_deadline,
+            }
+        } else {
+            Role::Observer {
+                leader_id: Some(leader_id),
+                fetch_deadline,
+            }
+        };
+        vec![
+            Action::PersistQuorumState,
+            Action::TransitionedTo(self.role.name()),
+            Action::SendFetch { leader_id },
+            Action::ResetTimer {
+                kind: TimerKind::Fetch,
+                deadline: fetch_deadline,
+            },
+        ]
+    }
+
+    /// A resigning leader asked us to start an election. If it is not stale, a
+    /// voter immediately begins a pre-vote round (no waiting for the election
+    /// timer); an observer simply detaches and keeps observing.
+    fn handle_end_quorum_epoch(
+        &mut self,
+        _leader_id: NodeId,
+        leader_epoch: LeaderEpoch,
+        now: SimInstant,
+    ) -> Vec<Action> {
+        if leader_epoch < self.state.leader_epoch {
+            return Vec::new();
+        }
+        if self.is_voter() {
+            self.start_election(now)
+        } else {
+            let mut actions = Vec::new();
+            self.transition_to_unattached(self.state.leader_epoch, now, &mut actions);
+            actions
         }
     }
 
@@ -641,5 +708,88 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, Action::SendVoteRequest { .. }))
         );
+    }
+
+    #[test]
+    fn begin_quorum_epoch_makes_us_follower() {
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        let actions = m.on_event(
+            Event::ReceiveBeginQuorumEpoch {
+                leader_id: 2,
+                leader_epoch: 4,
+            },
+            &log,
+            SimInstant(10),
+        );
+        assert!(matches!(m.role(), Role::Follower { leader_id: 2, .. }));
+        assert!(m.quorum_state().leader_epoch == 4);
+        assert!(m.quorum_state().leader_id == Some(2));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SendFetch { leader_id: 2 }))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::PersistQuorumState))
+        );
+    }
+
+    #[test]
+    fn end_quorum_epoch_triggers_immediate_election() {
+        let mut m = machine(1, &[1, 2, 3]);
+        // follow leader 2 @ epoch 4 first
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        m.on_event(
+            Event::ReceiveBeginQuorumEpoch {
+                leader_id: 2,
+                leader_epoch: 4,
+            },
+            &log,
+            SimInstant(10),
+        );
+        let actions = m.on_event(
+            Event::ReceiveEndQuorumEpoch {
+                leader_id: 2,
+                leader_epoch: 4,
+            },
+            &log,
+            SimInstant(11),
+        );
+        // immediately start pre-vote (Prospective), not wait for timeout
+        assert!(matches!(m.role(), Role::Prospective { .. }));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SendVoteRequest { pre_vote: true, .. }))
+        );
+    }
+
+    #[test]
+    fn stale_begin_quorum_epoch_ignored() {
+        let mut m = machine(1, &[1, 2, 3]);
+        m.force_epoch(7);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 7,
+        };
+        let actions = m.on_event(
+            Event::ReceiveBeginQuorumEpoch {
+                leader_id: 2,
+                leader_epoch: 4,
+            },
+            &log,
+            SimInstant(10),
+        );
+        assert!(actions.is_empty()); // lower epoch → ignored
+        assert!(m.quorum_state().leader_id.is_none());
     }
 }
