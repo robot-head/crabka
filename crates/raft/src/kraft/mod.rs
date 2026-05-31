@@ -9,17 +9,21 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod action;
+pub mod controller;
 pub mod core;
 pub mod event;
 pub mod log;
 pub mod role;
+pub mod transport;
 pub mod types;
 
 pub use action::Action;
+pub use controller::{KraftConfig, KraftController};
 pub use core::QuorumStateMachine;
 pub use event::Event;
 pub use log::KraftLog;
 pub use role::Role;
+pub use transport::{Command, Inbound, NullPeerSender, PeerSender};
 pub use types::{
     LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant,
 };
