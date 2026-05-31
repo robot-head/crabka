@@ -6,6 +6,7 @@
 pub(crate) mod bootstrap;
 pub(crate) mod coordinator;
 pub(crate) mod handlers;
+pub(crate) mod log_record;
 pub(crate) mod marker;
 pub(crate) mod partitioner;
 pub(crate) mod state;
