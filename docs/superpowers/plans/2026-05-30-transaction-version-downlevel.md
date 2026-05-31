@@ -103,14 +103,16 @@ Use Task 0's verified values for every `⟨pin⟩`.
 //! dependency thresholds against cp-kafka 4.0 before editing.
 
 pub const TRANSACTION_VERSION_FEATURE: &str = "transaction.version";
-pub const TRANSACTION_VERSION_MIN: i16 = 0; // ⟨pin⟩
-pub const TRANSACTION_VERSION_MAX: i16 = 2; // ⟨pin⟩
+pub const TRANSACTION_VERSION_MIN: i16 = 0; // pinned: cp-kafka 4.0
+pub const TRANSACTION_VERSION_MAX: i16 = 2; // pinned: cp-kafka 4.0
 
-/// metadata.version at/above which transaction.version=1 (flexible records) is
-/// the per-release default + dependency.
-pub const TV1_METADATA_LEVEL: i16 = 0; // ⟨pin⟩
-/// metadata.version at/above which transaction.version=2 is the default + dep.
-pub const TV2_METADATA_LEVEL: i16 = 0; // ⟨pin⟩
+/// metadata.version at/above which transaction.version becomes a bootstrap
+/// default. Pinned empirically: BOTH TV_1 and TV_2 bootstrap at 4.0-IV2
+/// (level 24), so the per-release default jumps 0 -> 2 at level 24 (TV_1 is
+/// never a standalone release default; it is still a settable level via
+/// UpdateFeatures). dependencies() is EMPTY (Kafka declares no hard dep).
+pub const TV1_METADATA_LEVEL: i16 = 24; // pinned: 4.0-IV2
+pub const TV2_METADATA_LEVEL: i16 = 24; // pinned: 4.0-IV2
 ```
 
 - [ ] **Step 2: Add `TransactionVersionFeature` to `feature.rs` and register**
@@ -133,6 +135,9 @@ impl Feature for TransactionVersionFeature {
         )
     }
     fn default_level(&self, bootstrap_mv: i16) -> i16 {
+        // Both TV_1 and TV_2 bootstrap at level 24 (4.0-IV2), so the default
+        // jumps 0 -> 2 at >= 24 (the TV_1 branch is unreachable as a default;
+        // TV_1 is still settable via UpdateFeatures). Empirically pinned.
         use crate::transaction_version::{TV1_METADATA_LEVEL, TV2_METADATA_LEVEL};
         if bootstrap_mv >= TV2_METADATA_LEVEL {
             2
@@ -142,22 +147,10 @@ impl Feature for TransactionVersionFeature {
             0
         }
     }
-    fn dependencies(&self, level: i16) -> &'static [(&'static str, i16)] {
-        use crate::transaction_version::{TV1_METADATA_LEVEL, TV2_METADATA_LEVEL};
-        match level {
-            2 => {
-                const D: &[(&str, i16)] =
-                    &[(crate::metadata_version::METADATA_VERSION_FEATURE, TV2_METADATA_LEVEL)];
-                D
-            }
-            1 => {
-                const D: &[(&str, i16)] =
-                    &[(crate::metadata_version::METADATA_VERSION_FEATURE, TV1_METADATA_LEVEL)];
-                D
-            }
-            _ => &[],
-        }
-    }
+    // dependencies: inherits the empty default. Empirically (cp-kafka 4.0) every
+    // transaction.version level declares an empty dependency map — the
+    // metadata.version 4.0-IV2 threshold is a bootstrap-default input only, not
+    // a hard UpdateFeatures floor. Same finding as group.version.
 }
 ```
 
@@ -188,10 +181,13 @@ Add `pub mod transaction_version;`.
     }
 
     #[test]
-    fn transaction_version_two_depends_on_metadata_version() {
+    fn transaction_version_declares_no_hard_dependencies() {
+        // Kafka 4.0 declares no UpdateFeatures dependency for transaction.version
+        // (the 4.0-IV2 threshold only drives the bootstrap default).
         let f = feature("transaction.version").unwrap();
-        assert!(!f.dependencies(2).is_empty());
         assert!(f.dependencies(0).is_empty());
+        assert!(f.dependencies(1).is_empty());
+        assert!(f.dependencies(2).is_empty());
     }
 ```
 

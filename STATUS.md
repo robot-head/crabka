@@ -5047,3 +5047,54 @@ introspection metadata).
   (`transactions.rs` has a known pre-existing parallel-load flake that passes
   in isolation); `cargo clippy --workspace --all-targets -- -D warnings` and
   `cargo fmt --all --check` clean.
+
+## Slice — transaction.version (KIP-890) byte-exact downlevel behavior (2026-05-31)
+
+- **Goal.** Generalize the feature framework to `transaction.version` (KIP-890)
+  with full faithful per-level behavior, including a byte-exact Kafka
+  `__transaction_state` record format. Plan:
+  `docs/superpowers/plans/2026-05-30-transaction-version-downlevel.md`.
+- **Feature registration.** `transaction.version` (range `0..=2`) registered in
+  the `crabka_metadata` feature registry; per-release default jumps `0 -> 2` at
+  metadata.version `4.0-IV2` (level 24), empty `dependencies()` (both pinned
+  empirically vs cp-kafka 4.0). A `TxnVersion` resolver (`Classic`/`Flexible`/
+  `Verified`) reads the finalized level per request.
+- **Byte-exact codec.** `crates/broker/src/txn/log_record.rs` encodes/decodes
+  Kafka `TransactionLogValue` v0 (non-flexible, TV_0) + v1 (flexible, TV_1/TV_2)
+  and `TransactionLogKey`, replacing the prior `serde-wincode` codec in
+  `TxnCoordinator::put`/`recover`. Verified byte-identical against a captured
+  real cp-kafka 4.0 record (48-byte sample) + round-trips + truncation/unknown-
+  version/trailing-byte rejection. Deterministic (sorted partitions) for replica
+  snapshot equality.
+- **Model alignment.** `TxnEntry` adopted Kafka's offset-partition model — offset
+  commits are now `__consumer_offsets` partitions in the txn partition set
+  (dropped the group-name `offset_commit_groups`), plus `TxnState`↔int8 status
+  mapping and `prev`/`next_producer_id` (KIP-890) fields.
+- **TV_2 behaviors (client-observable).** Producer-epoch bump on completion
+  (fences zombies without re-`InitProducerId`; the producer client adopts the
+  bumped identity from the EndTxn v5 response); epoch-exhaustion rolls to a
+  fresh `producer_id` at epoch 0 (records `prev_producer_id`); verify-only
+  `AddPartitionsToTxn` returns `TRANSACTION_ABORTABLE` (120) for a partition not
+  in the txn. All gated strictly on the finalized `transaction.version`.
+- **Tests.** Per-level integration (TV_0/TV_1/TV_2 full cycles + verify-only),
+  restart-durability (an `Ongoing` txn survives a broker restart, exercising the
+  `recover` decode-from-disk path for both v0 and v1), and byte-exact codec unit
+  tests. Full `cargo test --workspace` green (50 suites; the one `opa_authorizer`
+  blip in a run was an interrupted-by-kill artifact — passes in isolation; the
+  known `transactions.rs` parallel-load flake passes in isolation).
+  `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all
+  --check` clean.
+- **OUTSTANDING GATE — full Docker `jvm_acceptance` sweep NOT yet run.** Docker
+  was unresponsive/overloaded in the implementing session, so the 28-test live
+  JVM sweep did not run. **This is the remaining gate and must run in CI / an
+  unconstrained environment before the README KIP-584 row flips to ✅** (left at
+  ⚠️ for now). It must specifically verify a risk this work introduces: the
+  standalone self-bootstrap path now FINALIZES `metadata.version=25` +
+  `group.version=1` + `transaction.version=2` on every fresh broker (previously
+  features were UNKNOWN/absent), and the `jvm_acceptance` suite boots brokers via
+  that exact path while connecting OLD cp-kafka clients (6.1.1 / 3.1.2 / 7.5.0).
+  A validating client (cp-kafka 7.5.0 = Kafka 3.5) calls
+  `MetadataVersion.fromFeatureLevel(N)` and throws on a level its enum doesn't
+  know — the original "19 tests broke" failure mode. The sweep must confirm the
+  finalized-feature surface does not break those handshakes (or the suite/
+  self-bootstrap release level must be adjusted for old-client compatibility).
