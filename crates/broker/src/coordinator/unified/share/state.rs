@@ -126,7 +126,7 @@ impl ShareGroupState {
         if let Some(m) = self.members.get_mut(member_id) {
             m.member_epoch = self.group_epoch;
             if let Some(a) = self.target.per_member.get(member_id) {
-                m.assigned_partitions = a.clone();
+                m.assigned_partitions.clone_from(a);
             }
         }
     }
@@ -155,7 +155,7 @@ mod tests {
     #[test]
     fn evict_expired_removes_silent_members() {
         let mut g = ShareGroupState::new("g1");
-        let mut m = ShareMemberState::joining("m1", "c1", "h1", Default::default());
+        let mut m = ShareMemberState::joining("m1", "c1", "h1", HashSet::default());
         m.last_seen = Instant::now() - Duration::from_secs(120);
         g.add_or_update_member(m);
         let evicted = g.evict_expired(Instant::now(), Duration::from_secs(45));
