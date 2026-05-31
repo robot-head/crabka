@@ -26,6 +26,7 @@ pub const KEY_SHARE_MEMBER_METADATA: i16 = 10;
 pub const KEY_SHARE_TARGET_ASSIGNMENT_METADATA: i16 = 11;
 pub const KEY_SHARE_TARGET_ASSIGNMENT_MEMBER: i16 = 12;
 pub const KEY_SHARE_CURRENT_MEMBER_ASSIGNMENT: i16 = 13;
+pub const KEY_SHARE_GROUP_STATE_PARTITION_METADATA: i16 = 14;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShareGroupKey {
@@ -34,6 +35,7 @@ pub enum ShareGroupKey {
     TargetAssignmentMetadata { group_id: String },
     TargetAssignmentMember { group_id: String, member_id: String },
     CurrentMemberAssignment { group_id: String, member_id: String },
+    StatePartitionMetadata { group_id: String },
 }
 
 #[must_use]
@@ -72,6 +74,10 @@ pub fn encode_share_key(key: &ShareGroupKey) -> Bytes {
             put_string(&mut buf, group_id);
             put_string(&mut buf, member_id);
         }
+        ShareGroupKey::StatePartitionMetadata { group_id } => {
+            buf.put_i16(KEY_SHARE_GROUP_STATE_PARTITION_METADATA);
+            put_string(&mut buf, group_id);
+        }
     }
     buf.freeze()
 }
@@ -95,6 +101,9 @@ pub fn parse_share_key(version: i16, mut buf: &[u8]) -> Result<ShareGroupKey, Br
         KEY_SHARE_CURRENT_MEMBER_ASSIGNMENT => ShareGroupKey::CurrentMemberAssignment {
             group_id: get_string(&mut buf)?,
             member_id: get_string(&mut buf)?,
+        },
+        KEY_SHARE_GROUP_STATE_PARTITION_METADATA => ShareGroupKey::StatePartitionMetadata {
+            group_id: get_string(&mut buf)?,
         },
         _ => {
             return Err(BrokerError::Protocol(ProtocolError::InvalidValue(
@@ -236,6 +245,79 @@ impl ShareGroupCurrentMemberAssignmentValue {
             assigned_partitions,
         })
     }
+}
+
+/// KIP-932 `ShareGroupStatePartitionMetadata` (key v14): tracks which
+/// `(topic_id, partition)` share-states a group has initialized, plus a set
+/// of topic ids whose share-state is being deleted. Lets the group
+/// coordinator skip re-initializing partitions across restarts.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShareGroupStatePartitionMetadataValue {
+    pub initialized: Vec<(uuid::Uuid, Vec<i32>)>,
+    pub deleting: Vec<uuid::Uuid>,
+}
+
+impl ShareGroupStatePartitionMetadataValue {
+    #[must_use]
+    pub fn encode(&self) -> Bytes {
+        let mut buf = BytesMut::new();
+        buf.put_i16(0);
+        let n = i32::try_from(self.initialized.len()).expect("fits");
+        buf.put_i32(n);
+        for (topic_id, partitions) in &self.initialized {
+            buf.put_slice(topic_id.as_bytes());
+            let pn = i32::try_from(partitions.len()).expect("fits");
+            buf.put_i32(pn);
+            for p in partitions {
+                buf.put_i32(*p);
+            }
+        }
+        let dn = i32::try_from(self.deleting.len()).expect("fits");
+        buf.put_i32(dn);
+        for topic_id in &self.deleting {
+            buf.put_slice(topic_id.as_bytes());
+        }
+        buf.freeze()
+    }
+
+    pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
+        let _v = get_i16(&mut buf)?;
+        let n = get_i32(&mut buf)?;
+        let cap = usize::try_from(n.max(0)).expect("non-negative");
+        let mut initialized = Vec::with_capacity(cap);
+        for _ in 0..n.max(0) {
+            let topic_id = get_uuid(&mut buf)?;
+            let pn = get_i32(&mut buf)?;
+            let pcap = usize::try_from(pn.max(0)).expect("non-negative");
+            let mut partitions = Vec::with_capacity(pcap);
+            for _ in 0..pn.max(0) {
+                partitions.push(get_i32(&mut buf)?);
+            }
+            initialized.push((topic_id, partitions));
+        }
+        let dn = get_i32(&mut buf)?;
+        let dcap = usize::try_from(dn.max(0)).expect("non-negative");
+        let mut deleting = Vec::with_capacity(dcap);
+        for _ in 0..dn.max(0) {
+            deleting.push(get_uuid(&mut buf)?);
+        }
+        Ok(Self {
+            initialized,
+            deleting,
+        })
+    }
+}
+
+fn get_uuid(buf: &mut &[u8]) -> Result<uuid::Uuid, BrokerError> {
+    if buf.len() < 16 {
+        return Err(BrokerError::Protocol(ProtocolError::InvalidValue(
+            "topic_id not 16 bytes",
+        )));
+    }
+    let mut arr = [0u8; 16];
+    arr.copy_from_slice(&buf[..16]);
+    bytes::Buf::advance(buf, 16);
+    Ok(uuid::Uuid::from_bytes(arr))
 }
 
 fn encode_topic_partitions(buf: &mut BytesMut, items: &[(Uuid, Vec<i32>)]) {
@@ -384,6 +466,32 @@ mod tests {
             assigned_partitions: vec![(Uuid([3; 16]), vec![0, 1])],
         };
         assert!(ShareGroupCurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
+    }
+
+    #[test]
+    fn state_partition_metadata_round_trip() {
+        let key = ShareGroupKey::StatePartitionMetadata {
+            group_id: "g1".into(),
+        };
+        let b = encode_share_key(&key);
+        let (ver, body) = peek_version(&b);
+        assert!(ver == KEY_SHARE_GROUP_STATE_PARTITION_METADATA);
+        assert!(parse_share_key(ver, body).unwrap() == key);
+
+        let v = ShareGroupStatePartitionMetadataValue {
+            initialized: vec![
+                (uuid::Uuid::from_bytes([1; 16]), vec![0, 1, 2]),
+                (uuid::Uuid::from_bytes([2; 16]), vec![]),
+            ],
+            deleting: vec![uuid::Uuid::from_bytes([9; 16])],
+        };
+        assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
+    }
+
+    #[test]
+    fn state_partition_metadata_empty_round_trip() {
+        let v = ShareGroupStatePartitionMetadataValue::default();
+        assert!(ShareGroupStatePartitionMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]

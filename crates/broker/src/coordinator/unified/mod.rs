@@ -396,6 +396,23 @@ impl GroupCoordinator {
         cached.current_per_member.insert(member_id.into(), v);
     }
 
+    /// Replay a KIP-932 `ShareGroupStatePartitionMetadata` (key v14) record,
+    /// recording which `(topic_id, partition)` share-states the group has
+    /// initialized so the lifecycle hook can skip re-initialization after a
+    /// restart.
+    pub fn replay_share_state_partition_metadata(
+        &self,
+        group_id: &str,
+        v: share::persistence::ShareGroupStatePartitionMetadataValue,
+    ) {
+        {
+            let mut seed = self.share_seeds.entry(group_id.into()).or_default();
+            seed.state_partition_metadata = v.clone();
+        }
+        let mut cached = self.share_seeds_cache.entry(group_id.into()).or_default();
+        cached.state_partition_metadata = v;
+    }
+
     /// Apply a tombstone for a share-group key. Removes the corresponding
     /// entry from both `share_seeds` and `share_seeds_cache`.
     pub fn replay_share_tombstone(&self, key: &share::persistence::ShareGroupKey) {
@@ -405,7 +422,8 @@ impl GroupCoordinator {
             | K::MemberMetadata { group_id, .. }
             | K::TargetAssignmentMetadata { group_id }
             | K::TargetAssignmentMember { group_id, .. }
-            | K::CurrentMemberAssignment { group_id, .. } => group_id.as_str(),
+            | K::CurrentMemberAssignment { group_id, .. }
+            | K::StatePartitionMetadata { group_id } => group_id.as_str(),
         };
         let scrub = |seed: &mut ShareGroupSeed| match key {
             K::GroupMetadata { .. } => seed.group_epoch = 0,
@@ -418,6 +436,10 @@ impl GroupCoordinator {
             }
             K::CurrentMemberAssignment { member_id, .. } => {
                 seed.current_per_member.remove(member_id);
+            }
+            K::StatePartitionMetadata { .. } => {
+                seed.state_partition_metadata =
+                    share::persistence::ShareGroupStatePartitionMetadataValue::default();
             }
         };
         {
@@ -528,6 +550,11 @@ pub struct ShareGroupSeed {
         String,
         share::persistence::ShareGroupCurrentMemberAssignmentValue,
     >,
+    /// KIP-932 `ShareGroupStatePartitionMetadata` (key v14): which
+    /// `(topic_id, partition)` share-states this group has already
+    /// initialized, plus topic ids whose share-state is being deleted.
+    /// Lets the lifecycle hook skip re-initializing partitions on restart.
+    pub state_partition_metadata: share::persistence::ShareGroupStatePartitionMetadataValue,
 }
 
 #[cfg(test)]

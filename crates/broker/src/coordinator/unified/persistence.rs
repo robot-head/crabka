@@ -59,7 +59,7 @@ pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
         3 | 5 | 6 | 7 | 8 => Ok(Key::NextGen(
             crate::coordinator::unified::persistence_next_gen::parse_key(version, buf)?,
         )),
-        9..=13 => Ok(Key::Share(
+        9..=14 => Ok(Key::Share(
             crate::coordinator::unified::share::persistence::parse_share_key(version, buf)?,
         )),
         _ => Err(BrokerError::Protocol(

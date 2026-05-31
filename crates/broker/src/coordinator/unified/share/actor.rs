@@ -34,8 +34,9 @@ use super::assignor::ShareGroupAssignor;
 use super::config::ShareGroupConfig;
 use super::persistence::{
     ShareGroupCurrentMemberAssignmentValue, ShareGroupKey, ShareGroupMemberMetadataValue,
-    ShareGroupMetadataValue, ShareGroupTargetAssignmentMemberValue,
-    ShareGroupTargetAssignmentMetadataValue, encode_share_key,
+    ShareGroupMetadataValue, ShareGroupStatePartitionMetadataValue,
+    ShareGroupTargetAssignmentMemberValue, ShareGroupTargetAssignmentMetadataValue,
+    encode_share_key,
 };
 use super::state::{ShareGroupState, ShareMemberState};
 
@@ -734,6 +735,9 @@ fn snapshot_seed(state: &ShareGroupState) -> super::super::ShareGroupSeed {
         members,
         target_per_member,
         current_per_member,
+        // Populated by the KIP-932 lifecycle hook (Slice B Task 11); not yet
+        // tracked in the live `ShareGroupState`.
+        state_partition_metadata: ShareGroupStatePartitionMetadataValue::default(),
     }
 }
 

@@ -303,6 +303,13 @@ fn apply_share_record(
                 sp::ShareGroupCurrentMemberAssignmentValue::decode(value_bytes)?,
             );
         }
+        sp::ShareGroupKey::StatePartitionMetadata { group_id } => {
+            coord.mark_share(&group_id);
+            coord.replay_share_state_partition_metadata(
+                &group_id,
+                sp::ShareGroupStatePartitionMetadataValue::decode(value_bytes)?,
+            );
+        }
     }
     Ok(())
 }
