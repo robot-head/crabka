@@ -15,6 +15,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crabka_protocol::owned::common::share_group_heartbeat_response::topic_partitions::TopicPartitions;
+use crabka_protocol::owned::share_group_describe_response::{
+    DescribedGroup, Member as DescribeMember,
+};
 use crabka_protocol::owned::share_group_heartbeat_request::ShareGroupHeartbeatRequest;
 use crabka_protocol::owned::share_group_heartbeat_response::{
     Assignment as RespAssignment, ShareGroupHeartbeatResponse,
@@ -71,6 +74,56 @@ pub struct ShareDescribeMember {
     pub client_host: String,
     pub subscribed_topic_names: Vec<String>,
     pub assigned_partitions: HashMap<Uuid, Vec<i32>>,
+}
+
+impl ShareDescribeView {
+    /// Render this view into a `ShareGroupDescribe` `DescribedGroup` wire row.
+    /// `error_code`/`authorized_operations` keep their defaults — the handler
+    /// owns the ACL outcome.
+    #[must_use]
+    pub fn into_described_group(self) -> DescribedGroup {
+        use crabka_protocol::owned::common::share_group_describe_response::assignment::Assignment;
+        use crabka_protocol::owned::common::share_group_describe_response::topic_partitions::TopicPartitions;
+
+        let members = self
+            .members
+            .into_iter()
+            .map(|m| {
+                let topic_partitions = m
+                    .assigned_partitions
+                    .into_iter()
+                    .map(|(tid, parts)| TopicPartitions {
+                        topic_id: tid,
+                        partitions: parts,
+                        ..Default::default()
+                    })
+                    .collect();
+                DescribeMember {
+                    member_id: m.member_id,
+                    rack_id: m.rack_id,
+                    member_epoch: m.member_epoch,
+                    client_id: m.client_id,
+                    client_host: m.client_host,
+                    subscribed_topic_names: m.subscribed_topic_names,
+                    assignment: Assignment {
+                        topic_partitions,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }
+            })
+            .collect();
+        DescribedGroup {
+            group_id: self.group_id,
+            group_state: self.group_state,
+            group_epoch: self.group_epoch,
+            assignment_epoch: self.assignment_epoch,
+            assignor_name: self.assignor_name,
+            members,
+            error_code: codes::NONE,
+            ..Default::default()
+        }
+    }
 }
 
 #[derive(Debug)]

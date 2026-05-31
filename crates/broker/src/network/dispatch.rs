@@ -458,6 +458,10 @@ async fn serve_connection_stream<S>(
                 handle_list_groups_frame(&broker, &frame, &auth, &peer),
                 "ListGroups"
             ),
+            Some(77) => intercept!(
+                handle_share_group_describe_frame(&broker, &frame, &auth, &peer),
+                "ShareGroupDescribe"
+            ),
             Some(42) => intercept!(
                 handle_delete_groups_frame(&broker, &frame, &auth, &peer),
                 "DeleteGroups"
@@ -2266,6 +2270,44 @@ async fn handle_describe_groups_frame(
     ))
 }
 
+/// Decode + dispatch a `ShareGroupDescribe` (`api_key` 77) frame. Pulls the
+/// authenticated principal off the per-connection `auth` state and the peer
+/// `SocketAddr` from the accept-time capture so the handler can run the
+/// per-group `Describe` ACL gate.
+async fn handle_share_group_describe_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 77);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+
+    let resp_body = crate::handlers::share_group_describe::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
 /// Decode + dispatch a `ListGroups` (`api_key` 16) frame. Pulls the
 /// authenticated principal off the per-connection `auth` state and the
 /// peer `SocketAddr` from the accept-time capture so the handler can
@@ -2857,6 +2899,9 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         // KIP-714 client-metrics push pair; both are flexible from v0.
         71 => version >= owned::get_telemetry_subscriptions_request::FLEXIBLE_MIN,
         72 => version >= owned::push_telemetry_request::FLEXIBLE_MIN,
+        // KIP-932 share-group membership pair; both are flexible from v0.
+        76 => version >= owned::share_group_heartbeat_request::FLEXIBLE_MIN,
+        77 => version >= owned::share_group_describe_request::FLEXIBLE_MIN,
         // ListConfigResources (74, KIP-1142) is flexible from v0.
         74 => version >= owned::list_config_resources_request::FLEXIBLE_MIN,
         // DescribeTopicPartitions (75, KIP-966) is flexible from v0.

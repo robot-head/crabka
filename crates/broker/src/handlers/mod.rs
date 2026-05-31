@@ -122,6 +122,10 @@ pub(crate) mod produce;
 pub(crate) mod push_telemetry;
 pub(crate) mod remove_raft_voter;
 pub(crate) mod renew_delegation_token;
+// KIP-932 ShareGroupDescribe (api_key 77). Intercepted inline in
+// `network::dispatch` so the handler receives the per-connection principal +
+// peer `SocketAddr` for the per-group Describe ACL gate.
+pub(crate) mod share_group_describe;
 // KIP-932 share-group membership (api_key 76).
 pub(crate) mod share_group_heartbeat;
 pub(crate) mod sync_group;
