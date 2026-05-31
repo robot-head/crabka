@@ -38,7 +38,10 @@ pub(crate) fn supported_features() -> Vec<SupportedFeature> {
         .collect()
 }
 
-/// Look up a supported feature by name (for `UpdateFeatures` range checks).
+/// Look up a supported feature by name. Pairs with `supported_features` as the
+/// module's feature-surface API; the `UpdateFeatures` handler now resolves the
+/// registry feature directly, so the non-test lib target sees this as unused.
+#[allow(dead_code)]
 pub(crate) fn lookup(name: &str) -> Option<SupportedFeature> {
     crabka_metadata::feature(name).map(|f| {
         let (min_version, max_version) = f.supported_range();
