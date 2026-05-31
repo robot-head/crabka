@@ -37,7 +37,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::time::{Duration, Instant};
 use uuid::Uuid;
 
-use crabka_metadata::{MetadataImage, from_kraft_value, to_kraft_values};
+use crabka_metadata::{
+    MetadataImage, MetadataRecord, VotersRecord, from_kraft_value, to_kraft_values,
+};
 use crabka_protocol::records::{Record, RecordBatch};
 
 use crate::error::RaftError;
@@ -186,6 +188,17 @@ impl KraftController {
         let initial_leader = core.quorum_state().leader_id;
         let initial_was_leader = core.role().is_leader();
         let initial_epoch = core.quorum_state().leader_epoch;
+
+        // The controller voter set lives in the raft `QuorumState` (seeded from
+        // config under KIP-595 static voters, recovered from the quorum-state
+        // file on restart), NOT on the KIP-631-framed metadata log — `V1Voters`
+        // is a raft-control record with no KIP-631 counterpart. Mirror it into
+        // the published `MetadataImage` so image readers (e.g. the broker's
+        // voter-set views, auto-join) observe the live quorum membership.
+        let mut image = image;
+        image.apply(&MetadataRecord::V1Voters(VotersRecord {
+            voters: core.quorum_state().voters.clone(),
+        }));
 
         let (image_tx, image_rx) = watch::channel(Arc::new(image.clone()));
         let (leader_tx, leader_rx) = watch::channel(initial_leader);
