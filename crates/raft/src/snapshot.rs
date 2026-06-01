@@ -9,20 +9,16 @@
 use bytes::{BufMut, Bytes, BytesMut};
 
 use crabka_metadata::{MetadataImage, MetadataRecord, from_kraft_value, to_kraft_values};
-use crabka_protocol::records::header::Attributes;
+use crabka_protocol::Encode;
+use crabka_protocol::owned::snapshot_footer_record::SnapshotFooterRecord;
+use crabka_protocol::owned::snapshot_header_record::SnapshotHeaderRecord;
+use crabka_protocol::records::metadata::control::{
+    ControlRecordType, control_record_key, encode_control_batch,
+};
 use crabka_protocol::records::{Record, RecordBatch};
 use uuid::Uuid;
 
 use crate::error::RaftError;
-
-/// Control-record key type codes (KIP-630). The key of a control record
-/// is `i16 version` + `i16 type`.
-const CONTROL_TYPE_SNAPSHOT_HEADER: i16 = 3;
-const CONTROL_TYPE_SNAPSHOT_FOOTER: i16 = 4;
-
-/// Version stamped into the snapshot header/footer control records.
-const SNAPSHOT_HEADER_VERSION: i16 = 0;
-const SNAPSHOT_FOOTER_VERSION: i16 = 0;
 
 /// Identifies a snapshot by the log position it covers: `end_offset` is
 /// the offset of the last record contained in the snapshot, and `epoch`
@@ -47,14 +43,21 @@ impl SnapshotWriter {
         let records = image.to_records();
         let mut out = BytesMut::new();
 
-        // (1) Header control batch at base_offset 0.
-        let mut header_key = Vec::with_capacity(4);
-        header_key.put_i16(SNAPSHOT_HEADER_VERSION);
-        header_key.put_i16(CONTROL_TYPE_SNAPSHOT_HEADER);
-        let mut header_value = Vec::with_capacity(10);
-        header_value.put_i16(SNAPSHOT_HEADER_VERSION);
-        header_value.put_i64(last_contained_log_timestamp);
-        encode_control_batch(&mut out, 0, header_key, header_value)?;
+        // (1) SnapshotHeader control batch at base_offset 0 — the real KIP-630
+        // `SnapshotHeaderRecord` (flexible message), encoded via the protocol
+        // control-batch builder so the JVM `kafka-dump-log` decoder parses it.
+        let header = SnapshotHeaderRecord {
+            version: 0,
+            last_contained_log_timestamp,
+            ..Default::default()
+        };
+        let mut header_body = BytesMut::new();
+        header.encode(&mut header_body, 0)?;
+        out.put_slice(&encode_control_batch(
+            0,
+            control_record_key(ControlRecordType::SnapshotHeader),
+            header_body.freeze(),
+        ));
 
         // (2) Data batch at base_offset 1: one record per KIP-631 value blob.
         // Each `MetadataRecord` is translated against the very image being
@@ -87,45 +90,26 @@ impl SnapshotWriter {
             data_batch.encode(&mut out)?;
         }
 
-        // (3) Footer control batch.
+        // (3) SnapshotFooter control batch (real KIP-630 `SnapshotFooterRecord`).
         let footer_base_offset = if total_blobs == 0 {
             1
         } else {
             1 + i64::try_from(total_blobs).unwrap_or(i64::MAX)
         };
-        let mut footer_key = Vec::with_capacity(4);
-        footer_key.put_i16(SNAPSHOT_FOOTER_VERSION);
-        footer_key.put_i16(CONTROL_TYPE_SNAPSHOT_FOOTER);
-        let mut footer_value = Vec::with_capacity(2);
-        footer_value.put_i16(SNAPSHOT_FOOTER_VERSION);
-        encode_control_batch(&mut out, footer_base_offset, footer_key, footer_value)?;
+        let footer = SnapshotFooterRecord {
+            version: 0,
+            ..Default::default()
+        };
+        let mut footer_body = BytesMut::new();
+        footer.encode(&mut footer_body, 0)?;
+        out.put_slice(&encode_control_batch(
+            footer_base_offset,
+            control_record_key(ControlRecordType::SnapshotFooter),
+            footer_body.freeze(),
+        ));
 
         Ok(out.freeze())
     }
-}
-
-/// Encode a single-record control `RecordBatch` (the control-batch
-/// attribute bit set) carrying `key`/`value` into `out`.
-fn encode_control_batch(
-    out: &mut BytesMut,
-    base_offset: i64,
-    key: Vec<u8>,
-    value: Vec<u8>,
-) -> Result<(), RaftError> {
-    let batch = RecordBatch {
-        base_offset,
-        attributes: Attributes::default().with_control(true),
-        last_offset_delta: 0,
-        records: vec![Record {
-            offset_delta: 0,
-            key: Some(Bytes::from(key)),
-            value: Some(Bytes::from(value)),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-    batch.encode(out)?;
-    Ok(())
 }
 
 /// Reads a canonical `.checkpoint` byte stream back into the sequence of
@@ -223,6 +207,116 @@ mod tests {
         let records = SnapshotReader::read_records(&bytes).unwrap();
         assert!(records.is_empty());
         assert!(MetadataImage::from_records(cid, &records) == image);
+    }
+
+    /// Docker-gated: a Crabka engine-produced KIP-630 snapshot (built by
+    /// `SnapshotWriter` from a real `MetadataImage` through the KIP-631
+    /// translation boundary) is parsed cleanly by the JVM
+    /// `kafka-dump-log --cluster-metadata-decoder`, proving the on-checkpoint
+    /// bytes are genuine KIP-631 records (`RegisterBroker` / `Topic` /
+    /// `Partition` / `Config`), not Crabka-private wincode.
+    ///
+    /// ```text
+    /// cargo test -p crabka-raft --lib snapshot -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "requires Docker"]
+    fn jvm_dump_log_parses_engine_snapshot() {
+        use crabka_metadata::{BrokerConfigRecord, BrokerRegistrationRecord, TopicConfigRecord};
+        use std::io::Write as _;
+        use std::process::Command;
+
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        // RegisterBroker (apiKey 0).
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 1,
+                host: "broker-1".into(),
+                port: 9092,
+                rack: Some("rack-a".into()),
+                endpoints: vec![],
+            },
+        ));
+        // Config (apiKey 4), broker scope.
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("1048576".into()),
+        }));
+        // Topic (apiKey 2) + Partition (apiKey 3) ×2.
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 2,
+            replication_factor: 1,
+        }));
+        for p in 0..2 {
+            image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: "orders".into(),
+                partition: p,
+                leader: 1,
+                replicas: vec![1],
+                isr: vec![1],
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+            }));
+        }
+        // Config (apiKey 4), topic scope.
+        image.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "orders".into(),
+            overrides: [("retention.ms".to_string(), "604800000".to_string())].into(),
+        }));
+
+        let bytes = SnapshotWriter::serialize(&image, 1_700_000_000_000).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // kafka-dump-log infers the snapshot base offset from the file name.
+        let path = dir
+            .path()
+            .join("00000000000000000000-0000000000.checkpoint");
+        std::fs::File::create(&path)
+            .unwrap()
+            .write_all(&bytes)
+            .unwrap();
+
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "-v",
+                &format!("{}:/work", dir.path().display()),
+                "apache/kafka:4.0.0",
+                "/opt/kafka/bin/kafka-dump-log.sh",
+                "--cluster-metadata-decoder",
+                "--files",
+                "/work/00000000000000000000-0000000000.checkpoint",
+            ])
+            .output()
+            .expect("docker run kafka-dump-log");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        eprintln!("{text}");
+        assert!(out.status.success(), "kafka-dump-log failed: {text}");
+        // The JVM decoder names each record by its KIP-631 type. Their presence
+        // (and a clean exit) proves the translated bytes decode as real records.
+        // The JVM decoder prints each record's KIP-631 type in SCREAMING_SNAKE.
+        for needle in [
+            "REGISTER_BROKER_RECORD",
+            "TOPIC_RECORD",
+            "PARTITION_RECORD",
+            "CONFIG_RECORD",
+        ] {
+            assert!(text.contains(needle), "missing {needle} in dump: {text}");
+        }
+        // No record may fail the decoder's CRC / schema check.
+        assert!(
+            !text.contains("isvalid: false") && !text.to_lowercase().contains("could not"),
+            "dump-log reported an invalid record: {text}"
+        );
     }
 
     #[test]
