@@ -92,7 +92,7 @@ where
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
             res = read_one_request(&mut stream) => {
-                let (api_key_n, _api_version, correlation_id, body) = match res {
+                let (api_key_n, api_version, correlation_id, body) = match res {
                     Ok(v) => v,
                     Err(e) => {
                         // Treat peer EOF as a clean shutdown of this conn.
@@ -108,7 +108,12 @@ where
                 // no tagged-fields byte) — the documented Kafka asymmetry. We
                 // serialize it separately rather than poisoning the generic codec.
                 if api_key_n == API_KEY_API_VERSIONS {
-                    let resp = api_versions_response_body();
+                    // ApiVersionsResponse always uses a v0 ResponseHeader (no
+                    // tagged-fields byte), but the BODY shape depends on the
+                    // request version: v0..=2 are non-flexible (i32 array), v3+
+                    // are flexible (compact array). Crabka's own client asks at
+                    // v0; the JVM controller asks at v4.
+                    let resp = api_versions_response_body(api_version);
                     write_response_no_tagged_fields(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
@@ -224,14 +229,76 @@ where
     Ok(())
 }
 
-/// Minimal `ApiVersionsResponse` v0: `error_code = 0`, empty `api_keys` array.
-/// The connection handshake doesn't consult the table (the engine always issues
-/// `raw_request` at the captured KIP-595 versions), so an empty list is harmless.
-fn api_versions_response_body() -> Bytes {
-    let mut out = BytesMut::with_capacity(6);
+/// `ApiVersionsResponse` advertising the controller-listener APIs.
+///
+/// SPIKE TWEAK (KIP-595 Slice 5 — evaluate for promotion): a real
+/// `apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
+/// flexible (v2) request header, then consults the returned table to decide
+/// which version of `Vote`/`Fetch`/etc. to send. An EMPTY `api_keys` list made
+/// the JVM treat every raft RPC as `UNSUPPORTED_VERSION` and refuse to send
+/// `Vote` on the wire (captured in the slice-5 findings). Advertising the
+/// KIP-595 APIs at the versions Crabka's engine speaks lets the JVM proceed to
+/// real `Vote`/`Fetch`.
+///
+/// Body is the flexible (v3+) `ApiVersionsResponse` shape: `error_code(i16)`,
+/// `api_keys` compact-array of `{api_key(i16), min(i16), max(i16), tagged(0)}`,
+/// `throttle_time_ms(i32)`, response-level `tagged(0)`. Per the documented Kafka
+/// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
+/// so this is written via [`write_response_no_tagged_fields`].
+fn api_versions_response_body(req_version: i16) -> Bytes {
+    // (api_key, min_version, max_version) — versions Crabka's transport codec
+    // emits (Vote v2, Begin/End QuorumEpoch v1, Fetch v17, FetchSnapshot v1) plus
+    // ApiVersions itself.
+    const KEYS: &[(i16, i16, i16)] = &[
+        (1, 0, 17), // Fetch
+        (18, 0, 4), // ApiVersions
+        (52, 0, 2), // Vote
+        (53, 0, 1), // BeginQuorumEpoch
+        (54, 0, 1), // EndQuorumEpoch
+        (59, 0, 1), // FetchSnapshot
+    ];
+    let mut out = BytesMut::new();
     out.put_i16(0); // error_code
-    out.put_i32(0); // api_keys: v0 non-flexible empty array
+    if req_version >= 3 {
+        // Flexible (v3+): compact array (len = N+1), per-entry + response-level
+        // tagged-field varints, trailing throttle_time_ms.
+        put_uvarint(&mut out, u64::try_from(KEYS.len() + 1).unwrap());
+        for &(api_key, min_v, max_v) in KEYS {
+            out.put_i16(api_key);
+            out.put_i16(min_v);
+            out.put_i16(max_v);
+            put_uvarint(&mut out, 0); // per-entry tagged fields
+        }
+        out.put_i32(0); // throttle_time_ms
+        put_uvarint(&mut out, 0); // response-level tagged fields
+    } else {
+        // Non-flexible (v0..=2): i32 array length, no tagged-field bytes.
+        // v1+ also carries throttle_time_ms after the array; Crabka's own client
+        // asks at v0 and ignores both the array and throttle, so emit the v0
+        // shape (array only) which is a strict prefix-correct v0 response.
+        out.put_i32(i32::try_from(KEYS.len()).unwrap());
+        for &(api_key, min_v, max_v) in KEYS {
+            out.put_i16(api_key);
+            out.put_i16(min_v);
+            out.put_i16(max_v);
+        }
+    }
     out.freeze()
+}
+
+/// Encode an unsigned varint (Kafka COMPACT length / tagged-field prefix).
+fn put_uvarint(out: &mut BytesMut, mut v: u64) {
+    loop {
+        let mut byte = (v & 0x7f) as u8;
+        v >>= 7;
+        if v != 0 {
+            byte |= 0x80;
+        }
+        out.put_u8(byte);
+        if v == 0 {
+            break;
+        }
+    }
 }
 
 /// Route an inbound RPC body to the engine and produce the response body.
