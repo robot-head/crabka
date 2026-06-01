@@ -11,6 +11,7 @@ pub mod core;
 pub mod event;
 pub mod log;
 pub mod role;
+pub mod snapshot_fetch;
 pub mod transport;
 pub mod types;
 
