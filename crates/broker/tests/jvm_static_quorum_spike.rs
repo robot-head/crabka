@@ -1,13 +1,14 @@
-//! THROWAWAY SPIKE (KIP-595 Slice 5) — does one `apache/kafka:4.0.0` controller
-//! plus two Crabka controllers form a single STATIC (`controller.quorum.voters`,
-//! kraft.version=0) metadata quorum that elects a cross-impl leader AND
-//! replicates committed metadata?
-//!
-//! Findings live in
-//! `docs/superpowers/specs/2026-05-31-kip595-slice5-static-mixed-quorum-findings.md`.
-//! This test is `#[ignore]`d (needs Docker + a published controller port) and is
-//! a findings instrument, not a CI gate — it prints what the JVM did and asserts
-//! the success criteria so a future fix can flip it green.
+//! KIP-595 Slice 6 ACCEPTANCE TEST (Docker-gated, `#[ignore]`) — one
+//! `apache/kafka:4.0.0` controller plus two Crabka controllers form a single
+//! STATIC (`controller.quorum.voters`, kraft.version=0) metadata quorum that
+//! elects a cross-impl leader AND replicates committed metadata: the JVM joins
+//! as a follower of the Crabka leader, never fatal-faults, catches its
+//! high-watermark up to the leader's, and builds a `FeaturesImage` carrying
+//! `metadata.version=25` from the Crabka-committed log. This is the program's
+//! end goal for the leader→follower direction (the static-quorum spike of
+//! Slice 5 grew into this acceptance test; KIP-853 dynamic voters proved
+//! unnecessary). Not a default-CI gate (needs Docker + a published controller
+//! port); run it explicitly.
 //!
 //! Run:
 //! ```text
@@ -256,8 +257,15 @@ async fn static_mixed_jvm_crabka_quorum() {
         || log_text.contains("Completed transition to LeaderState");
     let jvm_unsupported_version =
         log_text.contains("does not support VOTE") || log_text.contains("UNSUPPORTED_VERSION");
+    let jvm_fatal_fault = log_text.contains("Encountered fatal fault");
+    // The done bar: the JVM follower replicated the Crabka leader's committed
+    // log and built its FeaturesImage from it — proving cross-impl metadata
+    // replication, not just election.
+    let jvm_replicated = log_text.contains("finished catching up to the current high water mark")
+        && log_text.contains("metadata.version=25");
     eprintln!(
-        "JVM cross-impl join: joined={jvm_joined} unsupported_version_seen={jvm_unsupported_version}"
+        "JVM cross-impl: joined={jvm_joined} unsupported={jvm_unsupported_version} \
+         fatal_fault={jvm_fatal_fault} replicated={jvm_replicated}"
     );
 
     docker_rm(CONTAINER);
@@ -271,17 +279,21 @@ async fn static_mixed_jvm_crabka_quorum() {
          (n1={last_l1:?} n2={last_l2:?})"
     );
 
-    // The actual spike question: did the JVM join the quorum cross-impl?
-    // In the current codebase this is EXPECTED to FAIL: Crabka's controller
-    // listener answers ApiVersions with an empty api_keys list, so the JVM
-    // refuses to send VOTE and logs UNSUPPORTED_VERSION (see findings doc).
-    // The assertion encodes the success bar so a future ApiVersions fix flips
-    // this green.
+    // The acceptance bar (Slice 6): the JVM controller joins the Crabka-led
+    // static quorum as a follower, never fatal-faults, and replicates the
+    // leader's committed metadata (HWM catch-up + a FeaturesImage carrying
+    // metadata.version=25).
     assert!(
         jvm_joined && !jvm_unsupported_version,
-        "JVM (id 3) did not join the Crabka quorum cross-impl: joined={jvm_joined}, \
-         unsupported_version_seen={jvm_unsupported_version}. The blocker is the \
-         controller-listener ApiVersions handshake (empty api_keys => JVM treats \
-         VOTE/FETCH as unsupported). See the slice-5 findings doc."
+        "JVM did not join cross-impl: joined={jvm_joined}, unsupported={jvm_unsupported_version}"
+    );
+    assert!(
+        !jvm_fatal_fault,
+        "JVM raft thread fatal-faulted (a wire/record inconsistency); see logs"
+    );
+    assert!(
+        jvm_replicated,
+        "JVM did not replicate the Crabka leader's committed metadata (no HWM catch-up / \
+         metadata.version not loaded); see JVM logs"
     );
 }

@@ -1327,9 +1327,7 @@ impl Broker {
             //     Missing-file is treated as empty (handled by the loader),
             //     so the legacy zero-record path is a no-op and existing
             //     deployments / tests are byte-identical.
-            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
-                && !bootstrap_records.is_empty()
-            {
+            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
                 // KIP-853 raft-control records (`V1Voters` / `V1KRaftVersion`)
                 // have no KIP-631 metadata-log counterpart and are never carried
                 // on the KIP-631-framed metadata log in this slice — the engine
@@ -1343,6 +1341,41 @@ impl Broker {
                             | crabka_metadata::MetadataRecord::V1KRaftVersion(_)
                     )
                 });
+                // Seed the cluster-wide finalized features when bootstrapping a
+                // FRESH cluster. A real KRaft log always carries `metadata.version`
+                // (plus `group.version` / `transaction.version`): a JVM follower
+                // refuses to build its `FeaturesImage` without `metadata.version`,
+                // and these belong in the committed log for any KRaft-faithful
+                // cluster. Gated on the committed image so a second bootstrapping
+                // voter (or a re-bootstrap) does not double-write. Prepended so
+                // `metadata.version` is known before any later record applies.
+                if controller
+                    .current_image()
+                    .finalized_metadata_version()
+                    .is_none()
+                {
+                    let features = [
+                        (
+                            crabka_metadata::metadata_version::METADATA_VERSION_FEATURE,
+                            crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+                        ),
+                        ("group.version", 1),
+                        ("transaction.version", 2),
+                    ];
+                    let mut seeded: Vec<crabka_metadata::MetadataRecord> = features
+                        .iter()
+                        .map(|(name, level)| {
+                            crabka_metadata::MetadataRecord::V1FeatureLevel(
+                                crabka_metadata::FeatureLevelRecord {
+                                    name: (*name).to_string(),
+                                    level: *level,
+                                },
+                            )
+                        })
+                        .collect();
+                    seeded.append(&mut bootstrap_records);
+                    bootstrap_records = seeded;
+                }
                 if !bootstrap_records.is_empty() {
                     tracing::info!(
                         count = bootstrap_records.len(),
