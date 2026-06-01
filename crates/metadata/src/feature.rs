@@ -138,6 +138,30 @@ impl Feature for TransactionVersionFeature {
     // dependencies + min_required_floor: inherit the empty/supported-min defaults.
 }
 
+/// `share.version` (KIP-932). Plain integer feature gating share-group
+/// membership. Default stays at the supported min (0, disabled) until the
+/// bootstrap metadata.version reaches the KIP-932 GA level.
+pub struct ShareVersionFeature;
+
+impl Feature for ShareVersionFeature {
+    fn name(&self) -> &'static str {
+        crate::metadata_version::SHARE_VERSION_FEATURE
+    }
+    fn supported_range(&self) -> (i16, i16) {
+        (
+            crate::metadata_version::SHARE_VERSION_MIN,
+            crate::metadata_version::SHARE_VERSION_MAX,
+        )
+    }
+    fn default_level(&self, _bootstrap_mv: i16) -> i16 {
+        // Share groups are opt-in (KIP-932 early access): no released
+        // metadata.version enables share.version by default, so the bootstrap
+        // default stays at the supported min (0, disabled).
+        crate::metadata_version::SHARE_VERSION_MIN
+    }
+    // dependencies + min_required_floor: inherit the empty/supported-min defaults.
+}
+
 /// All features this broker supports finalizing. Single source of truth.
 #[must_use]
 pub fn feature_registry() -> &'static [&'static dyn Feature] {
@@ -145,6 +169,7 @@ pub fn feature_registry() -> &'static [&'static dyn Feature] {
         &MetadataVersionFeature,
         &GroupVersionFeature,
         &TransactionVersionFeature,
+        &ShareVersionFeature,
     ];
     REGISTRY
 }

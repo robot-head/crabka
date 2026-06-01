@@ -60,12 +60,19 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
     }
 
     // Emit common structs into separate file bodies.
+    //
+    // `commonStructs` are message-local: each is emitted under a per-message
+    // nested module `common/<message_snake>/<struct_snake>`. The `commons` key
+    // is the relative path stem `<message_snake>/<struct_snake>`; the caller
+    // turns that into the on-disk body path and the wrapper module nesting.
+    let message_snake = name_conv::module_name(&spec.name);
     let mut commons: Vec<(String, String)> = Vec::new();
     for cs in &spec.common_structs {
         let cs_flex_min = flex_min(spec); // common structs inherit message flex threshold
         // Build a modified res_map for the common-struct context:
-        // Common-struct references use sibling paths `super::<snake>::TypeName`
-        // (since the file lands in `src/{flavor}/common/<snake>.rs`).
+        // Common-struct references use sibling paths `super::<struct_snake>::TypeName`
+        // (the body lands in `src/{flavor}/common/<message_snake>/<struct_snake>.rs`,
+        // and sibling common structs of the same message share that parent module).
         let common_res_map: HashMap<String, Resolution> = res_map
             .iter()
             .map(|(k, v)| {
@@ -93,7 +100,8 @@ pub fn emit(spec: &MessageSpec, schemas_version: &str) -> Result<EmittedMessage,
             schemas_version,
             lenient_records,
         );
-        commons.push((cs.name.clone(), body));
+        let cs_snake = name_conv::module_name(&cs.name);
+        commons.push((format!("{message_snake}/{cs_snake}"), body));
     }
 
     Ok(EmittedMessage { primary, commons })

@@ -21,30 +21,19 @@ fn is_flexible(version: i16) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AddPartitionsToTxnRequest<'a> {
-    pub transactions: Vec<AddPartitionsToTxnTransaction<'a>>,
-    pub v3_and_below_transactional_id: &'a str,
-    pub v3_and_below_producer_id: i64,
-    pub v3_and_below_producer_epoch: i16,
-    pub v3_and_below_topics:
-        Vec<super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<'a>>,
-    pub unknown_tagged_fields: UnknownTaggedFields,
-}
+pub struct AddPartitionsToTxnRequest < 'a > { pub transactions : Vec < AddPartitionsToTxnTransaction <'a >> , pub v3_and_below_transactional_id : &'a str , pub v3_and_below_producer_id : i64 , pub v3_and_below_producer_epoch : i16 , pub v3_and_below_topics : Vec < super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic <'a >> , pub unknown_tagged_fields : UnknownTaggedFields , }
 impl AddPartitionsToTxnRequest<'_> {
     pub fn to_owned(
         &self,
     ) -> crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest {
         crate::owned::add_partitions_to_txn_request::AddPartitionsToTxnRequest {
-            transactions: (self.transactions)
-                .iter()
-                .map(AddPartitionsToTxnTransaction::to_owned)
-                .collect(),
+            transactions: (self.transactions).iter().map(AddPartitionsToTxnTransaction::to_owned).collect(),
             v3_and_below_transactional_id: (self.v3_and_below_transactional_id).to_string(),
             v3_and_below_producer_id: (self.v3_and_below_producer_id),
             v3_and_below_producer_epoch: (self.v3_and_below_producer_epoch),
             v3_and_below_topics: (self.v3_and_below_topics)
                 .iter()
-                .map(super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned)
+                .map(super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -183,7 +172,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnRequest<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: decode_borrow (buf , version) ?) ;
+                    v . push (super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -212,24 +201,13 @@ impl AddPartitionsToTxnRequest<'_> {
             m.v3_and_below_producer_epoch = 1i16;
         }
         if (0..=3).contains(&version) {
-            m.v3_and_below_topics = vec![
-                super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(
-                    version,
-                ),
-            ];
+            m . v3_and_below_topics = vec ! [super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: populated (version)] ;
         }
         m
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AddPartitionsToTxnTransaction<'a> {
-    pub transactional_id: &'a str,
-    pub producer_id: i64,
-    pub producer_epoch: i16,
-    pub verify_only: bool,
-    pub topics: Vec<super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic<'a>>,
-    pub unknown_tagged_fields: UnknownTaggedFields,
-}
+pub struct AddPartitionsToTxnTransaction < 'a > { pub transactional_id : &'a str , pub producer_id : i64 , pub producer_epoch : i16 , pub verify_only : bool , pub topics : Vec < super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic <'a >> , pub unknown_tagged_fields : UnknownTaggedFields , }
 impl AddPartitionsToTxnTransaction<'_> {
     pub fn to_owned(
         &self,
@@ -239,10 +217,7 @@ impl AddPartitionsToTxnTransaction<'_> {
             producer_id: (self.producer_id),
             producer_epoch: (self.producer_epoch),
             verify_only: (self.verify_only),
-            topics: (self.topics)
-                .iter()
-                .map(super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned)
-                .collect(),
+            topics: (self.topics).iter().map(super::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -339,7 +314,7 @@ impl<'de> DecodeBorrow<'de> for AddPartitionsToTxnTransaction<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: decode_borrow (buf , version) ?) ;
+                    v . push (super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -368,11 +343,7 @@ impl AddPartitionsToTxnTransaction<'_> {
             m.verify_only = true;
         }
         if version >= 4 {
-            m.topics = vec![
-                super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(
-                    version,
-                ),
-            ];
+            m . topics = vec ! [super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: populated (version)] ;
         }
         m
     }

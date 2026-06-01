@@ -31,10 +31,13 @@ pub struct StreamsGroupHeartbeatResponse {
     pub heartbeat_interval_ms: i32,
     pub acceptable_recovery_lag: i32,
     pub task_offset_interval_ms: i32,
-    pub status: Option<Vec<super::common::status::Status>>,
-    pub active_tasks: Option<Vec<super::common::task_ids::TaskIds>>,
-    pub standby_tasks: Option<Vec<super::common::task_ids::TaskIds>>,
-    pub warmup_tasks: Option<Vec<super::common::task_ids::TaskIds>>,
+    pub status: Option<Vec<super::common::streams_group_heartbeat_response::status::Status>>,
+    pub active_tasks:
+        Option<Vec<super::common::streams_group_heartbeat_response::task_ids::TaskIds>>,
+    pub standby_tasks:
+        Option<Vec<super::common::streams_group_heartbeat_response::task_ids::TaskIds>>,
+    pub warmup_tasks:
+        Option<Vec<super::common::streams_group_heartbeat_response::task_ids::TaskIds>>,
     pub endpoint_information_epoch: i32,
     pub partitions_by_user_endpoint: Option<Vec<EndpointToPartitions>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
@@ -299,7 +302,7 @@ impl Decode<'_> for StreamsGroupHeartbeatResponse {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::status::Status::decode(buf, version)?);
+                            v . push (super :: common :: streams_group_heartbeat_response :: status :: Status :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -314,7 +317,7 @@ impl Decode<'_> for StreamsGroupHeartbeatResponse {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_ids::TaskIds::decode(buf, version)?);
+                            v . push (super :: common :: streams_group_heartbeat_response :: task_ids :: TaskIds :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -329,7 +332,7 @@ impl Decode<'_> for StreamsGroupHeartbeatResponse {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_ids::TaskIds::decode(buf, version)?);
+                            v . push (super :: common :: streams_group_heartbeat_response :: task_ids :: TaskIds :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -344,7 +347,7 @@ impl Decode<'_> for StreamsGroupHeartbeatResponse {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_ids::TaskIds::decode(buf, version)?);
+                            v . push (super :: common :: streams_group_heartbeat_response :: task_ids :: TaskIds :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -405,16 +408,30 @@ impl StreamsGroupHeartbeatResponse {
             m.task_offset_interval_ms = 1i32;
         }
         if version >= 0 {
-            m.status = Some(vec![super::common::status::Status::populated(version)]);
+            m.status = Some(vec![
+                super::common::streams_group_heartbeat_response::status::Status::populated(version),
+            ]);
         }
         if version >= 0 {
-            m.active_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+            m.active_tasks = Some(vec![
+                super::common::streams_group_heartbeat_response::task_ids::TaskIds::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.standby_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+            m.standby_tasks = Some(vec![
+                super::common::streams_group_heartbeat_response::task_ids::TaskIds::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.warmup_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+            m.warmup_tasks = Some(vec![
+                super::common::streams_group_heartbeat_response::task_ids::TaskIds::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
             m.endpoint_information_epoch = 1i32;
@@ -427,9 +444,11 @@ impl StreamsGroupHeartbeatResponse {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndpointToPartitions {
-    pub user_endpoint: super::common::endpoint::Endpoint,
-    pub active_partitions: Vec<super::common::topic_partition::TopicPartition>,
-    pub standby_partitions: Vec<super::common::topic_partition::TopicPartition>,
+    pub user_endpoint: super::common::streams_group_heartbeat_response::endpoint::Endpoint,
+    pub active_partitions:
+        Vec<super::common::streams_group_heartbeat_response::topic_partition::TopicPartition>,
+    pub standby_partitions:
+        Vec<super::common::streams_group_heartbeat_response::topic_partition::TopicPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Encode for EndpointToPartitions {
@@ -504,16 +523,17 @@ impl Decode<'_> for EndpointToPartitions {
         let flex = version >= 0;
         let mut out = Self::default();
         if version >= 0 {
-            out.user_endpoint = super::common::endpoint::Endpoint::decode(buf, version)?;
+            out.user_endpoint =
+                super::common::streams_group_heartbeat_response::endpoint::Endpoint::decode(
+                    buf, version,
+                )?;
         }
         if version >= 0 {
             out.active_partitions = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_partition::TopicPartition::decode(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -523,9 +543,7 @@ impl Decode<'_> for EndpointToPartitions {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_partition::TopicPartition::decode(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -542,17 +560,16 @@ impl EndpointToPartitions {
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
         if version >= 0 {
-            m.user_endpoint = super::common::endpoint::Endpoint::populated(version);
+            m.user_endpoint =
+                super::common::streams_group_heartbeat_response::endpoint::Endpoint::populated(
+                    version,
+                );
         }
         if version >= 0 {
-            m.active_partitions = vec![super::common::topic_partition::TopicPartition::populated(
-                version,
-            )];
+            m . active_partitions = vec ! [super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: populated (version)] ;
         }
         if version >= 0 {
-            m.standby_partitions = vec![super::common::topic_partition::TopicPartition::populated(
-                version,
-            )];
+            m . standby_partitions = vec ! [super :: common :: streams_group_heartbeat_response :: topic_partition :: TopicPartition :: populated (version)] ;
         }
         m
     }

@@ -929,7 +929,7 @@ fn build_assignment_resp(
         topic_partitions: target_partitions
             .iter()
             .map(
-                |(tid, parts)| crabka_protocol::owned::common::topic_partitions::TopicPartitions {
+                |(tid, parts)| crabka_protocol::owned::common::consumer_group_heartbeat_response::topic_partitions::TopicPartitions {
                     topic_id: *tid,
                     partitions: parts.clone(),
                     ..Default::default()
@@ -1276,6 +1276,7 @@ mod tests {
         let log = Arc::new(InMemoryOffsetsLog::default());
         let coord = Arc::new(GroupCoordinator::new(
             NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             empty_metadata(),
             log.clone(),
         ));
@@ -1688,7 +1689,12 @@ mod tests {
             .unwrap();
 
         let log = Arc::new(InMemoryOffsetsLog::default());
-        let coord = Arc::new(GroupCoordinator::new(config, empty_metadata(), log));
+        let coord = Arc::new(GroupCoordinator::new(
+            config,
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            empty_metadata(),
+            log,
+        ));
         let handle = coord.get_or_create_consumer("g").expect("consumer actor");
 
         let (tx, rx) = tokio::sync::oneshot::channel();

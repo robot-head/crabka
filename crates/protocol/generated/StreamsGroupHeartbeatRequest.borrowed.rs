@@ -34,14 +34,21 @@ pub struct StreamsGroupHeartbeatRequest<'a> {
     pub rack_id: Option<&'a str>,
     pub rebalance_timeout_ms: i32,
     pub topology: Option<Topology<'a>>,
-    pub active_tasks: Option<Vec<super::common::task_ids::TaskIds<'a>>>,
-    pub standby_tasks: Option<Vec<super::common::task_ids::TaskIds<'a>>>,
-    pub warmup_tasks: Option<Vec<super::common::task_ids::TaskIds<'a>>>,
+    pub active_tasks:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_ids::TaskIds<'a>>>,
+    pub standby_tasks:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_ids::TaskIds<'a>>>,
+    pub warmup_tasks:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_ids::TaskIds<'a>>>,
     pub process_id: Option<&'a str>,
-    pub user_endpoint: Option<super::common::endpoint::Endpoint<'a>>,
-    pub client_tags: Option<Vec<super::common::key_value::KeyValue<'a>>>,
-    pub task_offsets: Option<Vec<super::common::task_offset::TaskOffset<'a>>>,
-    pub task_end_offsets: Option<Vec<super::common::task_offset::TaskOffset<'a>>>,
+    pub user_endpoint:
+        Option<super::common::streams_group_heartbeat_request::endpoint::Endpoint<'a>>,
+    pub client_tags:
+        Option<Vec<super::common::streams_group_heartbeat_request::key_value::KeyValue<'a>>>,
+    pub task_offsets:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_offset::TaskOffset<'a>>>,
+    pub task_end_offsets:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_offset::TaskOffset<'a>>>,
     pub shutdown_application: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
@@ -82,40 +89,26 @@ impl StreamsGroupHeartbeatRequest<'_> {
             rack_id: (self.rack_id).map(std::string::ToString::to_string),
             rebalance_timeout_ms: (self.rebalance_timeout_ms),
             topology: (self.topology).as_ref().map(Topology::to_owned),
-            active_tasks: (self.active_tasks).as_ref().map(|v| {
-                v.iter()
-                    .map(super::common::task_ids::TaskIds::to_owned)
-                    .collect()
-            }),
-            standby_tasks: (self.standby_tasks).as_ref().map(|v| {
-                v.iter()
-                    .map(super::common::task_ids::TaskIds::to_owned)
-                    .collect()
-            }),
-            warmup_tasks: (self.warmup_tasks).as_ref().map(|v| {
-                v.iter()
-                    .map(super::common::task_ids::TaskIds::to_owned)
-                    .collect()
-            }),
-            process_id: (self.process_id).map(std::string::ToString::to_string),
-            user_endpoint: (self.user_endpoint)
+            active_tasks: (self.active_tasks)
                 .as_ref()
-                .map(super::common::endpoint::Endpoint::to_owned),
-            client_tags: (self.client_tags).as_ref().map(|v| {
-                v.iter()
-                    .map(super::common::key_value::KeyValue::to_owned)
-                    .collect()
-            }),
-            task_offsets: (self.task_offsets).as_ref().map(|v| {
-                v.iter()
-                    .map(super::common::task_offset::TaskOffset::to_owned)
-                    .collect()
-            }),
-            task_end_offsets: (self.task_end_offsets).as_ref().map(|v| {
-                v.iter()
-                    .map(super::common::task_offset::TaskOffset::to_owned)
-                    .collect()
-            }),
+                .map(|v| v.iter().map(super::common::streams_group_heartbeat_request::task_ids::TaskIds::to_owned).collect()),
+            standby_tasks: (self.standby_tasks)
+                .as_ref()
+                .map(|v| v.iter().map(super::common::streams_group_heartbeat_request::task_ids::TaskIds::to_owned).collect()),
+            warmup_tasks: (self.warmup_tasks)
+                .as_ref()
+                .map(|v| v.iter().map(super::common::streams_group_heartbeat_request::task_ids::TaskIds::to_owned).collect()),
+            process_id: (self.process_id).map(std::string::ToString::to_string),
+            user_endpoint: (self.user_endpoint).as_ref().map(super::common::streams_group_heartbeat_request::endpoint::Endpoint::to_owned),
+            client_tags: (self.client_tags)
+                .as_ref()
+                .map(|v| v.iter().map(super::common::streams_group_heartbeat_request::key_value::KeyValue::to_owned).collect()),
+            task_offsets: (self.task_offsets)
+                .as_ref()
+                .map(|v| v.iter().map(super::common::streams_group_heartbeat_request::task_offset::TaskOffset::to_owned).collect()),
+            task_end_offsets: (self.task_end_offsets)
+                .as_ref()
+                .map(|v| v.iter().map(super::common::streams_group_heartbeat_request::task_offset::TaskOffset::to_owned).collect()),
             shutdown_application: (self.shutdown_application),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -471,9 +464,7 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_ids::TaskIds::decode_borrow(
-                                buf, version,
-                            )?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode_borrow (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -488,9 +479,7 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_ids::TaskIds::decode_borrow(
-                                buf, version,
-                            )?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode_borrow (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -505,9 +494,7 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_ids::TaskIds::decode_borrow(
-                                buf, version,
-                            )?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode_borrow (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -525,9 +512,7 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
             out.user_endpoint = if get_i8(buf)? < 0 {
                 None
             } else {
-                Some(super::common::endpoint::Endpoint::decode_borrow(
-                    buf, version,
-                )?)
+                Some (super :: common :: streams_group_heartbeat_request :: endpoint :: Endpoint :: decode_borrow (buf , version) ?)
             };
         }
         if version >= 0 {
@@ -538,9 +523,7 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::key_value::KeyValue::decode_borrow(
-                                buf, version,
-                            )?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: key_value :: KeyValue :: decode_borrow (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -555,9 +538,7 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_offset::TaskOffset::decode_borrow(
-                                buf, version,
-                            )?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_offset :: TaskOffset :: decode_borrow (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -572,9 +553,7 @@ impl<'de> DecodeBorrow<'de> for StreamsGroupHeartbeatRequest<'de> {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_offset::TaskOffset::decode_borrow(
-                                buf, version,
-                            )?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_offset :: TaskOffset :: decode_borrow (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -620,32 +599,56 @@ impl StreamsGroupHeartbeatRequest<'_> {
             m.topology = Some(Topology::populated(version));
         }
         if version >= 0 {
-            m.active_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+            m.active_tasks = Some(vec![
+                super::common::streams_group_heartbeat_request::task_ids::TaskIds::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.standby_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+            m.standby_tasks = Some(vec![
+                super::common::streams_group_heartbeat_request::task_ids::TaskIds::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.warmup_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+            m.warmup_tasks = Some(vec![
+                super::common::streams_group_heartbeat_request::task_ids::TaskIds::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
             m.process_id = Some("x");
         }
         if version >= 0 {
-            m.user_endpoint = Some(super::common::endpoint::Endpoint::populated(version));
+            m.user_endpoint = Some(
+                super::common::streams_group_heartbeat_request::endpoint::Endpoint::populated(
+                    version,
+                ),
+            );
         }
         if version >= 0 {
-            m.client_tags = Some(vec![super::common::key_value::KeyValue::populated(version)]);
+            m.client_tags = Some(vec![
+                super::common::streams_group_heartbeat_request::key_value::KeyValue::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.task_offsets = Some(vec![super::common::task_offset::TaskOffset::populated(
-                version,
-            )]);
+            m.task_offsets = Some(vec![
+                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.task_end_offsets = Some(vec![super::common::task_offset::TaskOffset::populated(
-                version,
-            )]);
+            m.task_end_offsets = Some(vec![
+                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
             m.shutdown_application = true;
@@ -759,9 +762,11 @@ pub struct Subtopology<'a> {
     pub subtopology_id: &'a str,
     pub source_topics: Vec<&'a str>,
     pub source_topic_regex: Vec<&'a str>,
-    pub state_changelog_topics: Vec<super::common::topic_info::TopicInfo<'a>>,
+    pub state_changelog_topics:
+        Vec<super::common::streams_group_heartbeat_request::topic_info::TopicInfo<'a>>,
     pub repartition_sink_topics: Vec<&'a str>,
-    pub repartition_source_topics: Vec<super::common::topic_info::TopicInfo<'a>>,
+    pub repartition_source_topics:
+        Vec<super::common::streams_group_heartbeat_request::topic_info::TopicInfo<'a>>,
     pub copartition_groups: Vec<CopartitionGroup>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
@@ -779,7 +784,9 @@ impl Subtopology<'_> {
                 .collect(),
             state_changelog_topics: (self.state_changelog_topics)
                 .iter()
-                .map(super::common::topic_info::TopicInfo::to_owned)
+                .map(
+                    super::common::streams_group_heartbeat_request::topic_info::TopicInfo::to_owned,
+                )
                 .collect(),
             repartition_sink_topics: (self.repartition_sink_topics)
                 .iter()
@@ -787,7 +794,9 @@ impl Subtopology<'_> {
                 .collect(),
             repartition_source_topics: (self.repartition_source_topics)
                 .iter()
-                .map(super::common::topic_info::TopicInfo::to_owned)
+                .map(
+                    super::common::streams_group_heartbeat_request::topic_info::TopicInfo::to_owned,
+                )
                 .collect(),
             copartition_groups: (self.copartition_groups)
                 .iter()
@@ -1042,9 +1051,7 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_info::TopicInfo::decode_borrow(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_heartbeat_request :: topic_info :: TopicInfo :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -1068,9 +1075,7 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_info::TopicInfo::decode_borrow(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_heartbeat_request :: topic_info :: TopicInfo :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -1106,15 +1111,21 @@ impl Subtopology<'_> {
             m.source_topic_regex = vec!["x"];
         }
         if version >= 0 {
-            m.state_changelog_topics =
-                vec![super::common::topic_info::TopicInfo::populated(version)];
+            m.state_changelog_topics = vec![
+                super::common::streams_group_heartbeat_request::topic_info::TopicInfo::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
             m.repartition_sink_topics = vec!["x"];
         }
         if version >= 0 {
-            m.repartition_source_topics =
-                vec![super::common::topic_info::TopicInfo::populated(version)];
+            m.repartition_source_topics = vec![
+                super::common::streams_group_heartbeat_request::topic_info::TopicInfo::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
             m.copartition_groups = vec![CopartitionGroup::populated(version)];

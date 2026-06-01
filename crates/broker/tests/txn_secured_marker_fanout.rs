@@ -43,7 +43,7 @@ use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_protocol::owned::add_partitions_to_txn_request::{
     AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction,
 };
-use crabka_protocol::owned::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
+use crabka_protocol::owned::common::add_partitions_to_txn_request::add_partitions_to_txn_topic::AddPartitionsToTxnTopic;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::end_txn_request::EndTxnRequest;
 use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;

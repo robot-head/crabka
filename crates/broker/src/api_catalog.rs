@@ -142,6 +142,22 @@ fn admin_apis() -> Vec<ApiVersion> {
         // KIP-848 next-gen consumer group protocol.
         v!(consumer_group_heartbeat_request),
         v!(consumer_group_describe_request),
+        // KIP-932 share-group membership protocol.
+        v!(share_group_heartbeat_request),
+        v!(share_group_describe_request),
+        // KIP-932 ShareFetch / ShareAcknowledge data-plane RPCs.
+        v!(share_fetch_request),
+        v!(share_acknowledge_request),
+        // KIP-932 share-group admin offset RPCs.
+        v!(describe_share_group_offsets_request),
+        v!(alter_share_group_offsets_request),
+        v!(delete_share_group_offsets_request),
+        // KIP-932 share-coordinator (persister) RPCs.
+        v!(initialize_share_group_state_request),
+        v!(read_share_group_state_request),
+        v!(write_share_group_state_request),
+        v!(delete_share_group_state_request),
+        v!(read_share_group_state_summary_request),
         // GetReplicaLogInfo (KIP-966) — inter-broker RPC the controller's
         // unclean recovery manager uses to read each replica's LEO + leader
         // epoch. Advertised so InterBrokerClient version negotiation succeeds.
@@ -159,6 +175,31 @@ fn admin_apis() -> Vec<ApiVersion> {
 mod tests {
     use super::*;
     use assert2::assert;
+
+    #[test]
+    fn share_group_apis_are_advertised() {
+        let apis = supported_apis();
+        let keys: Vec<i16> = apis.iter().map(|a| a.api_key).collect();
+        assert!(keys.contains(&76));
+        assert!(keys.contains(&77));
+        let hb = apis.iter().find(|a| a.api_key == 76).unwrap();
+        assert!(hb.min_version == 1 && hb.max_version == 1);
+    }
+
+    #[test]
+    fn share_coordinator_persister_apis_are_advertised() {
+        let apis = supported_apis();
+        let keys: Vec<i16> = apis.iter().map(|a| a.api_key).collect();
+        // InitializeShareGroupState(83), ReadShareGroupState(84),
+        // WriteShareGroupState(85), DeleteShareGroupState(86),
+        // ReadShareGroupStateSummary(87).
+        for k in [83, 84, 85, 86, 87] {
+            assert!(
+                keys.contains(&k),
+                "persister api_key {k} must be advertised"
+            );
+        }
+    }
 
     #[test]
     fn supported_apis_is_nonempty_and_sane() {

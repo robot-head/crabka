@@ -1,0 +1,406 @@
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
+//! End-to-end integration tests for the KIP-932 share coordinator (persister),
+//! driven against an in-process Crabka broker via `crabka-client-core`.
+//!
+//! The typed client works because `ApiVersions` advertises `api_keys` 83-87; each
+//! `*ShareGroupState*Request` impls `ProtocolRequest`, so `client.send(req)`
+//! exercises the real wire path (version negotiation through `ApiVersions`).
+//!
+//! Timing note: the raw persister RPC handlers do NOT create `__share_group_state`
+//! — `FindCoordinator(SHARE)` does. After the topic is created the broker
+//! materializes + leads its partitions asynchronously (replicator supervisor),
+//! so the first `Initialize` may briefly return a coordinator-not-ready code; the
+//! `*_ready` helpers retry, exactly as a real client would.
+
+use assert2::assert;
+use std::sync::Arc;
+use std::time::Duration;
+
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
+use crabka_client_core::Client;
+use crabka_protocol::owned::delete_share_group_state_request::{
+    DeleteShareGroupStateRequest, DeleteStateData, PartitionData as DeletePart,
+};
+use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
+use crabka_protocol::owned::initialize_share_group_state_request::{
+    InitializeShareGroupStateRequest, InitializeStateData, PartitionData as InitPart,
+};
+use crabka_protocol::owned::read_share_group_state_request::{
+    PartitionData as ReadPart, ReadShareGroupStateRequest, ReadStateData,
+};
+use crabka_protocol::owned::read_share_group_state_summary_request::{
+    PartitionData as SummaryPart, ReadShareGroupStateSummaryRequest, ReadStateSummaryData,
+};
+use crabka_protocol::owned::write_share_group_state_request::{
+    PartitionData as WritePart, StateBatch, WriteShareGroupStateRequest, WriteStateData,
+};
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+
+const KEY_TYPE_SHARE: i8 = 2;
+const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
+const COORDINATOR_NOT_AVAILABLE: i16 = 15;
+const NOT_COORDINATOR: i16 = 16;
+const FENCED_STATE_EPOCH: i16 = 124;
+
+fn not_ready(code: i16) -> bool {
+    code == COORDINATOR_LOAD_IN_PROGRESS
+        || code == COORDINATOR_NOT_AVAILABLE
+        || code == NOT_COORDINATOR
+}
+
+async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
+async fn connect(bootstrap: &str) -> Arc<Client> {
+    Arc::new(
+        Client::builder()
+            .bootstrap(bootstrap)
+            .client_id("c1")
+            .build()
+            .await
+            .unwrap(),
+    )
+}
+
+fn wire(tid: uuid::Uuid) -> WireUuid {
+    WireUuid(*tid.as_bytes())
+}
+
+/// Create `__share_group_state` (lazily, via `FindCoordinator` SHARE) and return
+/// the resolved coordinator node id for `key`.
+async fn find_share(client: &Client, key: &str) -> (i16, i32) {
+    let resp = client
+        .send(FindCoordinatorRequest {
+            key_type: KEY_TYPE_SHARE,
+            coordinator_keys: vec![key.to_string()],
+            ..Default::default()
+        })
+        .await
+        .expect("FindCoordinator(SHARE)");
+    let c = &resp.coordinators[0];
+    (c.error_code, c.node_id)
+}
+
+/// Initialize one (group, topic, partition), retrying while the coordinator
+/// is still materializing the state partition. Returns the final `error_code`.
+async fn initialize_ready(
+    client: &Client,
+    group: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+    state_epoch: i32,
+    start_offset: i64,
+) -> i16 {
+    for _ in 0..40 {
+        let resp = client
+            .send(InitializeShareGroupStateRequest {
+                group_id: group.into(),
+                topics: vec![InitializeStateData {
+                    topic_id: wire(tid),
+                    partitions: vec![InitPart {
+                        partition,
+                        state_epoch,
+                        start_offset,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("InitializeShareGroupState");
+        let code = resp.results[0].partitions[0].error_code;
+        if !not_ready(code) {
+            return code;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("share coordinator never became ready for {group}:{tid}:{partition}");
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn write_state(
+    client: &Client,
+    group: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+    state_epoch: i32,
+    leader_epoch: i32,
+    start_offset: i64,
+    delivery_complete_count: i32,
+    batches: Vec<StateBatch>,
+) -> i16 {
+    let resp = client
+        .send(WriteShareGroupStateRequest {
+            group_id: group.into(),
+            topics: vec![WriteStateData {
+                topic_id: wire(tid),
+                partitions: vec![WritePart {
+                    partition,
+                    state_epoch,
+                    leader_epoch,
+                    start_offset,
+                    delivery_complete_count,
+                    state_batches: batches,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("WriteShareGroupState");
+    resp.results[0].partitions[0].error_code
+}
+
+async fn read_summary(
+    client: &Client,
+    group: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+) -> crabka_protocol::owned::read_share_group_state_summary_response::PartitionResult {
+    let resp = client
+        .send(ReadShareGroupStateSummaryRequest {
+            group_id: group.into(),
+            topics: vec![ReadStateSummaryData {
+                topic_id: wire(tid),
+                partitions: vec![SummaryPart {
+                    partition,
+                    leader_epoch: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("ReadShareGroupStateSummary");
+    resp.results[0].partitions[0].clone()
+}
+
+async fn read_state(
+    client: &Client,
+    group: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+) -> crabka_protocol::owned::read_share_group_state_response::PartitionResult {
+    let resp = client
+        .send(ReadShareGroupStateRequest {
+            group_id: group.into(),
+            topics: vec![ReadStateData {
+                topic_id: wire(tid),
+                partitions: vec![ReadPart {
+                    partition,
+                    leader_epoch: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("ReadShareGroupState");
+    resp.results[0].partitions[0].clone()
+}
+
+/// `FindCoordinator(SHARE)` bootstraps `__share_group_state` and routes the
+/// `(group, topic, partition)` key to a real broker (this single node).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn find_coordinator_share_returns_broker() {
+    let (broker, bootstrap, _d) = boot().await;
+    let client = connect(&bootstrap).await;
+
+    let tid = uuid::Uuid::from_bytes([3u8; 16]);
+    let (error_code, node_id) = find_share(&client, &format!("g1:{tid}:0")).await;
+
+    assert!(
+        error_code == 0,
+        "FindCoordinator(SHARE) error: {error_code}"
+    );
+    assert!(
+        node_id == i32::try_from(broker.node_id()).unwrap(),
+        "coordinator must be this broker, got {node_id}"
+    );
+}
+
+/// Initialize -> Write -> Read -> `ReadSummary` -> Delete round-trips over the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn persister_round_trip() {
+    let (_b, bootstrap, _d) = boot().await;
+    let client = connect(&bootstrap).await;
+    let tid = uuid::Uuid::from_bytes([9u8; 16]);
+
+    // Bootstrap __share_group_state, then initialize (retrying until led).
+    let (fc, _) = find_share(&client, &format!("g1:{tid}:0")).await;
+    assert!(fc == 0, "FindCoordinator(SHARE) error: {fc}");
+    let init = initialize_ready(&client, "g1", tid, 0, 0, 0).await;
+    assert!(init == 0, "initialize error: {init}");
+
+    // Write an in-flight batch above the new SPSO (5).
+    let w = write_state(
+        &client,
+        "g1",
+        tid,
+        0,
+        0, // state_epoch (== stored, not fenced)
+        0, // leader_epoch
+        5, // start_offset (SPSO advances to 5)
+        2, // delivery_complete_count
+        vec![StateBatch {
+            first_offset: 5,
+            last_offset: 9,
+            delivery_state: 2,
+            delivery_count: 1,
+            ..Default::default()
+        }],
+    )
+    .await;
+    assert!(w == 0, "write error: {w}");
+
+    // Read full state.
+    let r = read_state(&client, "g1", tid, 0).await;
+    assert!(r.error_code == 0, "read error: {}", r.error_code);
+    assert!(
+        r.start_offset == 5,
+        "SPSO must be 5, got {}",
+        r.start_offset
+    );
+    assert!(
+        r.state_batches
+            .iter()
+            .any(|b| b.first_offset == 5 && b.last_offset == 9),
+        "written batch must be present: {:?}",
+        r.state_batches
+    );
+
+    // Summary matches.
+    let s = read_summary(&client, "g1", tid, 0).await;
+    assert!(s.error_code == 0, "summary error: {}", s.error_code);
+    assert!(
+        s.start_offset == 5,
+        "summary SPSO 5, got {}",
+        s.start_offset
+    );
+    assert!(
+        s.state_epoch == 0,
+        "summary state_epoch 0, got {}",
+        s.state_epoch
+    );
+    assert!(
+        s.delivery_complete_count == 2,
+        "summary DCC 2, got {}",
+        s.delivery_complete_count
+    );
+
+    // Delete, then a fresh read returns the missing/initial sentinel.
+    let del = client
+        .send(DeleteShareGroupStateRequest {
+            group_id: "g1".into(),
+            topics: vec![DeleteStateData {
+                topic_id: wire(tid),
+                partitions: vec![DeletePart {
+                    partition: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("DeleteShareGroupState");
+    assert!(
+        del.results[0].partitions[0].error_code == 0,
+        "delete error: {}",
+        del.results[0].partitions[0].error_code
+    );
+
+    let after = read_state(&client, "g1", tid, 0).await;
+    assert!(
+        after.error_code == 0,
+        "read-after-delete error: {}",
+        after.error_code
+    );
+    assert!(
+        after.start_offset == -1 && after.state_batches.is_empty(),
+        "deleted key must read as missing/initial, got start_offset {} batches {:?}",
+        after.start_offset,
+        after.state_batches
+    );
+}
+
+/// A write carrying a `state_epoch` below the durable one is fenced (124).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn write_fences_stale_state_epoch() {
+    let (_b, bootstrap, _d) = boot().await;
+    let client = connect(&bootstrap).await;
+    let tid = uuid::Uuid::from_bytes([11u8; 16]);
+
+    let (fc, _) = find_share(&client, &format!("g1:{tid}:0")).await;
+    assert!(fc == 0);
+    let init = initialize_ready(&client, "g1", tid, 0, 5, 0).await; // state_epoch 5
+    assert!(init == 0, "initialize error: {init}");
+
+    // Write at state_epoch 0 (< durable 5) -> fenced.
+    let w = write_state(&client, "g1", tid, 0, 0, 0, 0, 0, vec![]).await;
+    assert!(
+        w == FENCED_STATE_EPOCH,
+        "stale state_epoch must fence with 124, got {w}"
+    );
+}
+
+/// Persisted share state survives a broker restart (recover replays
+/// `__share_group_state`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_survives_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let log_dir = dir.path().to_path_buf();
+    let tid = uuid::Uuid::from_bytes([13u8; 16]);
+
+    {
+        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
+            .await
+            .unwrap();
+        let client = connect(&broker.listen_addr().to_string()).await;
+
+        let (fc, _) = find_share(&client, &format!("g1:{tid}:0")).await;
+        assert!(fc == 0);
+        let init = initialize_ready(&client, "g1", tid, 0, 0, 0).await;
+        assert!(init == 0, "initialize error: {init}");
+        let w = write_state(&client, "g1", tid, 0, 0, 0, 7, 3, vec![]).await;
+        assert!(w == 0, "write error: {w}");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        broker.shutdown().await;
+    }
+
+    {
+        let mut cfg = BrokerConfig::for_tests(log_dir);
+        cfg.bootstrap_mode = BootstrapMode::Rejoin;
+        let broker = Broker::start(cfg).await.unwrap();
+        let client = connect(&broker.listen_addr().to_string()).await;
+
+        // Recovered coordinator may still be materializing the led partition;
+        // retry the summary until it reflects the persisted SPSO.
+        let mut start_offset = i64::MIN;
+        for _ in 0..40 {
+            let s = read_summary(&client, "g1", tid, 0).await;
+            if !not_ready(s.error_code) {
+                start_offset = s.start_offset;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            start_offset == 7,
+            "recovered SPSO must be 7, got {start_offset}"
+        );
+    }
+}

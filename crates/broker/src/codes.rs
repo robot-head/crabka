@@ -109,6 +109,17 @@ pub const UNRELEASED_INSTANCE_ID: i16 = 114;
 /// subscription identifier was not found by the coordinator.
 pub const UNKNOWN_SUBSCRIPTION_ID: i16 = 117;
 
+/// KIP-932: an acknowledgement targeted a record no longer Acquired.
+pub const INVALID_RECORD_STATE: i16 = 121;
+/// KIP-932: the named share session does not exist.
+pub const SHARE_SESSION_NOT_FOUND: i16 = 122;
+/// KIP-932: the share session epoch did not match the broker's expectation.
+pub const INVALID_SHARE_SESSION_EPOCH: i16 = 123;
+/// KIP-932: the share coordinator fenced a write on a stale state epoch.
+pub const FENCED_STATE_EPOCH: i16 = 124;
+/// KIP-932: the per-broker share session cache is full.
+pub const SHARE_SESSION_LIMIT_REACHED: i16 = 133;
+
 // Admin handler codes.
 /// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.
 pub const INVALID_CONFIG: i16 = 40;
@@ -276,6 +287,7 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::Protocol(_)
         | BrokerError::Startup(_)
         | BrokerError::Txn(_)
+        | BrokerError::Share(_)
         | BrokerError::ListenerConflict { .. }
         | BrokerError::InvalidInterBrokerListener { .. }
         | BrokerError::EmptyRoles
@@ -295,6 +307,15 @@ mod tests {
     use super::*;
     use crate::error::BrokerError;
     use assert2::assert;
+
+    #[test]
+    fn share_group_error_codes_match_kafka() {
+        assert!(INVALID_RECORD_STATE == 121);
+        assert!(SHARE_SESSION_NOT_FOUND == 122);
+        assert!(INVALID_SHARE_SESSION_EPOCH == 123);
+        assert!(FENCED_STATE_EPOCH == 124);
+        assert!(SHARE_SESSION_LIMIT_REACHED == 133);
+    }
 
     #[test]
     fn maps_unsupported_to_35() {

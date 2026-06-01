@@ -49,6 +49,9 @@ pub struct Broker {
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
     pub(crate) txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
+    pub(crate) share_coordinator: Arc<crate::share_coordinator::coordinator::ShareCoordinator>,
+    pub(crate) share_partition_leaders:
+        Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     /// Handle for the periodic disk-usage scanner spawned when
@@ -388,6 +391,27 @@ impl BrokerHandle {
     #[allow(clippy::used_underscore_binding)]
     pub fn partition_exists_for_test(&self, topic: &str, partition: i32) -> bool {
         self._broker.partitions.contains(topic, partition)
+    }
+
+    /// Test-only: read the share-state summary
+    /// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)`
+    /// for `(group, topic_id, partition)` straight from this broker's
+    /// [`ShareCoordinator`](crate::share_coordinator::coordinator::ShareCoordinator).
+    /// Returns `None` when the key has no initialized state. KIP-932 lifecycle
+    /// tests use this to assert the group-coordinator Initialized per-partition
+    /// share state without advertising the persister RPCs over the wire.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[allow(clippy::used_underscore_binding)]
+    pub async fn share_state_summary_for_test(
+        &self,
+        group: &str,
+        topic_id: uuid::Uuid,
+        partition: i32,
+    ) -> Option<(i32, i32, i64, i32)> {
+        self._broker
+            .share_coordinator
+            .read_summary(group, topic_id, partition)
+            .await
     }
 
     /// Test-only: return the `log_start_offset` of `(topic, partition)` as
@@ -1342,7 +1366,8 @@ impl Broker {
                 ),
             );
         let group_coordinator = std::sync::Arc::new(crate::coordinator::GroupCoordinator::new(
-            config.next_gen_consumer_group.clone(),
+            config.next_gen_consumer_group.as_ref().clone(),
+            config.share_group.as_ref().clone(),
             std::sync::Arc::new(crate::coordinator::unified::ImageMetadataProvider {
                 controller: controller.clone(),
             }),
@@ -1372,6 +1397,60 @@ impl Broker {
             .recover(&controller.current_image())
             .await
             .map_err(|e| tracing::warn!(error = %e, "txn coordinator recovery error"));
+
+        // 4a'. Construct the share coordinator (KIP-932 persister). Same
+        //      dependencies as the txn coordinator; replay any existing
+        //      __share_group_state records (warnings only — a fresh broker
+        //      has nothing to replay).
+        let share_coordinator = Arc::new(
+            crate::share_coordinator::coordinator::ShareCoordinator::new(
+                config.node_id,
+                partitions.clone(),
+                (*config.share_coordinator).clone(),
+            ),
+        );
+        let _ = share_coordinator
+            .recover(&controller.current_image())
+            .await
+            .map_err(|e| tracing::warn!(error = %e, "share coordinator recovery error"));
+
+        // 4a''. Wire the KIP-932 group-coordinator → share-state-persister
+        //       bridge. Both the `ShareCoordinator` and the `GroupCoordinator`
+        //       exist now, so build the `SharePersister` and hand it to the
+        //       coordinator; its per-group share actors read it after reconcile
+        //       to Initialize/Delete per-partition share state. Single-broker
+        //       setups always route locally; remote routing mirrors EndTxn.
+        let share_persister = Arc::new(
+            crate::share_coordinator::persister_client::SharePersister::new(
+                config.node_id,
+                share_coordinator.clone(),
+                controller.clone(),
+                inter_broker_client.clone(),
+                config
+                    .effective_listeners()
+                    .iter()
+                    .find(|l| l.name == config.inter_broker_listener_name)
+                    .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol),
+                config.inter_broker_listener_name.clone(),
+            ),
+        );
+        group_coordinator.set_share_persister(share_persister.clone());
+
+        // 4a'''. Share-partition leader manager (KIP-932 Slice C): owns the
+        //        in-memory acquisition state machines for the (group, topic,
+        //        partition) triples this broker leads, loading/persisting them
+        //        through the same `SharePersister`. A background sweeper expires
+        //        acquisition locks so unacknowledged records redeliver.
+        let share_partition_leaders = Arc::new(
+            crate::share_partition::manager::SharePartitionLeaderManager::new(
+                config.node_id,
+                partitions.clone(),
+                controller.clone(),
+                share_persister.clone(),
+                Arc::new((*config.share_group).clone()),
+            ),
+        );
+        share_partition_leaders.spawn_lock_sweeper();
 
         // 4b. Spawn the replicator supervisor. Started AFTER the controller
         //    is up and self-registration succeeded so the supervisor's
@@ -1408,6 +1487,7 @@ impl Broker {
             format!("crabka-broker-{}-replicator", config.broker_id),
             supervisor_shutdown.clone(),
             Some(txn_coordinator.clone()),
+            Some(share_coordinator.clone()),
             inter_broker_client.clone(),
             inter_listener_proto,
             config.inter_broker_listener_name.clone(),
@@ -2175,6 +2255,8 @@ impl Broker {
             producer_ids,
             producer_state,
             txn_coordinator,
+            share_coordinator,
+            share_partition_leaders,
             supervisor_shutdown,
             supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
             disk_scanner_handle: tokio::sync::Mutex::new(disk_scanner_handle),

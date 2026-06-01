@@ -123,6 +123,23 @@ pub(crate) mod produce;
 pub(crate) mod push_telemetry;
 pub(crate) mod remove_raft_voter;
 pub(crate) mod renew_delegation_token;
+// KIP-932 ShareGroupDescribe (api_key 77). Intercepted inline in
+// `network::dispatch` so the handler receives the per-connection principal +
+// peer `SocketAddr` for the per-group Describe ACL gate.
+pub(crate) mod share_group_describe;
+// KIP-932 share-group membership (api_key 76).
+pub(crate) mod share_group_heartbeat;
+// KIP-932 admin offset RPCs (api_key 90/91/92). Intercepted inline in
+// `network::dispatch` for the per-group Describe/Alter/Delete ACL gates.
+pub(crate) mod alter_share_group_offsets;
+pub(crate) mod delete_share_group_offsets;
+pub(crate) mod describe_share_group_offsets;
+// KIP-932 ShareAcknowledge (api_key 79). Intercepted inline in
+// `network::dispatch` for the per-topic Read ACL gate.
+pub(crate) mod share_acknowledge;
+// KIP-932 ShareFetch (api_key 78). Intercepted inline in `network::dispatch`
+// for the per-topic Read ACL gate.
+pub(crate) mod share_fetch;
 pub(crate) mod sync_group;
 // KIP-185 admin RPC to permanently drop a broker registration (api_key 64).
 pub(crate) mod unregister_broker;
@@ -242,6 +259,16 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(93, get_replica_log_info::handle);
     t.register(68, consumer_group_heartbeat::handle);
     t.register(69, consumer_group_describe::handle);
+    // KIP-932 ShareGroupHeartbeat (api_key 76). Plain 4-arg handler:
+    // share-group membership needs no per-connection ACL context.
+    t.register(76, share_group_heartbeat::handle);
+    // KIP-932 share-state persister RPCs (api keys 83–87). Inter-broker
+    // handlers, gated per-partition on local share-state leadership.
+    t.register(83, crate::share_coordinator::handlers::initialize::handle);
+    t.register(84, crate::share_coordinator::handlers::read::handle);
+    t.register(85, crate::share_coordinator::handlers::write::handle);
+    t.register(86, crate::share_coordinator::handlers::delete::handle);
+    t.register(87, crate::share_coordinator::handlers::read_summary::handle);
     // 71 (GetTelemetrySubscriptions) intercepted inline in `network::dispatch`
     // so the handler receives the per-connection peer SocketAddr and software
     // name/version for KIP-714 subscription matching.

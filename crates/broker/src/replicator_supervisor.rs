@@ -147,6 +147,10 @@ pub(crate) struct ReplicatorSupervisor {
     task_targets: DashMap<(String, i32), (NodeId, i32)>,
     shutdown: CancellationToken,
     txn_coordinator: Option<Arc<TxnCoordinator>>,
+    /// KIP-932 share coordinator. Its view of locally-led
+    /// `__share_group_state` partitions is refreshed on each reconcile,
+    /// mirroring the txn coordinator.
+    share_coordinator: Option<Arc<crate::share_coordinator::coordinator::ShareCoordinator>>,
     /// Shared outbound dialer (TLS + SASL when configured, raw TCP
     /// otherwise). Each spawned replicator clones this Arc.
     inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
@@ -181,6 +185,7 @@ impl ReplicatorSupervisor {
         client_id: String,
         shutdown: CancellationToken,
         txn_coordinator: Option<Arc<TxnCoordinator>>,
+        share_coordinator: Option<Arc<crate::share_coordinator::coordinator::ShareCoordinator>>,
         inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
         inter_broker_listener_protocol: crabka_security::ListenerProtocol,
         inter_broker_listener_name: String,
@@ -199,6 +204,7 @@ impl ReplicatorSupervisor {
             task_targets: DashMap::new(),
             shutdown,
             txn_coordinator,
+            share_coordinator,
             inter_broker_client,
             inter_broker_listener_protocol,
             inter_broker_listener_name,
@@ -354,6 +360,12 @@ impl ReplicatorSupervisor {
         // 3. Refresh the txn coordinator's view of locally-led
         //    __transaction_state partitions. Cheap (Arc clone + lock).
         if let Some(coord) = &self.txn_coordinator {
+            coord.refresh_leader_partitions(image).await;
+        }
+
+        // 3b. Refresh the share coordinator's view of locally-led
+        //     __share_group_state partitions (KIP-932). Same shape as txn.
+        if let Some(coord) = &self.share_coordinator {
             coord.refresh_leader_partitions(image).await;
         }
     }

@@ -204,6 +204,9 @@ fn apply_record(
         Key::NextGen(ng_key) => {
             apply_next_gen_record(coordinator, ng_key, value_bytes)?;
         }
+        Key::Share(share_key) => {
+            apply_share_record(coordinator, share_key, value_bytes)?;
+        }
     }
     Ok(())
 }
@@ -259,14 +262,81 @@ fn apply_next_gen_record(
     Ok(())
 }
 
+fn apply_share_record(
+    coordinator: &Arc<GroupCoordinator>,
+    key: crate::coordinator::unified::share::persistence::ShareGroupKey,
+    value_bytes: &bytes::Bytes,
+) -> Result<(), BrokerError> {
+    use crate::coordinator::unified::share::persistence as sp;
+    match key {
+        sp::ShareGroupKey::GroupMetadata { group_id } => {
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_group_metadata(
+                &group_id,
+                sp::ShareGroupMetadataValue::decode(value_bytes)?,
+            );
+        }
+        sp::ShareGroupKey::MemberMetadata {
+            group_id,
+            member_id,
+        } => {
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_member_metadata(
+                &group_id,
+                &member_id,
+                sp::ShareGroupMemberMetadataValue::decode(value_bytes)?,
+            );
+        }
+        sp::ShareGroupKey::TargetAssignmentMetadata { group_id } => {
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_target_assignment_metadata(
+                &group_id,
+                sp::ShareGroupTargetAssignmentMetadataValue::decode(value_bytes)?,
+            );
+        }
+        sp::ShareGroupKey::TargetAssignmentMember {
+            group_id,
+            member_id,
+        } => {
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_target_assignment_member(
+                &group_id,
+                &member_id,
+                sp::ShareGroupTargetAssignmentMemberValue::decode(value_bytes)?,
+            );
+        }
+        sp::ShareGroupKey::CurrentMemberAssignment {
+            group_id,
+            member_id,
+        } => {
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_current_member_assignment(
+                &group_id,
+                &member_id,
+                sp::ShareGroupCurrentMemberAssignmentValue::decode(value_bytes)?,
+            );
+        }
+        sp::ShareGroupKey::StatePartitionMetadata { group_id } => {
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_state_partition_metadata(
+                &group_id,
+                sp::ShareGroupStatePartitionMetadataValue::decode(value_bytes)?,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Apply a tombstone (record with `value = None`). Classic offset-commit /
 /// group-metadata tombstones are no-ops during replay (preserved from the
 /// classic coordinator, whose in-memory snapshot is rebuilt fresh on restart);
-/// only next-gen tombstones are honored so leave/eviction semantics survive a
-/// restart.
+/// next-gen (KIP-848) and share-group (KIP-932) tombstones are honored so
+/// leave/eviction semantics survive a restart.
 fn apply_tombstone(coordinator: &Arc<GroupCoordinator>, key: Key) {
-    if let Key::NextGen(ng_key) = key {
-        coordinator.replay_next_gen_tombstone(&ng_key);
+    match key {
+        Key::NextGen(ng_key) => coordinator.replay_next_gen_tombstone(&ng_key),
+        Key::Share(share_key) => coordinator.replay_share_tombstone(&share_key),
+        Key::OffsetCommit { .. } | Key::GroupMetadata { .. } => {}
     }
 }
 
@@ -393,6 +463,93 @@ mod tests {
         handle
     }
 
+    /// Replaying a share-group's records (group metadata, member metadata,
+    /// target + current assignment) must reconstruct the cached seed so a
+    /// freshly-spawned actor restores the same membership after a restart.
+    #[tokio::test]
+    async fn share_group_records_replay_into_seed() {
+        use crate::coordinator::unified::GroupCoordinator;
+        use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
+        use crate::coordinator::unified::reconciler::ReconcileInput;
+        use crate::coordinator::unified::share::persistence as sp;
+        use crabka_protocol::primitives::uuid::Uuid;
+
+        #[derive(Debug)]
+        struct EmptyMeta;
+        impl crate::coordinator::unified::actor::MetadataProvider for EmptyMeta {
+            fn snapshot(&self) -> ReconcileInput {
+                ReconcileInput::default()
+            }
+        }
+
+        let coord = Arc::new(GroupCoordinator::new(
+            crate::coordinator::unified::config::NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            Arc::new(EmptyMeta),
+            Arc::new(InMemoryOffsetsLog::default()),
+        ));
+
+        let tid = Uuid([9; 16]);
+        // Drive the same path bootstrap takes: parse_key on the encoded key,
+        // then apply_record on the value bytes.
+        let recs: Vec<(bytes::Bytes, bytes::Bytes)> = vec![
+            (
+                sp::encode_share_key(&sp::ShareGroupKey::GroupMetadata {
+                    group_id: "sg".into(),
+                }),
+                sp::ShareGroupMetadataValue { epoch: 4 }.encode(),
+            ),
+            (
+                sp::encode_share_key(&sp::ShareGroupKey::MemberMetadata {
+                    group_id: "sg".into(),
+                    member_id: "m1".into(),
+                }),
+                sp::ShareGroupMemberMetadataValue {
+                    rack_id: None,
+                    client_id: "c1".into(),
+                    client_host: "/127.0.0.1".into(),
+                    subscribed_topic_names: vec!["t".into()],
+                }
+                .encode(),
+            ),
+            (
+                sp::encode_share_key(&sp::ShareGroupKey::CurrentMemberAssignment {
+                    group_id: "sg".into(),
+                    member_id: "m1".into(),
+                }),
+                sp::ShareGroupCurrentMemberAssignmentValue {
+                    member_epoch: 4,
+                    assigned_partitions: vec![(tid, vec![0, 1])],
+                }
+                .encode(),
+            ),
+        ];
+        let batch = RecordBatch::default();
+        let mut acc = Replayed::default();
+        for (k, v) in recs {
+            let key = persistence::parse_key(&k).unwrap();
+            apply_record(&coord, &mut acc, key, &v, &batch).unwrap();
+        }
+
+        // Type locked + seed reconstructed.
+        assert!(coord.group_type("sg") == Some(crate::coordinator::unified::GroupType::Share));
+        let seed = coord.cached_share_seed("sg").expect("seed cached");
+        assert!(seed.group_epoch == 4);
+        assert!(seed.members.contains_key("m1"));
+        assert!(seed.current_per_member["m1"].member_epoch == 4);
+
+        // A member tombstone scrubs the member from the seed.
+        let tomb_key =
+            persistence::parse_key(&sp::encode_share_key(&sp::ShareGroupKey::MemberMetadata {
+                group_id: "sg".into(),
+                member_id: "m1".into(),
+            }))
+            .unwrap();
+        apply_tombstone(&coord, tomb_key);
+        let seed = coord.cached_share_seed("sg").expect("seed still present");
+        assert!(!seed.members.contains_key("m1"), "tombstone removed member");
+    }
+
     fn test_coordinator(
         controller: &Arc<dyn crate::metadata_source::MetadataSource>,
         partitions: &Arc<PartitionRegistry>,
@@ -402,6 +559,7 @@ mod tests {
         );
         Arc::new(GroupCoordinator::new(
             crate::coordinator::unified::config::NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             Arc::new(crate::coordinator::unified::ImageMetadataProvider {
                 controller: controller.clone(),
             }),

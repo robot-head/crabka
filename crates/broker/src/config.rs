@@ -319,7 +319,14 @@ pub struct BrokerConfig {
     /// KIP-848 next-gen consumer group protocol configuration. Controls
     /// which rebalance protocols are advertised, session/heartbeat
     /// timeout bounds, and the set of enabled server-side assignors.
-    pub next_gen_consumer_group: crate::coordinator::unified::config::NextGenConfig,
+    pub next_gen_consumer_group: Box<crate::coordinator::unified::config::NextGenConfig>,
+
+    /// KIP-932 share-group configuration.
+    pub share_group: Box<crate::coordinator::unified::share::config::ShareGroupConfig>,
+
+    /// KIP-932 share-coordinator (persister) configuration. Controls the
+    /// `__share_group_state` internal topic geometry and snapshot folding.
+    pub share_coordinator: Box<crate::share_coordinator::config::ShareCoordinatorConfig>,
 
     /// How often the auto-rebalance ticker fires, in seconds. Default
     /// 300 (5 minutes). Matches Kafka's
@@ -566,7 +573,15 @@ impl BrokerConfig {
             oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: false, // tests opt in explicitly
-            next_gen_consumer_group: crate::coordinator::unified::config::NextGenConfig::default(),
+            next_gen_consumer_group: Box::new(
+                crate::coordinator::unified::config::NextGenConfig::default(),
+            ),
+            share_group: Box::new(
+                crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            ),
+            share_coordinator: Box::new(
+                crate::share_coordinator::config::ShareCoordinatorConfig::default(),
+            ),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]
@@ -813,7 +828,15 @@ impl Default for BrokerConfig {
             oauthbearer_jwks_min_on_demand_pause: std::time::Duration::from_secs(1),
             oauthbearer_jwks_ignore_key_use: false,
             auto_leader_rebalance_enable: true,
-            next_gen_consumer_group: crate::coordinator::unified::config::NextGenConfig::default(),
+            next_gen_consumer_group: Box::new(
+                crate::coordinator::unified::config::NextGenConfig::default(),
+            ),
+            share_group: Box::new(
+                crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            ),
+            share_coordinator: Box::new(
+                crate::share_coordinator::config::ShareCoordinatorConfig::default(),
+            ),
             leader_imbalance_check_interval_secs: 300,
             leader_imbalance_per_broker_percentage: 10,
             #[cfg(any(test, feature = "test-helpers"))]

@@ -23,6 +23,7 @@ use crate::error::BrokerError;
 
 const KEY_TYPE_GROUP: i8 = 0;
 const KEY_TYPE_TRANSACTION: i8 = 1;
+const KEY_TYPE_SHARE: i8 = 2;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) fn handle(
@@ -137,6 +138,98 @@ pub(crate) fn handle(
                 }
                 result
             }
+            KEY_TYPE_SHARE => {
+                // Ensure __share_group_state exists before resolving its
+                // partitions' leaders.
+                if let Err(e) = crate::share_coordinator::bootstrap::ensure_topic(&controller).await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "share-state bootstrap failed; replying COORDINATOR_NOT_AVAILABLE"
+                    );
+                    return encode_error_response(
+                        broker_id,
+                        &advertised,
+                        version,
+                        codes::COORDINATOR_NOT_AVAILABLE,
+                        Some("share-state topic bootstrap failed"),
+                    );
+                }
+
+                let mut result = Vec::with_capacity(keys.len());
+                for k in keys {
+                    // Kafka's share-coordinator key is `group:topicId:partition`.
+                    // Group ids may contain ':', so split from the right: the
+                    // last segment is the partition, the next is the topic id,
+                    // and everything before that is the group.
+                    let Some((group, topic_uuid, partition)) = parse_share_key(&k) else {
+                        result.push(Coordinator {
+                            key: k,
+                            node_id: -1,
+                            host: String::new(),
+                            port: -1,
+                            error_code: codes::COORDINATOR_NOT_AVAILABLE,
+                            error_message: Some("malformed share-state key".into()),
+                            ..Default::default()
+                        });
+                        continue;
+                    };
+
+                    let p = crate::share_coordinator::partitioner::partition_for_share_key(
+                        group,
+                        &topic_uuid,
+                        partition,
+                        crate::share_coordinator::bootstrap::NUM_PARTITIONS,
+                    );
+                    let image = controller.current_image();
+                    let Some(pr) = image.partition(crate::share_coordinator::bootstrap::TOPIC, p)
+                    else {
+                        result.push(Coordinator {
+                            key: k,
+                            node_id: -1,
+                            host: String::new(),
+                            port: -1,
+                            error_code: codes::COORDINATOR_NOT_AVAILABLE,
+                            error_message: Some("partition not found".into()),
+                            ..Default::default()
+                        });
+                        continue;
+                    };
+                    let leader = pr.leader;
+                    let Some(broker_info) = image.broker(leader) else {
+                        result.push(Coordinator {
+                            key: k,
+                            node_id: -1,
+                            host: String::new(),
+                            port: -1,
+                            error_code: codes::COORDINATOR_NOT_AVAILABLE,
+                            error_message: Some("leader broker not registered".into()),
+                            ..Default::default()
+                        });
+                        continue;
+                    };
+                    let node_id_i32 = i32::try_from(leader).unwrap_or(-1);
+                    // Prefer our own `advertised_listener` when the leader is
+                    // this broker (the metadata record may carry a pre-bind
+                    // port in test setups).
+                    let (host, port_i32) = if leader == node_id {
+                        let (h, p) = parse_host_port(&advertised);
+                        (h, i32::from(p))
+                    } else {
+                        (broker_info.host.clone(), i32::from(broker_info.port))
+                    };
+                    result.push(Coordinator {
+                        key: k,
+                        node_id: node_id_i32,
+                        host,
+                        port: port_i32,
+                        error_code: codes::NONE,
+                        error_message: None,
+                        ..Default::default()
+                    });
+                }
+                result
+            }
             unknown => {
                 tracing::warn!(key_type = unknown, "unknown FindCoordinator key_type");
                 let (host, port) = parse_host_port(&advertised);
@@ -209,6 +302,18 @@ fn encode_error_response(
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+/// Parse a share-coordinator key `"{group}:{topicId}:{partition}"` into its
+/// `(group, topic_id, partition)` parts. Group ids may themselves contain `:`,
+/// so the partition and topic-id are peeled from the right. Returns `None` on a
+/// malformed partition int, topic-id UUID, or missing segments.
+fn parse_share_key(key: &str) -> Option<(&str, uuid::Uuid, i32)> {
+    let (rest, partition_str) = key.rsplit_once(':')?;
+    let (group, topic_str) = rest.rsplit_once(':')?;
+    let partition: i32 = partition_str.parse().ok()?;
+    let topic_id = uuid::Uuid::parse_str(topic_str).ok()?;
+    Some((group, topic_id, partition))
 }
 
 fn parse_host_port(addr: &str) -> (String, u16) {

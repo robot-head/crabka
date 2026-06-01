@@ -307,8 +307,8 @@ pub struct PartitionData<'a> {
     pub leader_id: i32,
     pub leader_epoch: i32,
     pub high_watermark: i64,
-    pub current_voters: Vec<super::common::replica_state::ReplicaState>,
-    pub observers: Vec<super::common::replica_state::ReplicaState>,
+    pub current_voters: Vec<super::common::describe_quorum_response::replica_state::ReplicaState>,
+    pub observers: Vec<super::common::describe_quorum_response::replica_state::ReplicaState>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionData<'_> {
@@ -322,11 +322,11 @@ impl PartitionData<'_> {
             high_watermark: (self.high_watermark),
             current_voters: (self.current_voters)
                 .iter()
-                .map(super::common::replica_state::ReplicaState::to_owned)
+                .map(super::common::describe_quorum_response::replica_state::ReplicaState::to_owned)
                 .collect(),
             observers: (self.observers)
                 .iter()
-                .map(super::common::replica_state::ReplicaState::to_owned)
+                .map(super::common::describe_quorum_response::replica_state::ReplicaState::to_owned)
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -466,9 +466,7 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::replica_state::ReplicaState::decode_borrow(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: describe_quorum_response :: replica_state :: ReplicaState :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -478,9 +476,7 @@ impl<'de> DecodeBorrow<'de> for PartitionData<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::replica_state::ReplicaState::decode_borrow(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: describe_quorum_response :: replica_state :: ReplicaState :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -515,14 +511,18 @@ impl PartitionData<'_> {
             m.high_watermark = 1i64;
         }
         if version >= 0 {
-            m.current_voters = vec![super::common::replica_state::ReplicaState::populated(
-                version,
-            )];
+            m.current_voters = vec![
+                super::common::describe_quorum_response::replica_state::ReplicaState::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
-            m.observers = vec![super::common::replica_state::ReplicaState::populated(
-                version,
-            )];
+            m.observers = vec![
+                super::common::describe_quorum_response::replica_state::ReplicaState::populated(
+                    version,
+                ),
+            ];
         }
         m
     }

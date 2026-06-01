@@ -205,7 +205,8 @@ impl ConsumerGroupHeartbeatResponse {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Assignment {
-    pub topic_partitions: Vec<super::common::topic_partitions::TopicPartitions>,
+    pub topic_partitions:
+        Vec<super::common::consumer_group_heartbeat_response::topic_partitions::TopicPartitions>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Encode for Assignment {
@@ -257,9 +258,7 @@ impl Decode<'_> for Assignment {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_partitions::TopicPartitions::decode(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: consumer_group_heartbeat_response :: topic_partitions :: TopicPartitions :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -276,9 +275,7 @@ impl Assignment {
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
         if version >= 0 {
-            m.topic_partitions = vec![super::common::topic_partitions::TopicPartitions::populated(
-                version,
-            )];
+            m . topic_partitions = vec ! [super :: common :: consumer_group_heartbeat_response :: topic_partitions :: TopicPartitions :: populated (version)] ;
         }
         m
     }

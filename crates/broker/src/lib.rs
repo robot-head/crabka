@@ -166,6 +166,8 @@ pub mod replica_selector;
 pub(crate) mod replica_state;
 mod replicator;
 mod replicator_supervisor;
+pub mod share_coordinator;
+pub mod share_partition;
 pub mod telemetry;
 pub mod throttle;
 pub(crate) mod time_util;

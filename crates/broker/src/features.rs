@@ -13,6 +13,10 @@ pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MAX;
 pub(crate) use crabka_metadata::metadata_version::METADATA_VERSION_MIN;
 
 use crabka_metadata::MetadataImage;
+/// The `share.version` feature name (KIP-932). Consumed only from the
+/// `#[cfg(test)]` module that asserts share.version is advertised.
+#[allow(unused_imports)]
+pub(crate) use crabka_metadata::metadata_version::SHARE_VERSION_FEATURE as SHARE_VERSION;
 
 /// One row of the `ApiVersions.supported_features` advertisement.
 #[derive(Debug, Clone, Copy)]
@@ -104,6 +108,19 @@ mod tests {
         assert!(f.min_version == METADATA_VERSION_MIN);
         assert!(f.max_version == METADATA_VERSION_MAX);
         assert!(lookup("not.a.feature").is_none());
+    }
+
+    #[test]
+    fn share_version_is_supported() {
+        let f = lookup(SHARE_VERSION).expect("share.version supported");
+        assert!(f.min_version == 0);
+        assert!(f.max_version == 1);
+        // Advertised via the registry-derived supported-feature table.
+        assert!(
+            supported_features()
+                .iter()
+                .any(|f| f.name == SHARE_VERSION && f.min_version == 0 && f.max_version == 1)
+        );
     }
 
     #[test]
