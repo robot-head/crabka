@@ -34,7 +34,7 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::unified::share::actor::ShareGroupActorMessage;
 use crate::error::BrokerError;
-use crate::share_partition::state::{AckType, AcquiredRange};
+use crate::share_partition::state::AckType;
 
 type WaitFut = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
@@ -203,6 +203,7 @@ pub(crate) async fn handle(
         &member,
         req.max_records,
         req.max_bytes,
+        req.is_renew_ack,
         &cfg,
         &mut pending,
         true,
@@ -221,6 +222,7 @@ pub(crate) async fn handle(
             &member,
             req.max_records,
             req.max_bytes,
+            req.is_renew_ack,
             &cfg,
             &mut pending,
             false,
@@ -257,9 +259,13 @@ fn collect_ack_batches(fp: &FetchPartition) -> Vec<(i64, i64, Vec<i8>)> {
 
 /// Run one acquire pass over the leadable pending partitions. When
 /// `apply_acks` is true, the piggybacked acknowledgement batches are applied
-/// first (setting `acknowledge_error_code`). Returns the total number of
-/// offsets acquired across all partitions in this pass.
-#[allow(clippy::too_many_arguments)]
+/// first (setting `acknowledge_error_code`). When `is_renew_ack` is set, those
+/// batches RENEW the acquisition lock instead of acknowledging (KIP-932). Under
+/// a `ReadCommitted` isolation level the materialize/read window is clamped to
+/// the partition's last stable offset so uncommitted records are never
+/// acquired. Returns the total number of offsets acquired across all partitions
+/// in this pass.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn acquire_pass(
     broker: &Broker,
     mgr: &Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
@@ -267,11 +273,16 @@ async fn acquire_pass(
     member: &str,
     max_records: i32,
     max_bytes: i32,
+    is_renew_ack: bool,
     cfg: &crate::coordinator::unified::share::config::ShareGroupConfig,
     pending: &mut [PendingPartition],
     apply_acks: bool,
 ) -> Result<i64, BrokerError> {
     let now = Instant::now();
+    let read_committed = matches!(
+        cfg.isolation_level,
+        crate::coordinator::unified::share::config::ShareIsolationLevel::ReadCommitted
+    );
     let mut total = 0_i64;
 
     for p in pending.iter_mut() {
@@ -285,11 +296,18 @@ async fn acquire_pass(
         let cell = mgr.get_or_load(group, p.topic_id, p.partition_index).await;
         let mut st = cell.lock().await;
 
-        // Apply piggybacked acknowledgements (first pass only).
+        // Apply piggybacked acknowledgements (first pass only). When the
+        // request is a renew-ack, each batch RENEWs the lock on its range
+        // rather than acknowledging it.
         if apply_acks && !p.ack_batches.is_empty() {
             let mut ack_err = codes::NONE;
             for (first, last, types) in &p.ack_batches {
-                if let Err(code) = apply_one_ack(&mut st, member, *first, *last, types, now) {
+                let res = if is_renew_ack {
+                    st.renew(member, *first, *last, now, cfg.record_lock_duration)
+                } else {
+                    apply_one_ack(&mut st, member, *first, *last, types, now)
+                };
+                if let Err(code) = res {
                     ack_err = code;
                 }
             }
@@ -311,7 +329,21 @@ async fn acquire_pass(
             continue;
         };
         let hwm = part.high_watermark().await;
-        st.materialize(hwm, cfg.max_inflight_records);
+        // Under read_committed, never surface records past the last stable
+        // offset: clamp the materialize/read window to `min(lso, hwm)` so no
+        // record from an OPEN transaction can be acquired.
+        let upper = if read_committed {
+            part.lso().min(hwm)
+        } else {
+            hwm
+        };
+        // TODO(slice-F): archive aborted (committed-range) records. The LSO
+        // clamp above already guarantees no OPEN-transaction records are
+        // surfaced; aborted-but-stable records still get acquired because
+        // `AbortedTxn` carries only `producer_id + start_offset`, not the
+        // aborted region's end offset, so precise per-offset archival needs
+        // the control-batch markers.
+        st.materialize(upper, cfg.max_inflight_records);
         let acquired = st.acquire(
             member,
             max_records,
@@ -322,10 +354,6 @@ async fn acquire_pass(
         );
 
         if !acquired.is_empty() {
-            let (first, last) = acquired_span(&acquired);
-            // Read [first, last+1) clamped at the HWM. `last` is always < hwm
-            // because `materialize` only ever extends the window up to hwm-1.
-            let limit = (last + 1).min(hwm);
             // `partition_max_bytes` is a v0-only ShareFetch field; at the
             // supported versions (v1+, KIP-932) it is absent and decodes to 0.
             // A 0 read budget makes `read_raw` read only one batch header's
@@ -338,8 +366,20 @@ async fn acquire_pass(
             } else {
                 max_bytes
             };
-            let bytes = read_acquired_bytes(&part, first, limit, read_budget).await?;
-            p.out.records = bytes.map(RecordsPayload::Raw);
+            // Read each acquired range independently (clamped at `upper`) and
+            // concatenate the verbatim bytes. Contiguous ranges still produce
+            // one logical blob; bytes in any gap between ranges are excluded.
+            let mut blob = BytesMut::new();
+            for r in &acquired {
+                let limit = (r.last + 1).min(upper);
+                if let Some(bytes) = read_acquired_bytes(&part, r.first, limit, read_budget).await?
+                {
+                    blob.extend_from_slice(&bytes);
+                }
+            }
+            if !blob.is_empty() {
+                p.out.records = Some(RecordsPayload::Raw(blob.freeze()));
+            }
             p.out.acquired_records = acquired
                 .iter()
                 .map(|r| AcquiredRecords {
@@ -399,13 +439,6 @@ pub(crate) fn apply_one_ack(
         idx = j;
     }
     result
-}
-
-/// The `(min first, max last)` span covering every acquired range.
-fn acquired_span(ranges: &[AcquiredRange]) -> (i64, i64) {
-    let first = ranges.iter().map(|r| r.first).min().unwrap_or(0);
-    let last = ranges.iter().map(|r| r.last).max().unwrap_or(-1);
-    (first, last)
 }
 
 /// Read the verbatim on-disk batch bytes for `[fetch_offset, limit_offset)`

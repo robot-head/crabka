@@ -117,14 +117,26 @@ pub(crate) async fn handle(
             let mut st = cell.lock().await;
             let mut err = codes::NONE;
             for batch in &ap.acknowledgement_batches {
-                if let Err(code) = apply_one_ack(
-                    &mut st,
-                    &member,
-                    batch.first_offset,
-                    batch.last_offset,
-                    &batch.acknowledge_types,
-                    now,
-                ) {
+                // A renew-ack RENEWs each batch's lock instead of acknowledging.
+                let res = if req.is_renew_ack {
+                    st.renew(
+                        &member,
+                        batch.first_offset,
+                        batch.last_offset,
+                        now,
+                        cfg.record_lock_duration,
+                    )
+                } else {
+                    apply_one_ack(
+                        &mut st,
+                        &member,
+                        batch.first_offset,
+                        batch.last_offset,
+                        &batch.acknowledge_types,
+                        now,
+                    )
+                };
+                if let Err(code) = res {
                     err = code;
                 }
             }
