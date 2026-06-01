@@ -302,20 +302,37 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
     );
 
     // Locate the transaction coordinator for TID.
-    let fc = admin
-        .send(FindCoordinatorRequest {
-            key: TID.into(),
-            key_type: 1, // TRANSACTION
-            coordinator_keys: vec![TID.into()],
-            ..Default::default()
-        })
-        .await
-        .expect("find coordinator");
-    let (coord_node, coord_host, coord_port) = fc.coordinators.first().map_or_else(
-        || (fc.node_id, fc.host.clone(), fc.port),
-        |c| (c.node_id, c.host.clone(), c.port),
-    );
-    assert!(coord_node >= 0, "no txn coordinator: {fc:?}");
+    // The transaction coordinator partition (`__transaction_state[hash(TID)]`)
+    // is auto-created and its leader elected lazily on first access, so the
+    // initial FindCoordinator can race ahead of that election and briefly
+    // return COORDINATOR_NOT_AVAILABLE ("partition not found"). Poll until it
+    // resolves — matching the retry-with-deadline idiom used elsewhere in this
+    // test — so a genuine never-available coordinator still surfaces (after the
+    // deadline) rather than flaking on the timing window.
+    let fc_deadline = Instant::now() + Duration::from_secs(30);
+    let (coord_node, coord_host, coord_port) = loop {
+        let fc = admin
+            .send(FindCoordinatorRequest {
+                key: TID.into(),
+                key_type: 1, // TRANSACTION
+                coordinator_keys: vec![TID.into()],
+                ..Default::default()
+            })
+            .await
+            .expect("find coordinator");
+        let (node, host, port) = fc.coordinators.first().map_or_else(
+            || (fc.node_id, fc.host.clone(), fc.port),
+            |c| (c.node_id, c.host.clone(), c.port),
+        );
+        if node >= 0 {
+            break (node, host, port);
+        }
+        assert!(
+            Instant::now() <= fc_deadline,
+            "txn coordinator never became available: {fc:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
 
     // Pick the partition led by the broker that is NOT the coordinator, so
     // EndTxn must fan a marker to a *remote* leader over the SASL listener.
