@@ -146,6 +146,9 @@ pub struct QuorumStateSnapshot {
     pub leader_epoch: LeaderEpoch,
     pub high_watermark: i64,
     pub log_end_offset: i64,
+    /// Log-start offset (rises past 0 once the log has been pruned below a
+    /// snapshot under KIP-630).
+    pub log_start_offset: i64,
     pub voters: Vec<NodeId>,
     /// Per-follower fetch offset, populated only on the leader.
     pub per_voter_fetch_offset: std::collections::BTreeMap<NodeId, i64>,

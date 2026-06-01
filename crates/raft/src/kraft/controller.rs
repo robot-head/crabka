@@ -48,6 +48,7 @@ use crate::kraft::core::QuorumStateMachine;
 use crate::kraft::event::{Event, LogEnd};
 use crate::kraft::log::KraftLog;
 use crate::kraft::role::Role;
+use crate::kraft::snapshot_fetch::{SnapshotFetchState, SnapshotFetchStep};
 use crate::kraft::transport::{
     Command, Inbound, MetadataFetchSlice, PeerSender, QuorumStateSnapshot, TimerTick, api_key, wire,
 };
@@ -66,6 +67,10 @@ const HEARTBEAT_DIVISOR: u64 = 3;
 
 /// Filename of the node-local durable quorum-state file.
 const QUORUM_STATE_FILE: &str = "quorum-state";
+
+/// Crabka-internal "snapshot not available" signal in a `FetchSnapshot`
+/// response (voter↔voter, Slice 4); exact JVM error mapping is Slice 6.
+const SNAPSHOT_NOT_FOUND: i16 = 1;
 
 /// Subdirectory under the data dir holding KIP-630 `.checkpoint` artifacts for
 /// the single metadata partition. Matches the on-disk layout the broker's
@@ -116,6 +121,18 @@ struct Engine {
     /// `submit_change` waiters instead of leaving them hung (FIX 1).
     was_leader: bool,
     held_epoch: LeaderEpoch,
+    /// Snapshot every this many committed records past the last snapshot, then
+    /// prune the log below that point. `0` disables snapshotting (KIP-630).
+    snapshot_interval_records: u64,
+    /// HWM at which the last checkpoint was written (and the log pruned to).
+    /// Seeded from the recovered checkpoint on `open`.
+    last_snapshot_end_offset: i64,
+    /// In-flight follower snapshot reassembly, if any.
+    snapshot_fetch: Option<SnapshotFetchState>,
+    /// Set when a snapshot was just installed; the next follower Fetch carries
+    /// this epoch (the log is empty at the snapshot boundary so it has no epoch
+    /// of its own). Cleared once a normal fetch advances the log.
+    installed_snapshot_epoch: Option<LeaderEpoch>,
 }
 
 /// A parked `submit_change`: it completes once the HWM reaches `need_offset`
@@ -167,7 +184,7 @@ impl KraftController {
     pub fn spawn(config: KraftConfig, log: KraftLog, data_dir: PathBuf) -> Self {
         let cluster_id = config.cluster_id;
         let image = MetadataImage::new(cluster_id);
-        Self::spawn_with_image(config, log, data_dir, image)
+        Self::spawn_with_image(config, log, data_dir, image, 0)
     }
 
     /// Spawn the engine starting from an already-recovered [`MetadataImage`]
@@ -178,6 +195,7 @@ impl KraftController {
         log: KraftLog,
         data_dir: PathBuf,
         image: MetadataImage,
+        last_snapshot_end_offset: i64,
     ) -> Self {
         let KraftConfig {
             me,
@@ -187,8 +205,6 @@ impl KraftController {
             peers,
             snapshot_interval_records,
         } = config;
-        // TODO(slice4 task6): store on Engine
-        let _ = snapshot_interval_records;
 
         let core = QuorumStateMachine::new(me, initial_state, election_timeout_ms);
         let initial_leader = core.quorum_state().leader_id;
@@ -213,6 +229,7 @@ impl KraftController {
             leader_epoch: initial_epoch,
             high_watermark: log.hwm(),
             log_end_offset: log.log_end_offset(),
+            log_start_offset: log.log_start_offset(),
             voters: initial_state_voters(&core),
             per_voter_fetch_offset: std::collections::BTreeMap::new(),
         };
@@ -247,6 +264,10 @@ impl KraftController {
             commit_waiters: Vec::new(),
             was_leader: initial_was_leader,
             held_epoch: initial_epoch,
+            snapshot_interval_records,
+            last_snapshot_end_offset,
+            snapshot_fetch: None,
+            installed_snapshot_epoch: None,
         };
 
         tokio::spawn(engine.run(cmd_rx));
@@ -285,9 +306,13 @@ impl KraftController {
         // (the HWM is not persisted separately; the log only holds committed
         // metadata in this slice, so we apply the full log end).
         let mut image = MetadataImage::new(cluster_id);
+        let mut last_snapshot_end_offset = 0;
         if let Some(bytes) = load_latest_checkpoint(&checkpoint_dir(&data_dir))? {
             let records = crate::snapshot::SnapshotReader::read_records(&bytes)?;
             image = MetadataImage::from_records(cluster_id, &records);
+            if let Some((off, _ep)) = latest_checkpoint_id(&checkpoint_dir(&data_dir)) {
+                last_snapshot_end_offset = off;
+            }
             // Checkpoints in this slice cover the in-memory image, not a log
             // prefix offset, so replay the full log on top (idempotent:
             // duplicate records fail validate and are skipped). A precise
@@ -313,6 +338,7 @@ impl KraftController {
             log,
             data_dir,
             image,
+            last_snapshot_end_offset,
         ))
     }
 
@@ -522,7 +548,9 @@ impl Engine {
             Command::Shutdown => {}
             Command::Event(event) => self.on_event(event),
             Command::FetchResponse { from, body } => self.on_fetch_response(from, &body),
-            Command::FetchSnapshotResponse { .. } => {}
+            Command::FetchSnapshotResponse { from, body } => {
+                self.on_fetch_snapshot_response(from, &body);
+            }
             Command::Inbound(inbound) => self.on_inbound(inbound),
             Command::Timer(tick) => self.on_timer(tick),
             Command::SubmitChange { records, reply } => self.on_submit_change(records, reply),
@@ -702,7 +730,19 @@ impl Engine {
                     // the HWM rides separately in the response). Only the leader
                     // serves records; a divergent fetch sends none (the follower
                     // truncates first, then re-fetches).
-                    let records = if diverging.is_some() || !self.core.role().is_leader() {
+                    // If the follower's fetch offset is below our pruned
+                    // log-start, it cannot replicate from the log — point it at
+                    // the latest snapshot instead (KIP-630).
+                    let log_start = self.log.log_start_offset();
+                    let snapshot_id = if fetch_offset >= 0 && fetch_offset < log_start {
+                        self.latest_snapshot_id()
+                    } else {
+                        None
+                    };
+                    let records = if snapshot_id.is_some()
+                        || diverging.is_some()
+                        || !self.core.role().is_leader()
+                    {
                         bytes::Bytes::new()
                     } else {
                         self.serve_fetch_records(fetch_offset)
@@ -711,15 +751,50 @@ impl Engine {
                         leader_id: self.me,
                         leader_epoch: self.core.quorum_state().leader_epoch,
                         diverging,
-                        snapshot_id: None,
+                        snapshot_id,
                         hwm: self.log.hwm(),
                         records,
                     };
                     let _ = reply.send(resp.encode());
                 }
             }
-            Inbound::FetchSnapshot { reply, .. } => {
-                let _ = reply;
+            Inbound::FetchSnapshot { req, reply } => {
+                if let Some(wire::PeerRequest::FetchSnapshot {
+                    snapshot_id,
+                    position,
+                    max_bytes,
+                    ..
+                }) = wire::decode_fetch_snapshot(&req)
+                {
+                    let (end_offset, epoch) = snapshot_id;
+                    let resp = match load_checkpoint_by_id(
+                        &checkpoint_dir(&self.data_dir),
+                        end_offset,
+                        epoch,
+                    ) {
+                        Some(bytes) => {
+                            let max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
+                            let pos = usize::try_from(position.max(0)).unwrap_or(0);
+                            let chunk =
+                                crate::snapshot::SnapshotReader::byte_range(&bytes, pos, max);
+                            wire::PeerResponse::FetchSnapshot {
+                                snapshot_id,
+                                size: i64::try_from(bytes.len()).unwrap_or(i64::MAX),
+                                position,
+                                bytes: bytes::Bytes::copy_from_slice(chunk),
+                                error_code: 0,
+                            }
+                        }
+                        None => wire::PeerResponse::FetchSnapshot {
+                            snapshot_id,
+                            size: 0,
+                            position,
+                            bytes: bytes::Bytes::new(),
+                            error_code: SNAPSHOT_NOT_FOUND,
+                        },
+                    };
+                    let _ = reply.send(resp.encode());
+                }
             }
         }
     }
@@ -1030,6 +1105,7 @@ impl Engine {
         let applied_hwm = self.log.hwm();
         if applied_hwm <= prev_hwm {
             self.try_resolve_waiters();
+            self.maybe_snapshot_and_prune();
             return;
         }
         match self.log.read_decoded(prev_hwm, MAX_APPLY_BYTES) {
@@ -1078,6 +1154,44 @@ impl Engine {
             Err(e) => tracing::error!(?e, "kraft: read for apply failed"),
         }
         self.try_resolve_waiters();
+        self.maybe_snapshot_and_prune();
+    }
+
+    /// (Leader, KIP-630) once the committed offset has advanced
+    /// `snapshot_interval_records` past the last snapshot, serialize the current
+    /// image to a checkpoint and prune the log below the snapshot boundary.
+    fn maybe_snapshot_and_prune(&mut self) {
+        if self.snapshot_interval_records == 0 || !self.core.role().is_leader() {
+            return;
+        }
+        let hwm = self.log.hwm();
+        let advanced = u64::try_from((hwm - self.last_snapshot_end_offset).max(0)).unwrap_or(0);
+        if advanced < self.snapshot_interval_records {
+            return;
+        }
+        let bytes = match crate::snapshot::SnapshotWriter::serialize(&self.image, 0) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(?e, "kraft: snapshot serialize failed");
+                return;
+            }
+        };
+        let epoch = i32::try_from(self.core.quorum_state().leader_epoch).unwrap_or(i32::MAX);
+        if let Err(e) = write_checkpoint(&checkpoint_dir(&self.data_dir), hwm, epoch, &bytes) {
+            tracing::error!(?e, "kraft: checkpoint write failed; skipping prune");
+            return;
+        }
+        self.last_snapshot_end_offset = hwm;
+        if let Err(e) = self.log.prune_to(hwm) {
+            tracing::error!(?e, "kraft: prune_to failed");
+        }
+        retain_latest_checkpoint(&checkpoint_dir(&self.data_dir));
+    }
+
+    /// The latest local snapshot id `(end_offset, epoch)`, if any (leader's
+    /// `FetchSnapshot` hint).
+    fn latest_snapshot_id(&self) -> Option<(i64, i32)> {
+        latest_checkpoint_id(&checkpoint_dir(&self.data_dir))
     }
 
     /// Attach a rejection to the waiter whose appended range
@@ -1145,6 +1259,7 @@ impl Engine {
             leader_epoch: qs.leader_epoch,
             high_watermark: self.log.hwm(),
             log_end_offset: self.log.log_end_offset(),
+            log_start_offset: self.log.log_start_offset(),
             voters: qs.voters.ids().into_iter().collect(),
             per_voter_fetch_offset,
         }
@@ -1236,7 +1351,17 @@ impl Engine {
             return;
         }
         let fetch_offset = self.log.end_offset();
-        let fetch_epoch = self.log.last_epoch();
+        // Post-install epoch hazard: right after installing a snapshot the log is
+        // empty at the snapshot boundary, so it carries no epoch of its own and
+        // `last_epoch()` would report 0. Sending `fetch_epoch = 0` from a
+        // non-zero boundary makes the leader's divergence check emit a spurious
+        // truncate hint → a re-fetch loop. While we hold a freshly-installed
+        // epoch AND the log is still empty at the boundary, fetch with that
+        // epoch instead. Cleared once a normal fetch appends past the boundary.
+        let fetch_epoch = match self.installed_snapshot_epoch {
+            Some(ep) if self.log.log_end_offset() == self.log.log_start_offset() => ep,
+            _ => self.log.last_epoch(),
+        };
         let body = wire::PeerRequest::Fetch {
             from: self.me,
             fetch_epoch,
@@ -1244,6 +1369,21 @@ impl Engine {
         }
         .encode();
         self.spawn_send(leader_id, api_key::FETCH, body);
+    }
+
+    /// (Follower side) request a byte range of `snapshot_id` from `leader_id`.
+    fn send_fetch_snapshot(&self, leader_id: NodeId, snapshot_id: (i64, i32), position: i64) {
+        if leader_id == self.me {
+            return;
+        }
+        let body = wire::PeerRequest::FetchSnapshot {
+            from: self.me,
+            snapshot_id,
+            position,
+            max_bytes: i32::try_from(MAX_APPLY_BYTES).unwrap_or(i32::MAX),
+        }
+        .encode();
+        self.spawn_send(leader_id, api_key::FETCH_SNAPSHOT, body);
     }
 
     /// (Leader side) serialize every log batch at/after `fetch_offset` up to our
@@ -1285,7 +1425,28 @@ impl Engine {
             return;
         };
         let _ = from;
-        let _ = snapshot_id;
+
+        // The leader signalled our fetch offset is below its pruned log-start:
+        // we must fetch the snapshot instead of replicating from the log. Start
+        // (or continue) a snapshot transfer, feed the core for liveness/epoch
+        // bookkeeping, then stop — no append/apply on this response.
+        if let Some(id) = snapshot_id {
+            if id.0 > self.log.log_end_offset()
+                && self
+                    .snapshot_fetch
+                    .as_ref()
+                    .is_none_or(|s| s.snapshot_id != id)
+            {
+                self.snapshot_fetch = Some(SnapshotFetchState::new(id, leader_id));
+                self.send_fetch_snapshot(leader_id, id, 0);
+            }
+            self.on_event(Event::ReceiveFetchResponse {
+                leader_id,
+                leader_epoch,
+                diverging,
+            });
+            return;
+        }
 
         if let Some(point) = diverging {
             // Diverged: truncate to the leader's hint. The follower will
@@ -1315,6 +1476,10 @@ impl Engine {
                             tracing::error!(?e, at, "kraft: follower append_at failed");
                             break;
                         }
+                        // Appended past the snapshot boundary: the log now has a
+                        // real epoch of its own, so drop the post-install epoch
+                        // override (see `send_fetch`).
+                        self.installed_snapshot_epoch = None;
                     }
                 }
                 Err(e) => tracing::error!(?e, "kraft: follower decode batches failed"),
@@ -1338,6 +1503,71 @@ impl Engine {
         });
     }
 
+    /// (Follower side) handle a `FetchSnapshot` response chunk: reassemble via
+    /// the [`SnapshotFetchState`], requesting the next range until complete, then
+    /// install the assembled snapshot and resume normal fetching. Any error /
+    /// abort falls back to a plain Fetch against the same peer.
+    fn on_fetch_snapshot_response(&mut self, from: NodeId, body: &[u8]) {
+        let Some(wire::PeerResponse::FetchSnapshot {
+            snapshot_id,
+            size,
+            position,
+            bytes,
+            error_code,
+        }) = wire::PeerResponse::decode_fetch_snapshot(body)
+        else {
+            return;
+        };
+        let Some(state) = self.snapshot_fetch.as_mut() else {
+            return;
+        };
+        if error_code != 0 || from != state.leader_id {
+            self.snapshot_fetch = None;
+            self.send_fetch(from);
+            return;
+        }
+        match state.on_chunk(snapshot_id, size, position, &bytes) {
+            SnapshotFetchStep::Continue { next_position } => {
+                self.send_fetch_snapshot(from, snapshot_id, next_position);
+            }
+            SnapshotFetchStep::Restart => {
+                self.snapshot_fetch = None;
+                self.send_fetch(from);
+            }
+            SnapshotFetchStep::Complete(assembled) => {
+                let id = state.snapshot_id;
+                self.snapshot_fetch = None;
+                if let Err(e) = self.install_fetched_snapshot(id, &assembled) {
+                    tracing::error!(?e, "kraft: snapshot install failed; will re-fetch");
+                }
+                self.send_fetch(from);
+            }
+        }
+    }
+
+    /// Validate, persist, and install a fetched snapshot: rebuild the image from
+    /// its records, write the checkpoint, install it into the log (resetting the
+    /// log-start/end to `end_offset`), publish the new image, and arm the
+    /// post-install fetch epoch (see `send_fetch`).
+    fn install_fetched_snapshot(&mut self, id: (i64, i32), bytes: &[u8]) -> Result<(), RaftError> {
+        let (end_offset, epoch) = id;
+        // Validate the bytes decode before mutating any durable state.
+        let records = crate::snapshot::SnapshotReader::read_records(bytes)?;
+        if end_offset <= self.log.log_end_offset() {
+            return Ok(()); // stale; we already advanced past this snapshot
+        }
+        let cluster_id = self.image.cluster_id();
+        let new_image = MetadataImage::from_records(cluster_id, &records);
+        write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset, epoch, bytes)?;
+        self.image = new_image;
+        self.log.install_snapshot(end_offset)?;
+        self.last_snapshot_end_offset = end_offset;
+        self.installed_snapshot_epoch = Some(u32::try_from(epoch).unwrap_or(0));
+        let _ = self.image_tx.send(Arc::new(self.image.clone()));
+        retain_latest_checkpoint(&checkpoint_dir(&self.data_dir));
+        Ok(())
+    }
+
     /// Fire-and-forget a peer send: spawn a task that performs the RPC, decodes
     /// the response into the matching `Receive*Response` core event, and posts
     /// it back to the loop. The loop NEVER awaits a peer RPC inline.
@@ -1354,6 +1584,16 @@ impl Engine {
                     if api_key == self::api_key::FETCH {
                         let _ = cmd_tx
                             .send(Command::FetchResponse {
+                                from: peer,
+                                body: resp_body,
+                            })
+                            .await;
+                    } else if api_key == self::api_key::FETCH_SNAPSHOT {
+                        // A FetchSnapshot response carries snapshot bytes the
+                        // follower reassembles + installs before resuming, so it
+                        // takes its own command path (mirrors FetchResponse).
+                        let _ = cmd_tx
+                            .send(Command::FetchSnapshotResponse {
                                 from: peer,
                                 body: resp_body,
                             })
@@ -1601,14 +1841,21 @@ fn write_checkpoint(
 /// this reads only the `.checkpoint` (the `.meta` sidecar is gone in
 /// this engine — the durable epoch lives in the quorum-state file).
 fn load_latest_checkpoint(dir: &std::path::Path) -> Result<Option<Vec<u8>>, RaftError> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(RaftError::Storage(crabka_log::LogError::Io(e))),
+    let Some((end_offset, epoch)) = latest_checkpoint_id(dir) else {
+        return Ok(None);
     };
-    let mut best: Option<((i64, i32), std::path::PathBuf)> = None;
-    for entry in entries {
-        let entry = entry.map_err(crabka_log::LogError::Io)?;
+    let name = format!("{end_offset:020}-{epoch:010}.checkpoint");
+    let bytes = std::fs::read(dir.join(name)).map_err(crabka_log::LogError::Io)?;
+    Ok(Some(bytes))
+}
+
+/// Scan `dir` for `<end_offset>-<epoch>.checkpoint` artifacts and return the
+/// highest `(end_offset, epoch)` id, or `None` when the directory is absent or
+/// holds no checkpoint.
+fn latest_checkpoint_id(dir: &std::path::Path) -> Option<(i64, i32)> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(i64, i32)> = None;
+    for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         let Some(stem) = name.strip_suffix(".checkpoint") else {
@@ -1620,15 +1867,46 @@ fn load_latest_checkpoint(dir: &std::path::Path) -> Result<Option<Vec<u8>>, Raft
         let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
             continue;
         };
-        if best.as_ref().is_none_or(|(cur, _)| (off, ep) > *cur) {
-            best = Some(((off, ep), entry.path()));
+        if best.is_none_or(|cur| (off, ep) > cur) {
+            best = Some((off, ep));
         }
     }
-    let Some((_, path)) = best else {
-        return Ok(None);
+    best
+}
+
+/// Delete every `.checkpoint` in `dir` except the latest `(end_offset, epoch)`,
+/// keeping the checkpoint directory single-snapshot after a snapshot+prune or
+/// install. Best-effort: read/remove errors are ignored.
+fn retain_latest_checkpoint(dir: &std::path::Path) {
+    let Some(latest) = latest_checkpoint_id(dir) else {
+        return;
     };
-    let bytes = std::fs::read(&path).map_err(crabka_log::LogError::Io)?;
-    Ok(Some(bytes))
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let Some(stem) = name.strip_suffix(".checkpoint") else {
+            continue;
+        };
+        let Some((off, ep)) = stem.split_once('-') else {
+            continue;
+        };
+        let (Ok(off), Ok(ep)) = (off.parse::<i64>(), ep.parse::<i32>()) else {
+            continue;
+        };
+        if (off, ep) != latest {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Read a specific checkpoint `<end_offset>-<epoch>.checkpoint` by id, or `None`
+/// if it is absent (the leader's `FetchSnapshot` serve path).
+fn load_checkpoint_by_id(dir: &std::path::Path, end_offset: i64, epoch: i32) -> Option<Vec<u8>> {
+    let name = format!("{end_offset:020}-{epoch:010}.checkpoint");
+    std::fs::read(dir.join(name)).ok()
 }
 
 #[cfg(test)]
@@ -1659,6 +1937,23 @@ mod tests {
         ids: &[NodeId],
         timeout_ms: u64,
     ) -> (KraftController, tempfile::TempDir) {
+        build_full(me, ids, timeout_ms, 0)
+    }
+
+    fn build_with_snapshot_interval(
+        me: NodeId,
+        ids: &[NodeId],
+        snapshot_interval_records: u64,
+    ) -> (KraftController, tempfile::TempDir) {
+        build_full(me, ids, 1000, snapshot_interval_records)
+    }
+
+    fn build_full(
+        me: NodeId,
+        ids: &[NodeId],
+        timeout_ms: u64,
+        snapshot_interval_records: u64,
+    ) -> (KraftController, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let log = KraftLog::open(dir.path()).expect("open log");
         let state = QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(ids));
@@ -1669,7 +1964,7 @@ mod tests {
                 initial_state: state,
                 election_timeout_ms: timeout_ms,
                 peers: Arc::new(NullPeerSender),
-                snapshot_interval_records: 0,
+                snapshot_interval_records,
             },
             log,
             dir.path().to_path_buf(),
@@ -2071,5 +2366,40 @@ mod tests {
         assert!(loaded.leader_id.is_none());
         assert!(loaded.voted_key.map(|k| k.id) == Some(3));
         assert!(loaded.cluster_id == cid);
+    }
+
+    // ---- Slice 4 Task 6: snapshot trigger + prune ----
+
+    /// A single-voter leader with `snapshot_interval_records = 3` snapshots and
+    /// prunes once the committed offset has advanced past the threshold. After
+    /// committing four distinct topics, a checkpoint exists on disk and the log
+    /// has been pruned (its log-start offset rose above 0).
+    #[tokio::test]
+    async fn leader_snapshots_and_prunes_at_threshold() {
+        let (ctrl, dir) = build_with_snapshot_interval(1, &[1], 3);
+        ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
+        await_leader(&ctrl, Some(1)).await;
+
+        // Four distinct topics, each committed immediately (single voter). Each
+        // commit advances the HWM well past the 3-record interval, so a
+        // snapshot+prune fires.
+        for name in ["a", "b", "c", "d"] {
+            ctrl.submit_change(topic_record(name)).await.unwrap();
+        }
+
+        // A checkpoint was written.
+        let cp = load_latest_checkpoint(&checkpoint_dir(dir.path()))
+            .expect("scan checkpoints")
+            .expect("a checkpoint exists");
+        assert!(!cp.is_empty());
+
+        // The log was pruned: log-start advanced past 0.
+        let qs = ctrl.quorum_state().await.unwrap();
+        assert!(
+            qs.log_start_offset > 0,
+            "log not pruned: log_start_offset = {}",
+            qs.log_start_offset
+        );
+        ctrl.shutdown().await;
     }
 }
