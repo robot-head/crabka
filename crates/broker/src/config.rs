@@ -82,6 +82,7 @@ impl InterBrokerCredentials {
 /// Build directly when embedding the broker as a library, or via the
 /// `crabka-broker` binary's clap CLI in production.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // a broad config struct; flags are independent knobs
 pub struct BrokerConfig {
     /// Broker id reported in `Metadata` responses. Default: 1.
     pub broker_id: i32,
@@ -179,7 +180,7 @@ pub struct BrokerConfig {
 
     /// Seed the cluster-wide finalized features (`metadata.version=25`,
     /// `group.version=1`, `transaction.version=2`) into the log when
-    /// bootstrapping a fresh cluster. Required for a JVM KRaft controller to
+    /// bootstrapping a fresh cluster. Required for a JVM `KRaft` controller to
     /// join the quorum (it refuses to build its `FeaturesImage` without
     /// `metadata.version`). Default `false`: a finalized `metadata.version` on
     /// the client-facing `ApiVersions` response breaks pre-4.0 admin clients
