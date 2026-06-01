@@ -1,8 +1,14 @@
-//! `ListGroups` (`api_key=16`). Returns every known group: classic groups
-//! from `GroupManager::list_groups` plus KIP-932 share groups from the
-//! next-gen coordinator's share registry. The optional `states_filter` (v4+)
-//! and `types_filter` (v5+, e.g. `["share"]` from `kafka-share-groups.sh
-//! --list`) are both honored.
+//! `ListGroups` (`api_key=16`). Returns every known group across all three
+//! registries: classic groups from `GroupManager::list_groups` (type
+//! `"classic"`), next-gen KIP-848 consumer groups from the unified
+//! coordinator's consumer registry (type `"consumer"`), and KIP-932 share
+//! groups from its share registry (type `"share"`). The optional
+//! `states_filter` (v4+) and `types_filter` (v5+, e.g. `["share"]` from
+//! `kafka-share-groups.sh --list` or `["consumer"]` from `kafka-consumer-groups
+//! .sh --list`) are both honored. A `group_id` is emitted at most once: the
+//! three registries are disjoint by `GroupType`, but we defensively dedup.
+
+use std::collections::HashSet;
 
 use bytes::{Bytes, BytesMut};
 
@@ -52,6 +58,9 @@ pub(crate) async fn handle(
     };
 
     let mut groups: Vec<ListedGroup> = Vec::with_capacity(snapshots.len());
+    // Ids already emitted, so the same group_id never appears twice across the
+    // three (disjoint-by-design) registries.
+    let mut emitted: HashSet<String> = HashSet::new();
 
     // ── Classic groups (group_type "classic") ───────────────────────────
     for s in snapshots {
@@ -70,6 +79,7 @@ pub(crate) async fn handle(
         {
             continue;
         }
+        emitted.insert(s.group_id.clone());
         groups.push(ListedGroup {
             group_id: s.group_id,
             protocol_type: s.protocol_type.unwrap_or_else(|| "consumer".into()),
@@ -79,34 +89,34 @@ pub(crate) async fn handle(
         });
     }
 
-    // ── KIP-932 share groups (group_type "share") ───────────────────────
-    // Share groups live in the next-gen coordinator's share registry, not the
-    // classic `GroupManager` map, so they need a separate pass. `list_groups`
-    // stays sync (no actor Describe hop): the share group's runtime state isn't
-    // cheaply available without a round-trip, so report "Stable" — `--list`
-    // filters on `types_filter`, not on the state here.
-    let share_state = "Stable";
-    let share_state_ok = !states_active || req.states_filter.iter().any(|v| v == share_state);
-    let share_type_ok = !types_active
-        || req
-            .types_filter
-            .iter()
-            .any(|t| t.eq_ignore_ascii_case("share"));
-    let share_ng = (broker.config.share_group.enable && share_state_ok && share_type_ok)
-        .then(|| broker.group_manager.next_gen())
-        .flatten();
-    if let Some(ng) = share_ng {
-        for gid in ng.share_group_ids() {
-            if !authorized(&gid) {
-                continue;
-            }
-            groups.push(ListedGroup {
-                group_id: gid,
-                protocol_type: String::new(),
-                group_state: share_state.into(),
-                group_type: "share".into(),
-                ..Default::default()
-            });
+    // ── KIP-848 next-gen consumer groups (group_type "consumer") ────────
+    // These live in the unified coordinator's consumer registry, separate from
+    // the classic `GroupManager` map (always present once next-gen is wired).
+    if let Some(ng) = broker.group_manager.next_gen() {
+        append_next_gen(
+            &mut groups,
+            &mut emitted,
+            "consumer",
+            ng.consumer_group_ids(),
+            &req,
+            states_active,
+            types_active,
+            &authorized,
+        );
+        // ── KIP-932 share groups (group_type "share") ───────────────────
+        // Gated on `share_group.enable`; share groups live in the same
+        // coordinator's separate share registry.
+        if broker.config.share_group.enable {
+            append_next_gen(
+                &mut groups,
+                &mut emitted,
+                "share",
+                ng.share_group_ids(),
+                &req,
+                states_active,
+                types_active,
+                &authorized,
+            );
         }
     }
 
@@ -119,6 +129,57 @@ pub(crate) async fn handle(
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+/// Append one `ListedGroup` per next-gen group id (`group_type` is either
+/// `"consumer"` or `"share"`), honoring `states_filter` / `types_filter` and the
+/// per-group Describe ACL, and deduping against already-emitted ids. Stays sync:
+/// the group's runtime state isn't cheaply available without an actor
+/// round-trip, so we report the constant "Stable" — `--list` filters on
+/// `types_filter`, not on the state here.
+#[allow(clippy::too_many_arguments)]
+fn append_next_gen(
+    groups: &mut Vec<ListedGroup>,
+    emitted: &mut HashSet<String>,
+    group_type: &str,
+    ids: Vec<String>,
+    req: &ListGroupsRequest,
+    states_active: bool,
+    types_active: bool,
+    authorized: &impl Fn(&str) -> bool,
+) {
+    const STATE: &str = "Stable";
+    if states_active && !req.states_filter.iter().any(|v| v == STATE) {
+        return;
+    }
+    if types_active
+        && !req
+            .types_filter
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(group_type))
+    {
+        return;
+    }
+    // Share groups carry an empty protocol_type (Kafka emits no consumer
+    // protocol for them); next-gen consumer groups use "consumer".
+    let protocol_type = if group_type == "share" {
+        String::new()
+    } else {
+        "consumer".into()
+    };
+    for gid in ids {
+        if emitted.contains(&gid) || !authorized(&gid) {
+            continue;
+        }
+        emitted.insert(gid.clone());
+        groups.push(ListedGroup {
+            group_id: gid,
+            protocol_type: protocol_type.clone(),
+            group_state: STATE.into(),
+            group_type: group_type.into(),
+            ..Default::default()
+        });
+    }
 }
 
 fn state_to_str(s: GroupState) -> &'static str {

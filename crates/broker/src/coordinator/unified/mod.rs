@@ -235,6 +235,13 @@ impl GroupCoordinator {
         self.share_groups.iter().map(|e| e.key().clone()).collect()
     }
 
+    /// Ids of every live next-gen (KIP-848) consumer group actor. Mirrors
+    /// [`share_group_ids`](Self::share_group_ids); used by `ListGroups` to emit
+    /// `group_type="consumer"` entries without an actor round-trip.
+    pub fn consumer_group_ids(&self) -> Vec<String> {
+        self.groups.iter().map(|e| e.key().clone()).collect()
+    }
+
     pub async fn shutdown_all(&self) {
         let handles: Vec<Arc<GroupActorHandle>> =
             self.groups.iter().map(|e| e.value().clone()).collect();
