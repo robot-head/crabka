@@ -125,6 +125,7 @@ fn build_engine(
             initial_state: QuorumState::bootstrap(cluster_id, voter_set(ids)),
             election_timeout_ms,
             peers: Arc::new(net.clone()),
+            snapshot_interval_records: 0,
         },
         log,
         dir.path().to_path_buf(),
@@ -409,6 +410,7 @@ async fn restart_recovers_image() {
         voter_set(&ids),
         timeouts[usize::try_from(victim - 1).unwrap()],
         Arc::new(net.clone()),
+        0,
     )
     .expect("reopen");
     // The recovered image must contain the committed topic.

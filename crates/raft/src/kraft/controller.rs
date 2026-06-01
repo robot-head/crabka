@@ -149,6 +149,9 @@ pub struct KraftConfig {
     pub initial_state: QuorumState,
     pub election_timeout_ms: u64,
     pub peers: Arc<dyn PeerSender>,
+    /// Snapshot once committed offset advances this many records past the
+    /// last snapshot, then prune the log below it. `0` disables snapshotting.
+    pub snapshot_interval_records: u64,
 }
 
 impl KraftController {
@@ -182,7 +185,10 @@ impl KraftController {
             initial_state,
             election_timeout_ms,
             peers,
+            snapshot_interval_records,
         } = config;
+        // TODO(slice4 task6): store on Engine
+        let _ = snapshot_interval_records;
 
         let core = QuorumStateMachine::new(me, initial_state, election_timeout_ms);
         let initial_leader = core.quorum_state().leader_id;
@@ -269,6 +275,7 @@ impl KraftController {
         bootstrap_voters: crabka_metadata::voters::VoterSet,
         election_timeout_ms: u64,
         peers: Arc<dyn PeerSender>,
+        snapshot_interval_records: u64,
     ) -> Result<Self, RaftError> {
         std::fs::create_dir_all(&data_dir).map_err(crabka_log::LogError::Io)?;
         let mut log = KraftLog::open(&data_dir)?;
@@ -301,6 +308,7 @@ impl KraftController {
                 initial_state,
                 election_timeout_ms,
                 peers,
+                snapshot_interval_records,
             },
             log,
             data_dir,
@@ -1661,6 +1669,7 @@ mod tests {
                 initial_state: state,
                 election_timeout_ms: timeout_ms,
                 peers: Arc::new(NullPeerSender),
+                snapshot_interval_records: 0,
             },
             log,
             dir.path().to_path_buf(),
@@ -2009,6 +2018,7 @@ mod tests {
                     initial_state: QuorumState::bootstrap(cluster_id, voters.clone()),
                     election_timeout_ms: 1000,
                     peers: Arc::new(NullPeerSender),
+                    snapshot_interval_records: 0,
                 },
                 log,
                 data_dir.clone(),
@@ -2031,6 +2041,7 @@ mod tests {
             voters,
             1000,
             Arc::new(NullPeerSender),
+            0,
         )
         .expect("reopen");
         assert!(ctrl2.current_image().topic("recovered").is_some());

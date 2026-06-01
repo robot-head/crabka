@@ -85,6 +85,9 @@ pub struct ControllerConfig {
     pub max_bytes_between_snapshots: u64,
     /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
     pub max_snapshot_interval: Duration,
+    /// Snapshot once committed offset advances this many records past the last
+    /// snapshot, then prune the log below it. `0` disables snapshotting.
+    pub snapshot_interval_records: u64,
 }
 
 impl std::fmt::Debug for ControllerConfig {
@@ -110,6 +113,7 @@ impl std::fmt::Debug for ControllerConfig {
                 &self.max_bytes_between_snapshots,
             )
             .field("max_snapshot_interval", &self.max_snapshot_interval)
+            .field("snapshot_interval_records", &self.snapshot_interval_records)
             .finish()
     }
 }
@@ -146,6 +150,7 @@ impl ControllerConfig {
             handshake: None,
             max_bytes_between_snapshots: 20 * 1024 * 1024,
             max_snapshot_interval: Duration::from_hours(1),
+            snapshot_interval_records: 0,
         }
     }
 }

@@ -1153,6 +1153,7 @@ impl Broker {
                 handshake: handshake_opt,
                 max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
                 max_snapshot_interval: config.metadata_max_snapshot_interval,
+                snapshot_interval_records: config.metadata_snapshot_interval_records,
             };
             let handle = Arc::new(
                 crabka_raft::Controller::start_with_listener(controller_cfg, controller_listener)

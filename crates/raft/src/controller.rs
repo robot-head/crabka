@@ -593,6 +593,7 @@ impl Controller {
             voters.clone(),
             election_ms,
             peers,
+            config.snapshot_interval_records,
         )?;
 
         // Controller listener.
