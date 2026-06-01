@@ -103,6 +103,33 @@ impl KraftLog {
         self.hwm = self.hwm.min(offset);
         Ok(())
     }
+
+    /// Prune the committed prefix below `end_offset`: advance the log-start
+    /// pointer and trim now-dead segments. No-op when `end_offset` is at or
+    /// below the current log start. Used by the leader after writing a snapshot.
+    ///
+    /// # Errors
+    /// Returns [`RaftError`] if the underlying log operations fail.
+    pub fn prune_to(&mut self, end_offset: i64) -> Result<(), RaftError> {
+        if end_offset <= self.log.log_start_offset() {
+            return Ok(());
+        }
+        self.log.set_log_start_offset(end_offset)?;
+        self.log.trim_to_offset(end_offset)?;
+        Ok(())
+    }
+
+    /// Replace the log with an empty log starting at `end_offset` (drops every
+    /// segment), and set the high watermark to `end_offset`. Used by a follower
+    /// installing a fetched snapshot whose `end_offset` is ahead of its log.
+    ///
+    /// # Errors
+    /// Returns [`RaftError`] if the underlying reset fails.
+    pub fn install_snapshot(&mut self, end_offset: i64) -> Result<(), RaftError> {
+        self.log.reset_to(end_offset)?;
+        self.hwm = end_offset;
+        Ok(())
+    }
 }
 
 impl LogView for KraftLog {
@@ -244,6 +271,34 @@ mod tests {
         assert!(log.hwm() == 1);
         log.advance_hwm(0); // never regress
         assert!(log.hwm() == 1);
+    }
+
+    #[test]
+    fn prune_to_advances_log_start_and_is_noop_when_behind() {
+        let (mut log, _dir) = open_tmp();
+        for _ in 0..5 {
+            log.append(&mut batch(0, 1, b"x")).unwrap();
+        }
+        log.advance_hwm(log.log_end_offset());
+        assert!(log.log_start_offset() == 0);
+        log.prune_to(3).unwrap();
+        assert!(log.log_start_offset() == 3);
+        log.prune_to(2).unwrap(); // <= current start: no-op
+        assert!(log.log_start_offset() == 3);
+    }
+
+    #[test]
+    fn install_snapshot_resets_log_to_empty_at_offset() {
+        let (mut log, _dir) = open_tmp();
+        for _ in 0..4 {
+            log.append(&mut batch(0, 1, b"x")).unwrap();
+        }
+        log.install_snapshot(100).unwrap();
+        assert!(log.log_start_offset() == 100);
+        assert!(log.log_end_offset() == 100);
+        assert!(log.hwm() == 100);
+        let base = log.append(&mut batch(0, 1, b"x")).unwrap();
+        assert!(base == 100);
     }
 
     #[test]
