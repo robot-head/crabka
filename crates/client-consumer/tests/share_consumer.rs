@@ -131,7 +131,9 @@ async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Cl
         resp.coordinators[0].error_code == 0,
         "FindCoordinator(SHARE)"
     );
-    for _ in 0..200 {
+    // ~30s budget: all SHARE_STATE_PARTITIONS must materialize a leader (subject
+    // to KIP-595 election jitter), which is slow under llvm-cov instrumentation.
+    for _ in 0..600 {
         let mut have = 0;
         for p in 0..SHARE_STATE_PARTITIONS {
             if broker.has_partition(SHARE_STATE_TOPIC, p).await {
@@ -154,7 +156,11 @@ async fn wait_for_share_init(
     tid: uuid::Uuid,
     partition: i32,
 ) {
-    for _ in 0..100 {
+    // ~30s budget (matching the other coordinator/leadership waits in the JVM
+    // suites): share-state init needs the `__share_group_state` partition's
+    // leader elected (subject to KIP-595 election jitter) plus a ShareFetch
+    // round-trip, which is slow under llvm-cov instrumentation in CI. 5s flaked.
+    for _ in 0..600 {
         if broker
             .share_state_summary_for_test(group, tid, partition)
             .await
