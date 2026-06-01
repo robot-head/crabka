@@ -260,6 +260,9 @@ async fn dispatch(
         api_key::END_QUORUM_EPOCH => {
             deliver_inbound(engine, |reply| Inbound::EndQuorumEpoch { req: body, reply }).await
         }
+        api_key::FETCH_SNAPSHOT => {
+            deliver_inbound(engine, |reply| Inbound::FetchSnapshot { req: body, reply }).await
+        }
         API_KEY_SUBMIT_CHANGE => dispatch_submit_change(&body, engine).await,
         API_KEY_METADATA_FETCH => dispatch_metadata_fetch(&body, engine).await,
         _ => Err(RaftError::Protocol(

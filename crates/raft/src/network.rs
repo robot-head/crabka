@@ -86,7 +86,7 @@ fn controller_addr(voters: &VoterSet, id: NodeId) -> Option<String> {
 fn api_version_for(key: i16) -> i16 {
     match key {
         api_key::VOTE => 2,
-        api_key::BEGIN_QUORUM_EPOCH | api_key::END_QUORUM_EPOCH => 1,
+        api_key::BEGIN_QUORUM_EPOCH | api_key::END_QUORUM_EPOCH | api_key::FETCH_SNAPSHOT => 1,
         api_key::FETCH => 17,
         _ => 0,
     }
