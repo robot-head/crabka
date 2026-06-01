@@ -1,5 +1,5 @@
 //! `ListGroups` (`api_key=16`). Returns every known group across all three
-//! registries: classic groups from `GroupManager::list_groups` (type
+//! registries: classic groups from `GroupCoordinator::list_groups` (type
 //! `"classic"`), next-gen KIP-848 consumer groups from the unified
 //! coordinator's consumer registry (type `"consumer"`), and KIP-932 share
 //! groups from its share registry (type `"share"`). The optional
@@ -20,7 +20,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::group::GroupState;
+use crate::coordinator::unified::classic_state::GroupState;
 use crate::error::BrokerError;
 
 pub(crate) async fn handle(
@@ -32,7 +32,7 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, BrokerError> {
     let mut cur: &[u8] = req_bytes;
     let req = ListGroupsRequest::decode(&mut cur, version)?;
-    let snapshots = broker.group_manager.list_groups().await;
+    let snapshots = broker.group_coordinator.list_groups().await;
 
     let image = broker.controller.current_image();
 
@@ -90,34 +90,33 @@ pub(crate) async fn handle(
     }
 
     // ── KIP-848 next-gen consumer groups (group_type "consumer") ────────
-    // These live in the unified coordinator's consumer registry, separate from
-    // the classic `GroupManager` map (always present once next-gen is wired).
-    if let Some(ng) = broker.group_manager.next_gen() {
+    // These live in the unified coordinator's consumer registry, separate
+    // from the classic group registry.
+    let ng = &broker.group_coordinator;
+    append_next_gen(
+        &mut groups,
+        &mut emitted,
+        "consumer",
+        ng.consumer_group_ids(),
+        &req,
+        states_active,
+        types_active,
+        &authorized,
+    );
+    // ── KIP-932 share groups (group_type "share") ───────────────────────
+    // Gated on `share_group.enable`; share groups live in the same
+    // coordinator's separate share registry.
+    if broker.config.share_group.enable {
         append_next_gen(
             &mut groups,
             &mut emitted,
-            "consumer",
-            ng.consumer_group_ids(),
+            "share",
+            ng.share_group_ids(),
             &req,
             states_active,
             types_active,
             &authorized,
         );
-        // ── KIP-932 share groups (group_type "share") ───────────────────
-        // Gated on `share_group.enable`; share groups live in the same
-        // coordinator's separate share registry.
-        if broker.config.share_group.enable {
-            append_next_gen(
-                &mut groups,
-                &mut emitted,
-                "share",
-                ng.share_group_ids(),
-                &req,
-                states_active,
-                types_active,
-                &authorized,
-            );
-        }
     }
 
     let resp = ListGroupsResponse {

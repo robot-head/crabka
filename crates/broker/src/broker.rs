@@ -45,7 +45,7 @@ pub struct Broker {
     /// request for the same partition idempotent (or reject a
     /// conflicting target).
     pub(crate) future_logs: Arc<DashMap<(String, i32), Arc<crate::future_log::FutureLogState>>>,
-    pub(crate) group_manager: Arc<crate::coordinator::GroupManager>,
+    pub(crate) group_coordinator: Arc<crate::coordinator::GroupCoordinator>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     pub(crate) producer_state: Arc<crate::producer_state::ProducerState>,
     pub(crate) txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
@@ -124,6 +124,10 @@ pub struct Broker {
     /// [`crate::log_dir_status::LogDirRegistry::is_offline`] before
     /// touching the dir.
     pub(crate) log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// KIP-714 client-metrics receiver: subscription manager + Prometheus
+    /// collector + OTLP forwarder. Shared so the push handler (Task 15)
+    /// and the scrape path both touch the same instance.
+    pub(crate) client_metrics: Arc<crate::client_metrics::ClientMetrics>,
     handlers: HandlerTable,
 }
 
@@ -533,14 +537,17 @@ impl BrokerHandle {
             .map_err(|e| crate::error::BrokerError::Replication(format!("submit: {e}")))
     }
 
-    /// Test-only: insert a group into this broker's `GroupManager`. Returns
-    /// immediately if the group already exists (idempotent). Used by
-    /// admin-handler integration tests to seed the group registry without
-    /// running a full `JoinGroup` / `SyncGroup` protocol exchange.
+    /// Test-only: insert a classic group into this broker's
+    /// `GroupCoordinator`. Returns immediately if the group already exists
+    /// (idempotent). Used by admin-handler integration tests to seed the group
+    /// registry without running a full `JoinGroup` / `SyncGroup` exchange.
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
     pub fn group_create_for_test(&self, group_id: &str) {
-        let _ = self._broker.group_manager.get_or_create(group_id);
+        let _ = self
+            ._broker
+            .group_coordinator
+            .get_or_create_classic(group_id);
     }
 
     /// This broker's raft `node_id` (1-indexed broker id used in raft quorum
@@ -1107,6 +1114,14 @@ impl Broker {
                     ),
                 );
                 initial_voters = voters;
+
+                // KIP-584/1022: a standalone self-bootstrap finalizes every
+                // feature at the newest release's default (metadata.version MAX),
+                // matching a freshly-formatted 4.0 cluster — so e.g. group.version=1
+                // is finalized and the next-gen group protocol is enabled.
+                bootstrap_records.extend(crabka_metadata::bootstrap_feature_records(
+                    crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+                ));
             }
 
             let controller_cfg = crabka_raft::ControllerConfig {
@@ -1342,31 +1357,29 @@ impl Broker {
             }
         }
 
-        // Group coordinator bootstrap.
-        let group_manager = Arc::new(crate::coordinator::GroupManager::new());
+        // Group coordinator bootstrap. One unified coordinator owns both the
+        // classic and the next-gen consumer-group protocols.
         let offsets_log: std::sync::Arc<dyn crate::coordinator::unified::offsets_log::OffsetsLog> =
             std::sync::Arc::new(
                 crate::coordinator::unified::offsets_log::ProductionOffsetsLog::new(
                     partitions.clone(),
                 ),
             );
-        let next_gen_coord =
-            std::sync::Arc::new(crate::coordinator::unified::GroupCoordinator::new(
-                config.next_gen_consumer_group.as_ref().clone(),
-                config.share_group.as_ref().clone(),
-                std::sync::Arc::new(crate::coordinator::unified::ImageMetadataProvider {
-                    controller: controller.clone(),
-                }),
-                offsets_log,
-            ));
-        group_manager.set_next_gen(next_gen_coord);
+        let group_coordinator = std::sync::Arc::new(crate::coordinator::GroupCoordinator::new(
+            config.next_gen_consumer_group.as_ref().clone(),
+            config.share_group.as_ref().clone(),
+            std::sync::Arc::new(crate::coordinator::unified::ImageMetadataProvider {
+                controller: controller.clone(),
+            }),
+            offsets_log,
+        ));
         let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         crate::coordinator::bootstrap::bootstrap(
             &config,
             &controller,
             &partitions,
-            group_manager.as_ref(),
+            &group_coordinator,
             &log_dir_status,
         )
         .await?;
@@ -1421,9 +1434,7 @@ impl Broker {
                 config.inter_broker_listener_name.clone(),
             ),
         );
-        if let Some(coord) = group_manager.next_gen() {
-            coord.set_share_persister(share_persister.clone());
-        }
+        group_coordinator.set_share_persister(share_persister.clone());
 
         // 4a'''. Share-partition leader manager (KIP-932 Slice C): owns the
         //        in-memory acquisition state machines for the (group, topic,
@@ -1652,6 +1663,40 @@ impl Broker {
         } else {
             None
         };
+        // KIP-714 client-metrics: build the bundle (manager + Prometheus
+        // collector + OTLP forwarder) and register the collector into the
+        // shared metrics registry so it appears on the `/metrics` scrape.
+        let otlp_metrics_endpoint =
+            crate::telemetry::OtlpConfig::from_env(|k| std::env::var(k).ok(), "", "")
+                .map(|c| c.endpoint);
+        let client_metrics = Arc::new(crate::client_metrics::ClientMetrics::new(
+            crate::client_metrics::DEFAULT_TELEMETRY_MAX_BYTES,
+            otlp_metrics_endpoint,
+        ));
+        {
+            let mut reg = metrics.registry.lock().await;
+            reg.register_collector(Box::new(
+                crate::client_metrics::prometheus_sink::SharedClientMetricsCollector(
+                    client_metrics.prometheus.clone(),
+                ),
+            ));
+        }
+        // Periodic eviction of stale client-metrics entries (3× push
+        // interval, floor 600s). Child token of supervisor_shutdown.
+        {
+            let cm = client_metrics.clone();
+            let token = supervisor_shutdown.child_token();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_mins(1));
+                loop {
+                    tokio::select! {
+                        () = token.cancelled() => break,
+                        _ = tick.tick() => cm.manager.evict_stale(3, std::time::Duration::from_mins(10)),
+                    }
+                }
+            });
+        }
+
         // Background gauge updater: poll partitions_led + active_controller
         // once a second. Cheap (DashMap iteration + one atomic borrow).
         {
@@ -2206,7 +2251,7 @@ impl Broker {
             controller,
             partitions,
             future_logs,
-            group_manager: group_manager.clone(),
+            group_coordinator: group_coordinator.clone(),
             producer_ids,
             producer_state,
             txn_coordinator,
@@ -2229,6 +2274,7 @@ impl Broker {
             should_shutdown: should_shutdown_tx,
             remote_reader,
             log_dir_status,
+            client_metrics,
             handlers,
         });
 

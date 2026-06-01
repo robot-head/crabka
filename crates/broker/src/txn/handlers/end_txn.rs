@@ -34,19 +34,12 @@ use crabka_security::ListenerProtocol;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::bootstrap::OFFSETS_TOPIC;
 use crate::error::BrokerError;
 use crate::network::client::InterBrokerClient;
 use crate::txn::marker::{MarkerType, build_marker_batch};
-use crate::txn::partitioner::partition_for_tid;
 use crate::txn::state::{TopicPartition, TxnEntry, TxnState};
 use crate::txn::util::now_millis;
-
-/// Number of partitions in `__consumer_offsets`. Bootstrap creates a
-/// 1-partition topic (`OFFSETS_PARTITION = 0`), so all group-ids map to
-/// partition 0. Documented here so it's easy to wire up the 50-partition
-/// topology once we get there.
-const OFFSETS_NUM_PARTITIONS: i32 = 1;
+use crate::txn::version::TxnVersion;
 
 #[allow(clippy::too_many_lines)]
 pub(crate) async fn handle(
@@ -67,6 +60,7 @@ pub(crate) async fn handle(
     // Refresh leader-partition view from the current metadata image
     // before checking coordinator-ness.
     let image = controller.current_image();
+    let txnv = crate::txn::version::resolve_txn_version(&image);
     coord.refresh_leader_partitions(&image).await;
 
     let tid = req.transactional_id.as_str();
@@ -127,7 +121,7 @@ pub(crate) async fn handle(
         // Lock dropped here.
     };
 
-    if let Err(e) = coord.put(prepare_snap.clone()).await {
+    if let Err(e) = coord.put(prepare_snap.clone(), txnv).await {
         tracing::error!(
             tid,
             state = ?prepare,
@@ -184,6 +178,14 @@ pub(crate) async fn handle(
         return encode_err(version, codes::INVALID_PRODUCER_ID_MAPPING);
     };
 
+    // The (pid, epoch) returned to the producer (see `next_producer_identity`).
+    // At TV_2 the epoch is bumped by one on completion; on epoch exhaustion the
+    // producer rolls to a new producer_id at epoch 0. Below TV_2 both are the
+    // producer's current values unchanged. Both are assigned on the Proceed
+    // path below (the other re-acquire branches return early).
+    let response_pid;
+    let response_epoch;
+
     let complete_snap: TxnEntry = {
         let mut entry = current_mutex.lock().await;
         match validate_complete_reacquire(
@@ -198,8 +200,10 @@ pub(crate) async fn handle(
                 // Another caller already drove this exact transition to
                 // completion (or we are an idempotent EndTxn retry that lost
                 // the race). The desired post-state is already persisted, so
-                // report success without re-writing.
-                return encode_ok(version);
+                // report success without re-writing. Return the persisted
+                // (possibly already-bumped) epoch so a KIP-890 client that
+                // retried picks up the authoritative value.
+                return encode_ok(version, entry.producer_id, entry.producer_epoch);
             }
             ReacquireDecision::Reject(code) => {
                 tracing::warn!(
@@ -217,6 +221,28 @@ pub(crate) async fn handle(
         }
         entry.state = complete;
         entry.last_update_ms = now_millis();
+        // KIP-890: at TV_2 bump the producer epoch on completion so a zombie
+        // holding the old epoch is fenced WITHOUT a fresh InitProducerId. The
+        // bump is applied AFTER the Phase-2 marker fan-out (markers were written
+        // with the producer's old/current epoch above); only the persisted and
+        // returned identity reflects it. On epoch exhaustion the producer rolls
+        // to a freshly-allocated producer_id at epoch 0. Below TV_2 both are
+        // unchanged.
+        let (new_pid, new_epoch) = next_producer_identity(
+            txnv,
+            entry.producer_id,
+            entry.producer_epoch,
+            &coord.producer_ids,
+        );
+        if new_pid != entry.producer_id {
+            // Epoch rolled over to a new producer_id: record the prior id so the
+            // transition is traceable on the entry (KIP-890 PreviousProducerId).
+            entry.prev_producer_id = entry.producer_id;
+        }
+        entry.producer_id = new_pid;
+        entry.producer_epoch = new_epoch;
+        response_pid = new_pid;
+        response_epoch = new_epoch;
         entry.clone()
         // Lock dropped here.
     };
@@ -224,7 +250,7 @@ pub(crate) async fn handle(
     // FINAL put: move `complete_snap` in (no use-after-move below) to avoid the
     // redundant full `TxnEntry` clone (incl. the partition / offset-commit-group
     // sets) that the intermediate phases pay.
-    if let Err(e) = coord.put(complete_snap).await {
+    if let Err(e) = coord.put(complete_snap, txnv).await {
         tracing::error!(
             tid,
             state = ?complete,
@@ -234,7 +260,34 @@ pub(crate) async fn handle(
         return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
     }
 
-    encode_ok(version)
+    encode_ok(version, response_pid, response_epoch)
+}
+
+/// KIP-890: the `(producer_id, producer_epoch)` a producer continues with after
+/// a transaction completes.
+///
+/// - Below `TV_2`: unchanged — the epoch only moves on `InitProducerId` reuse.
+/// - `TV_2`, normal: same `producer_id`, `epoch + 1` — bumping on completion
+///   fences a zombie holding the old epoch without a fresh `InitProducerId`.
+/// - `TV_2`, epoch exhaustion (`epoch == i16::MAX`): the epoch can't bump, so a
+///   *new* `producer_id` is allocated (`epoch` reset to 0). The caller records
+///   the old id as the entry's `prev_producer_id` so the transition is
+///   traceable. The `EndTxn` v5 response returns the new pair and the producer
+///   adopts it for its next transaction.
+fn next_producer_identity(
+    txnv: TxnVersion,
+    pid: i64,
+    epoch: i16,
+    ids: &crate::producer_id_manager::ProducerIdManager,
+) -> (i64, i16) {
+    if !txnv.verified() {
+        return (pid, epoch);
+    }
+    match epoch.checked_add(1) {
+        Some(bumped) => (pid, bumped),
+        // Epoch exhausted: roll to a fresh producer_id at epoch 0 (KIP-890).
+        None => ids.allocate(),
+    }
 }
 
 /// Decision for the Phase-3 (Complete) re-acquire re-validation. See
@@ -303,8 +356,9 @@ fn validate_complete_reacquire(
 ///   [`InterBrokerClient`], which runs TLS / SASL when the inter-broker
 ///   listener demands them.
 ///
-/// `__consumer_offsets` partitions are added for each group in
-/// `entry.offset_commit_groups`.
+/// Any `__consumer_offsets` partitions registered via `AddOffsetsToTxn` live
+/// in `entry.partitions` (Kafka's model has no separate group list), so they
+/// are fanned out by the same loop as data partitions.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_markers(
     node_id: NodeId,
@@ -324,21 +378,6 @@ async fn dispatch_markers(
             .partition(&tp.topic, tp.partition)
             .map_or(node_id, |p| p.leader);
         by_leader.entry(leader).or_default().push(tp.clone());
-    }
-
-    // Also add the `__consumer_offsets` partition for each transactional
-    // offset-commit group. `__consumer_offsets` is currently a 1-partition
-    // topic, so `partition_for_tid(group_id, 1)` always returns 0.
-    for group_id in &entry.offset_commit_groups {
-        let part_idx = partition_for_tid(group_id, OFFSETS_NUM_PARTITIONS);
-        let tp = TopicPartition {
-            topic: OFFSETS_TOPIC.to_string(),
-            partition: part_idx,
-        };
-        let leader = image
-            .partition(OFFSETS_TOPIC, part_idx)
-            .map_or(node_id, |p| p.leader);
-        by_leader.entry(leader).or_default().push(tp);
     }
 
     for (leader, tps) in by_leader {
@@ -488,17 +527,32 @@ async fn send_write_txn_markers(
 // ── encoding helpers ──────────────────────────────────────────────────────────
 
 fn encode_err(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
-    encode_response(version, error_code)
+    // On the error path the producer_id/epoch fields are not meaningful;
+    // leave them at the response default (-1, -1).
+    encode_response(version, error_code, -1, -1)
 }
 
-fn encode_ok(version: i16) -> Result<Bytes, BrokerError> {
-    encode_response(version, codes::NONE)
+/// Encode a successful `EndTxn` response. `producer_id` / `producer_epoch` are
+/// the post-completion identity (the epoch is bumped at `TV_2`, or rolls to a
+/// new `producer_id` on epoch exhaustion; see [`next_producer_identity`]). They
+/// are only on the wire at v5 (KIP-890); at
+/// lower versions the producer never observes them, and the persisted bump
+/// fences a stale-epoch producer on its next coordinator call instead.
+fn encode_ok(version: i16, producer_id: i64, producer_epoch: i16) -> Result<Bytes, BrokerError> {
+    encode_response(version, codes::NONE, producer_id, producer_epoch)
 }
 
-fn encode_response(version: i16, error_code: i16) -> Result<Bytes, BrokerError> {
+fn encode_response(
+    version: i16,
+    error_code: i16,
+    producer_id: i64,
+    producer_epoch: i16,
+) -> Result<Bytes, BrokerError> {
     let resp = EndTxnResponse {
         throttle_time_ms: 0,
         error_code,
+        producer_id,
+        producer_epoch,
         ..Default::default()
     };
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
@@ -511,6 +565,35 @@ mod tests {
     use super::*;
     use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
+
+    // ── KIP-890 TV_2 completion identity: next_producer_identity ────────────
+
+    #[test]
+    fn epoch_bumps_only_at_tv2() {
+        use crate::txn::version::TxnVersion;
+        let ids = crate::producer_id_manager::ProducerIdManager::new();
+        // Below TV_2: pid + epoch unchanged.
+        assert!(next_producer_identity(TxnVersion::Classic, 7, 3, &ids) == (7, 3));
+        assert!(next_producer_identity(TxnVersion::Flexible, 7, 3, &ids) == (7, 3));
+        // TV_2 non-overflow: same pid, epoch + 1.
+        assert!(next_producer_identity(TxnVersion::Verified, 7, 3, &ids) == (7, 4));
+    }
+
+    #[test]
+    fn epoch_overflow_at_tv2_allocates_new_pid_at_epoch_zero() {
+        use crate::txn::version::TxnVersion;
+        let ids = crate::producer_id_manager::ProducerIdManager::new();
+        // At i16::MAX the epoch can't bump: a fresh producer_id is allocated
+        // (monotonic from PID_BASE) and the epoch resets to 0. No panic.
+        let (new_pid, new_epoch) = next_producer_identity(TxnVersion::Verified, 7, i16::MAX, &ids);
+        assert!(new_pid != 7);
+        assert!(new_epoch == 0);
+        // The allocator hands out a distinct pid on the next overflow too.
+        let (next_pid, _) = next_producer_identity(TxnVersion::Verified, 7, i16::MAX, &ids);
+        assert!(next_pid != new_pid);
+        // Below TV_2 at i16::MAX: no roll, epoch stays (no bump path taken).
+        assert!(next_producer_identity(TxnVersion::Classic, 7, i16::MAX, &ids) == (7, i16::MAX));
+    }
 
     // ── Phase-3 re-validation: validate_complete_reacquire ──────────────────
 

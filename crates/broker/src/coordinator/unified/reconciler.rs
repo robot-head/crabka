@@ -132,6 +132,7 @@ mod tests {
             assigned_partitions: HashMap::new(),
             partitions_pending_revocation: HashMap::new(),
             last_seen: Instant::now(),
+            classic: None,
         }
     }
 
@@ -240,6 +241,7 @@ mod tests {
             assigned_partitions: HashMap::new(),
             partitions_pending_revocation: HashMap::new(),
             last_seen: Instant::now(),
+            classic: None,
         }
     }
 

@@ -45,6 +45,7 @@ impl HandlerTable {
 
 pub(crate) mod context;
 pub(crate) use context::RequestContext;
+pub(crate) use context::TelemetryContext;
 
 pub(crate) mod acl_wire;
 // KIP-853 dynamic-quorum reconfiguration (api_keys 80/81/82).
@@ -268,10 +269,10 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(85, crate::share_coordinator::handlers::write::handle);
     t.register(86, crate::share_coordinator::handlers::delete::handle);
     t.register(87, crate::share_coordinator::handlers::read_summary::handle);
-    // KIP-714 (client metrics push). Both handlers are no-ops: get returns
-    // an empty subscription so JVM clients skip push; push silently
-    // discards anything that races the subscription re-fetch.
-    t.register(71, get_telemetry_subscriptions::handle);
-    t.register(72, push_telemetry::handle);
+    // 71 (GetTelemetrySubscriptions) intercepted inline in `network::dispatch`
+    // so the handler receives the per-connection peer SocketAddr and software
+    // name/version for KIP-714 subscription matching.
+    // 72 (PushTelemetry) intercepted inline in `network::dispatch` for the
+    // same reason — it needs the per-connection context to authorize pushes.
     t
 }

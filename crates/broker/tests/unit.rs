@@ -458,13 +458,18 @@ async fn full_group_flow_join_sync_heartbeat_commit_fetch_leave() {
         OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
     };
     use crabka_protocol::owned::offset_fetch_request::{
-        OffsetFetchRequest, OffsetFetchRequestTopic,
+        OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopics,
     };
     use crabka_protocol::owned::sync_group_request::{
         SyncGroupRequest, SyncGroupRequestAssignment,
     };
 
     let p = support::start().await;
+
+    // KIP-516: OffsetCommit/OffsetFetch negotiate to v10/v8+, which key by
+    // topic_id on the wire — so the topic must exist to carry a real UUID.
+    create_topic(&p, "t", 1).await;
+    let tid = topic_id_for(&p, "t").await;
 
     // Step 1: empty member_id → broker returns one.
     let r1 = p
@@ -553,6 +558,7 @@ async fn full_group_flow_join_sync_heartbeat_commit_fetch_leave() {
             member_id: mid.clone(),
             topics: vec![OffsetCommitRequestTopic {
                 name: "t".into(),
+                topic_id: tid,
                 partitions: vec![OffsetCommitRequestPartition {
                     partition_index: 0,
                     committed_offset: 42,
@@ -568,21 +574,26 @@ async fn full_group_flow_join_sync_heartbeat_commit_fetch_leave() {
         .unwrap();
     assert!(r5.topics[0].partitions[0].error_code == 0);
 
-    // Step 6: OffsetFetch → returns 42.
+    // Step 6: OffsetFetch → returns 42. v8+ uses the multi-group `groups[]`
+    // shape, keyed by topic_id at v10.
     let r6 = p
         .client
         .send(OffsetFetchRequest {
-            group_id: "g".into(),
-            topics: Some(vec![OffsetFetchRequestTopic {
-                name: "t".into(),
-                partition_indexes: vec![0],
+            groups: vec![OffsetFetchRequestGroup {
+                group_id: "g".into(),
+                topics: Some(vec![OffsetFetchRequestTopics {
+                    name: "t".into(),
+                    topic_id: tid,
+                    partition_indexes: vec![0],
+                    ..Default::default()
+                }]),
                 ..Default::default()
-            }]),
+            }],
             ..Default::default()
         })
         .await
         .unwrap();
-    assert!(r6.topics[0].partitions[0].committed_offset == 42);
+    assert!(r6.groups[0].topics[0].partitions[0].committed_offset == 42);
 
     // Step 7: LeaveGroup.
     let r7 = p

@@ -22,7 +22,7 @@ pub(crate) fn handle(
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
     let share_enabled = broker.config.share_group.enable;
-    let group_manager = broker.group_manager.clone();
+    let ng = broker.group_coordinator.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ShareGroupHeartbeatRequest::decode(&mut cur, version)?;
@@ -30,10 +30,6 @@ pub(crate) fn handle(
         if !share_enabled {
             return encode(version, &error(codes::UNSUPPORTED_VERSION));
         }
-
-        let Some(ng) = group_manager.next_gen().cloned() else {
-            return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
-        };
 
         ng.mark_share(&req.group_id);
         let handle = ng.get_or_create_share(&req.group_id);

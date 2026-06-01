@@ -34,7 +34,7 @@ pub(crate) async fn handle(
 
     let image = broker.controller.current_image();
     let share_enabled = broker.config.share_group.enable;
-    let ng_opt = broker.group_manager.next_gen().cloned();
+    let ng_opt = Some(broker.group_coordinator.clone());
 
     let mut groups: Vec<DescribedGroup> = Vec::with_capacity(req.group_ids.len());
     for gid in &req.group_ids {

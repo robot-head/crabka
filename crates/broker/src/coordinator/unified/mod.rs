@@ -6,9 +6,12 @@
 //! and replays persisted state during bootstrap.
 pub mod actor;
 pub mod assignor;
+pub(crate) mod classic_ops;
+pub(crate) mod classic_state;
 pub mod config;
 pub(crate) mod consumer_state;
 pub(crate) mod group;
+pub(crate) mod migration;
 pub mod offsets_log;
 pub(crate) mod persistence;
 pub mod persistence_next_gen;
@@ -20,12 +23,19 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use tokio::sync::oneshot;
 
-use actor::{GroupActorHandle, GroupActorMessage, MetadataProvider};
+use actor::{GroupActorHandle, GroupActorMessage, GroupKindTag, MetadataProvider};
 use config::NextGenConfig;
+use group::Group;
 use offsets_log::OffsetsLog;
 use share::actor::{ShareGroupActorHandle, ShareGroupActorMessage};
 use share::config::ShareGroupConfig;
 
+use crate::coordinator::{DeleteGroupError, GroupSnapshot};
+
+/// Locked protocol identity for a `group_id`. Classic/next-gen actors enforce
+/// their lock via the actor's [`GroupKindTag`]; share groups (KIP-932) live in
+/// a separate `share_groups` registry and record their lock here so that the
+/// classic/next-gen and share namespaces can't collide on the same id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GroupType {
     Classic,
@@ -42,13 +52,15 @@ pub struct GroupCoordinator {
     pub groups: Arc<DashMap<String, Arc<GroupActorHandle>>>,
     /// Per-`group_id` share-group actor handles (KIP-932).
     pub share_groups: Arc<DashMap<String, Arc<ShareGroupActorHandle>>>,
-    /// First record persisted per `group_id` locks its type for life.
+    /// First record persisted per `group_id` locks its type for life (the
+    /// classic↔next-gen↔share namespace guard).
     pub group_types: Arc<DashMap<String, GroupType>>,
-    /// Bootstrap-time accumulator; drained by `finalize_bootstrap`.
+    /// Bootstrap-time accumulator for next-gen state; drained by
+    /// `finalize_bootstrap`.
     pub seeds: Arc<DashMap<String, GroupSeed>>,
     /// Bootstrap-time share-group accumulator; drained by `finalize_bootstrap`.
     pub share_seeds: Arc<DashMap<String, ShareGroupSeed>>,
-    /// Last-known-good state per group, populated alongside every
+    /// Last-known-good next-gen state per group, populated alongside every
     /// successful actor write. Used to seed a fresh actor when the
     /// previous instance crashed after a log-write failure.
     pub seeds_cache: Arc<DashMap<String, GroupSeed>>,
@@ -118,6 +130,10 @@ impl GroupCoordinator {
         self.seeds_cache.get(group_id).map(|e| e.value().clone())
     }
 
+    /// The locked protocol type for `group_id`, if recorded. Share groups
+    /// (KIP-932) record their lock here via [`mark_share`](Self::mark_share);
+    /// classic/next-gen actors additionally enforce their lock through the
+    /// actor [`GroupKindTag`].
     #[must_use]
     pub fn group_type(&self, group_id: &str) -> Option<GroupType> {
         self.group_types.get(group_id).map(|e| *e.value())
@@ -155,20 +171,34 @@ impl GroupCoordinator {
             .map(|e| e.value().clone())
     }
 
+    /// Get the existing actor for `group_id`, or spawn one of `kind`.
+    ///
+    /// Returns `None` if a *live* actor of the **other** protocol already owns
+    /// the id — this enforces the per-group type lock (formerly the
+    /// `group_types` map + `mark_*`): the first protocol to create the actor
+    /// wins, and the second is rejected by its handler, exactly as before.
     #[must_use]
-    pub fn get_or_create(self: &Arc<Self>, group_id: &str) -> Arc<GroupActorHandle> {
+    pub fn get_or_create(
+        self: &Arc<Self>,
+        group_id: &str,
+        kind: GroupKindTag,
+    ) -> Option<Arc<GroupActorHandle>> {
         if let Some(h) = self.groups.get(group_id) {
             // Dead-actor detection: if the mpsc sender is closed, the actor
             // has exited (typically after a log-write failure). Drop the
             // entry and fall through to spawn a fresh actor.
             if !h.value().tx.is_closed() {
-                return h.value().clone();
+                if h.value().kind != kind {
+                    return None;
+                }
+                return Some(h.value().clone());
             }
             drop(h);
             self.groups.remove(group_id);
         }
         let h = Arc::new(GroupActorHandle::spawn(
             group_id.into(),
+            kind,
             self.config.clone(),
             self.metadata.clone(),
             self.offsets_log.clone(),
@@ -180,10 +210,37 @@ impl GroupCoordinator {
             .or_insert(h)
             .value()
             .clone();
-        if let Some(seed) = self.cached_seed(group_id) {
+        if inserted.kind != kind {
+            // Lost a spawn race against the other protocol.
+            return None;
+        }
+        // Re-hydrate a respawned consumer actor from its last-known-good state.
+        if kind == GroupKindTag::Consumer
+            && let Some(seed) = self.cached_seed(group_id)
+        {
             let _ = inserted.tx.try_send(GroupActorMessage::Seed(seed));
         }
-        inserted
+        Some(inserted)
+    }
+
+    /// Get-or-create a classic-protocol actor. `None` if a consumer group
+    /// already owns the id.
+    #[must_use]
+    pub fn get_or_create_classic(
+        self: &Arc<Self>,
+        group_id: &str,
+    ) -> Option<Arc<GroupActorHandle>> {
+        self.get_or_create(group_id, GroupKindTag::Classic)
+    }
+
+    /// Get-or-create a next-gen consumer-protocol actor. `None` if a classic
+    /// group already owns the id.
+    #[must_use]
+    pub fn get_or_create_consumer(
+        self: &Arc<Self>,
+        group_id: &str,
+    ) -> Option<Arc<GroupActorHandle>> {
+        self.get_or_create(group_id, GroupKindTag::Consumer)
     }
 
     #[must_use]
@@ -240,6 +297,74 @@ impl GroupCoordinator {
     /// `group_type="consumer"` entries without an actor round-trip.
     pub fn consumer_group_ids(&self) -> Vec<String> {
         self.groups.iter().map(|e| e.key().clone()).collect()
+    }
+
+    /// Spawn a classic actor seeded with a fully-replayed `Group` (bootstrap).
+    pub fn seed_classic(self: &Arc<Self>, group_id: &str, group: Box<Group>) {
+        if let Some(handle) = self.get_or_create_classic(group_id) {
+            let _ = handle.tx.try_send(GroupActorMessage::ClassicSeed(group));
+        }
+    }
+
+    /// Snapshot every **classic** group. Consumer groups are intentionally not
+    /// surfaced to the legacy admin APIs (preserved from the two-coordinator
+    /// era). TODO(64d-C+): surface consumer groups in admin APIs.
+    pub async fn list_groups(&self) -> Vec<GroupSnapshot> {
+        let handles: Vec<Arc<GroupActorHandle>> = self
+            .groups
+            .iter()
+            .filter(|e| e.value().kind == GroupKindTag::Classic)
+            .map(|e| e.value().clone())
+            .collect();
+        let mut out = Vec::with_capacity(handles.len());
+        for h in handles {
+            let (tx, rx) = oneshot::channel();
+            if h.tx
+                .send(GroupActorMessage::ClassicInspect { reply: tx })
+                .await
+                .is_ok()
+                && let Ok(view) = rx.await
+            {
+                out.push(view.snapshot());
+            }
+        }
+        out
+    }
+
+    /// Snapshot a single **classic** group, or `None` if unknown / consumer.
+    pub async fn describe_group(&self, group_id: &str) -> Option<GroupSnapshot> {
+        let handle = self.find(group_id)?;
+        if handle.kind != GroupKindTag::Classic {
+            return None;
+        }
+        let (tx, rx) = oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicInspect { reply: tx })
+            .await
+            .ok()?;
+        rx.await.ok().map(|v| v.snapshot())
+    }
+
+    /// Drop a **classic** group from the registry. `NonEmpty` if it still has
+    /// live members; `NotFound` if unknown / consumer.
+    pub async fn delete_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
+        let handle = self.find(group_id).ok_or(DeleteGroupError::NotFound)?;
+        if handle.kind != GroupKindTag::Classic {
+            return Err(DeleteGroupError::NotFound);
+        }
+        let (tx, rx) = oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicInspect { reply: tx })
+            .await
+            .map_err(|_| DeleteGroupError::NotFound)?;
+        let view = rx.await.map_err(|_| DeleteGroupError::NotFound)?;
+        if !view.members.is_empty() {
+            return Err(DeleteGroupError::NonEmpty);
+        }
+        self.groups.remove(group_id);
+        Ok(())
     }
 
     pub async fn shutdown_all(&self) {
@@ -513,8 +638,9 @@ impl GroupCoordinator {
     pub fn finalize_bootstrap(self: &Arc<Self>) {
         let group_ids: Vec<String> = self.seeds.iter().map(|e| e.key().clone()).collect();
         for gid in group_ids {
-            if let Some((_, seed)) = self.seeds.remove(&gid) {
-                let handle = self.get_or_create(&gid);
+            if let Some((_, seed)) = self.seeds.remove(&gid)
+                && let Some(handle) = self.get_or_create_consumer(&gid)
+            {
                 let _ = handle.tx.try_send(actor::GroupActorMessage::Seed(seed));
             }
         }

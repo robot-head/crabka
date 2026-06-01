@@ -54,6 +54,7 @@ mod commit;
 mod consumer;
 mod coordinator;
 mod error;
+mod offset_wire;
 mod poll;
 mod share;
 

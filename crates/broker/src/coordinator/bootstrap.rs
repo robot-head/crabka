@@ -1,7 +1,8 @@
 //! `__consumer_offsets` topic lifecycle: ensure the topic exists at
 //! startup, then synchronously replay every record into the in-memory
-//! `GroupManager`.
+//! `GroupCoordinator`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
@@ -10,19 +11,46 @@ use crabka_raft::RaftError;
 
 use crate::broker::spawn_partition;
 use crate::config::BrokerConfig;
-use crate::coordinator::GroupManager;
-use crate::coordinator::group::{Group, Member, OffsetEntry};
+use crate::coordinator::GroupCoordinator;
 use crate::coordinator::persistence::{self, GroupMetadataValue, Key, OffsetCommitValue};
+use crate::coordinator::unified::classic_state::{
+    Group as ClassicState, GroupState as ClassicGroupState, Member, OffsetEntry,
+};
+use crate::coordinator::unified::group::{Group, GroupKind};
 use crate::error::BrokerError;
 use crate::log_dir;
 use crate::partition_registry::PartitionRegistry;
 
 pub const OFFSETS_TOPIC: &str = "__consumer_offsets";
 pub const OFFSETS_PARTITION: i32 = 0;
+/// Number of partitions in `__consumer_offsets`. Bootstrap creates a
+/// 1-partition topic (`OFFSETS_PARTITION = 0`), so all group-ids map to
+/// partition 0. Shared so the transaction handlers (`AddOffsetsToTxn`,
+/// `EndTxn`) agree on the partition a group's offset commits land in.
+///
+/// CAVEAT for a future multi-partition `__consumer_offsets`: Kafka partitions
+/// this topic by group with `abs(groupId.hashCode()) % N` (Java
+/// `String.hashCode`), NOT murmur2. `AddOffsetsToTxn` currently computes the
+/// group's partition with `partition_for_tid` (murmur2) — correct only while
+/// `N == 1`. Growing this past 1 requires a dedicated `partition_for_group`
+/// using the Java-hashCode rule, applied consistently here and in the offset
+/// storage path (which today hardcodes `OFFSETS_PARTITION = 0`).
+pub const OFFSETS_NUM_PARTITIONS: i32 = 1;
+
+/// Bootstrap-time accumulator. Committed offsets are protocol-agnostic, so we
+/// collect them per group and attach them once the group's kind is known;
+/// classic `GroupMetadata` builds a `ClassicState` in place. Next-gen records
+/// feed the coordinator's own seed accumulator (`replay_*`), drained by
+/// `finalize_bootstrap`.
+#[derive(Default)]
+struct Replayed {
+    classic: HashMap<String, ClassicState>,
+    committed: HashMap<String, HashMap<(String, i32), OffsetEntry>>,
+}
 
 /// Ensure the `__consumer_offsets-0` partition exists on disk, open its
 /// `Log`, spawn a writer task, and replay every record into the supplied
-/// `GroupManager`. Registers the topic via the metadata quorum
+/// `GroupCoordinator`. Registers the topic via the metadata quorum
 /// (`controller.submit_change(...)`) as a 1-partition internal topic;
 /// `TopicExists` is treated as success so a restart that finds the topic
 /// already in the log is a no-op.
@@ -33,7 +61,7 @@ pub async fn bootstrap(
     config: &BrokerConfig,
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     partitions: &Arc<PartitionRegistry>,
-    group_manager: &GroupManager,
+    coordinator: &Arc<GroupCoordinator>,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
 ) -> Result<(), BrokerError> {
     // KIP-113 offline-dir handling: exclude dirs flagged offline by the
@@ -85,10 +113,8 @@ pub async fn bootstrap(
     }
 
     // Replay before spawning the writer so reads see consistent state.
-    replay_records(&log, group_manager).await?;
-    if let Some(ng) = group_manager.next_gen() {
-        ng.finalize_bootstrap();
-    }
+    let replayed = replay_records(&log, coordinator)?;
+    finalize(coordinator, replayed);
 
     // Spawn a writer + register the partition handle.
     let partition = spawn_partition(
@@ -103,11 +129,13 @@ pub async fn bootstrap(
 }
 
 /// Walk every `RecordBatch` in the log from offset 0 to `log_end_offset()`
-/// and apply each record's key/value to the in-memory `GroupManager`.
-async fn replay_records(
+/// and apply each record's key/value into the accumulator (classic + offsets)
+/// or, for next-gen records, the coordinator's seed accumulator.
+fn replay_records(
     log: &crabka_log::Log,
-    group_manager: &GroupManager,
-) -> Result<(), BrokerError> {
+    coordinator: &Arc<GroupCoordinator>,
+) -> Result<Replayed, BrokerError> {
+    let mut acc = Replayed::default();
     let mut next = log.log_start_offset();
     let end = log.log_end_offset();
     while next < end {
@@ -124,10 +152,10 @@ async fn replay_records(
                 let key = persistence::parse_key(key_bytes)?;
                 match &record.value {
                     Some(value_bytes) => {
-                        apply_record(group_manager, key, value_bytes, batch).await?;
+                        apply_record(coordinator, &mut acc, key, value_bytes, batch)?;
                     }
                     None => {
-                        apply_tombstone(group_manager, key);
+                        apply_tombstone(coordinator, key);
                     }
                 }
             }
@@ -138,11 +166,12 @@ async fn replay_records(
         }
         next = advanced_to;
     }
-    Ok(())
+    Ok(acc)
 }
 
-async fn apply_record(
-    group_manager: &GroupManager,
+fn apply_record(
+    coordinator: &Arc<GroupCoordinator>,
+    acc: &mut Replayed,
     key: Key,
     value_bytes: &bytes::Bytes,
     batch: &RecordBatch,
@@ -153,13 +182,8 @@ async fn apply_record(
             topic,
             partition,
         } => {
-            // A value with negative length would have decoded to empty; we
-            // already filtered on `Some(value)` so we have at least an empty
-            // buf. Tombstones (`value = None`) are skipped upstream.
             let v = OffsetCommitValue::decode_value(value_bytes)?;
-            let handle = group_manager.get_or_create(&group_id);
-            let mut g = handle.state.lock().await;
-            g.committed_offsets.insert(
+            acc.committed.entry(group_id).or_default().insert(
                 (topic, partition),
                 OffsetEntry {
                     offset: v.offset,
@@ -170,52 +194,46 @@ async fn apply_record(
             );
         }
         Key::GroupMetadata { group_id } => {
-            if let Some(ng) = group_manager.next_gen() {
-                ng.mark_classic(&group_id);
-            }
             let v = GroupMetadataValue::decode_value(value_bytes)?;
-            let handle = group_manager.get_or_create(&group_id);
-            let mut g = handle.state.lock().await;
-            apply_group_metadata(&mut g, v, batch.max_timestamp);
+            let state = acc
+                .classic
+                .entry(group_id.clone())
+                .or_insert_with(|| ClassicState::new(group_id));
+            apply_group_metadata(state, v, batch.max_timestamp);
         }
         Key::NextGen(ng_key) => {
-            apply_next_gen_record(group_manager, ng_key, value_bytes)?;
+            apply_next_gen_record(coordinator, ng_key, value_bytes)?;
         }
         Key::Share(share_key) => {
-            apply_share_record(group_manager, share_key, value_bytes)?;
+            apply_share_record(coordinator, share_key, value_bytes)?;
         }
     }
     Ok(())
 }
 
 fn apply_next_gen_record(
-    group_manager: &GroupManager,
+    coordinator: &Arc<GroupCoordinator>,
     key: crate::coordinator::unified::persistence_next_gen::NextGenKey,
     value_bytes: &bytes::Bytes,
 ) -> Result<(), BrokerError> {
     use crate::coordinator::unified::persistence_next_gen as ng;
-    let Some(ng_coord) = group_manager.next_gen().cloned() else {
-        return Ok(());
-    };
     match key {
         ng::NextGenKey::GroupMetadata { group_id } => {
-            ng_coord.mark_next_gen(&group_id);
-            ng_coord.replay_group_metadata(&group_id, ng::GroupMetadataValue::decode(value_bytes)?);
+            coordinator
+                .replay_group_metadata(&group_id, ng::GroupMetadataValue::decode(value_bytes)?);
         }
         ng::NextGenKey::MemberMetadata {
             group_id,
             member_id,
         } => {
-            ng_coord.mark_next_gen(&group_id);
-            ng_coord.replay_member_metadata(
+            coordinator.replay_member_metadata(
                 &group_id,
                 &member_id,
                 ng::MemberMetadataValue::decode(value_bytes)?,
             );
         }
         ng::NextGenKey::TargetAssignmentMetadata { group_id } => {
-            ng_coord.mark_next_gen(&group_id);
-            ng_coord.replay_target_assignment_metadata(
+            coordinator.replay_target_assignment_metadata(
                 &group_id,
                 ng::TargetAssignmentMetadataValue::decode(value_bytes)?,
             );
@@ -224,8 +242,7 @@ fn apply_next_gen_record(
             group_id,
             member_id,
         } => {
-            ng_coord.mark_next_gen(&group_id);
-            ng_coord.replay_target_assignment_member(
+            coordinator.replay_target_assignment_member(
                 &group_id,
                 &member_id,
                 ng::TargetAssignmentMemberValue::decode(value_bytes)?,
@@ -235,8 +252,7 @@ fn apply_next_gen_record(
             group_id,
             member_id,
         } => {
-            ng_coord.mark_next_gen(&group_id);
-            ng_coord.replay_current_member_assignment(
+            coordinator.replay_current_member_assignment(
                 &group_id,
                 &member_id,
                 ng::CurrentMemberAssignmentValue::decode(value_bytes)?,
@@ -247,18 +263,15 @@ fn apply_next_gen_record(
 }
 
 fn apply_share_record(
-    group_manager: &GroupManager,
+    coordinator: &Arc<GroupCoordinator>,
     key: crate::coordinator::unified::share::persistence::ShareGroupKey,
     value_bytes: &bytes::Bytes,
 ) -> Result<(), BrokerError> {
     use crate::coordinator::unified::share::persistence as sp;
-    let Some(coord) = group_manager.next_gen().cloned() else {
-        return Ok(());
-    };
     match key {
         sp::ShareGroupKey::GroupMetadata { group_id } => {
-            coord.mark_share(&group_id);
-            coord.replay_share_group_metadata(
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_group_metadata(
                 &group_id,
                 sp::ShareGroupMetadataValue::decode(value_bytes)?,
             );
@@ -267,16 +280,16 @@ fn apply_share_record(
             group_id,
             member_id,
         } => {
-            coord.mark_share(&group_id);
-            coord.replay_share_member_metadata(
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_member_metadata(
                 &group_id,
                 &member_id,
                 sp::ShareGroupMemberMetadataValue::decode(value_bytes)?,
             );
         }
         sp::ShareGroupKey::TargetAssignmentMetadata { group_id } => {
-            coord.mark_share(&group_id);
-            coord.replay_share_target_assignment_metadata(
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_target_assignment_metadata(
                 &group_id,
                 sp::ShareGroupTargetAssignmentMetadataValue::decode(value_bytes)?,
             );
@@ -285,8 +298,8 @@ fn apply_share_record(
             group_id,
             member_id,
         } => {
-            coord.mark_share(&group_id);
-            coord.replay_share_target_assignment_member(
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_target_assignment_member(
                 &group_id,
                 &member_id,
                 sp::ShareGroupTargetAssignmentMemberValue::decode(value_bytes)?,
@@ -296,16 +309,16 @@ fn apply_share_record(
             group_id,
             member_id,
         } => {
-            coord.mark_share(&group_id);
-            coord.replay_share_current_member_assignment(
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_current_member_assignment(
                 &group_id,
                 &member_id,
                 sp::ShareGroupCurrentMemberAssignmentValue::decode(value_bytes)?,
             );
         }
         sp::ShareGroupKey::StatePartitionMetadata { group_id } => {
-            coord.mark_share(&group_id);
-            coord.replay_share_state_partition_metadata(
+            coordinator.mark_share(&group_id);
+            coordinator.replay_share_state_partition_metadata(
                 &group_id,
                 sp::ShareGroupStatePartitionMetadataValue::decode(value_bytes)?,
             );
@@ -314,28 +327,74 @@ fn apply_share_record(
     Ok(())
 }
 
-/// Apply a tombstone (record with `value = None`) for any key type.
-/// Classic offset-commit tombstones are no-ops during foundation replay
-/// (the classic coordinator's snapshot is rebuilt fresh on restart); we
-/// only need to honor next-gen tombstones so leave/eviction semantics
-/// survive a broker restart.
-fn apply_tombstone(group_manager: &GroupManager, key: Key) {
+/// Apply a tombstone (record with `value = None`). Classic offset-commit /
+/// group-metadata tombstones are no-ops during replay (preserved from the
+/// classic coordinator, whose in-memory snapshot is rebuilt fresh on restart);
+/// next-gen (KIP-848) and share-group (KIP-932) tombstones are honored so
+/// leave/eviction semantics survive a restart.
+fn apply_tombstone(coordinator: &Arc<GroupCoordinator>, key: Key) {
     match key {
-        Key::NextGen(ng_key) => {
-            if let Some(ng_coord) = group_manager.next_gen().cloned() {
-                ng_coord.replay_next_gen_tombstone(&ng_key);
-            }
-        }
-        Key::Share(share_key) => {
-            if let Some(coord) = group_manager.next_gen().cloned() {
-                coord.replay_share_tombstone(&share_key);
-            }
-        }
+        Key::NextGen(ng_key) => coordinator.replay_next_gen_tombstone(&ng_key),
+        Key::Share(share_key) => coordinator.replay_share_tombstone(&share_key),
         Key::OffsetCommit { .. } | Key::GroupMetadata { .. } => {}
     }
 }
 
-fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_ms: i64) {
+/// Decide each group's kind and seed its actor. Next-gen groups (those that
+/// accumulated next-gen records) spawn via `finalize_bootstrap`; their
+/// committed offsets are attached afterward. Every other group with classic
+/// metadata or committed offsets replays as a classic actor.
+fn finalize(coordinator: &Arc<GroupCoordinator>, mut replayed: Replayed) {
+    // Next-gen group ids are those present in the coordinator's seed map.
+    let next_gen_ids: std::collections::HashSet<String> =
+        coordinator.seeds.iter().map(|e| e.key().clone()).collect();
+
+    // Spawn + seed next-gen (consumer) actors.
+    coordinator.finalize_bootstrap();
+
+    // Attach committed offsets to consumer groups; the rest are classic.
+    let committed_groups: Vec<String> = replayed.committed.keys().cloned().collect();
+    for gid in committed_groups {
+        if next_gen_ids.contains(&gid)
+            && let Some(offsets) = replayed.committed.remove(&gid)
+            && let Some(handle) = coordinator.find(&gid)
+        {
+            let entries: Vec<((String, i32), OffsetEntry)> = offsets.into_iter().collect();
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let _ = handle.tx.try_send(
+                crate::coordinator::unified::actor::GroupActorMessage::UpdateCommitted {
+                    entries,
+                    reply: tx,
+                },
+            );
+        }
+    }
+
+    // Classic groups: those with classic metadata, plus offset-only groups
+    // that are not next-gen.
+    let classic_ids: std::collections::HashSet<String> = replayed
+        .classic
+        .keys()
+        .cloned()
+        .chain(replayed.committed.keys().cloned())
+        .filter(|gid| !next_gen_ids.contains(gid))
+        .collect();
+    for gid in classic_ids {
+        let state = replayed
+            .classic
+            .remove(&gid)
+            .unwrap_or_else(|| ClassicState::new(gid.clone()));
+        let committed_offsets = replayed.committed.remove(&gid).unwrap_or_default();
+        let group = Box::new(Group {
+            group_id: gid.clone(),
+            kind: GroupKind::Classic(state),
+            committed_offsets,
+        });
+        coordinator.seed_classic(&gid, group);
+    }
+}
+
+fn apply_group_metadata(g: &mut ClassicState, v: GroupMetadataValue, replay_timestamp_ms: i64) {
     g.protocol_type = Some(v.protocol_type);
     g.generation_id = v.generation;
     g.leader_id = v.leader;
@@ -369,9 +428,9 @@ fn apply_group_metadata(g: &mut Group, v: GroupMetadataValue, replay_timestamp_m
         g.members.insert(m.member_id, member);
     }
     g.state = if g.members.is_empty() {
-        crate::coordinator::group::GroupState::Empty
+        ClassicGroupState::Empty
     } else {
-        crate::coordinator::group::GroupState::Stable
+        ClassicGroupState::Stable
     };
     let _ = replay_timestamp_ms; // currently unused; logged for debug
 }
@@ -423,14 +482,12 @@ mod tests {
             }
         }
 
-        let gm = GroupManager::new();
         let coord = Arc::new(GroupCoordinator::new(
             crate::coordinator::unified::config::NextGenConfig::default(),
             crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             Arc::new(EmptyMeta),
             Arc::new(InMemoryOffsetsLog::default()),
         ));
-        gm.set_next_gen(coord.clone());
 
         let tid = Uuid([9; 16]);
         // Drive the same path bootstrap takes: parse_key on the encoded key,
@@ -468,9 +525,10 @@ mod tests {
             ),
         ];
         let batch = RecordBatch::default();
+        let mut acc = Replayed::default();
         for (k, v) in recs {
             let key = persistence::parse_key(&k).unwrap();
-            apply_record(&gm, key, &v, &batch).await.unwrap();
+            apply_record(&coord, &mut acc, key, &v, &batch).unwrap();
         }
 
         // Type locked + seed reconstructed.
@@ -487,9 +545,26 @@ mod tests {
                 member_id: "m1".into(),
             }))
             .unwrap();
-        apply_tombstone(&gm, tomb_key);
+        apply_tombstone(&coord, tomb_key);
         let seed = coord.cached_share_seed("sg").expect("seed still present");
         assert!(!seed.members.contains_key("m1"), "tombstone removed member");
+    }
+
+    fn test_coordinator(
+        controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+        partitions: &Arc<PartitionRegistry>,
+    ) -> Arc<GroupCoordinator> {
+        let offsets_log: Arc<dyn crate::coordinator::unified::offsets_log::OffsetsLog> = Arc::new(
+            crate::coordinator::unified::offsets_log::ProductionOffsetsLog::new(partitions.clone()),
+        );
+        Arc::new(GroupCoordinator::new(
+            crate::coordinator::unified::config::NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            Arc::new(crate::coordinator::unified::ImageMetadataProvider {
+                controller: controller.clone(),
+            }),
+            offsets_log,
+        ))
     }
 
     #[tokio::test]
@@ -499,14 +574,69 @@ mod tests {
         let controller: Arc<dyn crate::metadata_source::MetadataSource> =
             controller_with_leader(dir.path().join("__cluster_metadata_test")).await;
         let partitions: Arc<PartitionRegistry> = Arc::new(PartitionRegistry::new());
-        let gm = GroupManager::new();
+        let coordinator = test_coordinator(&controller, &partitions);
         let log_dir_status = crate::log_dir_status::LogDirRegistry::probe(&config.all_log_dirs());
-        bootstrap(&config, &controller, &partitions, &gm, &log_dir_status)
-            .await
-            .unwrap();
+        bootstrap(
+            &config,
+            &controller,
+            &partitions,
+            &coordinator,
+            &log_dir_status,
+        )
+        .await
+        .unwrap();
         let topic_dir = log_dir::partition_dir(&config.log_dir, OFFSETS_TOPIC, OFFSETS_PARTITION);
         assert!(topic_dir.exists());
         assert!(partitions.contains(OFFSETS_TOPIC, OFFSETS_PARTITION));
         assert!(controller.current_image().topic(OFFSETS_TOPIC).is_some());
+    }
+
+    #[test]
+    fn apply_group_metadata_rebuilds_members_and_state() {
+        use crate::coordinator::persistence::MemberMetadata;
+        use bytes::Bytes;
+
+        let mut g = ClassicState::new("g");
+        let v = GroupMetadataValue {
+            protocol_type: "consumer".into(),
+            generation: 5,
+            protocol_name: Some("range".into()),
+            leader: Some("m1".into()),
+            current_state_timestamp_ms: 0,
+            members: vec![MemberMetadata {
+                member_id: "m1".into(),
+                group_instance_id: Some("inst".into()),
+                client_id: "c".into(),
+                client_host: "h".into(),
+                rebalance_timeout_ms: 60_000,
+                session_timeout_ms: 30_000,
+                subscription: Bytes::new(),
+                assignment: Bytes::from_static(b"asn"),
+            }],
+        };
+        apply_group_metadata(&mut g, v, 0);
+        assert!(g.generation_id == 5);
+        assert!(g.protocol_type.as_deref() == Some("consumer"));
+        assert!(g.leader_id.as_deref() == Some("m1"));
+        assert!(g.state == ClassicGroupState::Stable);
+        assert!(g.members.contains_key("m1"));
+        assert!(g.members["m1"].assignment.as_deref() == Some(b"asn" as &[u8]));
+        assert!(g.current_member_id_for_instance("inst") == Some("m1"));
+
+        // No members → Empty state.
+        let mut empty = ClassicState::new("g2");
+        apply_group_metadata(
+            &mut empty,
+            GroupMetadataValue {
+                protocol_type: "consumer".into(),
+                generation: 0,
+                protocol_name: None,
+                leader: None,
+                current_state_timestamp_ms: 0,
+                members: vec![],
+            },
+            0,
+        );
+        assert!(empty.state == ClassicGroupState::Empty);
     }
 }

@@ -7,7 +7,7 @@ use assert2::assert;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use crabka_metadata::{MetadataRecord, TopicRecord, VoterEndpoint};
+use crabka_metadata::{FeatureLevelRecord, MetadataRecord, TopicRecord, VoterEndpoint};
 use crabka_raft::{BootstrapMode, Controller, ControllerConfig, Node};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -63,16 +63,49 @@ async fn snapshot_then_restart_recovers_image() {
         let controller = Controller::start(cfg).await.expect("first boot start");
         wait_for_leader(&controller).await;
 
+        // KIP-853 voter set + finalized cluster kraft.version: both must
+        // survive snapshot + restart. A dropped V1Voters record leaves the
+        // recovered image with an empty voter set (breaking DescribeQuorum /
+        // auto-join) and reverts kraft.version to 0. (Bootstrap seeds only
+        // openraft's membership, not the image's voter set, so submit it
+        // explicitly here — the broker layer does the same after bootstrap.)
+        let voters = crabka_metadata::VoterSet::from_voters([crabka_metadata::Voter {
+            id: 1,
+            directory_id: Uuid::from_u128(1),
+            endpoints: vec![VoterEndpoint {
+                name: "CONTROLLER".into(),
+                host: "127.0.0.1".into(),
+                port: 9093,
+            }],
+            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+        }]);
         controller
-            .submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
-                name: "t".into(),
-                topic_id: Uuid::new_v4(),
-                partitions: 1,
-                replication_factor: 1,
-            })])
+            .submit_change(vec![
+                MetadataRecord::V1Topic(TopicRecord {
+                    name: "t".into(),
+                    topic_id: Uuid::new_v4(),
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                // KIP-584 finalized feature: must survive snapshot + restart.
+                // A dropped feature level reverts metadata.version to UNKNOWN.
+                MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                    name: "metadata.version".into(),
+                    level: 25,
+                }),
+                MetadataRecord::V1KRaftVersion(crabka_metadata::KRaftVersionRecord {
+                    kraft_version: 1,
+                }),
+                MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
+                    voters: voters.clone(),
+                }),
+            ])
             .await
             .expect("submit topic");
         assert!(controller.current_image().topic("t").is_some());
+        assert!(controller.current_image().finalized_metadata_version() == Some(25));
+        assert!(controller.current_image().voters().contains(1));
+        assert!(controller.current_image().kraft_version() == 1);
 
         controller
             .trigger_snapshot()
@@ -110,6 +143,26 @@ async fn snapshot_then_restart_recovers_image() {
             controller.current_image().topic("t").is_some(),
             "topic 't' must survive snapshot + restart"
         );
+        // The finalized feature + its epoch must be rebuilt from the on-disk
+        // checkpoint, not silently dropped.
+        let recovered = controller.current_image();
+        assert!(
+            recovered.finalized_metadata_version() == Some(25),
+            "finalized metadata.version must survive snapshot + restart"
+        );
+        assert!(
+            recovered.finalized_features_epoch() >= 0,
+            "finalized-features epoch must survive snapshot + restart, got {}",
+            recovered.finalized_features_epoch()
+        );
+        assert!(
+            recovered.voters().contains(1),
+            "voter set must survive snapshot + restart"
+        );
+        assert!(
+            recovered.kraft_version() == 1,
+            "finalized kraft.version must survive snapshot + restart"
+        );
 
         controller.shutdown().await;
     }
@@ -135,16 +188,44 @@ async fn lagging_learner_catches_up_via_snapshot() {
     // 0`, the completed snapshot drives a purge that compacts the log
     // behind the checkpoint — so a node that has never seen those entries
     // can only learn them through InstallSnapshot.
+    let voters = crabka_metadata::VoterSet::from_voters([crabka_metadata::Voter {
+        id: 1,
+        directory_id: Uuid::from_u128(1),
+        endpoints: vec![VoterEndpoint {
+            name: "CONTROLLER".into(),
+            host: addr1.ip().to_string(),
+            port: addr1.port(),
+        }],
+        kraft_version: crabka_metadata::KRaftVersionRange::default(),
+    }]);
     leader
-        .submit_change(vec![MetadataRecord::V1Topic(TopicRecord {
-            name: "t".into(),
-            topic_id: Uuid::new_v4(),
-            partitions: 1,
-            replication_factor: 1,
-        })])
+        .submit_change(vec![
+            MetadataRecord::V1Topic(TopicRecord {
+                name: "t".into(),
+                topic_id: Uuid::new_v4(),
+                partitions: 1,
+                replication_factor: 1,
+            }),
+            MetadataRecord::V1KRaftVersion(crabka_metadata::KRaftVersionRecord {
+                kraft_version: 1,
+            }),
+            MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
+                voters: voters.clone(),
+            }),
+        ])
         .await
         .expect("submit topic");
     assert!(leader.current_image().topic("t").is_some());
+
+    // Finalize a feature too, so the InstallSnapshot path must carry finalized
+    // features + epoch to the learner (not just topic state).
+    leader
+        .submit_change(vec![MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        })])
+        .await
+        .expect("submit feature level");
 
     leader.trigger_snapshot().await.expect("trigger snapshot");
     let snap_dir = dir1.path().join("@metadata-0");
@@ -190,6 +271,24 @@ async fn lagging_learner_catches_up_via_snapshot() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    // ...and on the finalized feature carried by that same installed snapshot.
+    assert!(
+        learner.current_image().finalized_metadata_version() == Some(25),
+        "finalized metadata.version must arrive via InstallSnapshot"
+    );
+
+    // The KIP-853 voter set + finalized kraft.version must arrive over the
+    // SAME InstallSnapshot path (they ride in to_records, not just the
+    // openraft membership sidecar). Without the to_records fix the installed
+    // image rebuilds with an empty voter set and kraft.version 0.
+    assert!(
+        learner.current_image().voters().contains(1),
+        "voter set must survive snapshot install"
+    );
+    assert!(
+        learner.current_image().kraft_version() == 1,
+        "finalized kraft.version must survive snapshot install"
+    );
 
     // The learner never triggers its own snapshot, so a checkpoint in its
     // snapshot dir can only have come from install_snapshot — proof the

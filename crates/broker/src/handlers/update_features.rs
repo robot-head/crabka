@@ -16,14 +16,17 @@ use crabka_raft::RaftError;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
-use crate::features;
 
-/// True if finalizing `metadata.version` to `level` would drop below the
-/// `floor` the live image requires (KIP-584 unsafe downgrade). `level == 0`
-/// (delete) is excluded — deletion is handled by the existing tombstone
-/// path, not the floor.
-fn violates_downgrade_floor(level: i16, floor: i16) -> bool {
-    level > 0 && level < floor
+/// True if every KIP-1022 dependency for a feature finalize is already met in
+/// the target image. `deps` is the feature's `dependencies(level)` slice:
+/// `(dependency_feature_name, min_finalized_level)` pairs.
+fn dependencies_met(image: &crabka_metadata::MetadataImage, deps: &[(&str, i16)]) -> bool {
+    deps.iter().all(|(dep, min_level)| {
+        image
+            .finalized_features()
+            .get(*dep)
+            .is_some_and(|finalized| finalized >= min_level)
+    })
 }
 
 /// KIP-584 `FeatureUpdate.UpgradeType`: 1 = UPGRADE, 2 = `SAFE_DOWNGRADE`,
@@ -87,7 +90,7 @@ pub(crate) async fn handle(
             ));
             continue;
         }
-        let Some(feat) = features::lookup(&name) else {
+        let Some(feat) = crabka_metadata::feature(&name) else {
             results.push(row(
                 name,
                 codes::INVALID_REQUEST,
@@ -100,7 +103,8 @@ pub(crate) async fn handle(
         let current = image.finalized_features().get(&name).copied();
         let allow_dg = downgrade_allowed(version, upd.allow_downgrade, upd.upgrade_type);
 
-        if level < 0 || level > feat.max_version {
+        let (_min, max) = feat.supported_range();
+        if level < 0 || level > max {
             results.push(row(
                 name,
                 codes::INVALID_UPDATE_VERSION,
@@ -108,16 +112,28 @@ pub(crate) async fn handle(
             ));
             continue;
         }
-        if name == crate::features::METADATA_VERSION {
-            let floor = image.min_required_metadata_version();
-            if violates_downgrade_floor(level, floor) {
-                results.push(row(
-                    name,
-                    codes::INVALID_UPDATE_VERSION,
-                    "Can not downgrade metadata.version below the level required by existing cluster state.",
-                ));
-                continue;
-            }
+        // Per-feature downgrade-safety floor (KIP-584 unsafe downgrade): a
+        // finalize below the level the live image requires is rejected even
+        // with the downgrade flag set. `level == 0` (delete) is handled by the
+        // tombstone path below, not the floor.
+        let floor = feat.min_required_floor(&image);
+        if level > 0 && level < floor {
+            results.push(row(
+                name,
+                codes::INVALID_UPDATE_VERSION,
+                "Can not downgrade the feature below the level required by existing cluster state.",
+            ));
+            continue;
+        }
+        // KIP-1022 dependencies: every dependency must already be finalized
+        // at >= its required level in the target image.
+        if !dependencies_met(&image, feat.dependencies(level)) {
+            results.push(row(
+                name,
+                codes::INVALID_UPDATE_VERSION,
+                "Can not finalize feature: a required dependency feature is not finalized at a high enough level.",
+            ));
+            continue;
         }
         if level == 0 {
             // Delete the finalized feature; only valid if it exists and a
@@ -305,13 +321,28 @@ mod tests {
     }
 
     #[test]
-    fn below_floor_is_rejected_even_with_downgrade_flag() {
-        // floor = 14 (delegation tokens present); a finalize to 11 is an
-        // unsafe downgrade and must be rejected regardless of the flag.
-        assert!(violates_downgrade_floor(11, 14));
-        assert!(!violates_downgrade_floor(14, 14));
-        assert!(!violates_downgrade_floor(19, 14));
-        // level 0 (delete) is handled separately; never a floor violation here.
-        assert!(!violates_downgrade_floor(0, 14));
+    fn metadata_version_floor_via_registry() {
+        // A fresh image floors metadata.version at its supported min; the
+        // registry trait path returns that floor.
+        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        let feat = crabka_metadata::feature("metadata.version").unwrap();
+        assert!(feat.min_required_floor(&image) == crate::features::METADATA_VERSION_MIN);
+    }
+
+    #[test]
+    fn dependencies_met_checks_finalized_levels() {
+        use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        // No deps → trivially met.
+        assert!(dependencies_met(&image, &[]));
+        // Unmet: metadata.version not finalized at all.
+        assert!(!dependencies_met(&image, &[("metadata.version", 22)]));
+        // Finalize metadata.version=25 → a >=22 dependency is now met, >=26 not.
+        image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        }));
+        assert!(dependencies_met(&image, &[("metadata.version", 22)]));
+        assert!(!dependencies_met(&image, &[("metadata.version", 26)]));
     }
 }

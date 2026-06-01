@@ -1,8 +1,9 @@
 //! `Heartbeat` (`api_key=12`). Validates `(generation, member)` and
-//! refreshes the member's `last_heartbeat` clock.
+//! refreshes the member's `last_heartbeat` clock inside the group's actor.
 
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
+use tokio::sync::oneshot;
 
 use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
 use crabka_protocol::owned::heartbeat_response::HeartbeatResponse;
@@ -10,7 +11,7 @@ use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::group::GroupState;
+use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
 pub(crate) fn handle(
@@ -20,40 +21,24 @@ pub(crate) fn handle(
     req_bytes: &[u8],
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
-    let group_manager = broker.group_manager.clone();
+    let coordinator = broker.group_coordinator.clone();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = HeartbeatRequest::decode(&mut cur, version)?;
 
-        let error_code = match group_manager.find(&req.group_id) {
+        let error_code = match coordinator.find(&req.group_id) {
             None => codes::UNKNOWN_MEMBER_ID,
             Some(handle) => {
-                let mut g = handle.state.lock().await;
-                // Check preconditions in order so callers see the most
-                // informative code first. `let-else` can't chain like this,
-                // so split membership / generation / state into a flat
-                // sequence of guards before mutating.
-                // KIP-345 fence: a Heartbeat carrying a `group.instance.id`
-                // pinned to a different member id (or to no member at all)
-                // is rejected before any other validation.
-                let instance_fenced = req.group_instance_id.as_deref().is_some_and(|iid| {
-                    g.current_member_id_for_instance(iid)
-                        .is_none_or(|pinned| pinned != req.member_id)
-                });
-                if instance_fenced {
-                    codes::FENCED_INSTANCE_ID
-                } else if !g.members.contains_key(&req.member_id) {
+                let (tx, rx) = oneshot::channel();
+                if handle
+                    .tx
+                    .send(GroupActorMessage::ClassicHeartbeat { req, reply: tx })
+                    .await
+                    .is_err()
+                {
                     codes::UNKNOWN_MEMBER_ID
-                } else if g.generation_id != req.generation_id {
-                    codes::ILLEGAL_GENERATION
-                } else if !matches!(g.state, GroupState::Stable) {
-                    codes::REBALANCE_IN_PROGRESS
                 } else {
-                    g.members
-                        .get_mut(&req.member_id)
-                        .expect("contains_key checked above")
-                        .last_heartbeat = std::time::Instant::now();
-                    codes::NONE
+                    rx.await.unwrap_or(codes::UNKNOWN_MEMBER_ID)
                 }
             }
         };

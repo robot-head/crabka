@@ -26,28 +26,31 @@ use crabka_metadata::MetadataImage;
 
 use crate::error::RaftError;
 
-/// True when a *present* finalized `metadata.version` is outside the
-/// binary's supported range. A missing level (`None`) is permitted — a
-/// pre-bootstrap / legacy image advertises `MetadataVersion.UNKNOWN`.
-fn metadata_version_out_of_range(finalized: Option<i16>) -> bool {
-    finalized.is_some_and(|level| !crabka_metadata::metadata_version::is_supported_level(level))
+/// The first finalized feature whose *present* level is outside its registered
+/// supported range, if any. A feature not in the image is never a violation.
+fn first_out_of_range_feature(image: &crabka_metadata::MetadataImage) -> Option<(String, i16)> {
+    for (name, level) in image.finalized_features() {
+        if crabka_metadata::feature(name).is_some()
+            && !crabka_metadata::is_supported_level(name, *level)
+        {
+            return Some((name.clone(), *level));
+        }
+    }
+    None
 }
 
-/// Abort the process if the image's finalized `metadata.version` is
-/// outside `[MIN, MAX]`. Apply is infallible (the committed record cannot
-/// be rejected), so an out-of-range level — applied via a snapshot from a
-/// newer binary or a record finalized by a newer controller — means this
-/// binary cannot safely interpret the metadata log. Fail loud and fast;
-/// the operator's `binary >= finalized` guard is what prevents this on a
-/// correctly-run cluster.
-fn guard_metadata_version(image: &crabka_metadata::MetadataImage) {
-    let finalized = image.finalized_metadata_version();
-    if metadata_version_out_of_range(finalized) {
+/// Abort the process if any finalized feature carries a level outside this
+/// binary's supported range. Apply is infallible (a committed record cannot be
+/// rejected), so an out-of-range level — applied via a snapshot from a newer
+/// binary or a record finalized by a newer controller — means this binary
+/// cannot safely interpret the metadata log. Fail loud and fast; the operator's
+/// `binary >= finalized` guard prevents this on a correctly-run cluster.
+fn guard_finalized_features(image: &crabka_metadata::MetadataImage) {
+    if let Some((name, level)) = first_out_of_range_feature(image) {
         tracing::error!(
-            finalized = ?finalized,
-            min = crabka_metadata::metadata_version::METADATA_VERSION_MIN,
-            max = crabka_metadata::metadata_version::METADATA_VERSION_MAX,
-            "finalized metadata.version is outside this binary's supported range; aborting"
+            feature = %name,
+            level,
+            "finalized feature level is outside this binary's supported range; aborting"
         );
         std::process::abort();
     }
@@ -96,7 +99,7 @@ impl CrabkaStateMachine {
                 let records = SnapshotReader::read_records(&bytes)
                     .expect("checkpoint records must decode on recovery");
                 let image = MetadataImage::from_records(cluster_id, &records);
-                guard_metadata_version(&image);
+                guard_finalized_features(&image);
                 (image, meta.last_log_id, meta.last_membership)
             }
             Ok(None) => (
@@ -149,7 +152,7 @@ impl CrabkaStateMachine {
         // reads via `borrow()` on the sender and must always see the
         // latest applied state.
         let _ = self.image.send_replace(Arc::new(next));
-        guard_metadata_version(self.image.borrow().as_ref());
+        guard_finalized_features(self.image.borrow().as_ref());
         *self.last_applied.lock().await = Some(log_id);
         AppDataResponse {
             applied_index: log_id.index,
@@ -238,7 +241,7 @@ impl RaftStateMachine<TypeConfig> for Arc<CrabkaStateMachine> {
         let records = SnapshotReader::read_records(&bytes).map_err(|e| io_storage_err(&e))?;
         let image = MetadataImage::from_records(self.cluster_id, &records);
         let _ = self.image.send_replace(Arc::new(image));
-        guard_metadata_version(self.image.borrow().as_ref());
+        guard_finalized_features(self.image.borrow().as_ref());
         *self.last_applied.lock().await = meta.last_log_id;
         *self.last_membership.lock().await = meta.last_membership.clone();
         if let Some(id) = snapshot_id_from_meta(meta) {
@@ -302,12 +305,36 @@ mod tests {
     use crabka_metadata::{MetadataRecord, TopicRecord};
 
     #[test]
-    fn guard_rejects_out_of_range_finalized_level() {
-        assert!(metadata_version_out_of_range(Some(6))); // below MIN
-        assert!(metadata_version_out_of_range(Some(26))); // above MAX
-        assert!(!metadata_version_out_of_range(Some(7)));
-        assert!(!metadata_version_out_of_range(Some(25)));
-        assert!(!metadata_version_out_of_range(None)); // UNKNOWN is allowed
+    fn guard_predicate_flags_only_present_out_of_range_features() {
+        use crabka_metadata::{FeatureLevelRecord, MetadataImage};
+        let empty = MetadataImage::new(uuid::Uuid::nil());
+        assert!(super::first_out_of_range_feature(&empty).is_none());
+
+        let mut ok = MetadataImage::new(uuid::Uuid::nil());
+        ok.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 25,
+        }));
+        assert!(super::first_out_of_range_feature(&ok).is_none());
+
+        let mut bad = MetadataImage::new(uuid::Uuid::nil());
+        bad.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "metadata.version".into(),
+            level: 99,
+        }));
+        let hit = super::first_out_of_range_feature(&bad).expect("flagged");
+        assert!(hit.0 == "metadata.version");
+        assert!(hit.1 == 99);
+
+        // Forward-compat: an UNREGISTERED feature name (finalized by a newer
+        // controller this binary doesn't know) must be IGNORED, never aborted
+        // on — this pins the `feature(name).is_some()` guard.
+        let mut unknown = MetadataImage::new(uuid::Uuid::nil());
+        unknown.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+            name: "future.unknown.feature".into(),
+            level: 999,
+        }));
+        assert!(super::first_out_of_range_feature(&unknown).is_none());
     }
 
     #[tokio::test]

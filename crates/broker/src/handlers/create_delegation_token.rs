@@ -66,10 +66,13 @@ pub(crate) async fn handle<S: BuildHasher>(
 
     let image = controller.current_image();
     // KIP-48/KIP-778: KRaft delegation tokens require metadata.version >= 3.6-IV2.
-    if crate::features::metadata_version_blocks(
-        image.finalized_metadata_version(),
+    if crate::features::require_feature(
+        &image,
+        crate::features::METADATA_VERSION,
         crabka_metadata::metadata_version::DELEGATION_TOKEN_MIN_LEVEL,
-    ) {
+    )
+    .is_err()
+    {
         return err_response(crate::codes::UNSUPPORTED_VERSION);
     }
 
@@ -599,18 +602,27 @@ mod tests {
     #[test]
     fn token_gate_uses_delegation_token_level() {
         use crabka_metadata::metadata_version::DELEGATION_TOKEN_MIN_LEVEL;
-        assert!(!crate::features::metadata_version_blocks(
-            None,
-            DELEGATION_TOKEN_MIN_LEVEL
-        ));
-        assert!(crate::features::metadata_version_blocks(
-            Some(13),
-            DELEGATION_TOKEN_MIN_LEVEL
-        ));
-        assert!(!crate::features::metadata_version_blocks(
-            Some(14),
-            DELEGATION_TOKEN_MIN_LEVEL
-        ));
+        use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
+
+        let gate = |level: Option<i16>| {
+            let mut image = MetadataImage::new(uuid::Uuid::nil());
+            if let Some(level) = level {
+                image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                    name: crate::features::METADATA_VERSION.to_string(),
+                    level,
+                }));
+            }
+            crate::features::require_feature(
+                &image,
+                crate::features::METADATA_VERSION,
+                DELEGATION_TOKEN_MIN_LEVEL,
+            )
+            .is_err()
+        };
+
+        assert!(!gate(None));
+        assert!(gate(Some(13)));
+        assert!(!gate(Some(14)));
     }
 
     /// Spec §1.2: only `User` is supported as the act-as owner

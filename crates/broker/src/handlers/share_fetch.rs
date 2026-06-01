@@ -93,9 +93,7 @@ pub(crate) async fn handle(
     // (e.g. the group was never joined) we are lenient and skip the check —
     // the Task-7 tests always join via `ShareGroupHeartbeat` first, so a
     // present actor with an absent member is the only hard failure.
-    if let Some(ng) = broker.group_manager.next_gen().cloned()
-        && let Some(handle) = ng.find_share(&group)
-    {
+    if let Some(handle) = broker.group_coordinator.find_share(&group) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if handle
             .tx

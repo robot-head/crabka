@@ -2,11 +2,9 @@
 
 use std::collections::HashSet;
 
-use serde::{Deserialize, Serialize};
-
 /// Tx state machine, mirroring Apache Kafka's classic transaction
 /// states (KIP-98) extended for KIP-1319 v2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TxnState {
     Empty,
     Ongoing,
@@ -40,15 +38,49 @@ impl TxnState {
             | (CompleteCommit | CompleteAbort, Dead)
         )
     }
+
+    /// Kafka `TransactionState` byte id (TransactionLogValue.TransactionStatus,
+    /// int8). Matches org.apache.kafka.coordinator.transaction.TransactionState
+    /// exactly: Empty=0, Ongoing=1, PrepareCommit=2, PrepareAbort=3,
+    /// CompleteCommit=4, CompleteAbort=5, Dead=6. (Kafka also has
+    /// `PrepareEpochFence`=7, a transient fencing state Crabka does not model.)
+    #[must_use]
+    pub fn to_kafka_status(self) -> i8 {
+        match self {
+            TxnState::Empty => 0,
+            TxnState::Ongoing => 1,
+            TxnState::PrepareCommit => 2,
+            TxnState::PrepareAbort => 3,
+            TxnState::CompleteCommit => 4,
+            TxnState::CompleteAbort => 5,
+            TxnState::Dead => 6,
+        }
+    }
+
+    /// Inverse of [`Self::to_kafka_status`]. Returns `None` for an id Crabka
+    /// does not model (e.g. 7 = `PrepareEpochFence`) or an out-of-range id.
+    #[must_use]
+    pub fn from_kafka_status(id: i8) -> Option<TxnState> {
+        Some(match id {
+            0 => TxnState::Empty,
+            1 => TxnState::Ongoing,
+            2 => TxnState::PrepareCommit,
+            3 => TxnState::PrepareAbort,
+            4 => TxnState::CompleteCommit,
+            5 => TxnState::CompleteAbort,
+            6 => TxnState::Dead,
+            _ => return None,
+        })
+    }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub struct TopicPartition {
     pub topic: String,
     pub partition: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TxnEntry {
     pub transactional_id: String,
     pub producer_id: i64,
@@ -56,7 +88,11 @@ pub struct TxnEntry {
     pub state: TxnState,
     pub txn_timeout_ms: i32,
     pub partitions: HashSet<TopicPartition>,
-    pub offset_commit_groups: HashSet<String>,
+    /// KIP-890 epoch bookkeeping (Kafka's `TransactionLogValue.PreviousProducerId`
+    /// / `NextProducerId` tagged fields). `-1` means "none", matching Kafka's
+    /// tagged-field default.
+    pub prev_producer_id: i64,
+    pub next_producer_id: i64,
     pub last_update_ms: i64,
     pub start_ms: i64,
 }
@@ -77,7 +113,8 @@ impl TxnEntry {
             state: TxnState::Empty,
             txn_timeout_ms,
             partitions: HashSet::new(),
-            offset_commit_groups: HashSet::new(),
+            prev_producer_id: -1,
+            next_producer_id: -1,
             last_update_ms: now_ms,
             start_ms: now_ms,
         }
@@ -87,8 +124,6 @@ impl TxnEntry {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use serde_wincode::SerdeCompat;
-    use wincode::{Deserialize as _, Serialize as _};
 
     use super::*;
 
@@ -113,20 +148,28 @@ mod tests {
     }
 
     #[test]
-    fn entry_serde_round_trip() {
-        let mut e = TxnEntry::new_empty("my-tid".into(), 1000, 0, 60_000, 1000);
-        e.partitions.insert(TopicPartition {
-            topic: "t".into(),
-            partition: 0,
-        });
-        e.state = TxnState::Ongoing;
+    fn kafka_status_round_trips_all_states() {
+        for s in [
+            TxnState::Empty,
+            TxnState::Ongoing,
+            TxnState::PrepareCommit,
+            TxnState::PrepareAbort,
+            TxnState::CompleteCommit,
+            TxnState::CompleteAbort,
+            TxnState::Dead,
+        ] {
+            assert!(TxnState::from_kafka_status(s.to_kafka_status()) == Some(s));
+        }
+    }
 
-        let bytes = <SerdeCompat<TxnEntry>>::serialize(&e).unwrap();
-        let decoded: TxnEntry = <SerdeCompat<TxnEntry>>::deserialize(&bytes).unwrap();
-
-        assert!(decoded.transactional_id == "my-tid");
-        assert!(decoded.producer_id == 1000);
-        assert!(decoded.state == TxnState::Ongoing);
-        assert!(decoded.partitions.len() == 1);
+    #[test]
+    fn kafka_status_values_match_kafka() {
+        // Empirically pinned: cp-kafka 4.0 Ongoing record had TransactionStatus=1.
+        assert!(TxnState::Ongoing.to_kafka_status() == 1);
+        assert!(TxnState::Empty.to_kafka_status() == 0);
+        assert!(TxnState::Dead.to_kafka_status() == 6);
+        // PrepareEpochFence (7) and out-of-range are not modeled.
+        assert!(TxnState::from_kafka_status(7).is_none());
+        assert!(TxnState::from_kafka_status(-1).is_none());
     }
 }
