@@ -46,6 +46,10 @@ pub enum Inbound {
         req: Bytes,
         reply: oneshot::Sender<Bytes>,
     },
+    FetchSnapshot {
+        req: Bytes,
+        reply: oneshot::Sender<Bytes>,
+    },
 }
 
 /// Everything that arrives on the engine's mpsc and drives one turn of the
@@ -68,6 +72,10 @@ pub enum Command {
         /// The raw encoded [`wire::PeerResponse::Fetch`] body.
         body: Bytes,
     },
+    /// A `FetchSnapshot` RESPONSE the follower received from the leader (carries
+    /// snapshot bytes the follower reassembles before resuming). Mirrors
+    /// `FetchResponse`'s dedicated command path.
+    FetchSnapshotResponse { from: NodeId, body: Bytes },
     /// A timer (election / fetch / heartbeat) fired. The loop maps it to the
     /// right core event after consulting liveness state (a fetch tick re-polls
     /// rather than electing unless the leader has been missed enough times).
@@ -180,6 +188,7 @@ pub mod api_key {
     pub const VOTE: i16 = 52;
     pub const BEGIN_QUORUM_EPOCH: i16 = 53;
     pub const END_QUORUM_EPOCH: i16 = 54;
+    pub const FETCH_SNAPSHOT: i16 = 59;
 }
 
 /// Real KIP-595 peer-RPC body codec (Task 7). The engine's loop reasons in
@@ -210,6 +219,8 @@ pub mod wire {
     use crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse;
     use crabka_protocol::owned::fetch_request::{self as fetch_req, FetchRequest};
     use crabka_protocol::owned::fetch_response::{self as fetch_resp, FetchResponse};
+    use crabka_protocol::owned::fetch_snapshot_request::{self as fs_req, FetchSnapshotRequest};
+    use crabka_protocol::owned::fetch_snapshot_response::{self as fs_resp, FetchSnapshotResponse};
     use crabka_protocol::owned::vote_request::{self as vote_req, VoteRequest};
     use crabka_protocol::owned::vote_response::{self as vote_resp, VoteResponse};
     use crabka_protocol::records::RecordsPayload;
@@ -227,6 +238,7 @@ pub mod wire {
     const VOTE_VERSION: i16 = 2;
     const QUORUM_EPOCH_VERSION: i16 = 1;
     const FETCH_VERSION: i16 = 17;
+    const FETCH_SNAPSHOT_VERSION: i16 = 1;
 
     /// Internal tagged-field tag carrying the `pre_vote` echo on a `VoteResponse`
     /// (a single byte: 1 = pre-vote round, 0 = real vote). Picked well above any
@@ -257,6 +269,12 @@ pub mod wire {
             fetch_epoch: LeaderEpoch,
             fetch_offset: i64,
         },
+        FetchSnapshot {
+            from: NodeId,
+            snapshot_id: (i64, i32),
+            position: i64,
+            max_bytes: i32,
+        },
     }
 
     /// A peer RPC response body, decoded by the sending engine back into the
@@ -274,10 +292,20 @@ pub mod wire {
             leader_id: NodeId,
             leader_epoch: LeaderEpoch,
             diverging: Option<LogOffsetMetadata>,
+            /// When set, the follower's fetch offset is below the leader's pruned
+            /// log-start; it must `FetchSnapshot` this snapshot instead. `(end_offset, epoch)`.
+            snapshot_id: Option<(i64, i32)>,
             /// Leader's high watermark at serve time.
             hwm: i64,
             /// Verbatim concatenated `RecordBatch` bytes for `[fetch_offset, log_end)`.
             records: Bytes,
+        },
+        FetchSnapshot {
+            snapshot_id: (i64, i32),
+            size: i64,
+            position: i64,
+            bytes: Bytes,
+            error_code: i16,
         },
     }
 
@@ -309,6 +337,7 @@ pub mod wire {
 
     impl PeerRequest {
         #[must_use]
+        #[allow(clippy::too_many_lines)]
         pub fn encode(&self) -> Bytes {
             match *self {
                 PeerRequest::Vote {
@@ -407,6 +436,12 @@ pub mod wire {
                     };
                     encode_body(&req, FETCH_VERSION)
                 }
+                PeerRequest::FetchSnapshot {
+                    from,
+                    snapshot_id,
+                    position,
+                    max_bytes,
+                } => encode_fetch_snapshot_request(from, snapshot_id, position, max_bytes),
             }
         }
 
@@ -487,8 +522,87 @@ pub mod wire {
         })
     }
 
+    /// Encode a `FetchSnapshot` request body (api 59).
+    fn encode_fetch_snapshot_request(
+        from: NodeId,
+        snapshot_id: (i64, i32),
+        position: i64,
+        max_bytes: i32,
+    ) -> Bytes {
+        let (end_offset, epoch) = snapshot_id;
+        let req = FetchSnapshotRequest {
+            replica_id: node_to_wire(from),
+            max_bytes,
+            topics: vec![fs_req::TopicSnapshot {
+                name: METADATA_TOPIC.to_string(),
+                partitions: vec![fs_req::PartitionSnapshot {
+                    partition: METADATA_PARTITION,
+                    current_leader_epoch: epoch,
+                    snapshot_id: fs_req::SnapshotId {
+                        end_offset,
+                        epoch,
+                        ..Default::default()
+                    },
+                    position,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            cluster_id: None,
+            ..Default::default()
+        };
+        encode_body(&req, FETCH_SNAPSHOT_VERSION)
+    }
+
+    /// Encode a `FetchSnapshot` response body (api 59).
+    fn encode_fetch_snapshot_response(
+        snapshot_id: (i64, i32),
+        size: i64,
+        position: i64,
+        bytes: &Bytes,
+        error_code: i16,
+    ) -> Bytes {
+        let (end_offset, epoch) = snapshot_id;
+        let resp = FetchSnapshotResponse {
+            topics: vec![fs_resp::TopicSnapshot {
+                name: METADATA_TOPIC.to_string(),
+                partitions: vec![fs_resp::PartitionSnapshot {
+                    index: METADATA_PARTITION,
+                    error_code,
+                    snapshot_id: fs_resp::SnapshotId {
+                        end_offset,
+                        epoch,
+                        ..Default::default()
+                    },
+                    size,
+                    position,
+                    unaligned_records: RecordsPayload::Raw(bytes.clone()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        encode_body(&resp, FETCH_SNAPSHOT_VERSION)
+    }
+
+    /// Decode a `FetchSnapshot` request body (api 59).
+    #[must_use]
+    pub fn decode_fetch_snapshot(buf: &[u8]) -> Option<PeerRequest> {
+        let mut cur = buf;
+        let req = FetchSnapshotRequest::decode(&mut cur, FETCH_SNAPSHOT_VERSION).ok()?;
+        let p = req.topics.first()?.partitions.first()?;
+        Some(PeerRequest::FetchSnapshot {
+            from: node_from_wire(req.replica_id),
+            snapshot_id: (p.snapshot_id.end_offset, p.snapshot_id.epoch),
+            position: p.position,
+            max_bytes: req.max_bytes,
+        })
+    }
+
     impl PeerResponse {
         #[must_use]
+        #[allow(clippy::too_many_lines)]
         pub fn encode(&self) -> Bytes {
             match self {
                 PeerResponse::Vote {
@@ -549,6 +663,7 @@ pub mod wire {
                     leader_id,
                     leader_epoch,
                     diverging,
+                    snapshot_id,
                     hwm,
                     records,
                 } => {
@@ -570,6 +685,13 @@ pub mod wire {
                             ..Default::default()
                         };
                     }
+                    if let Some((end_offset, epoch)) = snapshot_id {
+                        partition.snapshot_id = fetch_resp::SnapshotId {
+                            end_offset: *end_offset,
+                            epoch: *epoch,
+                            ..Default::default()
+                        };
+                    }
                     if !records.is_empty() {
                         partition.records = Some(RecordsPayload::Raw(records.clone()));
                     }
@@ -583,6 +705,19 @@ pub mod wire {
                     };
                     encode_body(&resp, FETCH_VERSION)
                 }
+                PeerResponse::FetchSnapshot {
+                    snapshot_id,
+                    size,
+                    position,
+                    bytes,
+                    error_code,
+                } => encode_fetch_snapshot_response(
+                    *snapshot_id,
+                    *size,
+                    *position,
+                    bytes,
+                    *error_code,
+                ),
             }
         }
 
@@ -634,6 +769,11 @@ pub mod wire {
             } else {
                 None
             };
+            let snapshot_id = if p.snapshot_id.end_offset >= 0 {
+                Some((p.snapshot_id.end_offset, p.snapshot_id.epoch))
+            } else {
+                None
+            };
             let records = match &p.records {
                 Some(RecordsPayload::Raw(b)) => b.clone(),
                 Some(other) => {
@@ -647,8 +787,32 @@ pub mod wire {
                 leader_id,
                 leader_epoch,
                 diverging,
+                snapshot_id,
                 hwm: p.high_watermark,
                 records,
+            })
+        }
+
+        /// Decode a `FetchSnapshot` response body (api 59).
+        #[must_use]
+        pub fn decode_fetch_snapshot(buf: &[u8]) -> Option<Self> {
+            let mut cur = buf;
+            let resp = FetchSnapshotResponse::decode(&mut cur, FETCH_SNAPSHOT_VERSION).ok()?;
+            let p = resp.topics.first()?.partitions.first()?;
+            let bytes = match &p.unaligned_records {
+                RecordsPayload::Raw(b) => b.clone(),
+                other => {
+                    let mut o = BytesMut::new();
+                    let _ = other.encode_to(&mut o);
+                    o.freeze()
+                }
+            };
+            Some(PeerResponse::FetchSnapshot {
+                snapshot_id: (p.snapshot_id.end_offset, p.snapshot_id.epoch),
+                size: p.size,
+                position: p.position,
+                bytes,
+                error_code: p.error_code,
             })
         }
     }
@@ -713,11 +877,48 @@ pub mod wire {
         }
 
         #[test]
+        fn fetch_response_carries_snapshot_id() {
+            let resp = PeerResponse::Fetch {
+                leader_id: 1,
+                leader_epoch: 4,
+                diverging: None,
+                snapshot_id: Some((42, 3)),
+                hwm: 0,
+                records: Bytes::new(),
+            };
+            assert!(PeerResponse::decode_fetch(&resp.encode()) == Some(resp));
+        }
+
+        #[test]
+        fn fetch_snapshot_request_round_trips() {
+            let req = PeerRequest::FetchSnapshot {
+                from: 2,
+                snapshot_id: (42, 3),
+                position: 128,
+                max_bytes: 4096,
+            };
+            assert!(decode_fetch_snapshot(&req.encode()) == Some(req));
+        }
+
+        #[test]
+        fn fetch_snapshot_response_round_trips() {
+            let resp = PeerResponse::FetchSnapshot {
+                snapshot_id: (42, 3),
+                size: 9,
+                position: 0,
+                bytes: Bytes::from_static(b"snapshotX"),
+                error_code: 0,
+            };
+            assert!(PeerResponse::decode_fetch_snapshot(&resp.encode()) == Some(resp));
+        }
+
+        #[test]
         fn fetch_response_round_trips() {
             let with_records = PeerResponse::Fetch {
                 leader_id: 2,
                 leader_epoch: 5,
                 diverging: None,
+                snapshot_id: None,
                 hwm: 7,
                 records: Bytes::from_static(b"\x01\x02\x03"),
             };
@@ -730,6 +931,7 @@ pub mod wire {
                     offset: 5,
                     epoch: 1,
                 }),
+                snapshot_id: None,
                 hwm: 0,
                 records: Bytes::new(),
             };

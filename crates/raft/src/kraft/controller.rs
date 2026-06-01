@@ -514,6 +514,7 @@ impl Engine {
             Command::Shutdown => {}
             Command::Event(event) => self.on_event(event),
             Command::FetchResponse { from, body } => self.on_fetch_response(from, &body),
+            Command::FetchSnapshotResponse { .. } => {}
             Command::Inbound(inbound) => self.on_inbound(inbound),
             Command::Timer(tick) => self.on_timer(tick),
             Command::SubmitChange { records, reply } => self.on_submit_change(records, reply),
@@ -596,6 +597,7 @@ impl Engine {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn on_inbound(&mut self, inbound: Inbound) {
         // Decode the node-local request body, run it through the core, and
         // encode the produced reply back onto the oneshot. Task 7 swaps the
@@ -701,11 +703,15 @@ impl Engine {
                         leader_id: self.me,
                         leader_epoch: self.core.quorum_state().leader_epoch,
                         diverging,
+                        snapshot_id: None,
                         hwm: self.log.hwm(),
                         records,
                     };
                     let _ = reply.send(resp.encode());
                 }
+            }
+            Inbound::FetchSnapshot { reply, .. } => {
+                let _ = reply;
             }
         }
     }
@@ -1263,6 +1269,7 @@ impl Engine {
             leader_id,
             leader_epoch,
             diverging,
+            snapshot_id,
             hwm,
             records,
         }) = wire::PeerResponse::decode_fetch(body)
@@ -1270,6 +1277,7 @@ impl Engine {
             return;
         };
         let _ = from;
+        let _ = snapshot_id;
 
         if let Some(point) = diverging {
             // Diverged: truncate to the leader's hint. The follower will
