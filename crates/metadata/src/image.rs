@@ -428,25 +428,33 @@ impl MetadataImage {
                     self.topic_ids.remove(&prev.topic_id);
                 }
                 self.topic_ids.insert(t.topic_id, t.name.clone());
-                self.topics.insert(t.name.clone(), t.clone());
+                // The denormalized `partitions` count is a derived cache of the
+                // partitions map (KIP-631 `TopicRecord` carries no partition
+                // count), maintained incrementally as `V1Partition` records
+                // apply. A brand-new topic starts at 0 and the partition records
+                // that follow it in log order restore the real count; a
+                // re-registration of an existing topic keeps its partitions in
+                // the map, so preserve the running count rather than trusting
+                // the (KIP-631-zeroed) record field.
+                let mut rec = t.clone();
+                rec.partitions = self.topics.get(&t.name).map_or(0, |prev| prev.partitions);
+                self.topics.insert(t.name.clone(), rec);
             }
             MetadataRecord::V1Partition(p) => {
-                self.partitions
-                    .insert((p.topic.clone(), p.partition), p.clone());
-                // Keep the owning topic's denormalized partition count / RF in
-                // sync with the partitions map. KIP-631 framing carries no
-                // partition count on `TopicRecord`, so a freshly-decoded
-                // `V1Topic` lands with partitions=0; the partition records that
-                // follow it in log order restore the real count here, making the
-                // denormalized fields a true derived cache of the partitions map.
+                // Maintain the owning topic's denormalized partition count / RF
+                // incrementally. Re-scanning the whole partitions map on every
+                // record (the previous approach) made log/snapshot replay
+                // O(P²); bumping the cached count only when a *new* partition
+                // key lands keeps apply O(1) while leaving the count a true
+                // derived view of the partitions map.
+                let is_new = self
+                    .partitions
+                    .insert((p.topic.clone(), p.partition), p.clone())
+                    .is_none();
                 if let Some(t) = self.topics.get_mut(&p.topic) {
-                    t.partitions = i32::try_from(
-                        self.partitions
-                            .keys()
-                            .filter(|(topic, _)| topic == &p.topic)
-                            .count(),
-                    )
-                    .unwrap_or(t.partitions);
+                    if is_new {
+                        t.partitions = t.partitions.saturating_add(1);
+                    }
                     t.replication_factor =
                         i16::try_from(p.replicas.len()).unwrap_or(t.replication_factor);
                 }
