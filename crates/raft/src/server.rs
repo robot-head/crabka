@@ -246,6 +246,8 @@ where
 /// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
 /// so this is written via [`write_response_no_tagged_fields`].
 fn api_versions_response_body(req_version: i16) -> Bytes {
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
     // (api_key, min_version, max_version) — versions Crabka's transport codec
     // emits (Vote v2, Begin/End QuorumEpoch v1, Fetch v17, FetchSnapshot v1) plus
     // ApiVersions itself.
@@ -257,48 +259,29 @@ fn api_versions_response_body(req_version: i16) -> Bytes {
         (54, 0, 1), // EndQuorumEpoch
         (59, 0, 1), // FetchSnapshot
     ];
-    let mut out = BytesMut::new();
-    out.put_i16(0); // error_code
-    if req_version >= 3 {
-        // Flexible (v3+): compact array (len = N+1), per-entry + response-level
-        // tagged-field varints, trailing throttle_time_ms.
-        put_uvarint(&mut out, u64::try_from(KEYS.len() + 1).unwrap());
-        for &(api_key, min_v, max_v) in KEYS {
-            out.put_i16(api_key);
-            out.put_i16(min_v);
-            out.put_i16(max_v);
-            put_uvarint(&mut out, 0); // per-entry tagged fields
-        }
-        out.put_i32(0); // throttle_time_ms
-        put_uvarint(&mut out, 0); // response-level tagged fields
-    } else {
-        // Non-flexible (v0..=2): i32 array length, no tagged-field bytes.
-        // v1+ also carries throttle_time_ms after the array; Crabka's own client
-        // asks at v0 and ignores both the array and throttle, so emit the v0
-        // shape (array only) which is a strict prefix-correct v0 response.
-        out.put_i32(i32::try_from(KEYS.len()).unwrap());
-        for &(api_key, min_v, max_v) in KEYS {
-            out.put_i16(api_key);
-            out.put_i16(min_v);
-            out.put_i16(max_v);
-        }
-    }
-    out.freeze()
-}
-
-/// Encode an unsigned varint (Kafka COMPACT length / tagged-field prefix).
-fn put_uvarint(out: &mut BytesMut, mut v: u64) {
-    loop {
-        let mut byte = (v & 0x7f) as u8;
-        v >>= 7;
-        if v != 0 {
-            byte |= 0x80;
-        }
-        out.put_u8(byte);
-        if v == 0 {
-            break;
-        }
-    }
+    let resp = ApiVersionsResponse {
+        error_code: 0,
+        api_keys: KEYS
+            .iter()
+            .map(|&(api_key, min_version, max_version)| ApiVersion {
+                api_key,
+                min_version,
+                max_version,
+                ..Default::default()
+            })
+            .collect(),
+        throttle_time_ms: 0,
+        ..Default::default()
+    };
+    // JVM dials at v4 (flexible); Crabka's own client at v0 (non-flexible). The
+    // codec emits the correct body shape per version: req v<=2 → non-flexible
+    // v0-shaped body, req v>=3 → flexible (compact) body. The v0 ApiVersions
+    // response HEADER asymmetry lives in the framing (`write_response_no_tagged_fields`),
+    // not here.
+    let body_version = req_version.clamp(0, 4);
+    let mut buf = BytesMut::new();
+    let _ = resp.encode(&mut buf, body_version);
+    buf.freeze()
 }
 
 /// Route an inbound RPC body to the engine and produce the response body.
@@ -429,4 +412,31 @@ async fn dispatch_metadata_fetch(
     let mut out = Vec::new();
     resp.encode_v0(&mut out)?;
     Ok(Bytes::from(out))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn api_versions_body_advertises_kip595_set_both_shapes() {
+        use crabka_protocol::Decode;
+        use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+        for req_v in [0i16, 4i16] {
+            let body = super::api_versions_response_body(req_v);
+            let v = req_v.clamp(0, 4);
+            let mut cur = &body[..];
+            let resp = ApiVersionsResponse::decode(&mut cur, v).expect("decode body");
+            assert!(cur.is_empty(), "no trailing bytes (req_v={req_v})");
+            assert!(resp.error_code == 0);
+            let keys: std::collections::BTreeSet<i16> =
+                resp.api_keys.iter().map(|k| k.api_key).collect();
+            for want in [1i16, 18, 52, 53, 54, 59] {
+                assert!(
+                    keys.contains(&want),
+                    "missing api_key {want} at req_v={req_v}"
+                );
+            }
+            let vote = resp.api_keys.iter().find(|k| k.api_key == 52).unwrap();
+            assert!(vote.min_version == 0 && vote.max_version == 2);
+        }
+    }
 }
