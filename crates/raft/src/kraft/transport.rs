@@ -232,10 +232,15 @@ pub mod wire {
 
     use super::{LeaderEpoch, LogOffsetMetadata, NodeId};
 
+    use crabka_protocol::primitives::uuid::Uuid as MetaUuid;
+
     /// `KRaft` metadata log topic name.
     const METADATA_TOPIC: &str = "__cluster_metadata";
     /// The single metadata partition.
     const METADATA_PARTITION: i32 = 0;
+    /// The fixed `KRaft` `__cluster_metadata` topic id (KIP-595). Fetch v13+ keys
+    /// the topic by this id, not by name.
+    const METADATA_TOPIC_ID: MetaUuid = MetaUuid([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
     /// Captured flexible wire versions (Slice-0 findings; byte-validated Slice-2).
     const VOTE_VERSION: i16 = 2;
@@ -426,6 +431,7 @@ pub mod wire {
                         },
                         topics: vec![fetch_req::FetchTopic {
                             topic: METADATA_TOPIC.to_string(),
+                            topic_id: METADATA_TOPIC_ID,
                             partitions: vec![fetch_req::FetchPartition {
                                 partition: METADATA_PARTITION,
                                 current_leader_epoch: epoch_to_wire(fetch_epoch),
@@ -701,6 +707,7 @@ pub mod wire {
                     let resp = FetchResponse {
                         responses: vec![fetch_resp::FetchableTopicResponse {
                             topic: METADATA_TOPIC.to_string(),
+                            topic_id: METADATA_TOPIC_ID,
                             partitions: vec![partition],
                             ..Default::default()
                         }],
@@ -939,6 +946,33 @@ pub mod wire {
                 records: Bytes::new(),
             };
             assert!(PeerResponse::decode_fetch(&diverged.encode()) == Some(diverged));
+        }
+
+        #[test]
+        fn fetch_wire_carries_metadata_topic_id() {
+            use crabka_protocol::Decode;
+            use crabka_protocol::owned::fetch_request::FetchRequest;
+            use crabka_protocol::owned::fetch_response::FetchResponse;
+            let req = PeerRequest::Fetch {
+                from: 2,
+                fetch_epoch: 1,
+                fetch_offset: 5,
+            };
+            let mut c = &req.encode()[..];
+            let dreq = FetchRequest::decode(&mut c, FETCH_VERSION).unwrap();
+            assert!(dreq.topics[0].topic_id == METADATA_TOPIC_ID);
+
+            let resp = PeerResponse::Fetch {
+                leader_id: 1,
+                leader_epoch: 4,
+                diverging: None,
+                snapshot_id: None,
+                hwm: 0,
+                records: Bytes::new(),
+            };
+            let mut c2 = &resp.encode()[..];
+            let dresp = FetchResponse::decode(&mut c2, FETCH_VERSION).unwrap();
+            assert!(dresp.responses[0].topic_id == METADATA_TOPIC_ID);
         }
     }
 }
