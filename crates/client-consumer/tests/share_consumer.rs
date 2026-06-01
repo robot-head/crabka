@@ -1,3 +1,5 @@
+#![cfg(not(target_os = "windows"))]
+
 //! Tests for the KIP-932 [`ShareConsumer`]: a membership smoke test (join +
 //! close, Task E1) and a happy-path poll test (acquire records with the broker's
 //! `delivery_count`, then implicit auto-`Accept` advances the SPSO, Task E2).
@@ -8,8 +10,6 @@
 //! first acquire/accept persists) and the produce helper from
 //! `tests/integration.rs`. The fuller suite (explicit release/reject,
 //! two-consumer sharing, close-leaves-group) is Task E3.
-
-#![cfg(not(target_os = "windows"))]
 
 use assert2::assert;
 use std::time::Duration;

@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
 //! End-to-end integration tests for KIP-932 Slice C: share-partition consume
 //! (`ShareFetch`, `api_key` 78) + acknowledge (`ShareAcknowledge`, `api_key` 79),
 //! driven against an in-process Crabka broker via `crabka-client-core`.
@@ -18,9 +21,6 @@
 //!   lock-timeout sweep;
 //! - a record that exhausts `max_delivery_attempts` is archived (poison pill);
 //! - the share-session epoch state machine rejects stale / unknown epochs.
-
-#![cfg(not(target_os = "windows"))]
-#![allow(clippy::pedantic)]
 
 use assert2::assert;
 use std::sync::Arc;

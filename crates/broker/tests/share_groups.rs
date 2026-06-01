@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
 //! End-to-end integration tests for KIP-932 share-group membership,
 //! driven against an in-process Crabka broker via `crabka-client-core`.
 //!
@@ -6,9 +9,6 @@
 //! `ProtocolRequest`, so `client.send(req)` returns the typed response and
 //! exercises the real wire path (version negotiation through `ApiVersions` —
 //! both share RPCs are MIN=MAX=1, so the client negotiates v1).
-
-#![cfg(not(target_os = "windows"))]
-#![allow(clippy::pedantic)]
 
 use assert2::assert;
 use std::sync::Arc;

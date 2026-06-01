@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
 //! End-to-end integration tests for KIP-932 Slice D: share-group admin offset
 //! RPCs — `DescribeShareGroupOffsets` (`api_key` 90), `AlterShareGroupOffsets`
 //! (91), `DeleteShareGroupOffsets` (92).
@@ -17,9 +20,6 @@
 //!   partition as missing → `start_offset` -1);
 //! - Describe of an unknown topic returns UNKNOWN_TOPIC_OR_PARTITION per
 //!   partition.
-
-#![cfg(not(target_os = "windows"))]
-#![allow(clippy::pedantic)]
 
 use assert2::assert;
 use std::sync::Arc;

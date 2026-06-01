@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
 //! End-to-end integration tests for the KIP-932 share coordinator (persister),
 //! driven against an in-process Crabka broker via `crabka-client-core`.
 //!
@@ -10,9 +13,6 @@
 //! materializes + leads its partitions asynchronously (replicator supervisor),
 //! so the first `Initialize` may briefly return a coordinator-not-ready code; the
 //! `*_ready` helpers retry, exactly as a real client would.
-
-#![cfg(not(target_os = "windows"))]
-#![allow(clippy::pedantic)]
 
 use assert2::assert;
 use std::sync::Arc;

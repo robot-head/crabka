@@ -1,3 +1,6 @@
+#![cfg(not(target_os = "windows"))]
+#![allow(clippy::pedantic)]
+
 //! JVM differential / interop test for KIP-932 share groups.
 //!
 //! Drives a REAL Apache Kafka 4.x `kafka-console-share-consumer.sh`
@@ -22,9 +25,6 @@
 //! Networking mirrors `jvm_consumer_group_next_gen.rs` / `jvm_acceptance.rs`:
 //! the broker binds `0.0.0.0:9092` and advertises `host.docker.internal:9092`;
 //! the container reaches it via `--add-host=host.docker.internal:host-gateway`.
-
-#![cfg(not(target_os = "windows"))]
-#![allow(clippy::pedantic)]
 
 use assert2::assert;
 use std::process::{Command, Stdio};
