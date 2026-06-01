@@ -245,6 +245,61 @@ impl ShareConsumer {
         Ok(())
     }
 
+    /// Renew the acquisition lock on a single delivered `record` (KIP-932
+    /// RENEW). Sends a standalone `ShareAcknowledge` with `is_renew_ack = true`
+    /// and an empty `acknowledge_types` for the record's offset, which extends
+    /// the broker-side lock deadline without changing the record's state. Like
+    /// [`acknowledge`](ShareConsumer::acknowledge), this is only valid in
+    /// explicit ack mode. Advances the session epoch on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConsumerError::IllegalState`] in
+    /// [`Implicit`](super::types::ShareAckMode::Implicit) mode (records are
+    /// auto-accepted on the next poll/close, so renewing a lock is meaningless),
+    /// and [`ConsumerError::Server`] if the broker rejects the renew.
+    pub async fn renew(&mut self, record: &ShareConsumerRecord) -> Result<(), ConsumerError> {
+        if self.ack_mode == ShareAckMode::Implicit {
+            return Err(ConsumerError::IllegalState(
+                "renew() is not allowed in implicit ack mode; \
+                 records are auto-accepted on the next poll/close"
+                    .into(),
+            ));
+        }
+        let topic_id = self.topic_id_for(&record.topic);
+        let topics = vec![AcknowledgeTopic {
+            topic_id,
+            partitions: vec![AcknowledgePartition {
+                partition_index: record.partition,
+                acknowledgement_batches: vec![AckAckBatch {
+                    first_offset: record.offset,
+                    last_offset: record.offset,
+                    acknowledge_types: vec![],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }];
+
+        let resp = self
+            .client
+            .send(ShareAcknowledgeRequest {
+                group_id: Some(self.group_id.clone()),
+                member_id: Some(self.member_id.clone()),
+                share_session_epoch: self.share_session_epoch,
+                is_renew_ack: true,
+                topics,
+                ..Default::default()
+            })
+            .await?;
+        if resp.error_code != 0 {
+            return Err(ConsumerError::Server(resp.error_code));
+        }
+        self.share_session_epoch = self.share_session_epoch.wrapping_add(1);
+        Ok(())
+    }
+
     /// Flush staged explicit acknowledgements via a standalone
     /// `ShareAcknowledge`. No-op when nothing is staged.
     pub async fn commit(&mut self) -> Result<(), ConsumerError> {

@@ -50,6 +50,15 @@ pub enum ShareGroupActorMessage {
     Describe {
         reply: oneshot::Sender<ShareDescribeView>,
     },
+    /// KIP-932 lifecycle: a `DeleteShareGroupOffsets` removed every initialized
+    /// partition of `topic_id`. Drop the topic from `state.initialized` and
+    /// rewrite the `ShareGroupStatePartitionMetadata` (key v14) so the topic no
+    /// longer appears after a restart. `topic_id` is the metadata-image
+    /// (`uuid::Uuid`) id, matching the persister's delete key.
+    DropTopicMetadata {
+        topic_id: uuid::Uuid,
+        reply: oneshot::Sender<()>,
+    },
     Seed(super::super::ShareGroupSeed),
     Shutdown(oneshot::Sender<()>),
 }
@@ -201,6 +210,32 @@ async fn actor_loop(
                     }
                     ShareGroupActorMessage::Describe { reply } => {
                         let _ = reply.send(build_describe(&state));
+                    }
+                    ShareGroupActorMessage::DropTopicMetadata { topic_id, reply } => {
+                        state
+                            .initialized
+                            .retain(|(tid, _)| uuid::Uuid::from_bytes(tid.0) != topic_id);
+                        let pending = PendingShareRecords {
+                            state_partition_metadata: Some(state_partition_metadata_from(&state)),
+                            ..Default::default()
+                        };
+                        if let Err(e) = flush_pending(
+                            &state,
+                            pending,
+                            &*offsets_log,
+                            &coordinator,
+                            chrono_now_ms(),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                group_id = %state.group_id,
+                                topic_id = %topic_id,
+                                error = %e,
+                                "rewriting ShareGroupStatePartitionMetadata after topic delete failed; in-memory set updated",
+                            );
+                        }
+                        let _ = reply.send(());
                     }
                     ShareGroupActorMessage::Seed(seed) => {
                         apply_seed(&mut state, seed);

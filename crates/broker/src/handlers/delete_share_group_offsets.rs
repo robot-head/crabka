@@ -109,6 +109,27 @@ pub(crate) async fn handle(
             }
         }
 
+        // KIP-932 lifecycle: drop the topic from the group's v14
+        // `ShareGroupStatePartitionMetadata` so it stays absent across restart.
+        // Best-effort: a send/await failure must not fail the delete.
+        if error_code == codes::NONE
+            && let Some(ng) = ng_opt.as_ref()
+            && let Some(handle) = ng.find_share(&gid)
+        {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            handle
+                .tx
+                .send(
+                    crate::coordinator::unified::share::actor::ShareGroupActorMessage::DropTopicMetadata {
+                        topic_id,
+                        reply: tx,
+                    },
+                )
+                .await
+                .ok();
+            let _ = rx.await;
+        }
+
         responses.push(DeleteShareGroupOffsetsResponseTopic {
             topic_name,
             topic_id: Uuid(*topic_id.as_bytes()),
