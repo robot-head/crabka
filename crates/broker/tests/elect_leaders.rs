@@ -259,6 +259,31 @@ async fn wait_partition_isr_only(
     }
 }
 
+/// Poll until the partition's ISR contains `member`. Unlike
+/// [`wait_partition_isr_only`] this asserts membership, not an exact set, so it
+/// tolerates a live caught-up replica being (re-)admitted alongside `member`.
+async fn wait_partition_isr_contains(
+    handle: &BrokerHandle,
+    topic: &str,
+    partition: i32,
+    member: u64,
+) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(isr) = handle.partition_isr_for_test(topic, partition)
+            && isr.contains(&member)
+        {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "ISR for {topic}-{partition} never contained {member} within 15s; current={:?}",
+            handle.partition_isr_for_test(topic, partition)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -391,14 +416,6 @@ async fn preferred_election_via_wire_returns_success() {
 /// 4. The handler checks: is any ISR member (99) alive? No → unclean eligible.
 ///    First alive replica in [1, 2]? Broker 1 → elected as leader, ISR=[1].
 /// 5. Assert per-partition error_code = 0 and poll until leader == 1.
-// PRE-EXISTING RACE (not a 3d-2 regression): the forged state (leader 1 alive
-// but ISR=[99]) is exactly what the leader's ISR-repair reconcile heals — it
-// re-admits the live leader to the ISR before the manual ElectLeaders runs, so
-// the unclean election finds a live ISR member and returns ELECTION_NOT_NEEDED
-// (81). Bisected to caa97e85 (the 3d-1 tip, wincode engine, zero KIP-631
-// changes), where it fails identically. Same churn root cause that `isr_expand`
-// is ignored for; tracked as a follow-up to make the injection reconcile-proof.
-#[ignore = "pre-existing ISR-repair race (see comment); unrelated to KIP-631 — follow-up"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unclean_election_via_wire_picks_alive_replica() {
     let _g = cluster_lock().lock().await;
@@ -421,16 +438,22 @@ async fn unclean_election_via_wire_picks_alive_replica() {
     let pr_before = wait_partition_record_known(h0, "foo-unclean", 0).await;
     eprintln!("partition before injection: {pr_before:?}");
 
-    // Inject a PartitionRecord where the ISR contains only broker 99 (dead).
-    // Broker 99 has never sent a heartbeat, so liveness.is_alive(99) == false.
-    // Broker 1 is alive (it's been running and heartbeating to the controller).
+    // Inject a PartitionRecord whose leader AND ISR are the dead phantom 99.
+    // Broker 99 never registered/heartbeated, so liveness.is_alive(99)==false.
+    //
+    // Crucially, the leader must be a DEAD broker, not a live replica: a live
+    // leader runs ISR management and would re-admit itself / caught-up replicas
+    // before the manual election ran, healing the forged state (the partition
+    // would then have a live ISR member → ELECTION_NOT_NEEDED). With a dead
+    // leader (99, not in replicas) no live broker owns the partition, so the
+    // forged ISR=[99] persists until the operator's unclean election. (Nothing
+    // auto-elects either: failover is transition-triggered on AliveToDead, and
+    // 99 never went alive→dead.)
     let forged = MetadataRecord::V1Partition(PartitionRecord {
         topic: "foo-unclean".to_string(),
         partition: 0,
-        // Keep the same leader for now; UNCLEAN will change it.
-        leader: pr_before.leader,
+        leader: 99,
         replicas: pr_before.replicas.clone(),
-        // ISR contains only a dead phantom node.
         isr: vec![99],
         leader_epoch: pr_before.leader_epoch + 1,
         adding_replicas: vec![],
@@ -440,7 +463,8 @@ async fn unclean_election_via_wire_picks_alive_replica() {
         .await
         .expect("inject forged PartitionRecord");
 
-    // Wait for the injected ISR to propagate to the image.
+    // Wait for the injected ISR to propagate to the image. With a dead leader
+    // it stays [99] (no live leader to repair it).
     wait_partition_isr_only(h0, "foo-unclean", 0, &[99]).await;
 
     // Drive ElectLeaders Unclean (election_type=1).
@@ -452,9 +476,14 @@ async fn unclean_election_via_wire_picks_alive_replica() {
         "expected error_code=0 for UNCLEAN election; got {result:?}"
     );
 
-    // Poll until the metadata image reflects the new leader and ISR.
+    // Poll until the metadata image reflects the new leader. The unclean
+    // election makes broker 1 the leader with ISR=[1]; we assert leadership and
+    // broker 1's ISR membership rather than an exact ISR={1}, because once
+    // broker 1 leads, the other live replica (broker 2, caught up on the empty
+    // log) is legitimately re-admitted to the ISR — asserting exactly [1] would
+    // race that re-admission.
     wait_partition_leader(h0, "foo-unclean", 0, 1).await;
-    wait_partition_isr_only(h0, "foo-unclean", 0, &[1]).await;
+    wait_partition_isr_contains(h0, "foo-unclean", 0, 1).await;
 
     // Clean up.
     for (h, _, _) in cluster {
