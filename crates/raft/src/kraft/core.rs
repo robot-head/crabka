@@ -9,6 +9,25 @@ use crate::kraft::types::{
     LeaderEpoch, LogOffsetMetadata, LogView, NodeId, QuorumState, ReplicaKey, SimInstant,
 };
 
+/// Deterministic per-`(node, epoch)` election-timeout jitter in
+/// `[0, base_ms)` — Raft's randomized backoff, made reproducible for the
+/// deterministic sims. Different nodes (and the same node across re-election
+/// epochs) get different spreads, so closely-synchronized voters don't arm their
+/// election timers in lockstep and split the vote indefinitely. Shared by the
+/// pure core and the async engine's initial timer arm so production self-staggers
+/// without per-node config.
+#[must_use]
+pub(crate) fn election_jitter_ms(me: NodeId, epoch: LeaderEpoch, base_ms: u64) -> u64 {
+    if base_ms == 0 {
+        return 0;
+    }
+    // Cheap integer hash of (node id, epoch); avoids any RNG so the sims stay
+    // deterministic.
+    let mix = me.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ u64::from(epoch).wrapping_mul(0xD1B5_4A32_D192_ED03);
+    mix % base_ms
+}
+
 /// The hand-rolled KIP-595 + KIP-996 quorum state machine. Pure and
 /// deterministic: it consumes [`Event`]s, reads the log through [`LogView`],
 /// takes the current time as an injected [`SimInstant`], and produces a list of
@@ -73,9 +92,18 @@ impl QuorumStateMachine {
         cand.last_epoch > my_epoch || (cand.last_epoch == my_epoch && cand.last_offset >= my_end)
     }
 
-    /// The deadline for an election timer armed at `now`.
+    /// The deadline for an election timer armed at `now`. Adds deterministic
+    /// per-`(node, epoch)` jitter (standard Raft randomized backoff, made
+    /// deterministic for the sims) so competing voters do not arm their election
+    /// timers in lockstep. Without this, a bare majority of in-process /
+    /// closely-synchronized voters (e.g. exactly 2 of a 3-voter set) splits the
+    /// vote every round — both become candidates, self-vote, and neither reaches
+    /// majority — livelocking elections until natural skew breaks the tie.
     fn election_deadline(&self, now: SimInstant) -> SimInstant {
-        now.saturating_add_ms(self.election_timeout_ms)
+        now.saturating_add_ms(
+            self.election_timeout_ms
+                + election_jitter_ms(self.me, self.state.leader_epoch, self.election_timeout_ms),
+        )
     }
 
     // `event` is taken by value: it models a consumed input message, and 3b/3c

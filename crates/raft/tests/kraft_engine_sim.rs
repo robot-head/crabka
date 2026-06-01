@@ -253,6 +253,41 @@ async fn three_engines_elect_one_leader() {
     }
 }
 
+/// 1b. A bare majority (exactly 2 of a 3-voter set) elects a stable leader even
+///     with UNIFORM election timeouts and in-process lockstep. This guards the
+///     split-vote livelock fix: without per-(node, epoch) election-timeout jitter
+///     the two closely-synchronized voters both become candidates every round,
+///     self-vote, and never reach majority (the 3rd voter is down) — churning for
+///     tens of seconds. `start_n_node`-style "all voters up" topologies never
+///     exercised this; the mixed JVM+Crabka quorum (JVM boots slowly) did.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bare_majority_two_of_three_elects_with_uniform_timeouts() {
+    let net = SimNet::new();
+    let ids = [1u64, 2, 3];
+    let cid = uuid::Uuid::from_u128(150);
+
+    // UNIFORM timeout for both live voters (no manual stagger) — the production
+    // controller config uses a single election timeout for every node. Only
+    // voters 1 and 2 are started; voter 3 stays down, so {1,2} is the bare
+    // majority of the 3-voter set.
+    let mut dirs = Vec::new();
+    for &id in &[1u64, 2] {
+        let (ctrl, dir) = build_engine(id, &ids, cid, 200, &net);
+        net.register(id, ctrl);
+        dirs.push(dir);
+    }
+
+    // Must converge quickly via self-staggering; without the jitter fix this
+    // livelocks well past the deadline.
+    let (leader, epoch) = await_single_leader(&net, &[1u64, 2], Duration::from_secs(8)).await;
+    assert!(epoch >= 1);
+    assert!(leader == 1 || leader == 2, "leader must be a live voter");
+
+    for &id in &[1u64, 2] {
+        net.get(id).unwrap().shutdown().await;
+    }
+}
+
 /// 2. `submit_change` on a follower forwards to the leader, commits via
 ///    record-carrying replication, and the topic appears in ALL three images.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

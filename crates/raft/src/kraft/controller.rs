@@ -240,7 +240,13 @@ impl KraftController {
         // A fresh voter arms its election timer so a bootstrap cluster elects
         // without an injected event. Observers/followers leave it disarmed.
         let election_at = if core.is_voter() && initial_leader.is_none() {
-            Some(clock_base + Duration::from_millis(election_timeout_ms))
+            // Same deterministic per-(node, epoch) jitter the core applies to
+            // re-election timers, so the FIRST election round is also staggered
+            // across closely-synchronized voters (otherwise a bare majority that
+            // boots in lockstep splits the vote on round one).
+            let jitter =
+                crate::kraft::core::election_jitter_ms(me, initial_epoch, election_timeout_ms);
+            Some(clock_base + Duration::from_millis(election_timeout_ms + jitter))
         } else {
             None
         };

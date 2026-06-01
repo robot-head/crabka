@@ -199,6 +199,17 @@ impl BrokerHandle {
         *self._broker.controller.watch_leader().borrow()
     }
 
+    /// Test-only: the controller's current quorum state (leader epoch, HWM,
+    /// per-voter matched index). Used by the mixed-quorum acceptance test to
+    /// observe whether the Crabka leader commits/advances and whether a peer
+    /// voter (e.g. a JVM follower) is fetching.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn controller_quorum_state_for_test(&self) -> crabka_raft::QuorumState {
+        self._broker.controller.quorum_state()
+    }
+
     /// Number of brokers currently registered in this broker's
     /// `MetadataImage`. Used by replication integration tests to wait
     /// for all peers to come up before issuing `CreateTopics`.
