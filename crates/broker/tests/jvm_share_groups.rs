@@ -299,12 +299,6 @@ async fn jvm_share_consumer_reads_crabka() {
 /// path (`ShareGroupDescribe`, api_key 77) to the real JVM tooling: the tool
 /// resolves the share coordinator, sends ShareGroupDescribe, and renders the
 /// group's coordinator + state.
-///
-/// (`kafka-share-groups.sh --list` is NOT asserted here: Crabka's ListGroups
-/// handler does not yet honor the `types_filter=["share"]` the tool sends, so
-/// the JVM tool's client-side type filter drops the group. That ListGroups gap
-/// is tracked separately; the ShareGroupDescribe path below is the share-admin
-/// wire that this differential test validates.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_share_groups_describe_state() {
@@ -350,5 +344,59 @@ async fn jvm_share_groups_describe_state() {
         state_out.contains(group),
         "share group {group} must appear in --describe --state output; got:\n{state_out}\nstderr:\n{}",
         String::from_utf8_lossy(&state.stderr),
+    );
+}
+
+/// `kafka-share-groups.sh --list` drives `ListGroups` (api_key 16) with
+/// `types_filter = ["share"]`. After a real JVM `KafkaShareConsumer` has joined
+/// a share group on the Crabka broker, the share group id must appear in the
+/// tool's `--list` stdout. Before the ListGroups share pass landed, the JVM
+/// tool's `types_filter=["share"]` matched nothing and `--list` was EMPTY; this
+/// asserts the regression is closed against the real Apache Kafka 4.1.0 tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+async fn jvm_share_groups_list() {
+    let (broker, _dir) = start_host_broker().await;
+    let topic = "kip932-jvm-l";
+    let group = "jvm-share-gl";
+    let values = ["l-one", "l-two"];
+
+    let client = connect().await;
+    let tid = create_topic(&broker, &client, topic).await;
+    bootstrap_share_state(&broker, &client, &format!("{group}:{tid}:0")).await;
+    produce(&client, topic, tid, &values).await;
+
+    // Join + read so the share group is registered with the coordinator. The
+    // share-group actor stays in the coordinator's share registry after the
+    // consumer's idle-timeout exit (it is only removed on a delete-groups
+    // tombstone), so `--list` below still sees a live group entry.
+    let _ = docker_run(&[
+        "bash",
+        "-c",
+        &format!(
+            "{SHARE_CONSUMER} \
+                --bootstrap-server {BOOTSTRAP} \
+                --topic {topic} \
+                --group {group} \
+                --consumer-property group.share.auto.offset.reset=earliest \
+                --timeout-ms 15000 \
+                --max-messages {}",
+            values.len()
+        ),
+    ]);
+
+    // `--list` drives ListGroups(16) with types_filter=["share"]. The share
+    // group id must appear in stdout.
+    let listed = docker_run(&[
+        "bash",
+        "-c",
+        &format!("{SHARE_GROUPS} --bootstrap-server {BOOTSTRAP} --list"),
+    ]);
+    let list_out = String::from_utf8_lossy(&listed.stdout);
+    eprintln!("CRABKA[test] share-groups --list stdout:\n{list_out}");
+    assert!(
+        list_out.contains(group),
+        "share group {group} must appear in --list output; got:\n{list_out}\nstderr:\n{}",
+        String::from_utf8_lossy(&listed.stderr),
     );
 }
