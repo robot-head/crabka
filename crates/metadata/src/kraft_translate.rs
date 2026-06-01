@@ -1069,7 +1069,10 @@ fn topic_name_for_id(image: &MetadataImage, id: uuid::Uuid) -> Option<String> {
 mod tests {
     use super::*;
     use crate::acl::AclEntryFilter;
-    use crate::records::{DeleteDelegationTokenRecord, KRaftVersionRecord, VotersRecord};
+    use crate::records::{
+        ClientMetricsConfigRecord, DeleteDelegationTokenRecord, FeaturesEpochRecord,
+        KRaftVersionRecord, VotersRecord,
+    };
     use assert2::assert;
 
     fn img() -> MetadataImage {
@@ -1328,6 +1331,46 @@ mod tests {
             config_name: "leader.replication.throttled.rate".into(),
             config_value: None,
         });
+        round_trip(&rec, &img());
+    }
+
+    #[test]
+    fn client_metrics_config_round_trips_via_private_carrier() {
+        // KIP-714 client-metrics config has no modeled KIP-631 counterpart yet,
+        // so `to_kraft` envelopes it verbatim in a Crabka-private `Unknown`
+        // carrier and `from_kraft` decodes it back. Snapshots round-trip it this
+        // way; it never reaches the JVM in the static mixed-quorum path.
+        let rec = MetadataRecord::V1ClientMetricsConfig(ClientMetricsConfigRecord {
+            name: "metrics-sub-1".into(),
+            configs: [
+                ("interval.ms".to_string(), "60000".to_string()),
+                ("metrics".to_string(), "org.apache.kafka".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        });
+        // The carrier is an `Unknown` record, not a modeled KIP-631 variant.
+        let k = to_kraft(&rec, &img()).unwrap();
+        assert!(matches!(
+            k,
+            crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
+                if api_key == PRIVATE_CLIENT_METRICS_KEY
+        ));
+        round_trip(&rec, &img());
+    }
+
+    #[test]
+    fn features_epoch_round_trips_via_private_carrier() {
+        // The synthetic `V1FeaturesEpoch` epoch pin is Crabka-internal (no KRaft
+        // record); it round-trips through the same private `Unknown` carrier so
+        // a snapshot preserves `finalized_features_epoch`.
+        let rec = MetadataRecord::V1FeaturesEpoch(FeaturesEpochRecord { epoch: 42 });
+        let k = to_kraft(&rec, &img()).unwrap();
+        assert!(matches!(
+            k,
+            crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
+                if api_key == PRIVATE_FEATURES_EPOCH_KEY
+        ));
         round_trip(&rec, &img());
     }
 
