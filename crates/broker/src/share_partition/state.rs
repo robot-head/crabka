@@ -279,6 +279,46 @@ impl AcquisitionState {
         Ok(())
     }
 
+    /// Renew (extend) the acquisition lock on the range `[first, last]` held by
+    /// `member`, resetting each covered Acquired batch's `lock_deadline` to
+    /// `now + lock_dur` (KIP-932 RENEW acknowledgement).
+    ///
+    /// The whole range must currently be `Acquired` by `member`, else
+    /// `Err(INVALID_RECORD_STATE)`. State, owner, and `delivery_count` are all
+    /// preserved (only the deadline moves) and SPSO is NOT advanced — renew
+    /// keeps records in flight. Marks the state dirty.
+    pub fn renew(
+        &mut self,
+        member: &str,
+        first: i64,
+        last: i64,
+        now: Instant,
+        lock_dur: Duration,
+    ) -> Result<(), i16> {
+        if first > last {
+            return Err(crate::codes::INVALID_RECORD_STATE);
+        }
+        // The entire range must be Acquired by this member.
+        if !self.range_acquired_by(member, first, last) {
+            return Err(crate::codes::INVALID_RECORD_STATE);
+        }
+        // Carve the range out at its boundaries, then extend each covered lock.
+        self.split_at_offset(first);
+        self.split_at_offset(last + 1);
+        let new_deadline = now + lock_dur;
+        for b in &mut self.batches {
+            if b.first_offset < first || b.last_offset > last {
+                continue;
+            }
+            if b.state != RecordState::Acquired {
+                continue;
+            }
+            b.lock_deadline = Some(new_deadline);
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
     /// Revert any Acquired batch whose lock has expired back to Available,
     /// clearing the lock/owner but retaining `delivery_count` (so the next
     /// acquire counts as a redelivery). Marks dirty if anything changed.
@@ -424,22 +464,35 @@ impl AcquisitionState {
         (self.start_offset, self.delivery_complete_count, out)
     }
 
+    /// Cumulative count of offsets that have reached a terminal state
+    /// (Acknowledged or Archived) — the persister's `delivery_complete_count`.
+    /// Currently only consulted by the state-machine tests; the value also
+    /// flows out through [`Self::to_persist_batches`].
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn delivery_complete_count(&self) -> i32 {
+        self.delivery_complete_count
+    }
+
     /// Rebuild the machine from persisted state. SPSO is restored to
-    /// `start_offset`, batches are rehydrated (persisted `Acquired(1)` maps to
-    /// `Available` since locks don't survive a leader change), and `end_offset`
-    /// is set to `max(last_offset)+1` or `start_offset` when empty.
+    /// `start_offset`, the cumulative `delivery_complete_count` is restored
+    /// (so the consumer-lag accounting survives a leader change), batches are
+    /// rehydrated (persisted `Acquired(1)` maps to `Available` since locks
+    /// don't survive a leader change), and `end_offset` is set to
+    /// `max(last_offset)+1` or `start_offset` when empty.
     pub fn load_from(
         &mut self,
         start_offset: i64,
         state_epoch: i32,
         leader_epoch: i32,
+        delivery_complete_count: i32,
         batches: &[StateBatch],
     ) {
         self.start_offset = start_offset;
         self.state_epoch = state_epoch;
         self.leader_epoch = leader_epoch;
         self.dirty = false;
-        self.delivery_complete_count = 0;
+        self.delivery_complete_count = delivery_complete_count;
         self.batches = batches
             .iter()
             .map(|sb| {
@@ -604,7 +657,7 @@ mod tests {
         assert!(start == 4);
 
         let mut reloaded = AcquisitionState::new(0);
-        reloaded.load_from(start, 7, 3, &batches);
+        reloaded.load_from(start, 7, 3, 0, &batches);
         assert!(reloaded.start_offset == 4);
         assert!(reloaded.end_offset == 10);
         assert!(reloaded.state_epoch == 7);
@@ -650,5 +703,62 @@ mod tests {
         // The remaining [4,9] is still Available.
         let acq2 = s.acquire("m2", 100, i32::MAX, t0(), LOCK, 5);
         assert!(acq2[0].first == 4 && acq2[0].last == 9);
+    }
+
+    #[test]
+    fn load_from_restores_delivery_complete_count() {
+        // F3: the cumulative delivery-complete count must survive a reload so
+        // consumer-lag accounting is preserved across a leader change.
+        let mut s = AcquisitionState::new(4);
+        s.load_from(4, 0, 0, 5, &[]);
+        assert!(s.delivery_complete_count() == 5);
+        // It round-trips back out through the persist projection.
+        let (_start, dcc, _batches) = s.to_persist_batches();
+        assert!(dcc == 5);
+    }
+
+    #[test]
+    fn renew_extends_lock_keeping_acquired() {
+        // F1: acquire with a short lock, renew with a longer one. An
+        // `expire_locks` at the ORIGINAL deadline must not release the records.
+        let t0 = Instant::now();
+        let short = Duration::from_secs(10);
+        let long = Duration::from_mins(1);
+
+        let mut s = AcquisitionState::new(0);
+        s.materialize(4, 100);
+        let acq = s.acquire("m1", 10, i32::MAX, t0, short, 5);
+        assert!(acq.len() == 1);
+        let original_deadline = t0 + short;
+
+        // Renew extends the lock well past the original deadline.
+        s.renew("m1", 0, 3, t0, long).unwrap();
+        assert!(s.dirty);
+
+        // Sweeping at the original deadline must NOT release the renewed lock.
+        s.expire_locks(original_deadline);
+        // Still Acquired by m1 -> a different member acquires nothing.
+        let none = s.acquire("m2", 10, i32::MAX, original_deadline, short, 5);
+        assert!(none.is_empty());
+        // And m1 can still acknowledge it (proves it stayed Acquired by m1).
+        s.acknowledge("m1", 0, 3, AckType::Accept, original_deadline)
+            .unwrap();
+        assert!(s.start_offset == 4);
+    }
+
+    #[test]
+    fn renew_on_unacquired_range_is_invalid_record_state() {
+        let t0 = Instant::now();
+        let mut s = AcquisitionState::new(0);
+        s.materialize(3, 100);
+        let _ = s.acquire("m1", 10, i32::MAX, t0, LOCK, 5);
+        // Wrong member.
+        let err = s.renew("m2", 0, 2, t0, LOCK);
+        assert!(err == Err(crate::codes::INVALID_RECORD_STATE));
+
+        // Non-Acquired range: release [0,2] back to Available, then renew fails.
+        s.acknowledge("m1", 0, 2, AckType::Release, t0).unwrap();
+        let err2 = s.renew("m1", 0, 2, t0, LOCK);
+        assert!(err2 == Err(crate::codes::INVALID_RECORD_STATE));
     }
 }

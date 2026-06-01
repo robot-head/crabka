@@ -1,6 +1,17 @@
 //! KIP-932 share-group membership configuration.
 use std::time::Duration;
 
+/// Transaction isolation applied to share-group reads. `ReadUncommitted`
+/// (Kafka's `share.group.isolation.level` default) exposes all records up to
+/// the high watermark; `ReadCommitted` clamps reads to the last stable offset
+/// so uncommitted transactional records are never acquired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShareIsolationLevel {
+    #[default]
+    ReadUncommitted,
+    ReadCommitted,
+}
+
 #[derive(Debug, Clone)]
 pub struct ShareGroupConfig {
     pub enable: bool,
@@ -15,6 +26,7 @@ pub struct ShareGroupConfig {
     pub record_lock_duration: Duration,
     pub max_delivery_attempts: i16,
     pub max_inflight_records: i32,
+    pub isolation_level: ShareIsolationLevel,
 }
 
 impl Default for ShareGroupConfig {
@@ -32,6 +44,7 @@ impl Default for ShareGroupConfig {
             record_lock_duration: Duration::from_secs(30),
             max_delivery_attempts: 5,
             max_inflight_records: 200,
+            isolation_level: ShareIsolationLevel::ReadUncommitted,
         }
     }
 }
@@ -55,5 +68,13 @@ mod tests {
         assert!(c.record_lock_duration == std::time::Duration::from_secs(30));
         assert!(c.max_delivery_attempts == 5);
         assert!(c.max_inflight_records == 200);
+    }
+
+    #[test]
+    fn slice_f_defaults() {
+        let c = ShareGroupConfig::default();
+        assert!(c.isolation_level == ShareIsolationLevel::ReadUncommitted);
+        // The enum's own Default must also be ReadUncommitted.
+        assert!(ShareIsolationLevel::default() == ShareIsolationLevel::ReadUncommitted);
     }
 }

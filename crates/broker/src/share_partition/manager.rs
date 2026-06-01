@@ -173,6 +173,7 @@ impl SharePartitionLeaderManager {
                     persisted.start_offset,
                     persisted.state_epoch,
                     leader_epoch,
+                    persisted.delivery_complete_count,
                     &persisted.state_batches,
                 );
                 st
@@ -224,7 +225,7 @@ impl SharePartitionLeaderManager {
             return;
         }
         let (start, dcc, batches) = st.to_persist_batches();
-        if let Err(e) = self
+        match self
             .persister
             .write_state(
                 group,
@@ -238,13 +239,15 @@ impl SharePartitionLeaderManager {
             )
             .await
         {
-            warn!(
+            // Clear `dirty` only on a durable write. On failure we leave it set
+            // so the background sweeper (and the next fetch/ack) retries.
+            Ok(()) => st.dirty = false,
+            Err(e) => warn!(
                 group,
                 %topic_id, partition, error = %e,
                 "share-partition state persist failed; will retry on next change"
-            );
+            ),
         }
-        st.dirty = false;
     }
 
     /// Spawn the background acquisition-lock-timeout sweeper.
@@ -286,6 +289,8 @@ mod tests {
     use assert2::assert;
     use std::collections::BTreeSet;
     use std::net::SocketAddr;
+
+    const LOCK: Duration = Duration::from_secs(30);
 
     use async_trait::async_trait;
     use tokio::sync::watch;
@@ -420,6 +425,26 @@ mod tests {
         // Clean state: no-op, no panic, stays clean.
         mgr.persist_if_dirty("g1", tid, 0, &mut st).await;
         assert!(!st.dirty);
+    }
+
+    #[tokio::test]
+    async fn persist_if_dirty_keeps_dirty_on_write_failure() {
+        // Under MockSource the persister can't bootstrap the share-state topic,
+        // so `write_state` errors. A failed durable write must leave `dirty`
+        // set so the sweeper/next-ack retries (F4 durability fix).
+        let mgr = manager();
+        let tid = uuid::Uuid::from_bytes([25; 16]);
+
+        let cell = mgr.get_or_load("g1", tid, 0).await;
+        let mut st = cell.lock().await;
+        // Make the state dirty with persistable content.
+        st.materialize(4, 100);
+        let _ = st.acquire("m1", 10, i32::MAX, std::time::Instant::now(), LOCK, 5);
+        assert!(st.dirty);
+
+        mgr.persist_if_dirty("g1", tid, 0, &mut st).await;
+        // Write failed -> dirty stays set for retry.
+        assert!(st.dirty);
     }
 
     #[tokio::test]
