@@ -1,8 +1,8 @@
 //! End-to-end integration tests for KIP-932 Slice C: share-partition consume
-//! (`ShareFetch`, api_key 78) + acknowledge (`ShareAcknowledge`, api_key 79),
+//! (`ShareFetch`, `api_key` 78) + acknowledge (`ShareAcknowledge`, `api_key` 79),
 //! driven against an in-process Crabka broker via `crabka-client-core`.
 //!
-//! The typed client works because `ApiVersions` advertises api_keys 78/79; both
+//! The typed client works because `ApiVersions` advertises `api_keys` 78/79; both
 //! `ShareFetchRequest` / `ShareAcknowledgeRequest` impl `ProtocolRequest`, so
 //! `client.send(req)` returns the typed response and exercises the real wire
 //! path (version negotiation through `ApiVersions` — both RPCs are MIN=1 MAX=2,
@@ -318,7 +318,7 @@ fn share_fetch_req(
 
 /// `ShareFetch`, retrying while the share-state leadership / acquisition is still
 /// settling. The first acquire pass after topic creation can briefly find the
-/// `__share_group_state` partition still materializing; mirror share_state.rs's
+/// `__share_group_state` partition still materializing; mirror `share_state.rs`'s
 /// retry-on-not-ready loop. Returns the (single) partition row.
 async fn share_fetch(
     client: &Client,
@@ -549,7 +549,7 @@ async fn consume_accept_restart() {
     }
 }
 
-/// Release re-delivers the same offsets with an incremented delivery_count.
+/// Release re-delivers the same offsets with an incremented `delivery_count`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn release_redelivers() {
     let dir = tempfile::TempDir::new().unwrap();
@@ -906,7 +906,7 @@ async fn renew_extends_lock_not_redelivered() {
 }
 
 /// F1 (control): the SAME timing WITHOUT a renew re-acquires the offset after
-/// the lock expires, at delivery_count 2 — proving the renew above is what
+/// the lock expires, at `delivery_count` 2 — proving the renew above is what
 /// suppressed the redelivery (not slack in the timing).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_renew_redelivers_after_lock_expiry() {
@@ -942,12 +942,12 @@ async fn no_renew_redelivers_after_lock_expiry() {
     );
 }
 
-/// F2 (read_committed): with `isolation_level = ReadCommitted`, a share fetch
+/// F2 (`read_committed`): with `isolation_level = ReadCommitted`, a share fetch
 /// never surfaces records from an OPEN transaction (offsets past the LSO).
 ///
 /// A transactional producer begins a txn and sends 3 records but does NOT
 /// commit — so the partition's HWM is 3 while the LSO stays at 0. A
-/// read_committed share fetch clamps its read window to `min(LSO, HWM) = 0`, so
+/// `read_committed` share fetch clamps its read window to `min(LSO, HWM) = 0`, so
 /// it acquires nothing. After the txn commits the LSO advances to 3 and the
 /// same group then acquires all 3 — proving the clamp tracked the LSO and the
 /// records were merely deferred, not lost.

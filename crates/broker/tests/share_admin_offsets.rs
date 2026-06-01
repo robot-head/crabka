@@ -1,8 +1,8 @@
 //! End-to-end integration tests for KIP-932 Slice D: share-group admin offset
-//! RPCs — `DescribeShareGroupOffsets` (api_key 90), `AlterShareGroupOffsets`
+//! RPCs — `DescribeShareGroupOffsets` (`api_key` 90), `AlterShareGroupOffsets`
 //! (91), `DeleteShareGroupOffsets` (92).
 //!
-//! The typed client works because `ApiVersions` advertises api_keys 90/91/92 and
+//! The typed client works because `ApiVersions` advertises `api_keys` 90/91/92 and
 //! all three requests impl `ProtocolRequest`, so `client.send(req)` exercises
 //! the real wire path (frame parse → handler → encode, version-negotiated).
 //!
@@ -14,7 +14,7 @@
 //!   acquires starting at the new offset;
 //! - Alter on a *non-empty* (live-member) group is rejected with NON_EMPTY_GROUP;
 //! - Delete removes the durable share-state for a topic (Describe then reads the
-//!   partition as missing → start_offset -1);
+//!   partition as missing → `start_offset` -1);
 //! - Describe of an unknown topic returns UNKNOWN_TOPIC_OR_PARTITION per
 //!   partition.
 
@@ -620,7 +620,7 @@ async fn alter_non_empty_group_fenced() {
 }
 
 /// Delete removes the durable share-state for a topic of an empty group; a
-/// subsequent Describe reads the partition as missing (start_offset -1).
+/// subsequent Describe reads the partition as missing (`start_offset` -1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_removes_topic() {
     let dir = tempfile::TempDir::new().unwrap();

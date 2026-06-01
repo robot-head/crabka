@@ -1,7 +1,7 @@
 //! End-to-end integration tests for KIP-932 share-group membership,
 //! driven against an in-process Crabka broker via `crabka-client-core`.
 //!
-//! The typed client works because `ApiVersions` advertises api_keys 76/77;
+//! The typed client works because `ApiVersions` advertises `api_keys` 76/77;
 //! `ShareGroupHeartbeatRequest` / `ShareGroupDescribeRequest` impl
 //! `ProtocolRequest`, so `client.send(req)` returns the typed response and
 //! exercises the real wire path (version negotiation through `ApiVersions` —
@@ -267,7 +267,7 @@ async fn topic_id(broker: &crabka_broker::BrokerHandle, topic: &str) -> uuid::Uu
 
 /// KIP-932 group-coordinator lifecycle: a share group joining a topic with `P`
 /// partitions drives the coordinator to Initialize per-partition share state in
-/// the `__share_group_state` persister (start_offset 0, state present — not the
+/// the `__share_group_state` persister (`start_offset` 0, state present — not the
 /// missing-key sentinel). The heartbeat hook runs after reconcile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lifecycle_initializes_share_state() {
@@ -304,7 +304,7 @@ async fn lifecycle_initializes_share_state() {
 }
 
 /// After a restart, the group's `ShareGroupStatePartitionMetadata` is recovered
-/// so re-joining does not re-initialize: a stale (non-zero) start_offset written
+/// so re-joining does not re-initialize: a stale (non-zero) `start_offset` written
 /// directly to the persister survives because the coordinator skips already-
 /// initialized partitions on the post-restart heartbeat.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -391,7 +391,7 @@ async fn lifecycle_metadata_survives_restart() {
     }
 }
 
-/// `kafka-share-groups.sh --list` sends `ListGroups` (api_key 16) with
+/// `kafka-share-groups.sh --list` sends `ListGroups` (`api_key` 16) with
 /// `types_filter = ["share"]`. A live share group must appear in that response
 /// tagged `group_type == "share"`, and must NOT appear when the request filters
 /// on `["consumer"]`.

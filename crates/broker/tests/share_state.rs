@@ -1,7 +1,7 @@
 //! End-to-end integration tests for the KIP-932 share coordinator (persister),
 //! driven against an in-process Crabka broker via `crabka-client-core`.
 //!
-//! The typed client works because `ApiVersions` advertises api_keys 83-87; each
+//! The typed client works because `ApiVersions` advertises `api_keys` 83-87; each
 //! `*ShareGroupState*Request` impls `ProtocolRequest`, so `client.send(req)`
 //! exercises the real wire path (version negotiation through `ApiVersions`).
 //!
@@ -90,7 +90,7 @@ async fn find_share(client: &Client, key: &str) -> (i16, i32) {
 }
 
 /// Initialize one (group, topic, partition), retrying while the coordinator
-/// is still materializing the state partition. Returns the final error_code.
+/// is still materializing the state partition. Returns the final `error_code`.
 async fn initialize_ready(
     client: &Client,
     group: &str,
@@ -336,7 +336,7 @@ async fn persister_round_trip() {
     );
 }
 
-/// A write carrying a state_epoch below the durable one is fenced (124).
+/// A write carrying a `state_epoch` below the durable one is fenced (124).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_fences_stale_state_epoch() {
     let (_b, bootstrap, _d) = boot().await;
