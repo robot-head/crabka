@@ -25,7 +25,7 @@ use assert2::assert;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crabka_broker::{Broker, BrokerConfig};
+use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::alter_share_group_offsets_request::{
     AlterShareGroupOffsetsRequest, AlterShareGroupOffsetsRequestPartition,
@@ -728,4 +728,218 @@ async fn admin_offsets_rejected_when_share_disabled() {
         "share-disabled describe must be UNSUPPORTED_VERSION (35), got {}",
         group.error_code
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Slice F tests.
+// ────────────────────────────────────────────────────────────────────────
+
+/// F3 (lag restore): the cumulative `delivery_complete_count` (number of
+/// terminally-acknowledged records — the basis for share-group lag) survives a
+/// broker restart. Before Slice F, `load_from` hard-reset it to 0, so the
+/// recovered group under-reported its completed work.
+///
+/// Produce N, consume + Accept all (SPSO advances to N, dcc = N), wait for the
+/// persist, restart on the same dir (Rejoin), then read the share-state summary:
+/// its 4th element (`delivery_complete_count`) must be the restored N, not 0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delivery_complete_count_restored_across_restart() {
+    const N: i64 = 4;
+    let dir = tempfile::TempDir::new().unwrap();
+    let log_dir = dir.path().to_path_buf();
+
+    let tid;
+    {
+        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
+            .await
+            .unwrap();
+        let client = connect(&broker.listen_addr().to_string()).await;
+        create_topic(&broker, &client, "t", 1).await;
+        tid = topic_id(&broker, "t");
+        bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+        produce_n(&client, "t", tid, 0, N).await;
+        let (member, _epoch) = join(&client, "g1", "t").await;
+        wait_for_share_init(&broker, "g1", tid, 0).await;
+
+        // Acquire 0..N-1 and Accept all → SPSO advances to N, dcc = N.
+        let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
+        assert!(acquired_count(&row) == N, "must acquire all {N} offsets");
+        let ack = share_ack(&client, "g1", &member, tid, 0, 1, 0, N - 1, ACCEPT).await;
+        assert!(ack.error_code == NONE, "accept error: {}", ack.error_code);
+
+        // Wait until the persisted summary reflects dcc == N before restarting.
+        let mut dcc = -1;
+        for _ in 0..50 {
+            if let Some((_se, _le, _start, d)) =
+                broker.share_state_summary_for_test("g1", tid, 0).await
+            {
+                dcc = d;
+                if dcc == i32::try_from(N).unwrap() {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            dcc == i32::try_from(N).unwrap(),
+            "pre-restart dcc must be {N}, got {dcc}"
+        );
+
+        // Let the persister land it durably, then shut down.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        broker.shutdown().await;
+    }
+
+    {
+        let mut cfg = BrokerConfig::for_tests(log_dir);
+        cfg.bootstrap_mode = BootstrapMode::Rejoin;
+        let broker = Broker::start(cfg).await.unwrap();
+        let client = connect(&broker.listen_addr().to_string()).await;
+        bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+
+        // The recovered summary must report the RESTORED dcc == N (not 0). The
+        // summary load is driven by the share coordinator reading the persisted
+        // record; poll until the recovered state is present.
+        let mut dcc = -1;
+        for _ in 0..50 {
+            if let Some((_se, _le, start, d)) =
+                broker.share_state_summary_for_test("g1", tid, 0).await
+            {
+                dcc = d;
+                // Sanity: the SPSO also recovered past the accepted records.
+                assert!(start == N, "recovered SPSO must be {N}, got {start}");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            dcc == i32::try_from(N).unwrap(),
+            "delivery_complete_count must be restored to {N} across restart, got {dcc}"
+        );
+    }
+}
+
+/// F6 (delete-metadata rewrite): `DeleteShareGroupOffsets` rewrites the v14
+/// state-partition-metadata record so the deleted topic is gone from the
+/// group's initialized set — and STAYS gone after a restart (the seed no longer
+/// re-lists it).
+///
+/// A describe with an explicit topic name but an EMPTY partitions list
+/// enumerates the group's *initialized* partitions for that topic (read from the
+/// v14 metadata cache). Before delete that returns partition [0]; after the
+/// delete rewrite the topic has no initialized partitions, so the row's
+/// `partitions` list is empty — before AND after a restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_rewrites_metadata_topic_absent_after_restart() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let log_dir = dir.path().to_path_buf();
+
+    let tid;
+    {
+        let broker = Broker::start(BrokerConfig::for_tests(log_dir.clone()))
+            .await
+            .unwrap();
+        let client = connect(&broker.listen_addr().to_string()).await;
+        create_topic(&broker, &client, "t", 1).await;
+        tid = topic_id(&broker, "t");
+        bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+        produce_n(&client, "t", tid, 0, 3).await;
+
+        // Initialize the topic's share state via the join lifecycle + a consume,
+        // then leave so the group is empty (Delete requires an empty group).
+        let (member, _epoch) = join(&client, "g1", "t").await;
+        wait_for_share_init(&broker, "g1", tid, 0).await;
+        let _ = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
+
+        // Sanity: a describe with empty partitions enumerates the initialized
+        // partitions for "t" — partition [0] is present before the delete.
+        let before = describe_offsets(&client, "g1", "t", vec![]).await;
+        let before_parts: Vec<i32> = before
+            .topics
+            .iter()
+            .find(|t| t.topic_name == "t")
+            .map(|t| t.partitions.iter().map(|p| p.partition_index).collect())
+            .unwrap_or_default();
+        assert!(
+            before_parts == vec![0],
+            "describe must enumerate initialized partition [0] before delete, got {before_parts:?}"
+        );
+
+        leave(&client, "g1", &member).await;
+
+        let resp = client
+            .send(DeleteShareGroupOffsetsRequest {
+                group_id: "g1".into(),
+                topics: vec![DeleteShareGroupOffsetsRequestTopic {
+                    topic_name: "t".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("DeleteShareGroupOffsets");
+        assert!(
+            resp.error_code == NONE && resp.responses[0].error_code == NONE,
+            "delete failed: top={} per-topic={}",
+            resp.error_code,
+            resp.responses[0].error_code
+        );
+
+        // The describe-by-name with empty partitions no longer enumerates any
+        // initialized partition for "t" (the v14 metadata record was rewritten).
+        let mut absent = false;
+        for _ in 0..40 {
+            let g = describe_offsets(&client, "g1", "t", vec![]).await;
+            let parts: Vec<i32> = g
+                .topics
+                .iter()
+                .find(|t| t.topic_name == "t")
+                .map(|t| t.partitions.iter().map(|p| p.partition_index).collect())
+                .unwrap_or_default();
+            if parts.is_empty() {
+                absent = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(
+            absent,
+            "describe must not enumerate any initialized partition for the deleted topic"
+        );
+
+        // Let the metadata-rewrite + delete land durably, then shut down.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        broker.shutdown().await;
+    }
+
+    {
+        let mut cfg = BrokerConfig::for_tests(log_dir);
+        cfg.bootstrap_mode = BootstrapMode::Rejoin;
+        let broker = Broker::start(cfg).await.unwrap();
+        let client = connect(&broker.listen_addr().to_string()).await;
+        bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+
+        // After restart, the v14 seed no longer lists "t" (the rewrite removed
+        // it), so the describe-by-name with empty partitions must STILL
+        // enumerate zero initialized partitions. Poll a window to let the
+        // coordinator finish replaying state, asserting absence throughout.
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let g = describe_offsets(&client, "g1", "t", vec![]).await;
+            let parts: Vec<i32> = g
+                .topics
+                .iter()
+                .find(|t| t.topic_name == "t")
+                .map(|t| t.partitions.iter().map(|p| p.partition_index).collect())
+                .unwrap_or_default();
+            assert!(
+                parts.is_empty(),
+                "deleted topic must remain un-initialized after restart (v14 rewrite), got {parts:?}"
+            );
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
 }

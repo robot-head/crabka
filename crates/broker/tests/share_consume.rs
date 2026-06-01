@@ -384,6 +384,50 @@ async fn share_ack(
     resp.responses[0].partitions[0].clone()
 }
 
+/// A renew-ack `ShareAcknowledge` (`is_renew_ack = true`) over `[first, last]`
+/// with *empty* ack types — the broker renew path extends each batch's lock
+/// without changing record state. Returns the partition row.
+#[allow(clippy::too_many_arguments)]
+async fn share_renew(
+    client: &Client,
+    group: &str,
+    member: &str,
+    tid: uuid::Uuid,
+    partition: i32,
+    epoch: i32,
+    first: i64,
+    last: i64,
+) -> crabka_protocol::owned::share_acknowledge_response::PartitionData {
+    let req = ShareAcknowledgeRequest {
+        group_id: Some(group.into()),
+        member_id: Some(member.into()),
+        share_session_epoch: epoch,
+        is_renew_ack: true,
+        topics: vec![AcknowledgeTopic {
+            topic_id: wire(tid),
+            partitions: vec![AcknowledgePartition {
+                partition_index: partition,
+                acknowledgement_batches: vec![AckAckBatch {
+                    first_offset: first,
+                    last_offset: last,
+                    acknowledge_types: vec![],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let resp: ShareAcknowledgeResponse = client.send(req).await.expect("ShareAcknowledge renew");
+    assert!(
+        resp.error_code == NONE,
+        "ShareAcknowledge(renew) top-level error: {}",
+        resp.error_code
+    );
+    resp.responses[0].partitions[0].clone()
+}
+
 /// Total number of offsets covered by the acquired ranges on a fetch row.
 fn acquired_count(p: &crabka_protocol::owned::share_fetch_response::PartitionData) -> i64 {
     p.acquired_records
@@ -799,5 +843,345 @@ async fn session_epoch_validation() {
         not_found.error_code == SHARE_SESSION_NOT_FOUND,
         "unknown session must be 122 (SHARE_SESSION_NOT_FOUND), got {}",
         not_found.error_code
+    );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Slice F tests.
+// ────────────────────────────────────────────────────────────────────────
+
+/// F1 (renew): a renew-ack extends the acquisition lock, so a record that would
+/// otherwise be re-delivered after its lock expires is NOT re-acquired.
+///
+/// Config: `record_lock_duration = 500ms` (sweeper ticks at 250ms). Acquire
+/// offset 0 (lock 500ms), send a renew-ack ~200ms in — which resets the
+/// deadline to renew-time + 500ms (≈ T0+700ms) — then check at ~T0+600ms, which
+/// is PAST the original 500ms deadline (so an un-renewed lock would already
+/// have been swept and re-delivered) but BEFORE the renewed 700ms deadline. The
+/// renew kept the record Acquired, so the fetch acquires nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renew_extends_lock_not_redelivered() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    cfg.share_group.record_lock_duration = Duration::from_millis(500);
+    let broker = Broker::start(cfg).await.unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    create_topic(&broker, &client, "t", 1).await;
+    let tid = topic_id(&broker, "t");
+    bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+    produce_n(&client, "t", tid, 0, 1).await;
+    let member = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, "g1", tid, 0).await;
+
+    // Acquire offset 0 (lock 500ms, delivery_count 1). Epoch is now 1.
+    let acquire_at = std::time::Instant::now();
+    let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
+    assert!(acquired_count(&row) == 1, "acquire the single offset");
+    assert!(row.acquired_records[0].delivery_count == 1);
+
+    // Renew ~200ms in (before the 500ms lock expires): resets the deadline to
+    // renew-time + 500ms ≈ T0+700ms. Epoch is now 2.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let renew = share_renew(&client, "g1", &member, tid, 0, 1, 0, 0).await;
+    assert!(
+        renew.error_code == NONE,
+        "renew must succeed for an acquired offset, got {}",
+        renew.error_code
+    );
+
+    // Wait until ~600ms after the ORIGINAL acquire: past the original 500ms
+    // deadline (so an un-renewed lock would have been swept) but before the
+    // renewed ~700ms deadline. Compute the remaining sleep from the real
+    // acquire instant so scheduling jitter doesn't overshoot the renewed window.
+    let target = acquire_at + Duration::from_millis(600);
+    if let Some(rem) = target.checked_duration_since(std::time::Instant::now()) {
+        tokio::time::sleep(rem).await;
+    }
+    let row2 = share_fetch(&client, "g1", &member, tid, 0, 2, 0).await;
+    assert!(
+        acquired_count(&row2) == 0,
+        "renew must keep the lock; offset 0 must NOT be re-acquired, got {:?}",
+        row2.acquired_records
+    );
+}
+
+/// F1 (control): the SAME timing WITHOUT a renew re-acquires the offset after
+/// the lock expires, at delivery_count 2 — proving the renew above is what
+/// suppressed the redelivery (not slack in the timing).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_renew_redelivers_after_lock_expiry() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    cfg.share_group.record_lock_duration = Duration::from_millis(500);
+    let broker = Broker::start(cfg).await.unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    create_topic(&broker, &client, "t", 1).await;
+    let tid = topic_id(&broker, "t");
+    bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+    produce_n(&client, "t", tid, 0, 1).await;
+    let member = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, "g1", tid, 0).await;
+
+    let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
+    assert!(acquired_count(&row) == 1, "acquire the single offset");
+    assert!(row.acquired_records[0].delivery_count == 1);
+
+    // No renew — wait well past the 500ms lock + a sweeper tick so the record is
+    // reverted to Available and re-delivered.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let row2 = share_fetch(&client, "g1", &member, tid, 0, 1, 0).await;
+    assert!(
+        acquired_count(&row2) == 1,
+        "without renew the expired lock must re-acquire, got {:?}",
+        row2.acquired_records
+    );
+    assert!(
+        row2.acquired_records[0].delivery_count == 2,
+        "re-delivery after lock timeout must bump delivery_count to 2, got {}",
+        row2.acquired_records[0].delivery_count
+    );
+}
+
+/// F2 (read_committed): with `isolation_level = ReadCommitted`, a share fetch
+/// never surfaces records from an OPEN transaction (offsets past the LSO).
+///
+/// A transactional producer begins a txn and sends 3 records but does NOT
+/// commit — so the partition's HWM is 3 while the LSO stays at 0. A
+/// read_committed share fetch clamps its read window to `min(LSO, HWM) = 0`, so
+/// it acquires nothing. After the txn commits the LSO advances to 3 and the
+/// same group then acquires all 3 — proving the clamp tracked the LSO and the
+/// records were merely deferred, not lost.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_committed_skips_open_txn_then_sees_committed() {
+    use crabka_broker::coordinator::unified::share::config::ShareIsolationLevel;
+    use crabka_client_producer::{Producer, ProducerRecord};
+
+    let dir = tempfile::TempDir::new().unwrap();
+    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    cfg.share_group.isolation_level = ShareIsolationLevel::ReadCommitted;
+    let broker = Broker::start(cfg).await.unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    let client = connect(&bootstrap).await;
+    create_topic(&broker, &client, "t", 1).await;
+    let tid = topic_id(&broker, "t");
+    bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+
+    // Open a transaction and send 3 records WITHOUT committing: HWM=3, LSO=0.
+    let producer = Producer::builder()
+        .bootstrap(bootstrap.clone())
+        .transactional_id("share-rc-tid")
+        .build()
+        .await
+        .unwrap();
+    producer.init_transactions().await.unwrap();
+    producer.begin_transaction().await.unwrap();
+    for v in ["a", "b", "c"] {
+        drop(
+            producer
+                .send(ProducerRecord {
+                    topic: "t".into(),
+                    value: Some(bytes::Bytes::from(v.to_string())),
+                    ..Default::default()
+                })
+                .await,
+        );
+    }
+    // Flush the records to the log (advances HWM) but keep the txn OPEN (LSO=0).
+    producer.flush().await.unwrap();
+
+    let member = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, "g1", tid, 0).await;
+
+    // A read_committed share fetch must acquire NOTHING: every record is past
+    // the LSO (still 0). Poll a few times to be sure it never spuriously acquires.
+    for epoch in 0..6 {
+        let row = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
+        assert!(
+            acquired_count(&row) == 0,
+            "read_committed must not surface open-txn records, got {:?}",
+            row.acquired_records
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Commit the transaction → the LSO advances past the records (a commit
+    // control marker is appended, so HWM == LSO). The same group now acquires
+    // the committed records (proving they were deferred, not dropped). The
+    // acquired window also covers the control-marker offset, whose bytes the
+    // read path filters out — so we assert on the surfaced record VALUES.
+    producer.commit_transaction().await.unwrap();
+    let mut values: Vec<String> = Vec::new();
+    for epoch in 6..30 {
+        let row = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
+        if acquired_count(&row) > 0
+            && let Some(batches) = row.records.as_ref().and_then(|r| r.as_v2())
+        {
+            values = batches
+                .iter()
+                .flat_map(|b| b.records.iter())
+                .filter_map(|r| r.value.as_ref())
+                .map(|v| String::from_utf8_lossy(v).into_owned())
+                .collect();
+            values.sort();
+            if values == vec!["a", "b", "c"] {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        values == vec!["a", "b", "c"],
+        "after commit the read_committed fetch must surface the 3 committed \
+         records, got {values:?}"
+    );
+
+    producer.close().await.unwrap();
+}
+
+/// Produce a single record carrying `value` into `(topic, partition)` as its OWN
+/// batch (so each offset is a distinct on-disk batch). This matters for the
+/// fragmented-window read test: the share-fetch read path reads verbatim bytes
+/// at *batch* granularity, so to surface byte-exact disjoint offsets each offset
+/// must be its own batch. Retries while the partition is still materializing.
+async fn produce_one(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32, value: &str) {
+    for _ in 0..40 {
+        let resp = client
+            .send(ProduceRequest {
+                transactional_id: None,
+                acks: -1,
+                timeout_ms: 5_000,
+                topic_data: vec![TopicProduceData {
+                    name: topic.to_string(),
+                    topic_id: wire(tid),
+                    partition_data: vec![PartitionProduceData {
+                        index: partition,
+                        records: Some(
+                            RecordBatch {
+                                last_offset_delta: 0,
+                                records: vec![Record {
+                                    offset_delta: 0,
+                                    value: Some(bytes::Bytes::copy_from_slice(value.as_bytes())),
+                                    ..Default::default()
+                                }],
+                                ..Default::default()
+                            }
+                            .into(),
+                        ),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("Produce");
+        let p = &resp.responses[0].partition_responses[0];
+        if p.error_code == 0 {
+            return;
+        }
+        if p.error_code == 3 || p.error_code == 6 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        }
+        panic!("produce failed: {p:?}");
+    }
+    panic!("partition never became produceable for {topic}:{partition}");
+}
+
+/// F5 (fragmented window): a single share fetch that returns DISJOINT acquired
+/// ranges must carry record bytes for exactly the acquired offsets — the gap
+/// offset's value must not appear.
+///
+/// Scenario: produce 3 records as THREE separate single-record batches (so
+/// offsets 0, 1, 2 are each their own on-disk batch — the share-fetch read is
+/// batch-granular, so byte-exact disjoint reads require separate batches).
+/// Acquire 0..2, then Accept the MIDDLE offset (1) only and Release the outer
+/// offsets 0 and 2. The SPSO stays at 0 (offset 0 isn't accepted); offset 1 is
+/// acknowledged and offsets 0, 2 return to Available — leaving a gap at offset
+/// 1. The re-fetch acquires the DISJOINT set {0, 2}; the read concatenates the
+/// per-range bytes, so the payload decodes to exactly offsets {0, 2} (values
+/// v0, v2) — never the gap offset 1's value v1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fragmented_window_records_match_acquired_offsets() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let client = connect(&broker.listen_addr().to_string()).await;
+    create_topic(&broker, &client, "t", 1).await;
+    let tid = topic_id(&broker, "t");
+    bootstrap_share_state(&broker, &client, &format!("g1:{tid}:0")).await;
+    // Three separate single-record batches: offset 0=v0, 1=v1, 2=v2.
+    produce_one(&client, "t", tid, 0, "v0").await;
+    produce_one(&client, "t", tid, 0, "v1").await;
+    produce_one(&client, "t", tid, 0, "v2").await;
+    let member = join(&client, "g1", "t").await;
+    wait_for_share_init(&broker, "g1", tid, 0).await;
+
+    // Acquire 0..2 (epoch 0 opens; stored epoch is now 1).
+    let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
+    assert!(acquired_count(&row) == 3, "acquire all 3 offsets");
+
+    // Accept the MIDDLE offset (1) only; Release the outer offsets 0 and 2.
+    // SPSO stays at 0 (offset 0 is not accepted), offset 1 becomes Acknowledged,
+    // offsets 0 and 2 return to Available — a gap at offset 1 between them.
+    let a1 = share_ack(&client, "g1", &member, tid, 0, 1, 1, 1, ACCEPT).await;
+    assert!(a1.error_code == NONE, "accept 1 error: {}", a1.error_code);
+    let a0 = share_ack(&client, "g1", &member, tid, 0, 2, 0, 0, RELEASE).await;
+    assert!(a0.error_code == NONE, "release 0 error: {}", a0.error_code);
+    let a2 = share_ack(&client, "g1", &member, tid, 0, 3, 2, 2, RELEASE).await;
+    assert!(a2.error_code == NONE, "release 2 error: {}", a2.error_code);
+
+    // Re-fetch: the acquired set is the DISJOINT {0, 2} (offset 1 is gone). The
+    // returned records payload must decode to exactly offsets {0, 2}.
+    let mut row2 = share_fetch(&client, "g1", &member, tid, 0, 4, 0).await;
+    for epoch in 5..20 {
+        if acquired_count(&row2) >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        row2 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
+    }
+    // The authoritative acquired offset set.
+    let acquired_offsets: std::collections::BTreeSet<i64> = row2
+        .acquired_records
+        .iter()
+        .flat_map(|r| r.first_offset..=r.last_offset)
+        .collect();
+    assert!(
+        acquired_offsets == std::collections::BTreeSet::from([0, 2]),
+        "must re-acquire the disjoint set {{0, 2}}, got {acquired_offsets:?}"
+    );
+
+    // Decode the records payload and collect the absolute offsets it carries.
+    let batches = row2
+        .records
+        .as_ref()
+        .and_then(|r| r.as_v2())
+        .expect("disjoint acquired ranges must carry decodable v2 record bytes");
+    let record_offsets: std::collections::BTreeSet<i64> = batches
+        .iter()
+        .flat_map(|b| {
+            let base = b.base_offset;
+            b.records
+                .iter()
+                .map(move |r| base + i64::from(r.offset_delta))
+        })
+        .collect();
+    assert!(
+        record_offsets == acquired_offsets,
+        "records payload offsets {record_offsets:?} must equal acquired offsets \
+         {acquired_offsets:?} (gap offset 1 must be excluded)"
+    );
+    // Belt-and-suspenders: the gap offset's value (v1) must never appear.
+    let values: Vec<String> = batches
+        .iter()
+        .flat_map(|b| b.records.iter())
+        .filter_map(|r| r.value.as_ref())
+        .map(|v| String::from_utf8_lossy(v).into_owned())
+        .collect();
+    assert!(
+        !values.contains(&"v1".to_string()),
+        "the gap offset's value v1 must be excluded, got {values:?}"
     );
 }

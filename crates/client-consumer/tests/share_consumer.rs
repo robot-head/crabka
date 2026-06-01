@@ -716,3 +716,157 @@ async fn close_leaves_group() {
 
     broker.shutdown().await;
 }
+
+// ───────────────────────── Slice F: client renew ─────────────────────────
+
+/// F1 (client renew): an explicit `ShareConsumer` polls a record, `renew()`s its
+/// lock before the (short) record-lock duration expires, then waits past the
+/// original lock. Because the renew extended the lock the record is NOT
+/// redelivered on the next poll — proving the client's renew round-trips and the
+/// broker honored it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_renew_prevents_redelivery() {
+    let dir = TempDir::new().unwrap();
+    let mut cfg = BrokerConfig::for_tests(dir.path().to_path_buf());
+    // 1s lock; the sweeper ticks at lock/2. Generous so the renew timing window
+    // tolerates scheduling jitter.
+    cfg.share_group.record_lock_duration = Duration::from_secs(1);
+    let broker = Broker::start(cfg).await.unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    let admin = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("setup")
+        .build()
+        .await
+        .unwrap();
+
+    create_topic_led(&broker, &admin, "rn").await;
+    let tid = topic_id(&broker, "rn");
+    bootstrap_share_state(&broker, &admin, &format!("rng:{tid}:0")).await;
+    produce_n(&admin, "rn", tid, 1).await;
+
+    let mut consumer = ShareConsumer::builder()
+        .bootstrap(&bootstrap)
+        .client_id("rn-1")
+        .group_id("rng")
+        .subscribe(vec!["rn".to_string()])
+        .ack_mode(ShareAckMode::Explicit)
+        .heartbeat_interval(Duration::from_millis(200))
+        .build()
+        .await
+        .unwrap();
+
+    wait_for_share_init(&broker, "rng", tid, 0).await;
+
+    // Acquire the single record (explicit mode → no auto-accept). Capture the
+    // instant the record is delivered: the broker-side 1s lock starts at roughly
+    // this moment (the poll that returns the record is the acquiring fetch).
+    let mut first: Vec<ShareConsumerRecord> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut acquired_at = std::time::Instant::now();
+    while std::time::Instant::now() < deadline && first.is_empty() {
+        let recs = consumer.poll(Duration::from_millis(200)).await.unwrap();
+        if !recs.is_empty() {
+            acquired_at = std::time::Instant::now();
+            first = recs;
+        }
+    }
+    assert!(
+        first.len() == 1,
+        "must acquire the single record, got {first:?}"
+    );
+    assert!(
+        first[0].delivery_count == 1,
+        "first delivery_count must be 1"
+    );
+
+    // Renew ~400ms after acquire, before the 1000ms lock expires → resets the
+    // deadline to renew-time + 1000ms (≈ T_acq+1400ms).
+    let renew_at = acquired_at + Duration::from_millis(400);
+    if let Some(rem) = renew_at.checked_duration_since(std::time::Instant::now()) {
+        tokio::time::sleep(rem).await;
+    }
+    consumer
+        .renew(&first[0])
+        .await
+        .expect("renew in explicit mode must succeed");
+
+    // Wait to ~T_acq+1150ms: PAST the original 1000ms lock (an un-renewed record
+    // would already be swept + redelivered) but before the renewed ~1400ms
+    // deadline. Keep the redelivery check short so it completes before 1400ms.
+    let target = acquired_at + Duration::from_millis(1150);
+    if let Some(rem) = target.checked_duration_since(std::time::Instant::now()) {
+        tokio::time::sleep(rem).await;
+    }
+
+    // The renewed lock still holds → no redelivery. Two short polls (ending
+    // ~T_acq+1300ms, still before the renewed ~1400ms deadline).
+    let mut redelivered = 0usize;
+    for _ in 0..2 {
+        redelivered += consumer
+            .poll(Duration::from_millis(60))
+            .await
+            .unwrap()
+            .len();
+    }
+    assert!(
+        redelivered == 0,
+        "renew must keep the lock; the record must NOT be redelivered, got {redelivered}"
+    );
+
+    consumer.close().await.unwrap();
+    broker.shutdown().await;
+}
+
+/// F1 (client renew): `renew()` is rejected in Implicit ack mode (records are
+/// auto-accepted on the next poll/close, so renewing a lock is meaningless) —
+/// it returns `ConsumerError::IllegalState` without any wire round-trip.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renew_errors_in_implicit_mode() {
+    use crabka_client_consumer::ConsumerError;
+
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    let admin = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("setup")
+        .build()
+        .await
+        .unwrap();
+
+    create_topic_led(&broker, &admin, "imp").await;
+    let tid = topic_id(&broker, "imp");
+    bootstrap_share_state(&broker, &admin, &format!("impg:{tid}:0")).await;
+    produce_n(&admin, "imp", tid, 1).await;
+
+    let mut consumer = ShareConsumer::builder()
+        .bootstrap(&bootstrap)
+        .client_id("imp-1")
+        .group_id("impg")
+        .subscribe(vec!["imp".to_string()])
+        .ack_mode(ShareAckMode::Implicit)
+        .heartbeat_interval(Duration::from_millis(200))
+        .build()
+        .await
+        .unwrap();
+
+    wait_for_share_init(&broker, "impg", tid, 0).await;
+
+    let first = poll_until(&mut consumer, 1, Duration::from_secs(15)).await;
+    assert!(
+        first.len() == 1,
+        "must acquire the single record, got {first:?}"
+    );
+
+    let err = consumer.renew(&first[0]).await;
+    assert!(
+        matches!(err, Err(ConsumerError::IllegalState(_))),
+        "renew() in implicit mode must be IllegalState, got {err:?}"
+    );
+
+    consumer.close().await.unwrap();
+    broker.shutdown().await;
+}
