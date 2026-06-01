@@ -978,7 +978,8 @@ impl Engine {
 
     /// Append the leader's `LeaderChange` control marker for `epoch`.
     fn append_leader_change(&mut self, epoch: LeaderEpoch) -> Result<i64, RaftError> {
-        let mut batch = leader_change_batch(epoch);
+        let voter_ids: Vec<NodeId> = self.core.quorum_state().voters.ids().into_iter().collect();
+        let mut batch = leader_change_batch(epoch, self.me, &voter_ids);
         self.log.append(&mut batch)
     }
 
@@ -1711,12 +1712,49 @@ fn initial_state_voters(core: &QuorumStateMachine) -> Vec<NodeId> {
     core.quorum_state().voters.ids().into_iter().collect()
 }
 
-/// Build the leader's `LeaderChange` marker batch for `epoch`.
-fn leader_change_batch(epoch: LeaderEpoch) -> RecordBatch {
+/// Build the leader's `LeaderChange` control batch for `epoch`: a single
+/// KIP-595 `LeaderChange` control record (control-batch attribute set), naming
+/// the new leader and the current voter set. A real `KRaft` batch MUST contain at
+/// least one record — an empty batch crashes a JVM follower
+/// (`Batch must contain at least one record`) — so this carries the proper
+/// `LeaderChangeMessage` rather than zero records. Crabka readers skip it via
+/// `is_control_batch()`; it occupies exactly one log offset
+/// (`last_offset_delta = 0`), unchanged from the prior empty batch.
+fn leader_change_batch(epoch: LeaderEpoch, leader_id: NodeId, voter_ids: &[NodeId]) -> RecordBatch {
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::common::voter::Voter;
+    use crabka_protocol::owned::leader_change_message::LeaderChangeMessage;
+    use crabka_protocol::records::header::Attributes;
+    use crabka_protocol::records::metadata::control::{ControlRecordType, control_record_key};
+
+    let voters: Vec<Voter> = voter_ids
+        .iter()
+        .map(|&id| Voter {
+            voter_id: i32::try_from(id).unwrap_or(i32::MAX),
+            ..Default::default()
+        })
+        .collect();
+    let msg = LeaderChangeMessage {
+        version: 0,
+        leader_id: i32::try_from(leader_id).unwrap_or(i32::MAX),
+        voters: voters.clone(),
+        granting_voters: voters,
+        ..Default::default()
+    };
+    let mut value = bytes::BytesMut::new();
+    // LeaderChangeMessage v0; encode is infallible for a well-formed message.
+    let _ = msg.encode(&mut value, 0);
+    let key = control_record_key(ControlRecordType::LeaderChange);
     RecordBatch {
         partition_leader_epoch: i32::try_from(epoch).unwrap_or(i32::MAX),
+        attributes: Attributes::default().with_control(true),
         last_offset_delta: 0,
-        records: Vec::new(),
+        records: vec![Record {
+            offset_delta: 0,
+            key: Some(key),
+            value: Some(value.freeze()),
+            ..Default::default()
+        }],
         ..Default::default()
     }
 }

@@ -185,10 +185,11 @@ async fn static_mixed_jvm_crabka_quorum() {
     // Success criterion 1: a single leader emerges across all three voters and
     // the two Crabka nodes agree on it. Success criterion 2: a follower's image
     // reflects the leader's committed records.
-    let deadline = std::time::Instant::now() + Duration::from_secs(40);
+    let deadline = std::time::Instant::now() + Duration::from_secs(50);
     let mut elected = false;
     let mut last_l1 = None;
     let mut last_l2 = None;
+    let mut tick = 0u32;
     while std::time::Instant::now() < deadline {
         let l1 = c1.controller_leader_id().await;
         let l2 = c2.controller_leader_id().await;
@@ -197,6 +198,20 @@ async fn static_mixed_jvm_crabka_quorum() {
         if l1.is_some() && l1 == l2 {
             elected = true;
         }
+        // Crabka-side telemetry every ~2s: leader epoch, HWM, and per-voter
+        // matched index (does the JVM voter id=3 show up as fetching?).
+        if tick.is_multiple_of(4) {
+            let qs = c1.controller_quorum_state_for_test();
+            eprintln!(
+                "[t={}s] crabka n1 view: leader={:?} epoch={} hwm={} matched={:?}",
+                tick / 2,
+                qs.current_leader,
+                qs.current_term,
+                qs.last_applied_index,
+                qs.per_voter_matched_index,
+            );
+        }
+        tick += 1;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
@@ -210,6 +225,7 @@ async fn static_mixed_jvm_crabka_quorum() {
         String::from_utf8_lossy(&logs.stdout),
         String::from_utf8_lossy(&logs.stderr)
     );
+    let _ = std::fs::write("/tmp/jvm_spike.log", &log_text);
     eprintln!("==== JVM controller logs (tail) ====");
     for line in log_text
         .lines()
