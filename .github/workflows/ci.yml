@@ -219,9 +219,21 @@ jobs:
   # for more than half an hour something is wedged — fail fast and re-run.
   broker-jvm-acceptance:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 60-minute budget: the suite grew (next-gen consumer-group + KIP-595
+    # multi-voter cases) and runs serially under `llvm-cov` instrumentation
+    # (~2x slowdown), so the ~25 docker-driven acceptance tests no longer fit
+    # the old 30-minute wall. A genuinely wedged test still surfaces well
+    # inside an hour. (Per-test stalls are caught by the in-test timeouts.)
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+      # llvm-cov profraw + two preloaded Kafka images + the cargo target dir
+      # exhaust the ~14 GB free on the default runner; reclaim ~25 GB of
+      # preinstalled SDKs we never use so the coverage run has headroom.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/share/swift /usr/local/.ghcup
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
@@ -271,6 +283,14 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
+      # `llvm-cov clean` + two instrumented `--no-report` runs generate a large
+      # profraw set on top of the cargo target dir, reliably exhausting the
+      # runner's ~14 GB free disk ("No space left on device"). Reclaim ~25 GB of
+      # preinstalled SDKs we never use.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /usr/share/swift /usr/local/.ghcup
+          df -h /
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.95.0"
