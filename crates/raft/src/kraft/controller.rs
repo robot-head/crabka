@@ -753,8 +753,17 @@ impl Engine {
                     } else {
                         self.serve_fetch_records(fetch_offset)
                     };
+                    // Advertise the ACTUAL current leader, not `self.me`: a
+                    // follower serving a Fetch must redirect the fetcher to the
+                    // real leader via `current_leader`. Returning `self.me` made a
+                    // follower claim leadership of the current epoch — a strict
+                    // KRaft follower (the JVM) caches that, then fatal-faults when
+                    // the true leader's BeginQuorumEpoch arrives ("inconsistent
+                    // leader at the same epoch"). Fall back to `self.me` only when
+                    // no leader is known (mid-election).
+                    let advertised_leader = self.core.quorum_state().leader_id.unwrap_or(self.me);
                     let resp = wire::PeerResponse::Fetch {
-                        leader_id: self.me,
+                        leader_id: advertised_leader,
                         leader_epoch: self.core.quorum_state().leader_epoch,
                         diverging,
                         snapshot_id,
