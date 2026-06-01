@@ -1,9 +1,9 @@
 //! End-to-end integration tests for the KIP-932 share coordinator (persister),
 //! driven against an in-process Crabka broker via `crabka-client-core`.
 //!
-//! The typed client works because ApiVersions advertises api_keys 83-87; each
+//! The typed client works because `ApiVersions` advertises api_keys 83-87; each
 //! `*ShareGroupState*Request` impls `ProtocolRequest`, so `client.send(req)`
-//! exercises the real wire path (version negotiation through ApiVersions).
+//! exercises the real wire path (version negotiation through `ApiVersions`).
 //!
 //! Timing note: the raw persister RPC handlers do NOT create `__share_group_state`
 //! — `FindCoordinator(SHARE)` does. After the topic is created the broker
@@ -74,7 +74,7 @@ fn wire(tid: uuid::Uuid) -> WireUuid {
     WireUuid(*tid.as_bytes())
 }
 
-/// Create `__share_group_state` (lazily, via FindCoordinator SHARE) and return
+/// Create `__share_group_state` (lazily, via `FindCoordinator` SHARE) and return
 /// the resolved coordinator node id for `key`.
 async fn find_share(client: &Client, key: &str) -> (i16, i32) {
     let resp = client
@@ -231,7 +231,7 @@ async fn find_coordinator_share_returns_broker() {
     );
 }
 
-/// Initialize -> Write -> Read -> ReadSummary -> Delete round-trips over the wire.
+/// Initialize -> Write -> Read -> `ReadSummary` -> Delete round-trips over the wire.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn persister_round_trip() {
     let (_b, bootstrap, _d) = boot().await;

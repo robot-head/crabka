@@ -2,7 +2,7 @@
 //! RPCs — `DescribeShareGroupOffsets` (api_key 90), `AlterShareGroupOffsets`
 //! (91), `DeleteShareGroupOffsets` (92).
 //!
-//! The typed client works because ApiVersions advertises api_keys 90/91/92 and
+//! The typed client works because `ApiVersions` advertises api_keys 90/91/92 and
 //! all three requests impl `ProtocolRequest`, so `client.send(req)` exercises
 //! the real wire path (frame parse → handler → encode, version-negotiated).
 //!
@@ -10,7 +10,7 @@
 //! - Describe reflects the durable SPSO after a consume+Accept advances it, and
 //!   reports lag = HWM − SPSO for a locally-led partition;
 //! - Alter on an *empty* group resets the SPSO (state-epoch bump + re-init) AND
-//!   invalidates the share-partition leader cache so a subsequent ShareFetch
+//!   invalidates the share-partition leader cache so a subsequent `ShareFetch`
 //!   acquires starting at the new offset;
 //! - Alter on a *non-empty* (live-member) group is rejected with NON_EMPTY_GROUP;
 //! - Delete removes the durable share-state for a topic (Describe then reads the
@@ -505,7 +505,7 @@ async fn describe_until(
 
 /// Alter resets the SPSO of an empty group: the persister state is re-initialized
 /// at the requested offset, the leader cache is invalidated, and a subsequent
-/// ShareFetch acquires starting at the new offset.
+/// `ShareFetch` acquires starting at the new offset.
 ///
 /// The group has *no members* when Alter runs, so the share-state has never been
 /// seeded by the membership lifecycle (a member join/leave would reap the state
@@ -513,7 +513,7 @@ async fn describe_until(
 /// `state_epoch = 1` with `start_offset = 5`. A subsequent first-join then
 /// reconciles at `group_epoch = 1`; its lifecycle re-init (`initialize(1, 0)`) is
 /// *fenced* by the equal-or-higher durable `state_epoch`, so the Alter's SPSO
-/// survives and the first ShareFetch acquires from offset 5 — exercising the
+/// survives and the first `ShareFetch` acquires from offset 5 — exercising the
 /// real acquire path against the reset (and invalidated) leader cache.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn alter_resets_empty_group() {
@@ -712,7 +712,7 @@ async fn describe_unknown_topic() {
 }
 
 /// With `share_group.enable = false` the admin offset RPCs are not implemented:
-/// DescribeShareGroupOffsets marks each requested group `UNSUPPORTED_VERSION`.
+/// `DescribeShareGroupOffsets` marks each requested group `UNSUPPORTED_VERSION`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admin_offsets_rejected_when_share_disabled() {
     let dir = tempfile::TempDir::new().unwrap();

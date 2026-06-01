@@ -2,10 +2,10 @@
 //! (`ShareFetch`, api_key 78) + acknowledge (`ShareAcknowledge`, api_key 79),
 //! driven against an in-process Crabka broker via `crabka-client-core`.
 //!
-//! The typed client works because ApiVersions advertises api_keys 78/79; both
+//! The typed client works because `ApiVersions` advertises api_keys 78/79; both
 //! `ShareFetchRequest` / `ShareAcknowledgeRequest` impl `ProtocolRequest`, so
 //! `client.send(req)` returns the typed response and exercises the real wire
-//! path (version negotiation through ApiVersions — both RPCs are MIN=1 MAX=2,
+//! path (version negotiation through `ApiVersions` — both RPCs are MIN=1 MAX=2,
 //! so the client negotiates v2).
 //!
 //! These tests prove the full acquire/ack loop:
@@ -242,7 +242,7 @@ async fn produce_n(client: &Client, topic: &str, tid: uuid::Uuid, partition: i32
 }
 
 /// Join `group` as a fresh member subscribed to `topic` so the share actor knows
-/// the member (the ShareFetch membership check needs this), then drive a few
+/// the member (the `ShareFetch` membership check needs this), then drive a few
 /// steady-state heartbeats so the group-coordinator lifecycle hook initializes
 /// the subscribed partitions' share state (mirrors
 /// `share_groups.rs::lifecycle_initializes_share_state`). Returns the minted

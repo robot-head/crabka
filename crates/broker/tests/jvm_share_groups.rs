@@ -143,7 +143,7 @@ async fn create_topic(broker: &BrokerHandle, client: &Client, topic: &str) -> uu
 /// Pre-create `__share_group_state` (as a KIP-932 client would, lazily via
 /// `FindCoordinator(SHARE)`) and wait until every state partition is local, so
 /// the share coordinator is write-ready before the JVM consumer drives
-/// ShareFetch/ShareAcknowledge.
+/// `ShareFetch`/`ShareAcknowledge`.
 async fn bootstrap_share_state(broker: &BrokerHandle, client: &Client, key: &str) {
     let resp = client
         .send(FindCoordinatorRequest {
@@ -297,7 +297,7 @@ async fn jvm_share_consumer_reads_crabka() {
 /// `kafka-share-groups.sh --describe --state` surfaces the share group after
 /// the JVM consumer has joined, proving Crabka serves the share-group admin
 /// path (`ShareGroupDescribe`, api_key 77) to the real JVM tooling: the tool
-/// resolves the share coordinator, sends ShareGroupDescribe, and renders the
+/// resolves the share coordinator, sends `ShareGroupDescribe`, and renders the
 /// group's coordinator + state.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
@@ -350,7 +350,7 @@ async fn jvm_share_groups_describe_state() {
 /// `kafka-share-groups.sh --list` drives `ListGroups` (api_key 16) with
 /// `types_filter = ["share"]`. After a real JVM `KafkaShareConsumer` has joined
 /// a share group on the Crabka broker, the share group id must appear in the
-/// tool's `--list` stdout. Before the ListGroups share pass landed, the JVM
+/// tool's `--list` stdout. Before the `ListGroups` share pass landed, the JVM
 /// tool's `types_filter=["share"]` matched nothing and `--list` was EMPTY; this
 /// asserts the regression is closed against the real Apache Kafka 4.1.0 tool.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -1,10 +1,10 @@
 //! End-to-end integration tests for KIP-932 share-group membership,
 //! driven against an in-process Crabka broker via `crabka-client-core`.
 //!
-//! The typed client works because ApiVersions advertises api_keys 76/77;
+//! The typed client works because `ApiVersions` advertises api_keys 76/77;
 //! `ShareGroupHeartbeatRequest` / `ShareGroupDescribeRequest` impl
 //! `ProtocolRequest`, so `client.send(req)` returns the typed response and
-//! exercises the real wire path (version negotiation through ApiVersions —
+//! exercises the real wire path (version negotiation through `ApiVersions` —
 //! both share RPCs are MIN=MAX=1, so the client negotiates v1).
 
 #![cfg(not(target_os = "windows"))]
@@ -118,7 +118,7 @@ async fn single_member_join_assignment() {
     );
 }
 
-/// Two members join the same group; after both converge, ShareGroupDescribe
+/// Two members join the same group; after both converge, `ShareGroupDescribe`
 /// reports one group with both members and a non-trivial group epoch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_members_then_describe() {
@@ -201,7 +201,7 @@ async fn member_leave_epoch_minus_one() {
 
 /// Share-group state persists to `__consumer_offsets`; after a broker restart
 /// (Rejoin on the same data dir) the group + member are reconstructed via
-/// replay and visible through ShareGroupDescribe.
+/// replay and visible through `ShareGroupDescribe`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn state_survives_restart() {
     let dir = tempfile::TempDir::new().unwrap();
