@@ -75,6 +75,7 @@ impl PeerSender for SimNet {
             api_key::BEGIN_QUORUM_EPOCH => Inbound::BeginQuorumEpoch { req: body, reply },
             api_key::END_QUORUM_EPOCH => Inbound::EndQuorumEpoch { req: body, reply },
             api_key::FETCH => Inbound::Fetch { req: body, reply },
+            api_key::FETCH_SNAPSHOT => Inbound::FetchSnapshot { req: body, reply },
             other => panic!("sim: unexpected api_key {other}"),
         };
         // Deliver to the target loop (non-blocking enqueue) and await its reply.
@@ -116,6 +117,20 @@ fn build_engine(
     election_timeout_ms: u64,
     net: &SimNet,
 ) -> (KraftController, tempfile::TempDir) {
+    build_engine_with_snapshot_interval(me, ids, cluster_id, election_timeout_ms, net, 0)
+}
+
+/// Like [`build_engine`] but with a caller-chosen `snapshot_interval_records`
+/// (`0` disables snapshotting). The snapshot catch-up acceptance uses a small
+/// interval so the leader snapshots + prunes its log after a short burst.
+fn build_engine_with_snapshot_interval(
+    me: NodeId,
+    ids: &[NodeId],
+    cluster_id: uuid::Uuid,
+    election_timeout_ms: u64,
+    net: &SimNet,
+    snapshot_interval_records: u64,
+) -> (KraftController, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let log = KraftLog::open(dir.path()).expect("open log");
     let ctrl = KraftController::spawn(
@@ -125,7 +140,7 @@ fn build_engine(
             initial_state: QuorumState::bootstrap(cluster_id, voter_set(ids)),
             election_timeout_ms,
             peers: Arc::new(net.clone()),
-            snapshot_interval_records: 0,
+            snapshot_interval_records,
         },
         log,
         dir.path().to_path_buf(),
@@ -419,6 +434,129 @@ async fn restart_recovers_image() {
         "reopened node did not recover its image"
     );
     net.register(victim, reopened);
+
+    for &id in &ids {
+        if let Some(c) = net.get(id) {
+            c.shutdown().await;
+        }
+    }
+}
+
+/// 5. KIP-630 snapshot catch-up (the Slice-4 acceptance): a lagging controller
+///    follower whose own log is empty and far behind the leader's pruned
+///    `log_start` catches up purely via `FetchSnapshot`, not log replication.
+///
+///    Topology: all three voters are configured up front (so an election can
+///    reach a majority), but the lagging node's engine is started LATE, on a
+///    fresh empty tempdir. The two timely voters (leader + one follower) commit
+///    a burst of distinct metadata records larger than `snapshot_interval_records`,
+///    which forces the leader to write a checkpoint and prune its log
+///    (`log_start_offset` advances past 0). When the lagging node finally joins,
+///    its `LEO == 0 < leader.log_start`, so its first Fetch is answered with a
+///    `snapshot_id`; the engine then runs the `FetchSnapshot` loop, installs the
+///    snapshot, and resumes a normal Fetch from the snapshot boundary. The
+///    follower's published `MetadataImage` must converge to the leader's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lagging_follower_catches_up_via_snapshot() {
+    let net = SimNet::new();
+    let ids = [1u64, 2, 3];
+    let cid = uuid::Uuid::from_u128(500);
+    // Snapshot after every 5 committed records past the last checkpoint.
+    let interval = 5u64;
+
+    // Start only TWO voters (leader + one follower): that is a majority of three,
+    // so submits commit while the third node stays down. Staggered timeouts so
+    // node 1 reliably wins. Node 3 is the lagging node, started later.
+    let timeouts = [150u64, 300, 450];
+    let mut dirs: HashMap<NodeId, tempfile::TempDir> = HashMap::new();
+    for &id in &[1u64, 2] {
+        let idx = usize::try_from(id - 1).unwrap();
+        let (ctrl, dir) = build_engine_with_snapshot_interval(
+            id,
+            &ids, // full voter set: the quorum is three even though one is down
+            cid,
+            timeouts[idx],
+            &net,
+            interval,
+        );
+        net.register(id, ctrl);
+        dirs.insert(id, dir);
+    }
+
+    // The two live voters elect a leader among themselves (two of three is a
+    // majority). The lagging node 3 is down, so only poll the live pair.
+    let live = [1u64, 2];
+    let (leader, _epoch) = await_single_leader(&net, &live, Duration::from_secs(10)).await;
+
+    // Commit MORE than `interval` distinct topics so the leader snapshots and
+    // prunes at least once. Distinct names make the image grow per record.
+    let burst = usize::try_from(interval).unwrap() * 3; // comfortably past the threshold
+    for i in 0..burst {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            net.get(leader)
+                .unwrap()
+                .submit_change(vec![topic_record(&format!("t{i}"), 1000 + i as u128)]),
+        )
+        .await
+        .expect("burst submit did not hang")
+        .expect("burst submit ok");
+    }
+
+    // The leader must have snapshotted and pruned: its log_start advanced past 0.
+    // Poll briefly — the prune happens on the apply that crosses the threshold,
+    // which is synchronous with the last submit's commit, but give the watch a
+    // moment to republish the quorum snapshot.
+    let leader_ctrl = net.get(leader).unwrap();
+    await_until(Duration::from_secs(10), || {
+        (leader_ctrl.quorum_snapshot().log_start_offset > 0).then_some(())
+    })
+    .await;
+    let leader_log_start = leader_ctrl.quorum_snapshot().log_start_offset;
+    assert!(
+        leader_log_start > 0,
+        "leader did not prune its log (log_start_offset still 0); snapshot never happened"
+    );
+
+    // Capture the leader's converged image to compare against.
+    let leader_image = leader_ctrl.current_image();
+    // Sanity: every burst topic is in the leader image.
+    for i in 0..burst {
+        assert!(
+            leader_image.topic(&format!("t{i}")).is_some(),
+            "leader image missing burst topic t{i}"
+        );
+    }
+
+    // Now bring the lagging node 3 up on a FRESH empty tempdir: its LEO is 0,
+    // far below the leader's pruned log_start, so it can ONLY catch up by
+    // fetching the snapshot.
+    let (lag_ctrl, lag_dir) =
+        build_engine_with_snapshot_interval(3, &ids, cid, timeouts[2], &net, interval);
+    net.register(3, lag_ctrl);
+    dirs.insert(3, lag_dir);
+
+    // Wait until the lagging follower's image equals the leader's. Catch-up runs
+    // through the FetchSnapshot path (its LEO 0 < leader.log_start), reassembling
+    // and installing the snapshot, then resuming normal fetch.
+    let lag = net.get(3).unwrap();
+    let want = leader_image.clone();
+    await_until(Duration::from_secs(10), || {
+        (*lag.current_image() == *want).then_some(())
+    })
+    .await;
+
+    assert!(
+        *lag.current_image() == *leader_image,
+        "lagging follower image did not converge to the leader's via snapshot"
+    );
+    // It really used a snapshot: the follower's log_start is at the snapshot
+    // boundary, not 0 (a pure log replication from 0 would leave it at 0).
+    let lag_snap = lag.quorum_snapshot();
+    assert!(
+        lag_snap.log_start_offset > 0,
+        "lagging follower's log_start is still 0 — it did not install a snapshot"
+    );
 
     for &id in &ids {
         if let Some(c) = net.get(id) {

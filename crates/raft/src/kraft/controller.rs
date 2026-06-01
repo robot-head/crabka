@@ -1557,7 +1557,17 @@ impl Engine {
             return Ok(()); // stale; we already advanced past this snapshot
         }
         let cluster_id = self.image.cluster_id();
-        let new_image = MetadataImage::from_records(cluster_id, &records);
+        let mut new_image = MetadataImage::from_records(cluster_id, &records);
+        // KIP-630 snapshots cover the KIP-631-framed metadata records only;
+        // `to_records` does NOT emit the raft-control `V1Voters` (the controller
+        // voter set lives in the raft `QuorumState`, not the metadata log — see
+        // `spawn_with_image`). Rebuilding the image straight from snapshot
+        // records would therefore drop the live quorum membership, leaving image
+        // readers (DescribeQuorum / auto-join) blind on a follower that caught up
+        // via snapshot. Mirror the live voter set back in, exactly as spawn does.
+        new_image.apply(&MetadataRecord::V1Voters(VotersRecord {
+            voters: self.core.quorum_state().voters.clone(),
+        }));
         write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset, epoch, bytes)?;
         self.image = new_image;
         self.log.install_snapshot(end_offset)?;
