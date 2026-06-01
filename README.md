@@ -206,7 +206,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Metadata snapshots + `FetchSnapshot` (KIP-630) | ✅ |
 | Controller bootstrap via `crabka format` | ✅ |
 | Separate `process.roles` (controller-only / broker-only) + observer metadata fetch | ✅ |
-| `metadata.version` feature level (KIP-584) | ⚠️ |
+| Feature versioning — `metadata.version` / `group.version` / `transaction.version` (KIP-584) | ✅ |
 | Dynamic quorum voters — `Add`/`Remove`/`UpdateRaftVoter` (KIP-853) | ✅ |
 | ZooKeeper mode / ZK→KRaft migration | ⛔ (KRaft only) |
 
@@ -396,7 +396,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-595](https://cwiki.apache.org/confluence/display/KAFKA/KIP-595) | A Raft protocol for the metadata quorum | ⚠️ |
 | [KIP-630](https://cwiki.apache.org/confluence/display/KAFKA/KIP-630) | Kafka Raft snapshot | ✅ |
 | [KIP-631](https://cwiki.apache.org/confluence/display/KAFKA/KIP-631) | The quorum-based Kafka controller (metadata records) | ✅ |
-| [KIP-584](https://cwiki.apache.org/confluence/display/KAFKA/KIP-584) | Versioning scheme for features (`metadata.version`) | ⚠️ |
+| [KIP-584](https://cwiki.apache.org/confluence/display/KAFKA/KIP-584) | Versioning scheme for features (`metadata.version`, `group.version`, `transaction.version`) | ✅ |
 | [KIP-778](https://cwiki.apache.org/confluence/display/KAFKA/KIP-778) | KRaft-to-KRaft upgrades | ⚠️ |
 | [KIP-853](https://cwiki.apache.org/confluence/display/KAFKA/KIP-853) | KRaft controller membership changes (dynamic voters) | ✅ |
 | [KIP-1022](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1022) | Formatting and updating features | ⚠️ |

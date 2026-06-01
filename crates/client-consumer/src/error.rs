@@ -18,6 +18,9 @@ pub enum ConsumerError {
     #[error("not subscribed to any topic")]
     NotSubscribed,
 
+    #[error("illegal state: {0}")]
+    IllegalState(String),
+
     #[error("commit conflict: rejoined since this poll")]
     CommitInvalid,
 

@@ -369,8 +369,8 @@ pub struct Member {
     pub client_host: String,
     pub subscribed_topic_names: Vec<String>,
     pub subscribed_topic_regex: Option<String>,
-    pub assignment: super::common::assignment::Assignment,
-    pub target_assignment: super::common::assignment::Assignment,
+    pub assignment: super::common::consumer_group_describe_response::assignment::Assignment,
+    pub target_assignment: super::common::consumer_group_describe_response::assignment::Assignment,
     pub member_type: i8,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
@@ -618,10 +618,16 @@ impl Decode<'_> for Member {
             };
         }
         if version >= 0 {
-            out.assignment = super::common::assignment::Assignment::decode(buf, version)?;
+            out.assignment =
+                super::common::consumer_group_describe_response::assignment::Assignment::decode(
+                    buf, version,
+                )?;
         }
         if version >= 0 {
-            out.target_assignment = super::common::assignment::Assignment::decode(buf, version)?;
+            out.target_assignment =
+                super::common::consumer_group_describe_response::assignment::Assignment::decode(
+                    buf, version,
+                )?;
         }
         if version >= 1 {
             out.member_type = get_i8(buf)?;
@@ -662,10 +668,16 @@ impl Member {
             m.subscribed_topic_regex = Some("x".to_string());
         }
         if version >= 0 {
-            m.assignment = super::common::assignment::Assignment::populated(version);
+            m.assignment =
+                super::common::consumer_group_describe_response::assignment::Assignment::populated(
+                    version,
+                );
         }
         if version >= 0 {
-            m.target_assignment = super::common::assignment::Assignment::populated(version);
+            m.target_assignment =
+                super::common::consumer_group_describe_response::assignment::Assignment::populated(
+                    version,
+                );
         }
         if version >= 1 {
             m.member_type = 1i8;

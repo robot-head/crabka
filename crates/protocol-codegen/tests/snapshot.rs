@@ -2,7 +2,7 @@ use assert2::assert;
 use std::path::PathBuf;
 
 use crabka_protocol_codegen::emit::EmittedMessage;
-use crabka_protocol_codegen::{emit, ir};
+use crabka_protocol_codegen::{emit, ir, resolve};
 
 const CURATED: &[&str] = &[
     "ApiVersionsRequest",
@@ -64,6 +64,47 @@ fn check_emitted(flavor: &str, em: &EmittedMessage, name: &str) {
     for (cs_name, body) in &em.commons {
         check(&base.join(format!("common/{cs_name}.{flavor}.rs")), body);
     }
+}
+
+/// `commonStructs` are MESSAGE-LOCAL in Kafka schemas: two different messages
+/// may each declare a struct named `Assignment` with different fields. The
+/// resolver must scope them per owning message so the paths differ and each
+/// carries its message segment — otherwise one shape silently wins globally and
+/// corrupts the other message's type.
+#[test]
+fn common_structs_are_message_scoped() {
+    let specs = ir::load_dir(&schemas_dir()).unwrap();
+    let share = specs
+        .iter()
+        .find(|s| s.name == "ShareGroupDescribeResponse")
+        .unwrap();
+    let streams = specs
+        .iter()
+        .find(|s| s.name == "StreamsGroupDescribeResponse")
+        .unwrap();
+
+    let share_map = resolve::resolve_message(share).unwrap();
+    let streams_map = resolve::resolve_message(streams).unwrap();
+
+    let share_path = &share_map.get("Assignment").unwrap().rust_path;
+    let streams_path = &streams_map.get("Assignment").unwrap().rust_path;
+
+    assert!(
+        share_path != streams_path,
+        "ShareGroupDescribeResponse and StreamsGroupDescribeResponse both \
+         resolve Assignment to the same path `{share_path}` — common structs \
+         are not message-scoped"
+    );
+    assert!(
+        share_path.contains("share_group_describe_response"),
+        "ShareGroupDescribeResponse Assignment path `{share_path}` lacks its \
+         message segment"
+    );
+    assert!(
+        streams_path.contains("streams_group_describe_response"),
+        "StreamsGroupDescribeResponse Assignment path `{streams_path}` lacks \
+         its message segment"
+    );
 }
 
 #[test]

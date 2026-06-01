@@ -105,9 +105,8 @@ pub(crate) async fn handle(
                 t.name.clone()
             } else if t.topic_id != WireUuid::ZERO {
                 image
-                    .topics()
-                    .find(|tt| tt.topic_id.into_bytes() == t.topic_id.0)
-                    .map(|tt| tt.name.clone())
+                    .topic_name_by_id(&uuid::Uuid::from_bytes(t.topic_id.0))
+                    .map(str::to_string)
                     .unwrap_or_default()
             } else {
                 String::new()
@@ -150,18 +149,18 @@ pub(crate) async fn handle(
 
     for topic in req.topic_data {
         // v ≤ 12 sends the topic name; v ≥ 13 sends only topic_id and
-        // we look it up in the metadata image.
-        let topic_name = if !topic.name.is_empty() {
-            topic.name.clone()
-        } else if topic.topic_id != WireUuid::ZERO {
-            let image = controller.current_image();
-            image
-                .topics()
-                .find(|t| t.topic_id.into_bytes() == topic.topic_id.0)
-                .map(|t| t.name.clone())
-                .unwrap_or_default()
-        } else {
-            String::new()
+        // we look it up in the metadata image. KIP-516: an explicit
+        // non-zero id that is unknown returns UNKNOWN_TOPIC_ID (100) on
+        // every partition row; a mismatched name+id returns
+        // INCONSISTENT_TOPIC_ID (103). Only name-only misses fall through
+        // to the legacy UNKNOWN_TOPIC_OR_PARTITION path.
+        let topic_name = match crate::topic_resolve::resolve(&image, &topic.name, topic.topic_id) {
+            Ok(rec) => rec.name.clone(),
+            Err(codes::UNKNOWN_TOPIC_OR_PARTITION) => topic.name.clone(),
+            Err(code) => {
+                topic_results.push(build_topic_error_response(&topic, code));
+                continue;
+            }
         };
 
         // Account for the topic in Prometheus before
@@ -440,7 +439,6 @@ async fn process_partition(
                             | crate::txn::state::TxnState::CompleteAbort
                     ) {
                         entry.partitions.clear();
-                        entry.offset_commit_groups.clear();
                     }
                     entry.state = crate::txn::state::TxnState::Ongoing;
                     entry.partitions.insert(tp);
@@ -448,7 +446,8 @@ async fn process_partition(
                     let snap = entry.clone();
                     // Lock must be dropped before the async put.
                     drop(entry);
-                    txn_coordinator.put(snap).await?;
+                    let txnv = crate::txn::version::resolve_txn_version(image);
+                    txn_coordinator.put(snap, txnv).await?;
                 }
                 // else: partition already registered in an active txn — fall through.
             }
@@ -719,6 +718,34 @@ fn consume_producer_quota(
     let overage = bytes - granted;
     let delay_secs = overage as f64 / rate;
     Duration::from_micros((delay_secs * 1_000_000.0) as u64).min(Duration::from_secs(1))
+}
+
+/// Build a topic-level error response for KIP-516 id-resolution failures
+/// (`UNKNOWN_TOPIC_ID`, `INCONSISTENT_TOPIC_ID`). Every partition row in
+/// the request receives the same error code; `base_offset` is set to -1 to
+/// signal "no offset assigned", matching Kafka's behavior on pre-append errors.
+fn build_topic_error_response(
+    topic: &crabka_protocol::owned::produce_request::TopicProduceData,
+    code: i16,
+) -> crabka_protocol::owned::produce_response::TopicProduceResponse {
+    use crabka_protocol::owned::produce_response::{
+        PartitionProduceResponse, TopicProduceResponse,
+    };
+    TopicProduceResponse {
+        name: topic.name.clone(),
+        topic_id: topic.topic_id,
+        partition_responses: topic
+            .partition_data
+            .iter()
+            .map(|p| PartitionProduceResponse {
+                index: p.index,
+                error_code: code,
+                base_offset: -1,
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]

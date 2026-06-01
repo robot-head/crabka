@@ -65,6 +65,21 @@ impl SnapshotWriter {
         // so emits all-sets-no-tombstones — correct for a from-scratch snapshot).
         let mut value_blobs: Vec<Bytes> = Vec::new();
         for rec in &records {
+            // `V1Voters` / `V1KRaftVersion` are raft-control state living in the
+            // controller's `QuorumState` (config-seeded under KIP-595 static
+            // voters), NOT KIP-631 metadata-log records — they have no wire
+            // counterpart and are not JVM-readable as snapshot records. A
+            // follower catching up via `FetchSnapshot` re-applies the live voter
+            // set after install (see `install_fetched_snapshot`), and a
+            // restarting controller re-derives it on boot (see `spawn_with_image`),
+            // so omitting them here keeps the snapshot a faithful, JVM-readable
+            // image of the KIP-631 metadata log.
+            if matches!(
+                rec,
+                MetadataRecord::V1Voters(_) | MetadataRecord::V1KRaftVersion(_)
+            ) {
+                continue;
+            }
             let mut blobs = to_kraft_values(rec, image)
                 .map_err(|e| RaftError::ChangeRejected(format!("snapshot encode: {e}")))?;
             value_blobs.append(&mut blobs);
@@ -162,7 +177,9 @@ mod tests {
     use super::*;
     use assert2::assert;
 
-    use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+    use crabka_metadata::{
+        FeatureLevelRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
+    };
     use uuid::Uuid;
 
     #[test]
@@ -196,6 +213,41 @@ mod tests {
         let bytes = SnapshotWriter::serialize(&image, 1_700_000_000_000).unwrap();
         let records = SnapshotReader::read_records(&bytes).unwrap();
         assert!(MetadataImage::from_records(cid, &records) == image);
+    }
+
+    /// A snapshot of an image carrying finalized KIP-584 features must
+    /// reproduce both the feature levels AND the finalized-features epoch
+    /// exactly on read-back. Regression guard for the bug where `to_records`
+    /// emitted no `V1FeatureLevel` records: `metadata.version` (range guard /
+    /// SCRAM + delegation-token gates) and `group.version` (next-gen consumer
+    /// groups) silently vanished after any compaction or learner snapshot
+    /// install. The epoch (3 here, from a re-finalize) exceeds the live feature
+    /// count (2), so a naive "replay one record per feature" fix would
+    /// reconstruct epoch=1 and fail this assertion.
+    #[test]
+    fn writer_reader_round_trips_image_with_features() {
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        for (name, level) in [
+            ("metadata.version", 24),
+            ("metadata.version", 25),
+            ("group.version", 1),
+            ("metadata.version", 25),
+        ] {
+            image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
+                name: name.into(),
+                level,
+            }));
+        }
+        assert!(image.finalized_features_epoch() == 3);
+
+        let bytes = SnapshotWriter::serialize(&image, 1_700_000_000_000).unwrap();
+        let records = SnapshotReader::read_records(&bytes).unwrap();
+        let rebuilt = MetadataImage::from_records(cid, &records);
+        assert!(rebuilt == image);
+        assert!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
+        assert!(rebuilt.finalized_features().get("group.version") == Some(&1));
+        assert!(rebuilt.finalized_features_epoch() == 3);
     }
 
     #[test]

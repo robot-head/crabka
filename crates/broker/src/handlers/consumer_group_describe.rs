@@ -13,8 +13,7 @@ use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::unified::GroupType;
-use crate::coordinator::unified::actor::GroupActorMessage;
+use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
 
 pub(crate) fn handle(
@@ -24,33 +23,41 @@ pub(crate) fn handle(
     req_bytes: &[u8],
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
-    let group_manager = broker.group_manager.clone();
+    let coordinator = broker.group_coordinator.clone();
+    let image = broker.controller.current_image();
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = ConsumerGroupDescribeRequest::decode(&mut cur, version)?;
 
         let mut described: Vec<DescribedGroup> = Vec::with_capacity(req.group_ids.len());
-        let ng_opt = group_manager.next_gen().cloned();
+        let next_gen_enabled = coordinator.config.next_gen_enabled();
         for group_id in &req.group_ids {
             let mut row = DescribedGroup {
                 group_id: group_id.clone(),
                 error_code: codes::NONE,
                 ..Default::default()
             };
-            let ng = match &ng_opt {
-                Some(c) if c.config.next_gen_enabled() => c,
-                _ => {
-                    row.error_code = codes::GROUP_ID_NOT_FOUND;
-                    described.push(row);
-                    continue;
-                }
-            };
-            if matches!(ng.group_type(group_id), Some(GroupType::Classic)) {
+            // KIP-848 / KIP-584: next-gen describe requires finalized
+            // group.version >= 1; below that — including UNFINALIZED, which
+            // means disabled — reject (consistent with the heartbeat fallback).
+            if !crate::features::feature_enabled(
+                &image,
+                crabka_metadata::group_version::GROUP_VERSION_FEATURE,
+                1,
+            ) {
+                row.error_code = codes::UNSUPPORTED_VERSION;
+                described.push(row);
+                continue;
+            }
+            if !next_gen_enabled {
                 row.error_code = codes::GROUP_ID_NOT_FOUND;
                 described.push(row);
                 continue;
             }
-            let Some(handle) = ng.find(group_id) else {
+            // Only next-gen (consumer) groups are described here; a classic
+            // group (or an unknown id) is GROUP_ID_NOT_FOUND.
+            let handle = coordinator.find(group_id);
+            let Some(handle) = handle.filter(|h| h.kind == GroupKindTag::Consumer) else {
                 row.error_code = codes::GROUP_ID_NOT_FOUND;
                 described.push(row);
                 continue;

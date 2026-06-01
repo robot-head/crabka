@@ -36,8 +36,9 @@ use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_top
 use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
-use crate::coordinator::group::GroupState;
 use crate::coordinator::persistence::OffsetCommitValue;
+use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
+use crate::coordinator::unified::classic_state::GroupState;
 use crate::error::BrokerError;
 use crate::partition::{ProduceJob, WriterMessage};
 
@@ -70,7 +71,7 @@ pub(crate) async fn handle(
     }
 
     // Group must exist.
-    let Some(group_handle) = broker.group_manager.find(&req.group_id) else {
+    let Some(group_handle) = broker.group_coordinator.find(&req.group_id) else {
         return encode(version, &whole_error(&req, codes::GROUP_ID_NOT_FOUND));
     };
 
@@ -88,21 +89,29 @@ pub(crate) async fn handle(
     };
 
     // Snapshot live subscriptions. KIP-496 only blocks deletion when a
-    // *consumer-protocol* group with live members still subscribes to
-    // the topic; Empty/Dead groups and non-`"consumer"` protocol_type
-    // groups skip the guard.
-    let subscribed_topics: HashSet<String> = {
-        let g = group_handle.state.lock().await;
-        if matches!(g.state, GroupState::Empty | GroupState::Dead)
-            || g.protocol_type.as_deref() != Some("consumer")
+    // *consumer-protocol* classic group with live members still subscribes to
+    // the topic; Empty/Dead groups, non-`"consumer"` protocol_type groups, and
+    // next-gen consumer groups skip the guard.
+    let subscribed_topics: HashSet<String> = if group_handle.kind == GroupKindTag::Classic {
+        let (tx, rx) = oneshot::channel();
+        if group_handle
+            .tx
+            .send(GroupActorMessage::ClassicInspect { reply: tx })
+            .await
+            .is_ok()
+            && let Ok(view) = rx.await
+            && !matches!(view.state, GroupState::Empty | GroupState::Dead)
+            && view.protocol_type.as_deref() == Some("consumer")
         {
-            HashSet::new()
-        } else {
-            g.members
-                .values()
+            view.members
+                .iter()
                 .flat_map(|m| decode_subscribed_topics(&m.protocol_metadata))
                 .collect()
+        } else {
+            HashSet::new()
         }
+    } else {
+        HashSet::new()
     };
 
     // Build per-topic/per-partition result rows and queue the tombstone
@@ -136,9 +145,17 @@ pub(crate) async fn handle(
         if let Err(code) = append_tombstones(broker, tombstones).await {
             return encode(version, &rewrite_success_as(topics_out, code));
         }
-        let mut g = group_handle.state.lock().await;
-        for key in &to_remove {
-            g.committed_offsets.remove(key);
+        let (tx, rx) = oneshot::channel();
+        if group_handle
+            .tx
+            .send(GroupActorMessage::RemoveCommitted {
+                keys: to_remove,
+                reply: tx,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = rx.await;
         }
     }
 

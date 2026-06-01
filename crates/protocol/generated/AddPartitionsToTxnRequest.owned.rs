@@ -21,15 +21,7 @@ fn is_flexible(version: i16) -> bool {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AddPartitionsToTxnRequest {
-    pub transactions: Vec<AddPartitionsToTxnTransaction>,
-    pub v3_and_below_transactional_id: String,
-    pub v3_and_below_producer_id: i64,
-    pub v3_and_below_producer_epoch: i16,
-    pub v3_and_below_topics:
-        Vec<super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic>,
-    pub unknown_tagged_fields: UnknownTaggedFields,
-}
+pub struct AddPartitionsToTxnRequest { pub transactions : Vec < AddPartitionsToTxnTransaction > , pub v3_and_below_transactional_id : String , pub v3_and_below_producer_id : i64 , pub v3_and_below_producer_epoch : i16 , pub v3_and_below_topics : Vec < super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic > , pub unknown_tagged_fields : UnknownTaggedFields , }
 impl Encode for AddPartitionsToTxnRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
@@ -163,7 +155,7 @@ impl Decode<'_> for AddPartitionsToTxnRequest {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: decode (buf , version) ?) ;
+                    v . push (super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -192,24 +184,13 @@ impl AddPartitionsToTxnRequest {
             m.v3_and_below_producer_epoch = 1i16;
         }
         if (0..=3).contains(&version) {
-            m.v3_and_below_topics = vec![
-                super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(
-                    version,
-                ),
-            ];
+            m . v3_and_below_topics = vec ! [super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: populated (version)] ;
         }
         m
     }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct AddPartitionsToTxnTransaction {
-    pub transactional_id: String,
-    pub producer_id: i64,
-    pub producer_epoch: i16,
-    pub verify_only: bool,
-    pub topics: Vec<super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic>,
-    pub unknown_tagged_fields: UnknownTaggedFields,
-}
+pub struct AddPartitionsToTxnTransaction { pub transactional_id : String , pub producer_id : i64 , pub producer_epoch : i16 , pub verify_only : bool , pub topics : Vec < super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic > , pub unknown_tagged_fields : UnknownTaggedFields , }
 impl Encode for AddPartitionsToTxnTransaction {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
@@ -302,7 +283,7 @@ impl Decode<'_> for AddPartitionsToTxnTransaction {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v . push (super :: common :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: decode (buf , version) ?) ;
+                    v . push (super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -331,11 +312,7 @@ impl AddPartitionsToTxnTransaction {
             m.verify_only = true;
         }
         if version >= 4 {
-            m.topics = vec![
-                super::common::add_partitions_to_txn_topic::AddPartitionsToTxnTopic::populated(
-                    version,
-                ),
-            ];
+            m . topics = vec ! [super :: common :: add_partitions_to_txn_request :: add_partitions_to_txn_topic :: AddPartitionsToTxnTopic :: populated (version)] ;
         }
         m
     }

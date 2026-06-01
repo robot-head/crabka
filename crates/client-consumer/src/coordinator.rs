@@ -30,7 +30,6 @@ use crabka_protocol::owned::join_group_response::JoinGroupResponse;
 use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
 use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
-use crabka_protocol::owned::offset_fetch_request::{OffsetFetchRequest, OffsetFetchRequestTopic};
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
 use crabka_protocol::owned::sync_group_response::SyncGroupResponse;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -39,8 +38,8 @@ use crate::assignor::{Assignor, RebalanceProtocol};
 use crate::builder::{
     AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment, encode_subscription,
 };
-use crate::commit::build_commit_topics;
 use crate::error::ConsumerError;
+use crate::offset_wire::{build_commit_topics, build_offset_fetch, id_to_name, parse_offset_fetch};
 
 /// Retriable group-coordinator error codes. The coordinator is loading its
 /// state (`14`), not yet available (`15`), or has moved to another broker
@@ -390,7 +389,8 @@ async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
     if offsets.is_empty() {
         return;
     }
-    let topics = build_commit_topics(offsets);
+    let topic_ids = state.topic_ids.lock().await.clone();
+    let topics = build_commit_topics(offsets, &topic_ids);
     let res = state
         .client
         .send(OffsetCommitRequest {
@@ -627,41 +627,28 @@ async fn prime_offsets(
     for (t, p) in partitions {
         by_topic.entry(t.clone()).or_default().push(*p);
     }
-    let topics: Vec<OffsetFetchRequestTopic> = by_topic
-        .into_iter()
-        .map(|(name, partition_indexes)| OffsetFetchRequestTopic {
-            name,
-            partition_indexes,
-            ..Default::default()
-        })
-        .collect();
+    let topic_ids = state.topic_ids.lock().await.clone();
     let of = state
         .client
-        .send(OffsetFetchRequest {
-            group_id: state.group_id.clone(),
-            topics: Some(topics),
-            ..Default::default()
-        })
+        .send(build_offset_fetch(&state.group_id, &by_topic, &topic_ids))
         .await?;
 
+    let id_to_name = id_to_name(&topic_ids);
     let mut offsets = state.next_offsets.lock().await;
     let mut seen: HashSet<(String, i32)> = HashSet::new();
-    for t in &of.topics {
-        for p in &t.partitions {
-            let committed = p.committed_offset;
-            let starting = if committed >= 0 {
-                committed
-            } else {
-                match state.auto_offset_reset {
-                    AutoOffsetReset::Earliest => 0,
-                    // Resolved lazily by poll::resolve_latest_sentinels.
-                    AutoOffsetReset::Latest => i64::MAX,
-                }
-            };
-            let key = (t.name.clone(), p.partition_index);
-            seen.insert(key.clone());
-            offsets.insert(key, starting);
-        }
+    for (name, partition_index, committed) in parse_offset_fetch(&of, &id_to_name) {
+        let starting = if committed >= 0 {
+            committed
+        } else {
+            match state.auto_offset_reset {
+                AutoOffsetReset::Earliest => 0,
+                // Resolved lazily by poll::resolve_latest_sentinels.
+                AutoOffsetReset::Latest => i64::MAX,
+            }
+        };
+        let key = (name, partition_index);
+        seen.insert(key.clone());
+        offsets.insert(key, starting);
     }
     // The broker may omit partitions that have no commit record at all;
     // ensure every requested partition has an entry so poll() can find it.

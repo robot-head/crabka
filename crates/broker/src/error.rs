@@ -114,6 +114,12 @@ pub enum BrokerError {
     #[error("transaction: {0}")]
     Txn(String),
 
+    /// A KIP-932 share-coordinator (persister) operation failed. Maps to
+    /// `UNKNOWN_SERVER_ERROR` on the wire; specific wire codes are chosen by
+    /// handlers.
+    #[error("share: {0}")]
+    Share(String),
+
     /// Two listeners share the same `bind_addr`.
     #[error("listener bind conflict: {a} and {b} share bind_addr")]
     ListenerConflict { a: String, b: String },

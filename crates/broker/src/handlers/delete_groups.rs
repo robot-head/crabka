@@ -47,7 +47,7 @@ pub(crate) async fn handle(
             continue;
         }
 
-        let error_code = match broker.group_manager.delete_group(&gid).await {
+        let error_code = match broker.group_coordinator.delete_group(&gid).await {
             Ok(()) => codes::NONE,
             Err(DeleteGroupError::NotFound) => codes::GROUP_ID_NOT_FOUND,
             Err(DeleteGroupError::NonEmpty) => codes::NON_EMPTY_GROUP,

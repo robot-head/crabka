@@ -31,14 +31,20 @@ pub struct StreamsGroupHeartbeatRequest {
     pub rack_id: Option<String>,
     pub rebalance_timeout_ms: i32,
     pub topology: Option<Topology>,
-    pub active_tasks: Option<Vec<super::common::task_ids::TaskIds>>,
-    pub standby_tasks: Option<Vec<super::common::task_ids::TaskIds>>,
-    pub warmup_tasks: Option<Vec<super::common::task_ids::TaskIds>>,
+    pub active_tasks:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_ids::TaskIds>>,
+    pub standby_tasks:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_ids::TaskIds>>,
+    pub warmup_tasks:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_ids::TaskIds>>,
     pub process_id: Option<String>,
-    pub user_endpoint: Option<super::common::endpoint::Endpoint>,
-    pub client_tags: Option<Vec<super::common::key_value::KeyValue>>,
-    pub task_offsets: Option<Vec<super::common::task_offset::TaskOffset>>,
-    pub task_end_offsets: Option<Vec<super::common::task_offset::TaskOffset>>,
+    pub user_endpoint: Option<super::common::streams_group_heartbeat_request::endpoint::Endpoint>,
+    pub client_tags:
+        Option<Vec<super::common::streams_group_heartbeat_request::key_value::KeyValue>>,
+    pub task_offsets:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_offset::TaskOffset>>,
+    pub task_end_offsets:
+        Option<Vec<super::common::streams_group_heartbeat_request::task_offset::TaskOffset>>,
     pub shutdown_application: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
@@ -416,7 +422,7 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_ids::TaskIds::decode(buf, version)?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -431,7 +437,7 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_ids::TaskIds::decode(buf, version)?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -446,7 +452,7 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_ids::TaskIds::decode(buf, version)?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_ids :: TaskIds :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -464,7 +470,11 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
             out.user_endpoint = if get_i8(buf)? < 0 {
                 None
             } else {
-                Some(super::common::endpoint::Endpoint::decode(buf, version)?)
+                Some(
+                    super::common::streams_group_heartbeat_request::endpoint::Endpoint::decode(
+                        buf, version,
+                    )?,
+                )
             };
         }
         if version >= 0 {
@@ -475,7 +485,7 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::key_value::KeyValue::decode(buf, version)?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: key_value :: KeyValue :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -490,9 +500,7 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_offset::TaskOffset::decode(
-                                buf, version,
-                            )?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_offset :: TaskOffset :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -507,9 +515,7 @@ impl Decode<'_> for StreamsGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(super::common::task_offset::TaskOffset::decode(
-                                buf, version,
-                            )?);
+                            v . push (super :: common :: streams_group_heartbeat_request :: task_offset :: TaskOffset :: decode (buf , version) ?) ;
                         }
                         Some(v)
                     }
@@ -555,32 +561,56 @@ impl StreamsGroupHeartbeatRequest {
             m.topology = Some(Topology::populated(version));
         }
         if version >= 0 {
-            m.active_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+            m.active_tasks = Some(vec![
+                super::common::streams_group_heartbeat_request::task_ids::TaskIds::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.standby_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+            m.standby_tasks = Some(vec![
+                super::common::streams_group_heartbeat_request::task_ids::TaskIds::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.warmup_tasks = Some(vec![super::common::task_ids::TaskIds::populated(version)]);
+            m.warmup_tasks = Some(vec![
+                super::common::streams_group_heartbeat_request::task_ids::TaskIds::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
             m.process_id = Some("x".to_string());
         }
         if version >= 0 {
-            m.user_endpoint = Some(super::common::endpoint::Endpoint::populated(version));
+            m.user_endpoint = Some(
+                super::common::streams_group_heartbeat_request::endpoint::Endpoint::populated(
+                    version,
+                ),
+            );
         }
         if version >= 0 {
-            m.client_tags = Some(vec![super::common::key_value::KeyValue::populated(version)]);
+            m.client_tags = Some(vec![
+                super::common::streams_group_heartbeat_request::key_value::KeyValue::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.task_offsets = Some(vec![super::common::task_offset::TaskOffset::populated(
-                version,
-            )]);
+            m.task_offsets = Some(vec![
+                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
-            m.task_end_offsets = Some(vec![super::common::task_offset::TaskOffset::populated(
-                version,
-            )]);
+            m.task_end_offsets = Some(vec![
+                super::common::streams_group_heartbeat_request::task_offset::TaskOffset::populated(
+                    version,
+                ),
+            ]);
         }
         if version >= 0 {
             m.shutdown_application = true;
@@ -682,9 +712,11 @@ pub struct Subtopology {
     pub subtopology_id: String,
     pub source_topics: Vec<String>,
     pub source_topic_regex: Vec<String>,
-    pub state_changelog_topics: Vec<super::common::topic_info::TopicInfo>,
+    pub state_changelog_topics:
+        Vec<super::common::streams_group_heartbeat_request::topic_info::TopicInfo>,
     pub repartition_sink_topics: Vec<String>,
-    pub repartition_source_topics: Vec<super::common::topic_info::TopicInfo>,
+    pub repartition_source_topics:
+        Vec<super::common::streams_group_heartbeat_request::topic_info::TopicInfo>,
     pub copartition_groups: Vec<CopartitionGroup>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
@@ -933,7 +965,7 @@ impl Decode<'_> for Subtopology {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_info::TopicInfo::decode(buf, version)?);
+                    v . push (super :: common :: streams_group_heartbeat_request :: topic_info :: TopicInfo :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -957,7 +989,7 @@ impl Decode<'_> for Subtopology {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_info::TopicInfo::decode(buf, version)?);
+                    v . push (super :: common :: streams_group_heartbeat_request :: topic_info :: TopicInfo :: decode (buf , version) ?) ;
                 }
                 v
             };
@@ -993,15 +1025,21 @@ impl Subtopology {
             m.source_topic_regex = vec!["x".to_string()];
         }
         if version >= 0 {
-            m.state_changelog_topics =
-                vec![super::common::topic_info::TopicInfo::populated(version)];
+            m.state_changelog_topics = vec![
+                super::common::streams_group_heartbeat_request::topic_info::TopicInfo::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
             m.repartition_sink_topics = vec!["x".to_string()];
         }
         if version >= 0 {
-            m.repartition_source_topics =
-                vec![super::common::topic_info::TopicInfo::populated(version)];
+            m.repartition_source_topics = vec![
+                super::common::streams_group_heartbeat_request::topic_info::TopicInfo::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
             m.copartition_groups = vec![CopartitionGroup::populated(version)];

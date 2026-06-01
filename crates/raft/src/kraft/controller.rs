@@ -1731,7 +1731,7 @@ fn initial_state_voters(core: &QuorumStateMachine) -> Vec<NodeId> {
 /// (`last_offset_delta = 0`), unchanged from the prior empty batch.
 fn leader_change_batch(epoch: LeaderEpoch, leader_id: NodeId, voter_ids: &[NodeId]) -> RecordBatch {
     use crabka_protocol::Encode;
-    use crabka_protocol::owned::common::voter::Voter;
+    use crabka_protocol::owned::common::leader_change_message::voter::Voter;
     use crabka_protocol::owned::leader_change_message::LeaderChangeMessage;
     use crabka_protocol::records::header::Attributes;
     use crabka_protocol::records::metadata::control::{ControlRecordType, control_record_key};

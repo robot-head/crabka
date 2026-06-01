@@ -4,11 +4,35 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
 use regex::Regex;
 
 use crabka_protocol::primitives::uuid::Uuid;
 
 use super::persistence_next_gen::MemberAssignmentState;
+
+/// Classic-protocol state for a member hosted inside an *upgraded* consumer
+/// group (KIP-848 64d-D). `None` on a native consumer-protocol member; `Some`
+/// once a classic member's group has been upgraded (or a classic member joins
+/// an already-upgraded group). The member keeps speaking the classic
+/// `JoinGroup`/`SyncGroup`/`Heartbeat` protocol; the coordinator serves it by
+/// mapping onto the consumer-group machinery and translating its target into a
+/// `ConsumerProtocolAssignment` blob on `SyncGroup`.
+#[derive(Debug, Clone)]
+pub struct ClassicMemberFacade {
+    /// Classic generation echoed to the member; advances with the group epoch.
+    pub generation_id: i32,
+    /// `(protocol_name, metadata)` pairs the member proposed in `JoinGroup`.
+    /// Preserved so a later downgrade (Slice 64d-E) can losslessly restore the
+    /// classic member.
+    pub supported_protocols: Vec<(String, Bytes)>,
+    /// The member's classic `session.timeout.ms`.
+    pub session_timeout: Duration,
+    /// The last `ConsumerProtocolAssignment` blob returned via `SyncGroup`.
+    pub last_synced_assignment: Bytes,
+    /// `true` once the member must re-`SyncGroup` to pick up a changed target.
+    pub awaiting_sync: bool,
+}
 
 #[derive(Debug, Clone)]
 pub struct MemberState {
@@ -51,9 +75,19 @@ pub struct MemberState {
     pub assigned_partitions: HashMap<Uuid, Vec<i32>>,
     pub partitions_pending_revocation: HashMap<Uuid, Vec<i32>>,
     pub last_seen: Instant,
+    /// Set iff this is a classic member hosted in an upgraded group (64d-D).
+    pub classic: Option<ClassicMemberFacade>,
 }
 
 impl MemberState {
+    /// `true` if this member speaks the classic protocol inside an upgraded
+    /// group (its RPCs are `JoinGroup`/`SyncGroup`/`Heartbeat`, not
+    /// `ConsumerGroupHeartbeat`).
+    #[must_use]
+    pub fn is_classic(&self) -> bool {
+        self.classic.is_some()
+    }
+
     /// Set `subscribed_topic_regex` and (re)compile the cached `Regex`.
     /// The compile is performed exactly once per distinct pattern — call
     /// this only when the pattern actually changes. An invalid pattern is
@@ -243,6 +277,7 @@ mod tests {
             assigned_partitions: HashMap::new(),
             partitions_pending_revocation: HashMap::new(),
             last_seen: Instant::now(),
+            classic: None,
         }
     }
 

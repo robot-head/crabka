@@ -50,6 +50,8 @@
 //!   form.
 
 use bytes::Bytes;
+use wincode::{Deserialize as _, Serialize as _};
+
 use crabka_protocol::owned::access_control_entry_record::AccessControlEntryRecord;
 use crabka_protocol::owned::client_quota_record::{
     ClientQuotaRecord as KClientQuotaRecord, EntityData,
@@ -608,6 +610,18 @@ fn to_kraft_iter(
                 })
                 .collect()
         }
+        // ----- records main's KIP-584/KIP-714 work added with no KIP-631 wire
+        // counterpart yet: carry verbatim (wincode body) in an Unknown envelope
+        // so Crabka-only logs/snapshots round-trip. They never reach a JVM peer
+        // in the static-quorum interop path (no snapshot fetch / no client-metrics
+        // there); full KIP-631 fidelity (real ClientMetricsRecord; deriving the
+        // features epoch from FeatureLevel offsets) is future work. -----
+        MetadataRecord::V1ClientMetricsConfig(_) => {
+            vec![wincode_carrier(rec, PRIVATE_CLIENT_METRICS_KEY)?]
+        }
+        MetadataRecord::V1FeaturesEpoch(_) => {
+            vec![wincode_carrier(rec, PRIVATE_FEATURES_EPOCH_KEY)?]
+        }
         // ----- no KIP-631 metadata counterpart -----
         MetadataRecord::V1Voters(_) => {
             return Err(TranslateError::NoCounterpart("V1Voters"));
@@ -617,6 +631,29 @@ fn to_kraft_iter(
         }
     };
     Ok(recs.into_iter())
+}
+
+/// Crabka-private metadata-record apiKeys (well outside Kafka's real
+/// non-sequential range 0..=27) for records carried verbatim through the
+/// KIP-631 `Unknown` envelope. NOT wire-faithful to a JVM peer — Crabka-only
+/// round-trip carriers.
+const PRIVATE_CLIENT_METRICS_KEY: u32 = 1000;
+const PRIVATE_FEATURES_EPOCH_KEY: u32 = 1001;
+
+/// Wrap a wincode-serialized `MetadataRecord` in an `Unknown` KIP-631 envelope
+/// under a Crabka-private apiKey, so it round-trips byte-faithfully through the
+/// KIP-631 log/snapshot without a real KIP-631 schema.
+fn wincode_carrier(
+    rec: &MetadataRecord,
+    api_key: u32,
+) -> Result<KraftMetadataRecord, TranslateError> {
+    let body = <serde_wincode::SerdeCompat<MetadataRecord>>::serialize(rec)
+        .map_err(|e| TranslateError::Encode(e.to_string()))?;
+    Ok(KraftMetadataRecord::Unknown {
+        api_key,
+        api_version: 0,
+        body: bytes::Bytes::from(body),
+    })
 }
 
 fn register_broker_to_kraft(
@@ -819,6 +856,14 @@ pub fn from_kraft(
             Ok(MetadataRecord::V1DeleteAccessControlEntry(exact_filter(
                 entry,
             )))
+        }
+        // Crabka-private carriers (see `wincode_carrier`): decode the verbatim
+        // wincode body back to the original record.
+        KraftMetadataRecord::Unknown { api_key, body, .. }
+            if *api_key == PRIVATE_CLIENT_METRICS_KEY || *api_key == PRIVATE_FEATURES_EPOCH_KEY =>
+        {
+            <serde_wincode::SerdeCompat<MetadataRecord>>::deserialize(body)
+                .map_err(|e| TranslateError::Decode(e.to_string()))
         }
         other => Err(TranslateError::NoCounterpart(kraft_variant_name(other))),
     }

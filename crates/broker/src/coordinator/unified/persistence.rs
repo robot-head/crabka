@@ -30,6 +30,8 @@ pub enum Key {
     GroupMetadata { group_id: String },
     /// KIP-848 next-gen consumer group record types (versions 3, 5–8).
     NextGen(crate::coordinator::unified::persistence_next_gen::NextGenKey),
+    /// KIP-932 share-group record types (versions 9–13).
+    Share(crate::coordinator::unified::share::persistence::ShareGroupKey),
 }
 
 pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
@@ -56,6 +58,9 @@ pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
         }
         3 | 5 | 6 | 7 | 8 => Ok(Key::NextGen(
             crate::coordinator::unified::persistence_next_gen::parse_key(version, buf)?,
+        )),
+        9..=14 => Ok(Key::Share(
+            crate::coordinator::unified::share::persistence::parse_share_key(version, buf)?,
         )),
         _ => Err(BrokerError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("unknown __consumer_offsets key version"),
@@ -117,7 +122,14 @@ impl OffsetCommitValue {
     }
 }
 
+// The k2 `GroupMetadata` *write* codec (`encode_key`/`encode_value`) and the
+// `current_state_timestamp_ms` field are wire-faithful but not yet exercised
+// in production: classic group membership is in-memory and only committed
+// offsets (k0/k1) are persisted today. Bootstrap *decodes* k2 records, and the
+// migration slices (64d-D/E) will *write* them on conversion. Retained per the
+// B1 merge; allow until those slices wire the write path.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GroupMetadataValue {
     pub protocol_type: String,
     pub generation: i32,
@@ -139,6 +151,7 @@ pub struct MemberMetadata {
     pub assignment: Bytes,
 }
 
+#[allow(dead_code)] // k2 write codec; see GroupMetadataValue note above.
 impl GroupMetadataValue {
     /// Encode a `GroupMetadata` key (version 2).
     #[must_use]
@@ -390,7 +403,7 @@ mod tests {
                 assert!(topic == "topic");
                 assert!(partition == 7);
             }
-            k @ (Key::GroupMetadata { .. } | Key::NextGen(_)) => {
+            k @ (Key::GroupMetadata { .. } | Key::NextGen(_) | Key::Share(_)) => {
                 panic!("expected OffsetCommit, got {k:?}")
             }
         }
@@ -401,7 +414,7 @@ mod tests {
         let key = GroupMetadataValue::encode_key("grp");
         match parse_key(&key).unwrap() {
             Key::GroupMetadata { group_id } => assert!(group_id == "grp"),
-            k @ (Key::OffsetCommit { .. } | Key::NextGen(_)) => {
+            k @ (Key::OffsetCommit { .. } | Key::NextGen(_) | Key::Share(_)) => {
                 panic!("expected GroupMetadata, got {k:?}")
             }
         }

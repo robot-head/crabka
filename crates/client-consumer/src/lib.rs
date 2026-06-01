@@ -54,9 +54,12 @@ mod commit;
 mod consumer;
 mod coordinator;
 mod error;
+mod offset_wire;
 mod poll;
+mod share;
 
 pub use assignor::Assignor;
 pub use builder::{AutoOffsetReset, IsolationLevel};
 pub use consumer::{Consumer, ConsumerRecord};
 pub use error::ConsumerError;
+pub use share::{ShareAckMode, ShareAckType, ShareConsumer, ShareConsumerRecord};

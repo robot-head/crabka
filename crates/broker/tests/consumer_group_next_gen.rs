@@ -12,6 +12,7 @@ use crabka_client_core::Client;
 use crabka_protocol::owned::consumer_group_describe_request::ConsumerGroupDescribeRequest;
 use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::list_groups_request::ListGroupsRequest;
 
 async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
     let dir = tempfile::TempDir::new().unwrap();
@@ -297,5 +298,89 @@ async fn first_join_with_client_member_id_echoes_and_assigns() {
     assert!(
         parts == 2,
         "single member should be assigned both partitions"
+    );
+}
+
+/// `kafka-consumer-groups.sh --list` sends `ListGroups` (api_key 16) with
+/// `types_filter = ["consumer"]`. A live next-gen consumer group must appear in
+/// that response tagged `group_type == "consumer"`, must NOT appear when the
+/// request filters on `["share"]`, and must appear (once) with no filter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn list_groups_includes_next_gen_consumer_group() {
+    let (_b, bootstrap, _d) = boot().await;
+    let client = Arc::new(
+        Client::builder()
+            .bootstrap(bootstrap.as_str())
+            .client_id("c")
+            .build()
+            .await
+            .unwrap(),
+    );
+    create_topic(&client, "tlist", 2).await;
+
+    // Join a next-gen consumer group so it is registered in the coordinator.
+    let mut req = heartbeat("glist", "", 0);
+    req.subscribed_topic_names = Some(vec!["tlist".into()]);
+    let resp = client.send(req).await.unwrap();
+    assert!(resp.error_code == 0, "join failed: {:?}", resp.error_code);
+
+    // types_filter = ["consumer"] → contains glist tagged "consumer".
+    let resp = client
+        .send(ListGroupsRequest {
+            types_filter: vec!["consumer".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("ListGroups[consumer]");
+    assert!(resp.error_code == 0, "list error: {:?}", resp.error_code);
+    let row = resp
+        .groups
+        .iter()
+        .find(|g| g.group_id == "glist")
+        .unwrap_or_else(|| {
+            panic!(
+                "consumer group glist missing from ListGroups[consumer], got {:?}",
+                resp.groups.iter().map(|g| &g.group_id).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        row.group_type == "consumer",
+        "expected group_type=consumer, got {:?}",
+        row.group_type
+    );
+
+    // types_filter = ["share"] → glist must NOT appear.
+    let resp = client
+        .send(ListGroupsRequest {
+            types_filter: vec!["share".into()],
+            ..Default::default()
+        })
+        .await
+        .expect("ListGroups[share]");
+    assert!(
+        !resp.groups.iter().any(|g| g.group_id == "glist"),
+        "consumer group glist must be excluded under types_filter=[share], got {:?}",
+        resp.groups.iter().map(|g| &g.group_id).collect::<Vec<_>>()
+    );
+
+    // No filter → glist appears exactly once, tagged "consumer".
+    let resp = client
+        .send(ListGroupsRequest::default())
+        .await
+        .expect("ListGroups[all]");
+    let matches: Vec<_> = resp
+        .groups
+        .iter()
+        .filter(|g| g.group_id == "glist")
+        .collect();
+    assert!(
+        matches.len() == 1,
+        "glist must be listed exactly once, got {} rows",
+        matches.len()
+    );
+    assert!(
+        matches[0].group_type == "consumer",
+        "unfiltered list must tag glist as consumer, got {:?}",
+        matches[0].group_type
     );
 }

@@ -73,6 +73,10 @@ opentelemetry = { version = "0.32", default-features = false, features = ["trace
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic", "http-proto", "reqwest-blocking-client"] }
 tracing-opentelemetry = { version = "0.33", default-features = false }
+# Slice KIP-714: prost-generated OTLP MetricsData / ExportMetricsServiceRequest
+# message types (aligned with the opentelemetry 0.32 stack). gen-tonic-messages
+# pulls the prost structs without a tonic client; metrics gates the metrics module.
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "metrics"] }
 bon = "3"
 # strum: derive enum<->&'static str (IntoStaticStr) and &str->enum (EnumString)
 # to retire hand-written match-arm conversions. Its whole proc-macro tree

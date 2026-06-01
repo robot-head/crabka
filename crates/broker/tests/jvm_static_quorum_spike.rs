@@ -71,9 +71,10 @@ fn crabka_controller_config(
     cfg.auto_join = false;
     cfg.bootstrap_servers = vec![];
     cfg.cluster_id = Some(cluster_id);
-    // Interop opt-in: seed metadata.version/group.version/transaction.version
-    // into the bootstrap log so the JVM controller can build its FeaturesImage.
-    cfg.seed_kraft_bootstrap_features = true;
+    // metadata.version/group.version/transaction.version are seeded into the
+    // bootstrap log automatically (KIP-584 `bootstrap_feature_records`, fired
+    // when the static voter set is derived), so the JVM controller can build
+    // its FeaturesImage.
     cfg
 }
 

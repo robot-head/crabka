@@ -19,7 +19,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::group::GroupState;
+use crate::coordinator::unified::classic_state::GroupState;
 use crate::error::BrokerError;
 use crate::handlers::authorized_operations::authorized_operations_bits;
 
@@ -56,7 +56,7 @@ pub(crate) async fn handle(
             continue;
         }
 
-        let Some(snap) = broker.group_manager.describe_group(&gid).await else {
+        let Some(snap) = broker.group_coordinator.describe_group(&gid).await else {
             groups.push(DescribedGroup {
                 group_id: gid,
                 error_code: codes::GROUP_ID_NOT_FOUND,

@@ -12,16 +12,18 @@
 //! consumer members simultaneously (live migration); this container is the seam
 //! that localizes that change.
 
-// The state machines are reused verbatim. They are physically relocated under
-// `unified/` in B5 once the classic handlers stop reaching the old
-// `GroupManager`; until then these aliases give the unified surface its types
-// without churning the still-live classic/next-gen call sites.
-pub(crate) use crate::coordinator::group::Group as ClassicState;
+// The state machines are reused verbatim, relocated under `unified/`. These
+// aliases give the unified surface its types without renaming the moved code
+// (the classic file keeps its internal `Group`/`GroupState` names).
+use std::collections::HashMap;
+
+pub(crate) use crate::coordinator::unified::classic_state::{Group as ClassicState, OffsetEntry};
 pub(crate) use crate::coordinator::unified::consumer_state::GroupState as ConsumerState;
 
 /// Which protocol a [`Group`]'s members speak. The variant carries that
 /// protocol's full state machine.
-pub(crate) enum GroupKind {
+#[derive(Debug)]
+pub enum GroupKind {
     /// Classic `JoinGroup`/`SyncGroup`/`Heartbeat`/`LeaveGroup` group.
     Classic(ClassicState),
     /// KIP-848 `ConsumerGroupHeartbeat` group.
@@ -29,9 +31,17 @@ pub(crate) enum GroupKind {
 }
 
 /// A consumer group in the unified coordinator.
-pub(crate) struct Group {
+#[derive(Debug)]
+#[allow(clippy::struct_field_names)]
+pub struct Group {
     pub group_id: String,
     pub kind: GroupKind,
+    /// Committed offsets (`__consumer_offsets` k0/k1). Protocol-agnostic — a
+    /// group's offsets are keyed by `(topic, partition)` regardless of which
+    /// protocol its members speak, so they live on the container, not inside
+    /// either state machine. This is what lets a future type flip (Slices
+    /// C–E) preserve committed offsets across a conversion untouched.
+    pub committed_offsets: HashMap<(String, i32), OffsetEntry>,
 }
 
 impl Group {
@@ -41,6 +51,7 @@ impl Group {
         Self {
             kind: GroupKind::Classic(ClassicState::new(group_id.clone())),
             group_id,
+            committed_offsets: HashMap::new(),
         }
     }
 
@@ -50,6 +61,7 @@ impl Group {
         Self {
             kind: GroupKind::Consumer(ConsumerState::new(group_id.clone())),
             group_id,
+            committed_offsets: HashMap::new(),
         }
     }
 

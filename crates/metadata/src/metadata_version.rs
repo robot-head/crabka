@@ -9,6 +9,13 @@
 /// The `metadata.version` feature name (KIP-584 / KIP-778).
 pub const METADATA_VERSION_FEATURE: &str = "metadata.version";
 
+/// The `share.version` feature name (KIP-932). Gates share-group membership.
+pub const SHARE_VERSION_FEATURE: &str = "share.version";
+/// Minimum supported `share.version` level: `0` (feature disabled).
+pub const SHARE_VERSION_MIN: i16 = 0;
+/// Maximum supported `share.version` level: `1` (KIP-932 GA).
+pub const SHARE_VERSION_MAX: i16 = 1;
+
 /// Minimum supported level: `3.3-IV3` (`KRaft` GA) — the floor real Kafka
 /// 4.0 supports.
 pub const METADATA_VERSION_MIN: i16 = 7;
@@ -182,6 +189,13 @@ mod tests {
         assert!(METADATA_VERSION_MAX == 25);
         assert!(TABLE.first().unwrap().level == METADATA_VERSION_MIN);
         assert!(TABLE.last().unwrap().level == METADATA_VERSION_MAX);
+    }
+
+    #[test]
+    fn share_version_feature_levels() {
+        assert!(SHARE_VERSION_FEATURE == "share.version");
+        assert!(SHARE_VERSION_MIN == 0);
+        assert!(SHARE_VERSION_MAX == 1);
     }
 
     #[test]

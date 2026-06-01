@@ -501,8 +501,10 @@ pub struct Subtopology<'a> {
     pub subtopology_id: &'a str,
     pub source_topics: Vec<&'a str>,
     pub repartition_sink_topics: Vec<&'a str>,
-    pub state_changelog_topics: Vec<super::common::topic_info::TopicInfo<'a>>,
-    pub repartition_source_topics: Vec<super::common::topic_info::TopicInfo<'a>>,
+    pub state_changelog_topics:
+        Vec<super::common::streams_group_describe_response::topic_info::TopicInfo<'a>>,
+    pub repartition_source_topics:
+        Vec<super::common::streams_group_describe_response::topic_info::TopicInfo<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Subtopology<'_> {
@@ -519,11 +521,15 @@ impl Subtopology<'_> {
                 .collect(),
             state_changelog_topics: (self.state_changelog_topics)
                 .iter()
-                .map(super::common::topic_info::TopicInfo::to_owned)
+                .map(
+                    super::common::streams_group_describe_response::topic_info::TopicInfo::to_owned,
+                )
                 .collect(),
             repartition_source_topics: (self.repartition_source_topics)
                 .iter()
-                .map(super::common::topic_info::TopicInfo::to_owned)
+                .map(
+                    super::common::streams_group_describe_response::topic_info::TopicInfo::to_owned,
+                )
                 .collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
@@ -722,9 +728,7 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_info::TopicInfo::decode_borrow(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_describe_response :: topic_info :: TopicInfo :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -734,9 +738,7 @@ impl<'de> DecodeBorrow<'de> for Subtopology<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::topic_info::TopicInfo::decode_borrow(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_describe_response :: topic_info :: TopicInfo :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -762,12 +764,18 @@ impl Subtopology<'_> {
             m.repartition_sink_topics = vec!["x"];
         }
         if version >= 0 {
-            m.state_changelog_topics =
-                vec![super::common::topic_info::TopicInfo::populated(version)];
+            m.state_changelog_topics = vec![
+                super::common::streams_group_describe_response::topic_info::TopicInfo::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
-            m.repartition_source_topics =
-                vec![super::common::topic_info::TopicInfo::populated(version)];
+            m.repartition_source_topics = vec![
+                super::common::streams_group_describe_response::topic_info::TopicInfo::populated(
+                    version,
+                ),
+            ];
         }
         m
     }
@@ -782,12 +790,16 @@ pub struct Member<'a> {
     pub client_host: &'a str,
     pub topology_epoch: i32,
     pub process_id: &'a str,
-    pub user_endpoint: Option<super::common::endpoint::Endpoint<'a>>,
-    pub client_tags: Vec<super::common::key_value::KeyValue<'a>>,
-    pub task_offsets: Vec<super::common::task_offset::TaskOffset<'a>>,
-    pub task_end_offsets: Vec<super::common::task_offset::TaskOffset<'a>>,
-    pub assignment: super::common::assignment::Assignment<'a>,
-    pub target_assignment: super::common::assignment::Assignment<'a>,
+    pub user_endpoint:
+        Option<super::common::streams_group_describe_response::endpoint::Endpoint<'a>>,
+    pub client_tags: Vec<super::common::streams_group_describe_response::key_value::KeyValue<'a>>,
+    pub task_offsets:
+        Vec<super::common::streams_group_describe_response::task_offset::TaskOffset<'a>>,
+    pub task_end_offsets:
+        Vec<super::common::streams_group_describe_response::task_offset::TaskOffset<'a>>,
+    pub assignment: super::common::streams_group_describe_response::assignment::Assignment<'a>,
+    pub target_assignment:
+        super::common::streams_group_describe_response::assignment::Assignment<'a>,
     pub is_classic: bool,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
@@ -802,20 +814,12 @@ impl Member<'_> {
             client_host: (self.client_host).to_string(),
             topology_epoch: (self.topology_epoch),
             process_id: (self.process_id).to_string(),
-            user_endpoint: (self.user_endpoint)
-                .as_ref()
-                .map(super::common::endpoint::Endpoint::to_owned),
-            client_tags: (self.client_tags)
-                .iter()
-                .map(super::common::key_value::KeyValue::to_owned)
-                .collect(),
-            task_offsets: (self.task_offsets)
-                .iter()
-                .map(super::common::task_offset::TaskOffset::to_owned)
-                .collect(),
+            user_endpoint: (self.user_endpoint).as_ref().map(super::common::streams_group_describe_response::endpoint::Endpoint::to_owned),
+            client_tags: (self.client_tags).iter().map(super::common::streams_group_describe_response::key_value::KeyValue::to_owned).collect(),
+            task_offsets: (self.task_offsets).iter().map(super::common::streams_group_describe_response::task_offset::TaskOffset::to_owned).collect(),
             task_end_offsets: (self.task_end_offsets)
                 .iter()
-                .map(super::common::task_offset::TaskOffset::to_owned)
+                .map(super::common::streams_group_describe_response::task_offset::TaskOffset::to_owned)
                 .collect(),
             assignment: (self.assignment).to_owned(),
             target_assignment: (self.target_assignment).to_owned(),
@@ -1089,9 +1093,7 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
             out.user_endpoint = if get_i8(buf)? < 0 {
                 None
             } else {
-                Some(super::common::endpoint::Endpoint::decode_borrow(
-                    buf, version,
-                )?)
+                Some (super :: common :: streams_group_describe_response :: endpoint :: Endpoint :: decode_borrow (buf , version) ?)
             };
         }
         if version >= 0 {
@@ -1099,9 +1101,7 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::key_value::KeyValue::decode_borrow(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_describe_response :: key_value :: KeyValue :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -1111,9 +1111,7 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::task_offset::TaskOffset::decode_borrow(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_describe_response :: task_offset :: TaskOffset :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
@@ -1123,19 +1121,16 @@ impl<'de> DecodeBorrow<'de> for Member<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::task_offset::TaskOffset::decode_borrow(
-                        buf, version,
-                    )?);
+                    v . push (super :: common :: streams_group_describe_response :: task_offset :: TaskOffset :: decode_borrow (buf , version) ?) ;
                 }
                 v
             };
         }
         if version >= 0 {
-            out.assignment = super::common::assignment::Assignment::decode_borrow(buf, version)?;
+            out . assignment = super :: common :: streams_group_describe_response :: assignment :: Assignment :: decode_borrow (buf , version) ? ;
         }
         if version >= 0 {
-            out.target_assignment =
-                super::common::assignment::Assignment::decode_borrow(buf, version)?;
+            out . target_assignment = super :: common :: streams_group_describe_response :: assignment :: Assignment :: decode_borrow (buf , version) ? ;
         }
         if version >= 0 {
             out.is_classic = get_bool(buf)?;
@@ -1176,22 +1171,44 @@ impl Member<'_> {
             m.process_id = "x";
         }
         if version >= 0 {
-            m.user_endpoint = Some(super::common::endpoint::Endpoint::populated(version));
+            m.user_endpoint = Some(
+                super::common::streams_group_describe_response::endpoint::Endpoint::populated(
+                    version,
+                ),
+            );
         }
         if version >= 0 {
-            m.client_tags = vec![super::common::key_value::KeyValue::populated(version)];
+            m.client_tags = vec![
+                super::common::streams_group_describe_response::key_value::KeyValue::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
-            m.task_offsets = vec![super::common::task_offset::TaskOffset::populated(version)];
+            m.task_offsets = vec![
+                super::common::streams_group_describe_response::task_offset::TaskOffset::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
-            m.task_end_offsets = vec![super::common::task_offset::TaskOffset::populated(version)];
+            m.task_end_offsets = vec![
+                super::common::streams_group_describe_response::task_offset::TaskOffset::populated(
+                    version,
+                ),
+            ];
         }
         if version >= 0 {
-            m.assignment = super::common::assignment::Assignment::populated(version);
+            m.assignment =
+                super::common::streams_group_describe_response::assignment::Assignment::populated(
+                    version,
+                );
         }
         if version >= 0 {
-            m.target_assignment = super::common::assignment::Assignment::populated(version);
+            m.target_assignment =
+                super::common::streams_group_describe_response::assignment::Assignment::populated(
+                    version,
+                );
         }
         if version >= 0 {
             m.is_classic = true;

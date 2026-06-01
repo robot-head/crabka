@@ -82,6 +82,10 @@ pub const INVALID_TXN_STATE: i16 = 24;
 pub const INVALID_TXN_TIMEOUT: i16 = 48;
 pub const CONCURRENT_TRANSACTIONS: i16 = 49;
 pub const TRANSACTION_COORDINATOR_FENCED: i16 = 50;
+/// `TRANSACTION_ABORTABLE` (120, KIP-890) — the operation failed but the
+/// transaction can still be aborted by the client; e.g. `AddPartitionsToTxn`
+/// verify-only found a partition that is not part of the ongoing transaction.
+pub const TRANSACTION_ABORTABLE: i16 = 120;
 
 /// `FENCED_INSTANCE_ID` (82, KIP-345) — another client is currently pinned
 /// to the same `group.instance.id`. The losing client must exit; the broker
@@ -104,6 +108,17 @@ pub const UNRELEASED_INSTANCE_ID: i16 = 114;
 /// `UNKNOWN_SUBSCRIPTION_ID` (117, KIP-848) — the consumer's persisted
 /// subscription identifier was not found by the coordinator.
 pub const UNKNOWN_SUBSCRIPTION_ID: i16 = 117;
+
+/// KIP-932: an acknowledgement targeted a record no longer Acquired.
+pub const INVALID_RECORD_STATE: i16 = 121;
+/// KIP-932: the named share session does not exist.
+pub const SHARE_SESSION_NOT_FOUND: i16 = 122;
+/// KIP-932: the share session epoch did not match the broker's expectation.
+pub const INVALID_SHARE_SESSION_EPOCH: i16 = 123;
+/// KIP-932: the share coordinator fenced a write on a stale state epoch.
+pub const FENCED_STATE_EPOCH: i16 = 124;
+/// KIP-932: the per-broker share session cache is full.
+pub const SHARE_SESSION_LIMIT_REACHED: i16 = 133;
 
 // Admin handler codes.
 /// `INVALID_CONFIG` (40) — a config key/value pair is invalid or unknown.
@@ -228,6 +243,27 @@ pub const POSITION_OUT_OF_RANGE: i16 = 99;
 /// `INCONSISTENT_CLUSTER_ID` (104) — the request's `cluster_id` does not
 /// match this cluster's id.
 pub const INCONSISTENT_CLUSTER_ID: i16 = 104;
+/// `UNKNOWN_TOPIC_ID` (100) — a request referenced a topic by UUID that this
+/// cluster does not know about (KIP-516).
+pub const UNKNOWN_TOPIC_ID: i16 = 100;
+/// `INCONSISTENT_TOPIC_ID` (103) — a request supplied a topic UUID that does
+/// not match the UUID stored for the named topic (KIP-516).
+pub const INCONSISTENT_TOPIC_ID: i16 = 103;
+/// `FETCH_SESSION_TOPIC_ID_ERROR` (106) — a fetch session referenced a topic
+/// UUID that no longer resolves (e.g. recreated mid-session) (KIP-516).
+pub const FETCH_SESSION_TOPIC_ID_ERROR: i16 = 106;
+
+/// `UNSUPPORTED_COMPRESSION_TYPE` (76) — KIP-714 `PushTelemetry` carried a
+/// `compression_type` the broker can't decompress.
+pub const UNSUPPORTED_COMPRESSION_TYPE: i16 = 76;
+
+/// `THROTTLING_QUOTA_EXCEEDED` (89) — KIP-714 client pushed/fetched
+/// telemetry faster than the configured interval allows.
+pub const THROTTLING_QUOTA_EXCEEDED: i16 = 89;
+
+/// `TELEMETRY_TOO_LARGE` (118) — KIP-714 `PushTelemetry` payload exceeded
+/// `telemetry.max.bytes`.
+pub const TELEMETRY_TOO_LARGE: i16 = 118;
 
 /// Map an internal [`crate::error::BrokerError`] to a wire-level code.
 /// Most internal errors map to `UNKNOWN_SERVER_ERROR`; specific variants
@@ -251,6 +287,7 @@ pub fn from_broker_error(err: &crate::error::BrokerError) -> i16 {
         | BrokerError::Protocol(_)
         | BrokerError::Startup(_)
         | BrokerError::Txn(_)
+        | BrokerError::Share(_)
         | BrokerError::ListenerConflict { .. }
         | BrokerError::InvalidInterBrokerListener { .. }
         | BrokerError::EmptyRoles
@@ -270,6 +307,15 @@ mod tests {
     use super::*;
     use crate::error::BrokerError;
     use assert2::assert;
+
+    #[test]
+    fn share_group_error_codes_match_kafka() {
+        assert!(INVALID_RECORD_STATE == 121);
+        assert!(SHARE_SESSION_NOT_FOUND == 122);
+        assert!(INVALID_SHARE_SESSION_EPOCH == 123);
+        assert!(FENCED_STATE_EPOCH == 124);
+        assert!(SHARE_SESSION_LIMIT_REACHED == 133);
+    }
 
     #[test]
     fn maps_unsupported_to_35() {
@@ -353,5 +399,12 @@ mod tests {
     fn unknown_leader_epoch_maps_correctly() {
         let e = BrokerError::UnknownLeaderEpoch(2);
         assert!(from_broker_error(&e) == UNKNOWN_LEADER_EPOCH);
+    }
+
+    #[test]
+    fn kip516_error_code_numbers_match_kafka() {
+        assert!(super::UNKNOWN_TOPIC_ID == 100);
+        assert!(super::INCONSISTENT_TOPIC_ID == 103);
+        assert!(super::FETCH_SESSION_TOPIC_ID_ERROR == 106);
     }
 }

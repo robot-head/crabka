@@ -26,9 +26,10 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.1", path = "../broker" }
+crabka-broker = { version = "0.1", path = "../broker", features = ["test-helpers"] }
 crabka-log = { version = "0.1", path = "../log" }
 crabka-security = { version = "0.1", path = "../security" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 proptest = { workspace = true }
+uuid = { workspace = true }

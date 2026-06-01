@@ -27,7 +27,7 @@
 use bytes::{Bytes, BytesMut};
 
 use crabka_metadata::AclOperation;
-use crabka_protocol::owned::common::replica_state::ReplicaState;
+use crabka_protocol::owned::common::describe_quorum_response::replica_state::ReplicaState;
 use crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest;
 use crabka_protocol::owned::describe_quorum_response::{
     DescribeQuorumResponse, Listener, Node, PartitionData, TopicData,
