@@ -226,6 +226,15 @@ impl GroupCoordinator {
         self.share_groups.get(group_id).map(|e| e.value().clone())
     }
 
+    /// Snapshot the ids of every live share group (KIP-932). Sync and cheap —
+    /// just the registry keys, no actor round-trip — so `ListGroups` (`api_key`
+    /// 16) can include share groups alongside classic ones without the
+    /// per-group `Describe` mpsc hop.
+    #[must_use]
+    pub fn share_group_ids(&self) -> Vec<String> {
+        self.share_groups.iter().map(|e| e.key().clone()).collect()
+    }
+
     pub async fn shutdown_all(&self) {
         let handles: Vec<Arc<GroupActorHandle>> =
             self.groups.iter().map(|e| e.value().clone()).collect();
