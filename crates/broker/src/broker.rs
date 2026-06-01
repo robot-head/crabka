@@ -1349,10 +1349,11 @@ impl Broker {
                 // cluster. Gated on the committed image so a second bootstrapping
                 // voter (or a re-bootstrap) does not double-write. Prepended so
                 // `metadata.version` is known before any later record applies.
-                if controller
-                    .current_image()
-                    .finalized_metadata_version()
-                    .is_none()
+                if config.seed_kraft_bootstrap_features
+                    && controller
+                        .current_image()
+                        .finalized_metadata_version()
+                        .is_none()
                 {
                     let features = [
                         (

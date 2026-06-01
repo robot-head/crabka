@@ -177,6 +177,16 @@ pub struct BrokerConfig {
     /// many records past the last snapshot, then prune below it.
     pub metadata_snapshot_interval_records: u64,
 
+    /// Seed the cluster-wide finalized features (`metadata.version=25`,
+    /// `group.version=1`, `transaction.version=2`) into the log when
+    /// bootstrapping a fresh cluster. Required for a JVM KRaft controller to
+    /// join the quorum (it refuses to build its `FeaturesImage` without
+    /// `metadata.version`). Default `false`: a finalized `metadata.version` on
+    /// the client-facing `ApiVersions` response breaks pre-4.0 admin clients
+    /// (`MetadataVersion.fromFeatureLevel` throws on an unknown level), so this
+    /// is opt-in for deployments that interoperate with JVM controllers.
+    pub seed_kraft_bootstrap_features: bool,
+
     /// How this broker participates in cluster formation. See
     /// [`crabka_raft::BootstrapMode`] for the trade-offs. The first broker
     /// of a fresh multi-broker cluster uses `Bootstrap`; subsequent brokers
@@ -542,6 +552,7 @@ impl BrokerConfig {
             metadata_max_bytes_between_snapshots: 20 * 1024 * 1024,
             metadata_max_snapshot_interval: std::time::Duration::from_hours(1),
             metadata_snapshot_interval_records: 10_000,
+            seed_kraft_bootstrap_features: false,
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             rack: None,
@@ -790,6 +801,7 @@ impl Default for BrokerConfig {
             metadata_max_bytes_between_snapshots: 20 * 1024 * 1024,
             metadata_max_snapshot_interval: std::time::Duration::from_hours(1),
             metadata_snapshot_interval_records: 10_000,
+            seed_kraft_bootstrap_features: false,
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             rack: None,
