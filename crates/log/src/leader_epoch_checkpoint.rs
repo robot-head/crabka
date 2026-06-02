@@ -32,6 +32,11 @@ pub struct LeaderEpochCheckpoint {
     entries: Vec<EpochEntry>,
 }
 
+/// Kafka sentinel: "no leader epoch information".
+pub const UNDEFINED_EPOCH: i32 = -1;
+/// Kafka sentinel: "no offset".
+pub const UNDEFINED_OFFSET: i64 = -1;
+
 impl LeaderEpochCheckpoint {
     /// Open (or recover) the checkpoint at `path`. Missing file → empty.
     pub fn open(path: PathBuf) -> Result<Self, LogError> {
@@ -130,6 +135,53 @@ impl LeaderEpochCheckpoint {
             .map(|e| e.start_offset)
             .min()
             .unwrap_or(log_end_offset)
+    }
+
+    /// Kafka `LeaderEpochFileCache.endOffsetFor`. Returns
+    /// `(found_epoch, end_offset)` — the epoch the requested offset range
+    /// actually belongs to on this log, and the first offset *after* that
+    /// epoch. Used to detect follower/consumer log divergence (KIP-320):
+    ///
+    ///  - `requested == UNDEFINED_EPOCH`            → `(UNDEFINED_EPOCH, log_end_offset)`
+    ///  - `requested == latest recorded epoch`      → `(requested, log_end_offset)`
+    ///  - `requested` above all recorded epochs     → `(UNDEFINED_EPOCH, log_end_offset)`
+    ///  - `requested` below all recorded epochs     → `(requested, first_recorded_start)`
+    ///  - otherwise (gap or exact older match)      → `(floor_epoch, next_epoch_start)`
+    ///
+    /// where `floor_epoch` is the largest recorded epoch `<= requested`.
+    /// `end_offset` is always a valid truncation target (`>= 0`).
+    #[must_use]
+    pub fn epoch_and_offset_for(&self, requested_epoch: i32, log_end_offset: i64) -> (i32, i64) {
+        if requested_epoch == UNDEFINED_EPOCH {
+            return (UNDEFINED_EPOCH, log_end_offset);
+        }
+        if self.latest_epoch() == Some(requested_epoch) {
+            return (requested_epoch, log_end_offset);
+        }
+        // Smallest recorded epoch strictly greater than `requested`.
+        let higher = self
+            .entries
+            .iter()
+            .filter(|e| e.epoch > requested_epoch)
+            .min_by_key(|e| e.epoch);
+        match higher {
+            // `requested` is in the future relative to this log.
+            None => (UNDEFINED_EPOCH, log_end_offset),
+            Some(next) => {
+                // Largest recorded epoch <= requested (the floor).
+                let floor = self
+                    .entries
+                    .iter()
+                    .filter(|e| e.epoch <= requested_epoch)
+                    .map(|e| e.epoch)
+                    .max();
+                match floor {
+                    Some(f) => (f, next.start_offset),
+                    // `requested` is below the first recorded epoch.
+                    None => (requested_epoch, next.start_offset),
+                }
+            }
+        }
     }
 
     #[must_use]
@@ -242,5 +294,64 @@ mod tests {
         let c = LeaderEpochCheckpoint::open(path).unwrap();
         assert!(c.entries().is_empty());
         assert!(c.latest_epoch() == None);
+    }
+
+    #[test]
+    fn epoch_and_offset_latest_returns_pair_at_log_end() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(0, 0).unwrap();
+        c.append(1, 50).unwrap();
+        // Requested == latest recorded epoch → (epoch, log_end_offset).
+        assert!(c.epoch_and_offset_for(1, 100) == (1, 100));
+    }
+
+    #[test]
+    fn epoch_and_offset_older_returns_floor_epoch_and_next_start() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(0, 0).unwrap();
+        c.append(1, 50).unwrap();
+        c.append(2, 100).unwrap();
+        // Recorded older epoch → (epoch, start of next epoch).
+        assert!(c.epoch_and_offset_for(0, 200) == (0, 50));
+        assert!(c.epoch_and_offset_for(1, 200) == (1, 100));
+    }
+
+    #[test]
+    fn epoch_and_offset_gap_uses_floor_epoch() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(0, 0).unwrap();
+        c.append(5, 100).unwrap();
+        // Requested epoch 3 is not recorded; floor is epoch 0, next start 100.
+        assert!(c.epoch_and_offset_for(3, 200) == (0, 100));
+    }
+
+    #[test]
+    fn epoch_and_offset_future_epoch_is_undefined_at_log_end() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(0, 0).unwrap();
+        c.append(1, 50).unwrap();
+        // Requested epoch above everything recorded → (UNDEFINED, log_end).
+        assert!(c.epoch_and_offset_for(7, 100) == (UNDEFINED_EPOCH, 100));
+    }
+
+    #[test]
+    fn epoch_and_offset_below_all_returns_requested_and_first_start() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(3, 30).unwrap();
+        c.append(4, 40).unwrap();
+        // Requested epoch below the first recorded epoch.
+        assert!(c.epoch_and_offset_for(1, 100) == (1, 30));
+    }
+
+    #[test]
+    fn epoch_and_offset_empty_cache_is_undefined_at_log_end() {
+        let (_d, path) = fresh();
+        let c = LeaderEpochCheckpoint::open(path).unwrap();
+        assert!(c.epoch_and_offset_for(0, 9) == (UNDEFINED_EPOCH, 9));
     }
 }
