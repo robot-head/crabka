@@ -152,6 +152,9 @@ pub struct FileRemoteStorageConfig {
 #[serde(deny_unknown_fields)]
 pub struct FileKafkaRlmmConfig {
     /// `host:port` the manager dials to reach its own broker.
+    /// May be empty; the broker derives the address from the inter-broker
+    /// listener at startup.
+    #[serde(default)]
     pub bootstrap: String,
     /// Partition count for `__remote_log_metadata` on first creation.
     /// Defaults to 50 (Kafka's
@@ -163,6 +166,10 @@ pub struct FileKafkaRlmmConfig {
     /// `remote.log.metadata.topic.replication.factor`).
     #[serde(default)]
     pub replication: Option<i32>,
+    /// Explicit opt-out: run the non-durable in-memory RLMM instead of the
+    /// topic-backed default. Tests / single-node dev only.
+    #[serde(default)]
+    pub in_memory: bool,
 }
 
 /// TOML shape of `[remote_storage.s3]`. Maps to
@@ -877,19 +884,24 @@ impl FileConfig {
                 (None, None) => {}
             }
 
-            // `[remote_storage.kafka_metadata]` opts in to the
-            // topic-backed RLMM. Defaults to in-memory when absent.
-            if let Some(km) = &rs.kafka_metadata {
-                cfg.remote_log_metadata_kafka = Some(crate::config::KafkaRlmmConfig {
-                    bootstrap: km.bootstrap.clone(),
-                    num_partitions: km.num_partitions.unwrap_or(50),
-                    replication: km.replication.unwrap_or(3),
-                    snapshot_interval: crate::config::DEFAULT_RLMM_SNAPSHOT_INTERVAL,
-                    snapshot_dir: cfg.log_dir.join("remote-log-metadata"),
-                    // The broker overrides this at runtime from the
-                    // inter-broker listener in `bootstrap_topic_rlmm`.
-                    security: None,
-                });
+            // KIP-405: topic-backed RLMM is the default whenever tiered storage
+            // is enabled. `[remote_storage.kafka_metadata]` only overrides the
+            // topic knobs; `in_memory = true` is the explicit opt-out.
+            if cfg.remote_storage_backend.is_some() {
+                let km = rs.kafka_metadata.as_ref();
+                if km.is_some_and(|k| k.in_memory) {
+                    cfg.remote_log_metadata = crate::config::RlmmKind::InMemory;
+                } else {
+                    cfg.remote_log_metadata =
+                        crate::config::RlmmKind::TopicBacked(crate::config::KafkaRlmmConfig {
+                            bootstrap: km.map(|k| k.bootstrap.clone()).unwrap_or_default(),
+                            num_partitions: km.and_then(|k| k.num_partitions).unwrap_or(50),
+                            replication: km.and_then(|k| k.replication).unwrap_or(3),
+                            snapshot_interval: crate::config::DEFAULT_RLMM_SNAPSHOT_INTERVAL,
+                            snapshot_dir: cfg.log_dir.join("remote-log-metadata"),
+                            security: None,
+                        });
+                }
             }
         }
 
@@ -1558,7 +1570,11 @@ storage_dir = "/var/lib/crabka/tier"
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
         assert!(cfg.remote_storage_backend.is_none());
-        assert!(cfg.remote_log_metadata_kafka.is_none());
+        // No remote_storage section: RLMM stays at the production default (TopicBacked).
+        assert!(matches!(
+            cfg.remote_log_metadata,
+            crate::config::RlmmKind::TopicBacked(_)
+        ));
     }
 
     #[test]
@@ -1573,7 +1589,10 @@ bootstrap = "127.0.0.1:9092"
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
-        let km = cfg.remote_log_metadata_kafka.expect("kafka rlmm config");
+        let km = match &cfg.remote_log_metadata {
+            crate::config::RlmmKind::TopicBacked(k) => k.clone(),
+            crate::config::RlmmKind::InMemory => panic!("expected TopicBacked"),
+        };
         assert!(km.bootstrap == "127.0.0.1:9092");
         assert!(km.num_partitions == 50);
         assert!(km.replication == 3);
@@ -1593,7 +1612,10 @@ replication = 1
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
-        let km = cfg.remote_log_metadata_kafka.expect("kafka rlmm config");
+        let km = match &cfg.remote_log_metadata {
+            crate::config::RlmmKind::TopicBacked(k) => k.clone(),
+            crate::config::RlmmKind::InMemory => panic!("expected TopicBacked"),
+        };
         assert!(km.bootstrap == "broker-0:9094");
         assert!(km.num_partitions == 8);
         assert!(km.replication == 1);

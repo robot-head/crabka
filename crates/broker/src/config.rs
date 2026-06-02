@@ -433,14 +433,10 @@ pub struct BrokerConfig {
     /// minutes; production deployments leave it at the default.
     pub remote_log_manager_interval: std::time::Duration,
 
-    /// KIP-405: which
-    /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-    /// implementation to construct when tiered storage is enabled.
-    /// `None` (default) keeps the in-memory fixture used by the
-    /// test paths; `Some(KafkaRlmmConfig)` swaps in the
-    /// production [`crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`]
-    /// backed by `__remote_log_metadata`.
-    pub remote_log_metadata_kafka: Option<KafkaRlmmConfig>,
+    /// KIP-405: which RLMM the broker runs when tiered storage is enabled.
+    /// Defaults to [`RlmmKind::TopicBacked`] in production; [`RlmmKind::InMemory`]
+    /// for in-process tests. Ignored when `remote_storage_backend` is `None`.
+    pub remote_log_metadata: RlmmKind,
 }
 
 /// Parameters for the topic-backed
@@ -484,6 +480,36 @@ pub struct KafkaRlmmConfig {
 /// 48p: default cadence of the topic-backed RLMM snapshot flush. 60s,
 /// matching Kafka's `remote.log.metadata.snapshot.interval` default.
 pub const DEFAULT_RLMM_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
+
+/// Which `RemoteLogMetadataManager` the broker runs when tiered storage is enabled.
+///
+/// Topic-backed is the production default (matches Kafka's
+/// `TopicBasedRemoteLogMetadataManager`, the only production RLMM). In-memory
+/// is an explicit opt-out for in-process integration tests that have no real
+/// listener to loop the metadata client back to. Ignored entirely when
+/// [`BrokerConfig::remote_storage_backend`] is `None`.
+#[derive(Debug, Clone)]
+pub enum RlmmKind {
+    /// Durable `__remote_log_metadata`-backed manager. `cfg.bootstrap` and
+    /// `cfg.snapshot_dir` may be empty; the broker derives them at start from
+    /// the inter-broker listener and `log.dir` respectively.
+    TopicBacked(KafkaRlmmConfig),
+    /// Non-durable in-process manager. Tests only.
+    InMemory,
+}
+
+impl Default for KafkaRlmmConfig {
+    fn default() -> Self {
+        Self {
+            bootstrap: String::new(),
+            num_partitions: 50,
+            replication: 3,
+            snapshot_interval: DEFAULT_RLMM_SNAPSHOT_INTERVAL,
+            snapshot_dir: std::path::PathBuf::new(),
+            security: None,
+        }
+    }
+}
 
 /// What backs the broker's `RemoteStorageManager` when tiered storage is on.
 #[derive(Debug, Clone)]
@@ -618,7 +644,7 @@ impl BrokerConfig {
             // for_tests default is well below the 30s production value.
             remote_log_manager_interval: std::time::Duration::from_secs(2),
             // Tests use the in-memory RLMM fixture.
-            remote_log_metadata_kafka: None,
+            remote_log_metadata: RlmmKind::InMemory,
         }
     }
 
@@ -870,9 +896,9 @@ impl Default for BrokerConfig {
             // via `[remote_storage] storage_dir` in `broker.toml`.
             remote_storage_backend: None,
             remote_log_manager_interval: std::time::Duration::from_secs(30),
-            // Production default keeps the in-memory RLMM
-            // until the operator opts into the topic-backed manager.
-            remote_log_metadata_kafka: None,
+            // Production default: topic-backed RLMM. `bootstrap` and
+            // `snapshot_dir` are empty; the broker derives them at startup.
+            remote_log_metadata: RlmmKind::TopicBacked(KafkaRlmmConfig::default()),
         }
     }
 }
@@ -882,6 +908,27 @@ mod tests {
     use super::*;
     use crate::BrokerError as BrokerStartError;
     use assert2::assert;
+
+    #[test]
+    fn production_default_selects_topic_backed_rlmm() {
+        let c = BrokerConfig::default();
+        assert!(matches!(c.remote_log_metadata, RlmmKind::TopicBacked(_)));
+    }
+
+    #[test]
+    fn test_default_selects_in_memory_rlmm() {
+        let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
+        assert!(matches!(c.remote_log_metadata, RlmmKind::InMemory));
+    }
+
+    #[test]
+    fn kafka_rlmm_config_default_has_sane_topic_settings() {
+        let c = KafkaRlmmConfig::default();
+        assert!(c.num_partitions == 50);
+        assert!(c.replication == 3);
+        assert!(c.bootstrap.is_empty());
+        assert!(c.snapshot_dir.as_os_str().is_empty());
+    }
 
     #[test]
     fn kafka_rlmm_config_carries_snapshot_settings() {

@@ -30,7 +30,9 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use crabka_broker::{Broker, BrokerConfig, BrokerHandle, KafkaRlmmConfig, RemoteStorageBackend};
+use crabka_broker::{
+    Broker, BrokerConfig, BrokerHandle, KafkaRlmmConfig, RemoteStorageBackend, RlmmKind,
+};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{
     CreatableTopic, CreatableTopicConfig, CreateTopicsRequest,
@@ -66,7 +68,7 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
         dir: remote_dir.path().to_path_buf(),
     });
     cfg.remote_log_manager_interval = Duration::from_secs(1);
-    cfg.remote_log_metadata_kafka = Some(KafkaRlmmConfig {
+    cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
         bootstrap: format!("127.0.0.1:{}", listen.port()),
         num_partitions: 1,
         replication: 1,
@@ -383,7 +385,7 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
         dir: remote_dir.path().to_path_buf(),
     });
     cfg.remote_log_manager_interval = Duration::from_secs(1);
-    cfg.remote_log_metadata_kafka = Some(KafkaRlmmConfig {
+    cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
         // The broker overrides bootstrap + security from the inter-broker
         // listener; the operator value here is the same loopback addr.
         bootstrap: format!("127.0.0.1:{}", listen.port()),

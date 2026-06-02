@@ -177,7 +177,7 @@ mod txn;
 pub(crate) mod unclean_recovery;
 
 pub use broker::{Broker, BrokerHandle};
-pub use config::{BootstrapMode, BrokerConfig, KafkaRlmmConfig, RemoteStorageBackend};
+pub use config::{BootstrapMode, BrokerConfig, KafkaRlmmConfig, RemoteStorageBackend, RlmmKind};
 pub use config_keys::{TopicConfigDoc, topic_config_docs};
 pub use crabka_raft::NodeId;
 pub use error::BrokerError;

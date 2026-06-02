@@ -2053,8 +2053,9 @@ impl Broker {
         // single broker has exactly one of each.
         // Hoist the parameters for the topic-backed RLMM
         // bootstrap before `config` moves into the broker struct.
-        let kafka_swap_kickoff: Option<KafkaSwapKickoff> =
-            config.remote_log_metadata_kafka.as_ref().map(|cfg| {
+        let kafka_swap_kickoff: Option<KafkaSwapKickoff> = match &config.remote_log_metadata {
+            crate::config::RlmmKind::InMemory => None,
+            crate::config::RlmmKind::TopicBacked(cfg) => Some({
                 // Resolve the inter-broker listener: its advertised address is
                 // the RLMM bootstrap; its protocol + the broker's credentials +
                 // TLS client config form the metadata-client security policy.
@@ -2113,12 +2114,17 @@ impl Broker {
                         num_partitions: cfg.num_partitions,
                         replication: cfg.replication,
                         snapshot_interval: cfg.snapshot_interval,
-                        snapshot_dir: cfg.snapshot_dir.clone(),
+                        snapshot_dir: if cfg.snapshot_dir.as_os_str().is_empty() {
+                            config.log_dir.join("remote-log-metadata")
+                        } else {
+                            cfg.snapshot_dir.clone()
+                        },
                         security,
                     },
                     broker_id: config.broker_id,
                 }
-            });
+            }),
+        };
         let (remote_reader, kafka_swap_target): (
             Option<Arc<crate::remote_reader::RemoteReader>>,
             Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
@@ -2147,12 +2153,15 @@ impl Broker {
             let (rlmm, kafka_swap_target): (
                 Arc<dyn crabka_remote_storage::RemoteLogMetadataManager>,
                 Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
-            ) = if config.remote_log_metadata_kafka.is_some() {
-                let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(placeholder));
-                let typed: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> = swap.clone();
-                (typed, Some(swap))
-            } else {
-                (placeholder, None)
+            ) = match &config.remote_log_metadata {
+                crate::config::RlmmKind::TopicBacked(_) => {
+                    let swap =
+                        Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(placeholder));
+                    let typed: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                        swap.clone();
+                    (typed, Some(swap))
+                }
+                crate::config::RlmmKind::InMemory => (placeholder, None),
             };
 
             let partitions = partitions.clone();
