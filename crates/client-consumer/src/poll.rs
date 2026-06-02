@@ -173,13 +173,19 @@ impl Consumer {
                     74 /* FENCED_LEADER_EPOCH */
                     | 75 /* UNKNOWN_LEADER_EPOCH */
                     | 6 /* NOT_LEADER_OR_FOLLOWER */ => {
-                        // Mark for validation + metadata refresh next poll.
                         let mut positions = self.positions.lock().await;
                         if let Some(p) = positions.get_mut(&key) {
-                            p.awaiting_validation = true;
                             // Force refresh_leader_epochs to re-flag against
-                            // fresher metadata next poll.
+                            // fresher metadata next poll (any real epoch >= 0 > -1).
                             p.leader_epoch = -1;
+                            // Only gate on validation when we have a consumed epoch
+                            // to validate against. A never-consumed partition
+                            // (offset_epoch < 0) has nothing to validate; flagging it
+                            // would wedge it — validate_positions skips offset_epoch
+                            // < 0, and the fetch builder skips awaiting_validation.
+                            if p.offset_epoch >= 0 {
+                                p.awaiting_validation = true;
+                            }
                         }
                         continue;
                     }

@@ -48,7 +48,17 @@ impl Consumer {
         // coordinator's established order, so we never deadlock against poll.
         let to_validate: Vec<(String, i32, i64, i32, i32)> = {
             let offsets = self.next_offsets.lock().await;
-            let positions = self.positions.lock().await;
+            let mut positions = self.positions.lock().await;
+            // Defensive: clear awaiting_validation for any partition whose
+            // offset_epoch < 0 (never consumed). There is nothing to validate
+            // below an offset never consumed, and leaving the flag set would
+            // wedge the partition — validate_positions skips it but the fetch
+            // builder also skips it, causing a permanent stall.
+            for p in positions.values_mut() {
+                if p.awaiting_validation && p.offset_epoch < 0 {
+                    p.awaiting_validation = false;
+                }
+            }
             positions
                 .iter()
                 .filter(|(_, p)| p.awaiting_validation && p.offset_epoch >= 0)
