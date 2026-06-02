@@ -55,6 +55,7 @@ pub mod error;
 pub mod kafka_log;
 pub mod log;
 pub mod manager;
+pub mod not_ready;
 pub mod partitioning;
 pub mod serde;
 pub mod snapshot;
@@ -70,6 +71,7 @@ pub use log::{
     MetadataEventStream, PartitionStart,
 };
 pub use manager::TopicBasedRemoteLogMetadataManager;
+pub use not_ready::NotReadyRlmm;
 pub use partitioning::{metadata_partition_for, metadata_partitions_for};
 pub use serde::{MetadataEvent, WIRE_VERSION};
 pub use snapshot::{SNAPSHOT_FILE_NAME, SNAPSHOT_FORMAT_VERSION, Snapshot};
