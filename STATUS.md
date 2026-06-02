@@ -5152,6 +5152,9 @@ introspection metadata).
   `committed_leader_epoch` stored and round-tripped through `__consumer_offsets`,
   and an `auto.offset.reset = None` policy that surfaces a `LogTruncation`
   error rather than silently resetting.
-- **Mixed-JVM scenario**: authored and validated against a JVM consumer on a
-  Crabka broker to confirm Java-faithful behaviour across the truncation path.
+- **Mixed-JVM scenario**: a wire-conformance check (a JVM consumer +
+  `OffsetForLeaderEpoch` against a Crabka broker, confirming `diverging_epoch`
+  decodes at Fetch v12+) passes locally; the mixed JVM+Crabka induced-divergence
+  scenarios are authored and `#[ignore]`d, to be run on the Linux/CI acceptance
+  harness.
 - README KIP-320 row flipped to ✅.
