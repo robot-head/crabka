@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- KIP-996 pre-vote now interoperates with a real KIP-996 JVM voter: vote
+  responses are matched to their round by the candidate's own role + epoch
+  (as Kafka does), replacing a private `VoteResponse` tagged-field echo that a
+  JVM peer never sends. A JVM voter's pre-vote grant is now counted, so a
+  Crabka-led election no longer stalls in a mixed JVM+Crabka quorum.
+
 ## [0.1.1] — 2026-05-29
 
 

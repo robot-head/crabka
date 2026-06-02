@@ -398,7 +398,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-497](https://cwiki.apache.org/confluence/display/KAFKA/KIP-497) | Inter-broker `AlterPartition` (AlterIsr) | ✅ |
 | [KIP-841](https://cwiki.apache.org/confluence/display/KAFKA/KIP-841) | Fence stale-epoch replicas / unclean recovery toggle | ✅ |
 | [KIP-966](https://cwiki.apache.org/confluence/display/KAFKA/KIP-966) | Eligible leader replicas / offset-aware unclean recovery | ✅ |
-| [KIP-996](https://cwiki.apache.org/confluence/display/KAFKA/KIP-996) | Pre-vote | ❌ |
+| [KIP-996](https://cwiki.apache.org/confluence/display/KAFKA/KIP-996) | Pre-vote | ✅ |
 
 ### KRaft metadata quorum
 
