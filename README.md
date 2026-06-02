@@ -33,7 +33,8 @@ Distributed under the Apache License 2.0 as a derivative work.
 - **Memory-safe, fearlessly concurrent.** Written in async Rust on `tokio`, with
   no JVM and no GC pauses. `unsafe_code = "forbid"` across the workspace.
 - **Single static binary.** No JDK, no ZooKeeper, no separate controller process.
-- **KRaft-native.** Metadata lives in an `openraft`-backed quorum from day one.
+- **KRaft-native.** Metadata lives in a native KRaft quorum speaking the real
+  KIP-595 wire — interoperable with JVM controllers in a mixed quorum.
 - **Modern crypto.** TLS via `rustls`; SASL/SCRAM-SHA-256/512, SASL/PLAIN,
   SASL/OAUTHBEARER (signed-JWT / JWKS), and SASL/GSSAPI (Kerberos) out of the box.
 - **Batteries included.** Native producer/consumer/admin clients, a Kubernetes
@@ -41,10 +42,16 @@ Distributed under the Apache License 2.0 as a derivative work.
 
 ## Project status
 
-Crabka is **greenfield and pre-1.0** (`v0.1.1`) — undeployed, with no production
-users and no on-disk compatibility guarantees yet. The Kafka wire protocol is the
-contract that matters, and it is locked to byte-exactness via the differential
-oracle and JVM acceptance tests.
+Crabka is in **beta** (`v0.2.0`). The Kafka-parity surface — wire protocol,
+storage, replication, KRaft metadata, security, authorization, quotas, the
+Kubernetes operator, and the rebalancer — is now broad enough, and validated
+hard enough against the JVM, that the project has matured out of its alpha phase.
+
+It remains **greenfield and pre-1.0** — undeployed, with no production users and
+no on-disk compatibility guarantees yet. The Kafka wire protocol is the contract
+that matters, and it is locked to byte-exactness via the differential oracle and
+JVM acceptance tests. Treat Crabka as beta: ready for evaluation and non-critical
+workloads, not yet hardened by production mileage.
 
 What works today:
 
@@ -59,6 +66,10 @@ What works today:
   with both the classic (eager) and cooperative-incremental (KIP-429) rebalance
   protocols, static membership (KIP-345), incremental fetch sessions (KIP-227),
   and log compaction.
+- Share groups / queues (KIP-932): the `ShareGroupHeartbeat` / `ShareFetch` /
+  `ShareAcknowledge` RPCs, the share-state coordinator and `__share_group_state`
+  topic, the share-group admin offset APIs, and a native share consumer —
+  validated against the JVM share-group client.
 - TLS / mTLS, SASL (PLAIN, SCRAM-256/512, OAUTHBEARER with JWKS / signed-JWT
   and opaque-token introspection, GSSAPI/Kerberos), SASL re-authentication
   (KIP-368), delegation tokens (KIP-48 / KIP-373), ACL authorization, the OPA
@@ -68,16 +79,16 @@ What works today:
   surface) and a Cruise-Control-equivalent rebalancer.
 
 Notable gaps (see the [KIP matrix](#kip-implementation-status) for detail): the
-next-gen consumer group protocol (KIP-848) is in progress — broker-side
-foundations, `__consumer_offsets` persistence, a rack-aware `UniformAssignor`,
-the pluggable server-side assignor surface, and `subscribed_topic_regex` are in
-tree, and GA `group.protocol=consumer` clients (kafka-clients 4.0) now consume
-end to end; classic→next-gen group migration is still pending. Tiered storage
-(KIP-405) is partial: the `crabka-remote-storage-topic` (KIP-405 production
-RLMM) crate is in tree but not yet wired into the broker. Share groups /
-queues (KIP-932) and a Kafka Connect / Streams / MirrorMaker equivalent are not
-yet implemented. ZooKeeper mode and ZK→KRaft migration are
-deliberately out of scope — Crabka is KRaft-only.
+next-gen consumer group protocol (KIP-848) consumes end to end with GA
+`group.protocol=consumer` clients (kafka-clients 4.0) over a unified group
+coordinator — `__consumer_offsets` persistence, a rack-aware `UniformAssignor`,
+the pluggable server-side assignor surface, and `subscribed_topic_regex` are all
+in tree — but live classic↔next-gen group migration is not yet wired (the
+conversion predicates exist and are unit-tested; the triggers are not). Tiered
+storage (KIP-405) is partial: the `crabka-remote-storage-topic` (KIP-405
+production RLMM) crate is in tree but not yet wired into the broker. A Kafka
+Connect / Streams / MirrorMaker equivalent is not yet implemented. ZooKeeper mode
+and ZK→KRaft migration are deliberately out of scope — Crabka is KRaft-only.
 
 ## Architecture
 
@@ -92,7 +103,7 @@ Crabka is organized as a Rust workspace.
 | [`crabka-compression`](crates/compression) | Kafka-compatible compression codecs (gzip, snappy, lz4, zstd) |
 | [`crabka-log`](crates/log) | Byte-compatible log segments, indexes, transaction index, compaction, retention |
 | [`crabka-metadata`](crates/metadata) | Versioned metadata records, immutable metadata image, ACL model |
-| [`crabka-raft`](crates/raft) | Metadata Raft quorum (`openraft` adapters + controller) |
+| [`crabka-raft`](crates/raft) | Metadata Raft quorum (native KRaft / KIP-595 wire + controller) |
 | [`crabka-security`](crates/security) | TLS (`rustls`), SASL/PLAIN, SASL/SCRAM-256/512, SASL/OAUTHBEARER, SASL/GSSAPI, mTLS |
 
 ### Broker
@@ -177,6 +188,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Static membership (KIP-345) | ✅ |
 | `OffsetDelete` admin API (KIP-496) | ✅ |
 | Next-gen consumer group protocol (KIP-848) | ⚠️ |
+| Share groups / queues (KIP-932) | ✅ |
 
 ### Replication & durability
 
@@ -201,7 +213,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 
 | Feature | Status |
 |---------|:------:|
-| KRaft controller quorum (raft-based, `openraft`) | ✅ |
+| KRaft controller quorum (native KRaft, KIP-595 wire) | ✅ |
 | Metadata image + delta apply | ✅ |
 | Metadata snapshots + `FetchSnapshot` (KIP-630) | ✅ |
 | Controller bootstrap via `crabka format` | ✅ |
@@ -273,7 +285,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Structured logging via `tracing` | ✅ |
 | Prometheus metrics / JMX-equivalent exporter | ✅ |
 | OTLP distributed tracing (OpenTelemetry) | ✅ |
-| Client metrics push (KIP-714) | ⚠️ |
+| Client metrics push (KIP-714) | ✅ |
 
 ### Kubernetes operator (Strimzi-equivalent)
 
@@ -393,7 +405,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | KIP | Title | Status |
 |-----|-------|:------:|
 | [KIP-500](https://cwiki.apache.org/confluence/display/KAFKA/KIP-500) | Replace ZooKeeper with a self-managed metadata quorum | ✅ |
-| [KIP-595](https://cwiki.apache.org/confluence/display/KAFKA/KIP-595) | A Raft protocol for the metadata quorum | ⚠️ |
+| [KIP-595](https://cwiki.apache.org/confluence/display/KAFKA/KIP-595) | A Raft protocol for the metadata quorum | ✅ |
 | [KIP-630](https://cwiki.apache.org/confluence/display/KAFKA/KIP-630) | Kafka Raft snapshot | ✅ |
 | [KIP-631](https://cwiki.apache.org/confluence/display/KAFKA/KIP-631) | The quorum-based Kafka controller (metadata records) | ✅ |
 | [KIP-584](https://cwiki.apache.org/confluence/display/KAFKA/KIP-584) | Versioning scheme for features (`metadata.version`, `group.version`, `transaction.version`) | ✅ |
@@ -414,7 +426,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-525](https://cwiki.apache.org/confluence/display/KAFKA/KIP-525) | Return configs in `CreateTopics` response | ✅ |
 | [KIP-554](https://cwiki.apache.org/confluence/display/KAFKA/KIP-554) | Broker-side SCRAM config API | ✅ |
 | [KIP-700](https://cwiki.apache.org/confluence/display/KAFKA/KIP-700) | `DescribeCluster` API | ✅ |
-| [KIP-516](https://cwiki.apache.org/confluence/display/KAFKA/KIP-516) | Topic identifiers | ⚠️ |
+| [KIP-516](https://cwiki.apache.org/confluence/display/KAFKA/KIP-516) | Topic identifiers | ✅ |
 | [KIP-430](https://cwiki.apache.org/confluence/display/KAFKA/KIP-430) | Authorized operations in describe responses | ✅ |
 | [KIP-664](https://cwiki.apache.org/confluence/display/KAFKA/KIP-664) | `DescribeProducers` / `ListTransactions` / `DescribeTransactions` admin APIs | ✅ |
 | [KIP-185](https://cwiki.apache.org/confluence/display/KAFKA/KIP-185) | `UnregisterBroker` admin API | ✅ |
@@ -457,8 +469,8 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 
 | KIP | Title | Status |
 |-----|-------|:------:|
-| [KIP-714](https://cwiki.apache.org/confluence/display/KAFKA/KIP-714) | Client metrics & observability push | ⚠️ |
-| [KIP-932](https://cwiki.apache.org/confluence/display/KAFKA/KIP-932) | Queues for Kafka (share groups) | ❌ |
+| [KIP-714](https://cwiki.apache.org/confluence/display/KAFKA/KIP-714) | Client metrics & observability push | ✅ |
+| [KIP-932](https://cwiki.apache.org/confluence/display/KAFKA/KIP-932) | Queues for Kafka (share groups) | ✅ |
 | [KIP-1071](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1071) | Streams rebalance protocol | ❌ |
 
 ## Published crates

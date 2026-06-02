@@ -7,6 +7,13 @@ template = "docs/page.html"
 lead = "Single-box, like-for-like comparison: same host, same load driver, same wire protocol. With the consumer-interop gaps closed, Crabka now drives a full produce-and-consume round-trip against Kafka 4.3 — matching its throughput within a few percent while resident in ~40–50× less memory, starting 4–8× faster, and sustaining 1.1–1.3× more work per CPU core."
 +++
 
+> **Note:** the figures below were measured on the `v0.1.2` broker build
+> (commit `a3d2f1f`). The current release is `v0.2.0`; a re-run on the same
+> 4-vCPU class is pending and the provenance will be updated once it lands.
+> The wire path and broker hot loops are unchanged between the two, so the
+> comparison is expected to hold, but treat the exact cells as a `v0.1.2`
+> snapshot until refreshed.
+
 This is a Kubernetes-free, single-machine comparison run with
 [`bench/local/run-local-bench.sh`](https://github.com/robot-head/crabka/tree/main/bench/local).
 Each scenario runs once per stack against a freshly-formatted single-node
