@@ -17,6 +17,9 @@ use crabka_metadata::MetadataImage;
 /// `#[cfg(test)]` module that asserts share.version is advertised.
 #[allow(unused_imports)]
 pub(crate) use crabka_metadata::metadata_version::SHARE_VERSION_FEATURE as SHARE_VERSION;
+/// The `streams.version` feature name (KIP-1071). Gates `StreamsGroupHeartbeat`
+/// / `StreamsGroupDescribe`; read by those handlers via `feature_enabled`.
+pub(crate) use crabka_metadata::metadata_version::STREAMS_VERSION_FEATURE as STREAMS_VERSION;
 
 /// One row of the `ApiVersions.supported_features` advertisement.
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +123,19 @@ mod tests {
             supported_features()
                 .iter()
                 .any(|f| f.name == SHARE_VERSION && f.min_version == 0 && f.max_version == 1)
+        );
+    }
+
+    #[test]
+    fn streams_version_is_supported() {
+        let f = lookup(STREAMS_VERSION).expect("streams.version supported");
+        assert!(f.min_version == 0);
+        assert!(f.max_version == 1);
+        // Advertised via the registry-derived supported-feature table.
+        assert!(
+            supported_features()
+                .iter()
+                .any(|f| f.name == STREAMS_VERSION && f.min_version == 0 && f.max_version == 1)
         );
     }
 

@@ -3222,6 +3222,9 @@ fn handler_body_flexible(api_key: i16, version: i16) -> bool {
         // KIP-932 share-group membership pair; both are flexible from v0.
         76 => version >= owned::share_group_heartbeat_request::FLEXIBLE_MIN,
         77 => version >= owned::share_group_describe_request::FLEXIBLE_MIN,
+        // KIP-1071 streams-group membership pair; both are flexible from v0.
+        88 => version >= owned::streams_group_heartbeat_request::FLEXIBLE_MIN,
+        89 => version >= owned::streams_group_describe_request::FLEXIBLE_MIN,
         // KIP-932 ShareFetch / ShareAcknowledge — both flexible from v0.
         78 => version >= owned::share_fetch_request::FLEXIBLE_MIN,
         79 => version >= owned::share_acknowledge_request::FLEXIBLE_MIN,

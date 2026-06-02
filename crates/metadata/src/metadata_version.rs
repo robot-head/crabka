@@ -16,6 +16,14 @@ pub const SHARE_VERSION_MIN: i16 = 0;
 /// Maximum supported `share.version` level: `1` (KIP-932 GA).
 pub const SHARE_VERSION_MAX: i16 = 1;
 
+/// The `streams.version` feature name (KIP-1071). Gates the broker-side
+/// Streams rebalance protocol (`StreamsGroupHeartbeat` / `StreamsGroupDescribe`).
+pub const STREAMS_VERSION_FEATURE: &str = "streams.version";
+/// Minimum supported `streams.version` level: `0` (feature disabled).
+pub const STREAMS_VERSION_MIN: i16 = 0;
+/// Maximum supported `streams.version` level: `1` (KIP-1071 early access).
+pub const STREAMS_VERSION_MAX: i16 = 1;
+
 /// Minimum supported level: `3.3-IV3` (`KRaft` GA) — the floor real Kafka
 /// 4.0 supports.
 pub const METADATA_VERSION_MIN: i16 = 7;
@@ -196,6 +204,13 @@ mod tests {
         assert!(SHARE_VERSION_FEATURE == "share.version");
         assert!(SHARE_VERSION_MIN == 0);
         assert!(SHARE_VERSION_MAX == 1);
+    }
+
+    #[test]
+    fn streams_version_feature_levels() {
+        assert!(STREAMS_VERSION_FEATURE == "streams.version");
+        assert!(STREAMS_VERSION_MIN == 0);
+        assert!(STREAMS_VERSION_MAX == 1);
     }
 
     #[test]

@@ -145,6 +145,9 @@ fn admin_apis() -> Vec<ApiVersion> {
         // KIP-932 share-group membership protocol.
         v!(share_group_heartbeat_request),
         v!(share_group_describe_request),
+        // KIP-1071 streams-group rebalance protocol.
+        v!(streams_group_heartbeat_request),
+        v!(streams_group_describe_request),
         // KIP-932 ShareFetch / ShareAcknowledge data-plane RPCs.
         v!(share_fetch_request),
         v!(share_acknowledge_request),
@@ -184,6 +187,17 @@ mod tests {
         assert!(keys.contains(&77));
         let hb = apis.iter().find(|a| a.api_key == 76).unwrap();
         assert!(hb.min_version == 1 && hb.max_version == 1);
+    }
+
+    #[test]
+    fn streams_group_apis_are_advertised() {
+        let apis = supported_apis();
+        let keys: Vec<i16> = apis.iter().map(|a| a.api_key).collect();
+        // StreamsGroupHeartbeat(88), StreamsGroupDescribe(89).
+        assert!(keys.contains(&88));
+        assert!(keys.contains(&89));
+        let hb = apis.iter().find(|a| a.api_key == 88).unwrap();
+        assert!(hb.min_version == 0 && hb.max_version == 0);
     }
 
     #[test]

@@ -162,6 +162,31 @@ impl Feature for ShareVersionFeature {
     // dependencies + min_required_floor: inherit the empty/supported-min defaults.
 }
 
+/// `streams.version` (KIP-1071). Plain integer feature gating the broker-side
+/// Streams rebalance protocol. Default stays at the supported min (0, disabled)
+/// — KIP-1071 is early access, so no released metadata.version enables it by
+/// default; an operator opts in via `UpdateFeatures`.
+pub struct StreamsVersionFeature;
+
+impl Feature for StreamsVersionFeature {
+    fn name(&self) -> &'static str {
+        crate::metadata_version::STREAMS_VERSION_FEATURE
+    }
+    fn supported_range(&self) -> (i16, i16) {
+        (
+            crate::metadata_version::STREAMS_VERSION_MIN,
+            crate::metadata_version::STREAMS_VERSION_MAX,
+        )
+    }
+    fn default_level(&self, _bootstrap_mv: i16) -> i16 {
+        crate::metadata_version::STREAMS_VERSION_MIN
+    }
+    // dependencies + min_required_floor: inherit the empty/supported-min
+    // defaults. Streams group state lives in __consumer_offsets, not the
+    // MetadataImage, so a live-state-aware downgrade floor can't be computed
+    // here (deferred, mirroring group.version / share.version).
+}
+
 /// All features this broker supports finalizing. Single source of truth.
 #[must_use]
 pub fn feature_registry() -> &'static [&'static dyn Feature] {
@@ -170,6 +195,7 @@ pub fn feature_registry() -> &'static [&'static dyn Feature] {
         &GroupVersionFeature,
         &TransactionVersionFeature,
         &ShareVersionFeature,
+        &StreamsVersionFeature,
     ];
     REGISTRY
 }
@@ -275,6 +301,15 @@ mod tests {
     fn transaction_version_registered() {
         let f = feature("transaction.version").expect("registered");
         assert!(f.supported_range() == (0, 2));
+    }
+
+    #[test]
+    fn streams_version_registered_opt_in() {
+        let f = feature("streams.version").expect("registered");
+        assert!(f.supported_range() == (0, 1));
+        // KIP-1071 is early access: never auto-enabled by any release level.
+        assert!(f.default_level(25) == 0);
+        assert!(f.dependencies(1).is_empty());
     }
 
     #[test]

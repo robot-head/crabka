@@ -37,10 +37,10 @@ fn format_with_add_scram_writes_credential_record() {
         .expect("bootstrap.json must exist");
     // Format seeds KRaftVersion + every registered feature (metadata.version
     // KIP-778 + group.version KIP-848 + transaction.version KIP-890 +
-    // share.version KIP-932) + SCRAM = 6 records.
+    // share.version KIP-932 + streams.version KIP-1071) + SCRAM = 7 records.
     assert!(
-        manifest.contains("\"record_count\": 6"),
-        "manifest must list KRaftVersion + metadata.version + group.version + transaction.version + share.version + one SCRAM record, got: {manifest}",
+        manifest.contains("\"record_count\": 7"),
+        "manifest must list KRaftVersion + metadata.version + group.version + transaction.version + share.version + streams.version + one SCRAM record, got: {manifest}",
     );
     assert!(
         manifest.contains("cluster_id"),
