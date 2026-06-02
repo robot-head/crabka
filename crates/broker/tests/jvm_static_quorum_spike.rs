@@ -485,6 +485,30 @@ async fn contested_election_crabka_counts_jvm_prevote() {
     }
     eprintln!("phase 1b: JVM voter joined and caught up to HWM — safe to kill the leader");
 
+    // ── Phase 1c: let the JVM settle into a STEADY live-fetch relationship. ──
+    // The Phase 1b gate trips the instant the JVM logs both "transition to
+    // FollowerState" and "finished catching up to the current high water mark"
+    // — but the JVM catches up from the *bootstrap snapshot* within tens of
+    // milliseconds of booting, long before it has completed a single live Fetch
+    // round-trip to the leader. Killing at that instant leaves the JVM with no
+    // recent successful fetch, so its FollowerState fetch-timeout clock has no
+    // live baseline and (with the leader endpoint in NetworkClient connection-
+    // backoff) KRaft 4.0 never promotes it to Prospective — it stays
+    // Follower(leader=1) and rejects every pre-vote for the whole window.
+    //
+    // Sleeping here lets the JVM run several live Fetch cycles before the kill.
+    // NOTE: doing so surfaced a SEPARATE, deeper Crabka blocker — the JVM
+    // replicates past the bootstrap snapshot and fatal-faults applying a
+    // DUPLICATE `__consumer_offsets` TopicRecord with a mismatched topic id
+    // ("Found duplicate TopicRecord for __consumer_offsets with a different ID
+    // than before"). That duplicate comes from both Crabka voters racing the
+    // read-then-write topic-bootstrap in coordinator/bootstrap.rs, each
+    // submitting a TopicRecord with its own fresh Uuid::new_v4(). Until that
+    // bootstrap is made idempotent on topic id, a JVM follower that replicates
+    // far enough will crash and can never grant the survivor's pre-vote.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    eprintln!("phase 1c: JVM has had 6s of steady fetching — killing the leader now");
+
     // ── Phase 2: kill the Crabka leader; the survivor needs the JVM's grants. ─
     let (killed, survivor, survivor_id) = if leader0 == 1 {
         (c1, c2, 2u64)

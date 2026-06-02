@@ -250,6 +250,12 @@ pub mod wire {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum PeerRequest {
         Vote {
+            /// The recipient voter this request is addressed to (the wire
+            /// top-level `voterId`). The JVM validates that an incoming Vote is
+            /// addressed to it before considering the grant; a stale/`-1`
+            /// `voterId` is silently rejected. Built per-recipient in
+            /// `broadcast_vote`.
+            voter_id: NodeId,
             candidate_epoch: LeaderEpoch,
             candidate: NodeId,
             last_epoch: LeaderEpoch,
@@ -342,6 +348,7 @@ pub mod wire {
         pub fn encode(&self) -> Bytes {
             match *self {
                 PeerRequest::Vote {
+                    voter_id,
                     candidate_epoch,
                     candidate,
                     last_epoch,
@@ -350,7 +357,7 @@ pub mod wire {
                 } => {
                     let req = VoteRequest {
                         cluster_id: None,
-                        voter_id: -1,
+                        voter_id: node_to_wire(voter_id),
                         topics: vec![vote_req::TopicData {
                             topic_name: METADATA_TOPIC.to_string(),
                             partitions: vec![vote_req::PartitionData {
@@ -460,6 +467,7 @@ pub mod wire {
                 && let Some(p) = req.topics.first().and_then(|t| t.partitions.first())
             {
                 return Some(PeerRequest::Vote {
+                    voter_id: node_from_wire(req.voter_id),
                     candidate_epoch: epoch_from_wire(p.replica_epoch),
                     candidate: node_from_wire(p.replica_id),
                     last_epoch: epoch_from_wire(p.last_offset_epoch),
@@ -478,6 +486,7 @@ pub mod wire {
         let req = VoteRequest::decode(&mut cur, VOTE_VERSION).ok()?;
         let p = req.topics.first()?.partitions.first()?;
         Some(PeerRequest::Vote {
+            voter_id: node_from_wire(req.voter_id),
             candidate_epoch: epoch_from_wire(p.replica_epoch),
             candidate: node_from_wire(p.replica_id),
             last_epoch: epoch_from_wire(p.last_offset_epoch),
@@ -811,6 +820,7 @@ pub mod wire {
         #[test]
         fn vote_request_round_trips() {
             let req = PeerRequest::Vote {
+                voter_id: 9,
                 candidate_epoch: 3,
                 candidate: 7,
                 last_epoch: 2,

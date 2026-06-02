@@ -652,6 +652,7 @@ impl Engine {
                     last_epoch,
                     last_offset,
                     pre_vote,
+                    ..
                 }) = wire::decode_vote(&req)
                 {
                     let event = Event::ReceiveVoteRequest {
@@ -1316,16 +1317,21 @@ impl Engine {
     fn broadcast_vote(&self, epoch: LeaderEpoch, pre_vote: bool) {
         let last_epoch = self.log.last_epoch();
         let last_offset = self.log.end_offset();
-        let body = wire::PeerRequest::Vote {
-            candidate_epoch: epoch,
-            candidate: self.me,
-            last_epoch,
-            last_offset,
-            pre_vote,
-        }
-        .encode();
+        // The wire top-level `voterId` must name the recipient voter; the JVM
+        // rejects a Vote addressed to anyone else (or to the sentinel `-1`). So
+        // build a per-recipient body inside the loop rather than broadcasting a
+        // single shared body.
         for peer in self.other_voters() {
-            self.spawn_send(peer, api_key::VOTE, body.clone());
+            let body = wire::PeerRequest::Vote {
+                voter_id: peer,
+                candidate_epoch: epoch,
+                candidate: self.me,
+                last_epoch,
+                last_offset,
+                pre_vote,
+            }
+            .encode();
+            self.spawn_send(peer, api_key::VOTE, body);
         }
     }
 
