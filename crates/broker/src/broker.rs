@@ -2102,12 +2102,23 @@ impl Broker {
                 } else {
                     None
                 };
-                // Bootstrap = inter-broker listener advertised addr when secured;
-                // otherwise the operator-supplied (loopback) bootstrap is kept.
-                let bootstrap = if security.is_some() {
-                    inter.map_or_else(|| cfg.bootstrap.clone(), |l| l.advertised.clone())
-                } else {
+                // Bootstrap address for the in-process RLMM metadata client.
+                // Priority: explicit config wins; then inter-broker advertised
+                // addr for secured listeners (TLS SNI / SASL host must match);
+                // then loopback-derived from the primary data listener.
+                let bootstrap = if !cfg.bootstrap.is_empty() {
+                    // Operator/file-config supplied an explicit address — always honor it.
                     cfg.bootstrap.clone()
+                } else if security.is_some() {
+                    // Secured inter-broker listener: dial its advertised address so the TLS
+                    // SNI / SASL host match. Fall back to loopback if no inter-broker listener.
+                    inter.map_or_else(
+                        || loopback_bootstrap(config.listen_addr),
+                        |l| l.advertised.clone(),
+                    )
+                } else {
+                    // Plaintext, no explicit bootstrap: dial our own listener over loopback.
+                    loopback_bootstrap(config.listen_addr)
                 };
                 KafkaSwapKickoff {
                     cfg: crate::config::KafkaRlmmConfig {
@@ -2469,6 +2480,20 @@ fn next_rlmm_backoff(cur: std::time::Duration, max: std::time::Duration) -> std:
     (cur * 2).min(max)
 }
 
+/// A connectable loopback `host:port` for the broker's own data listener,
+/// used as the default RLMM metadata-client bootstrap when none is configured.
+/// A wildcard bind (`0.0.0.0` / `::`) is mapped to loopback so the in-process
+/// metadata client has a routable target.
+fn loopback_bootstrap(listen: std::net::SocketAddr) -> String {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let ip = match listen.ip() {
+        IpAddr::V4(v4) if v4 == Ipv4Addr::UNSPECIFIED => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v6) if v6 == Ipv6Addr::UNSPECIFIED => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        other => other,
+    };
+    std::net::SocketAddr::new(ip, listen.port()).to_string()
+}
+
 /// Back off after a failed RLMM bootstrap attempt. Sleeps for the current
 /// backoff (advancing it toward the cap), or returns `false` if shutdown
 /// fired during the sleep so the caller can abort the bootstrap.
@@ -2787,6 +2812,19 @@ mod tests {
     use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    #[test]
+    fn loopback_bootstrap_maps_wildcard_to_loopback() {
+        use std::net::SocketAddr;
+        assert!(
+            loopback_bootstrap("0.0.0.0:9092".parse::<SocketAddr>().unwrap()) == "127.0.0.1:9092"
+        );
+        assert!(
+            loopback_bootstrap("192.168.1.5:9094".parse::<SocketAddr>().unwrap())
+                == "192.168.1.5:9094"
+        );
+        assert!(loopback_bootstrap("[::]:9092".parse::<SocketAddr>().unwrap()) == "[::1]:9092");
+    }
 
     #[test]
     fn needed_metadata_partitions_covers_led_and_followed() {
