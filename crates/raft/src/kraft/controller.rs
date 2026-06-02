@@ -666,6 +666,7 @@ impl Engine {
                     last_epoch,
                     last_offset,
                     pre_vote,
+                    ..
                 }) = wire::decode_vote(&req)
                 {
                     let event = Event::ReceiveVoteRequest {
@@ -838,22 +839,11 @@ impl Engine {
         let mut resp = wire::PeerResponse::Vote {
             epoch: self.core.quorum_state().leader_epoch,
             granted: false,
-            pre_vote: false,
         };
         let mut local = Vec::new();
         for action in actions {
-            if let Action::ReplyVote {
-                epoch,
-                granted,
-                pre_vote,
-                ..
-            } = action
-            {
-                resp = wire::PeerResponse::Vote {
-                    epoch,
-                    granted,
-                    pre_vote,
-                };
+            if let Action::ReplyVote { epoch, granted, .. } = action {
+                resp = wire::PeerResponse::Vote { epoch, granted };
             } else {
                 local.push(action);
             }
@@ -1341,16 +1331,21 @@ impl Engine {
     fn broadcast_vote(&self, epoch: LeaderEpoch, pre_vote: bool) {
         let last_epoch = self.log.last_epoch();
         let last_offset = self.log.end_offset();
-        let body = wire::PeerRequest::Vote {
-            candidate_epoch: epoch,
-            candidate: self.me,
-            last_epoch,
-            last_offset,
-            pre_vote,
-        }
-        .encode();
+        // The wire top-level `voterId` must name the recipient voter; the JVM
+        // rejects a Vote addressed to anyone else (or to the sentinel `-1`). So
+        // build a per-recipient body inside the loop rather than broadcasting a
+        // single shared body.
         for peer in self.other_voters() {
-            self.spawn_send(peer, api_key::VOTE, body.clone());
+            let body = wire::PeerRequest::Vote {
+                voter_id: peer,
+                candidate_epoch: epoch,
+                candidate: self.me,
+                last_epoch,
+                last_offset,
+                pre_vote,
+            }
+            .encode();
+            self.spawn_send(peer, api_key::VOTE, body);
         }
     }
 
@@ -1668,15 +1663,10 @@ impl Engine {
 fn response_to_event(peer: NodeId, api_key: i16, body: &[u8]) -> Option<Event> {
     match api_key {
         self::api_key::VOTE => match wire::PeerResponse::decode_vote(body)? {
-            wire::PeerResponse::Vote {
-                epoch,
-                granted,
-                pre_vote,
-            } => Some(Event::ReceiveVoteResponse {
+            wire::PeerResponse::Vote { epoch, granted } => Some(Event::ReceiveVoteResponse {
                 from: peer,
                 epoch,
                 vote_granted: granted,
-                pre_vote,
             }),
             _ => None,
         },
@@ -2070,7 +2060,6 @@ mod tests {
             from: helper,
             epoch: 0,
             vote_granted: true,
-            pre_vote: true,
         })
         .await
         .unwrap();
@@ -2079,7 +2068,6 @@ mod tests {
             from: helper,
             epoch: 1,
             vote_granted: true,
-            pre_vote: false,
         })
         .await
         .unwrap();

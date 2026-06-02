@@ -132,8 +132,7 @@ impl QuorumStateMachine {
                 from,
                 epoch,
                 vote_granted,
-                pre_vote,
-            } => self.handle_vote_response(log, from, epoch, vote_granted, pre_vote, now),
+            } => self.handle_vote_response(log, from, epoch, vote_granted, now),
             Event::ReceiveBeginQuorumEpoch {
                 leader_id,
                 leader_epoch,
@@ -396,7 +395,6 @@ impl QuorumStateMachine {
         from: NodeId,
         epoch: LeaderEpoch,
         vote_granted: bool,
-        pre_vote: bool,
         now: SimInstant,
     ) -> Vec<Action> {
         // A higher-epoch rejection fences us: step down to that epoch.
@@ -408,8 +406,13 @@ impl QuorumStateMachine {
         if !vote_granted {
             return Vec::new();
         }
-        match (&mut self.role, pre_vote) {
-            (Role::Prospective { granted, .. }, true) if epoch == self.state.leader_epoch => {
+        // Match the grant to our round by our OWN role + epoch — exactly as
+        // Kafka does (its `VoteResponse` carries no pre-vote flag). `Prospective`
+        // ⇒ this is a pre-vote grant; `Candidate` ⇒ a real-vote grant. The epoch
+        // guard drops a stale grant from a superseded round (e.g. a late pre-vote
+        // grant at epoch E arriving after we bumped to E+1 and became Candidate).
+        match &mut self.role {
+            Role::Prospective { granted, .. } if epoch == self.state.leader_epoch => {
                 granted.insert(from);
                 if self.tally_prevote_reached_majority() {
                     self.promote_to_candidate(log, now)
@@ -417,7 +420,7 @@ impl QuorumStateMachine {
                     Vec::new()
                 }
             }
-            (Role::Candidate { granted, .. }, false) if epoch == self.state.leader_epoch => {
+            Role::Candidate { granted, .. } if epoch == self.state.leader_epoch => {
                 granted.insert(from);
                 if self.tally_candidate_reached_majority() {
                     self.promote_to_leader(log)
@@ -527,7 +530,6 @@ impl QuorumStateMachine {
                 to: from,
                 epoch: self.state.leader_epoch,
                 granted: false,
-                pre_vote,
             });
             return actions;
         }
@@ -571,7 +573,6 @@ impl QuorumStateMachine {
             to: from,
             epoch: self.state.leader_epoch,
             granted,
-            pre_vote,
         });
         actions
     }
@@ -691,7 +692,6 @@ mod tests {
             Action::ReplyVote {
                 to: 2,
                 granted: true,
-                pre_vote: false,
                 ..
             }
         )));
@@ -858,7 +858,6 @@ mod tests {
                 from: 2,
                 epoch: 0,
                 vote_granted: true,
-                pre_vote: true,
             },
             &log,
             SimInstant(2001),
@@ -888,7 +887,6 @@ mod tests {
                 from: 2,
                 epoch: 0,
                 vote_granted: true,
-                pre_vote: true,
             },
             &log,
             SimInstant(2001),
@@ -898,7 +896,6 @@ mod tests {
                 from: 2,
                 epoch: 1,
                 vote_granted: true,
-                pre_vote: false,
             },
             &log,
             SimInstant(2002),
@@ -1034,7 +1031,6 @@ mod tests {
                 from: 2,
                 epoch: 0,
                 vote_granted: true,
-                pre_vote: true,
             },
             &log,
             SimInstant(2001),
@@ -1044,7 +1040,6 @@ mod tests {
                 from: 2,
                 epoch: 1,
                 vote_granted: true,
-                pre_vote: false,
             },
             &log,
             SimInstant(2002),
@@ -1105,7 +1100,6 @@ mod tests {
                 from: 2,
                 epoch: 0,
                 vote_granted: true,
-                pre_vote: true,
             },
             &log,
             SimInstant(2001),
@@ -1115,7 +1109,6 @@ mod tests {
                 from: 2,
                 epoch: 1,
                 vote_granted: true,
-                pre_vote: false,
             },
             &log,
             SimInstant(2002),
@@ -1176,7 +1169,6 @@ mod tests {
                 from: 2,
                 epoch: 0,
                 vote_granted: true,
-                pre_vote: true,
             },
             &log,
             SimInstant(2001),
@@ -1186,7 +1178,6 @@ mod tests {
                 from: 2,
                 epoch: 1,
                 vote_granted: true,
-                pre_vote: false,
             },
             &log,
             SimInstant(2002),
@@ -1208,6 +1199,83 @@ mod tests {
                 epoch: 1
             })
         )));
+    }
+
+    #[test]
+    fn prospective_counts_grant_with_no_wire_prevote_signal() {
+        // A JVM voter's `VoteResponse` carries no pre-vote flag. The candidate
+        // must still count the grant as a PRE-VOTE because it is Prospective —
+        // this is the KIP-996 interop fix (was dropped by the old echo-tag path).
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        m.on_event(Event::ElectionTimeout, &log, SimInstant(2000)); // → Prospective, epoch 0
+        assert!(matches!(m.role(), Role::Prospective { .. }));
+        let actions = m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 0,
+                vote_granted: true,
+            },
+            &log,
+            SimInstant(2001),
+        );
+        // Pre-vote majority (self + 2) → promote to Candidate and bump the epoch.
+        assert!(matches!(m.role(), Role::Candidate { .. }));
+        assert!(m.quorum_state().leader_epoch == 1);
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::SendVoteRequest {
+                pre_vote: false,
+                epoch: 1
+            }
+        )));
+    }
+
+    #[test]
+    fn stale_prevote_grant_ignored_after_promotion() {
+        // A late pre-vote grant at the old epoch must not be miscounted toward
+        // the real election once we have promoted to Candidate at epoch+1.
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        m.on_event(Event::ElectionTimeout, &log, SimInstant(2000));
+        m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 2,
+                epoch: 0,
+                vote_granted: true,
+            },
+            &log,
+            SimInstant(2001),
+        ); // → Candidate @ epoch 1
+        assert!(matches!(m.role(), Role::Candidate { .. }));
+        // A duplicate/late pre-vote grant still tagged epoch 0 arrives.
+        let actions = m.on_event(
+            Event::ReceiveVoteResponse {
+                from: 3,
+                epoch: 0,
+                vote_granted: true,
+            },
+            &log,
+            SimInstant(2002),
+        );
+        // Epoch guard (0 != 1) drops it: we stay Candidate, do NOT become leader.
+        assert!(matches!(m.role(), Role::Candidate { .. }));
+        assert!(!m.role().is_leader());
+        assert!(actions.is_empty());
+        // The ignored stale grant must not have entered the real-vote tally:
+        // after promotion the Candidate's grant set holds only our self-vote.
+        if let Role::Candidate { granted, .. } = m.role() {
+            assert!(granted.len() == 1);
+            assert!(!granted.contains(&3));
+        } else {
+            panic!("expected Candidate");
+        }
     }
 
     #[test]

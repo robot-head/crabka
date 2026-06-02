@@ -204,11 +204,9 @@ pub mod api_key {
 ///
 /// The metadata log is the single `KRaft` topic `__cluster_metadata`, partition
 /// 0; every RPC body therefore carries exactly one topic / one partition.
-/// `pre_vote` has no field in the JVM `VoteResponse`, so the responder echoes it
-/// back in an internal tagged field ([`PRE_VOTE_ECHO_TAG`]) that a JVM peer
-/// harmlessly ignores; the candidate reads it to match the response to its
-/// pre-vote vs vote round (keeping the loop's `ReceiveVoteResponse` handling
-/// unchanged).
+/// Kafka's `VoteResponse` carries no pre-vote field: a candidate matches a reply
+/// to its round from its own `Prospective`/`Candidate` role, so Crabka encodes a
+/// byte-faithful `VoteResponse` and the core infers the round itself (KIP-996).
 pub mod wire {
     use bytes::{Buf, Bytes, BytesMut};
 
@@ -227,7 +225,6 @@ pub mod wire {
     use crabka_protocol::owned::vote_request::{self as vote_req, VoteRequest};
     use crabka_protocol::owned::vote_response::{self as vote_resp, VoteResponse};
     use crabka_protocol::records::RecordsPayload;
-    use crabka_protocol::tagged_fields::{UnknownTaggedField, UnknownTaggedFields};
     use crabka_protocol::{Decode, Encode};
 
     use super::{LeaderEpoch, LogOffsetMetadata, NodeId};
@@ -248,16 +245,17 @@ pub mod wire {
     const FETCH_VERSION: i16 = 17;
     const FETCH_SNAPSHOT_VERSION: i16 = 1;
 
-    /// Internal tagged-field tag carrying the `pre_vote` echo on a `VoteResponse`
-    /// (a single byte: 1 = pre-vote round, 0 = real vote). Picked well above any
-    /// JVM-assigned tag so a real Kafka voter ignores it as unknown.
-    const PRE_VOTE_ECHO_TAG: u32 = 0x6b76; // "kv"
-
     /// A peer RPC request body, as encoded by the sending engine and decoded by
     /// the receiving engine's inbound dispatch.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum PeerRequest {
         Vote {
+            /// The recipient voter this request is addressed to (the wire
+            /// top-level `voterId`). The JVM validates that an incoming Vote is
+            /// addressed to it before considering the grant; a stale/`-1`
+            /// `voterId` is silently rejected. Built per-recipient in
+            /// `broadcast_vote`.
+            voter_id: NodeId,
             candidate_epoch: LeaderEpoch,
             candidate: NodeId,
             last_epoch: LeaderEpoch,
@@ -292,10 +290,11 @@ pub mod wire {
         Vote {
             epoch: LeaderEpoch,
             granted: bool,
-            pre_vote: bool,
         },
         /// Begin/End acks carry the responder's epoch; no core event is produced.
-        Ack { epoch: LeaderEpoch },
+        Ack {
+            epoch: LeaderEpoch,
+        },
         Fetch {
             leader_id: NodeId,
             leader_epoch: LeaderEpoch,
@@ -349,6 +348,7 @@ pub mod wire {
         pub fn encode(&self) -> Bytes {
             match *self {
                 PeerRequest::Vote {
+                    voter_id,
                     candidate_epoch,
                     candidate,
                     last_epoch,
@@ -357,7 +357,7 @@ pub mod wire {
                 } => {
                     let req = VoteRequest {
                         cluster_id: None,
-                        voter_id: -1,
+                        voter_id: node_to_wire(voter_id),
                         topics: vec![vote_req::TopicData {
                             topic_name: METADATA_TOPIC.to_string(),
                             partitions: vec![vote_req::PartitionData {
@@ -467,6 +467,7 @@ pub mod wire {
                 && let Some(p) = req.topics.first().and_then(|t| t.partitions.first())
             {
                 return Some(PeerRequest::Vote {
+                    voter_id: node_from_wire(req.voter_id),
                     candidate_epoch: epoch_from_wire(p.replica_epoch),
                     candidate: node_from_wire(p.replica_id),
                     last_epoch: epoch_from_wire(p.last_offset_epoch),
@@ -485,6 +486,7 @@ pub mod wire {
         let req = VoteRequest::decode(&mut cur, VOTE_VERSION).ok()?;
         let p = req.topics.first()?.partitions.first()?;
         Some(PeerRequest::Vote {
+            voter_id: node_from_wire(req.voter_id),
             candidate_epoch: epoch_from_wire(p.replica_epoch),
             candidate: node_from_wire(p.replica_id),
             last_epoch: epoch_from_wire(p.last_offset_epoch),
@@ -614,12 +616,8 @@ pub mod wire {
         #[allow(clippy::too_many_lines)]
         pub fn encode(&self) -> Bytes {
             match self {
-                PeerResponse::Vote {
-                    epoch,
-                    granted,
-                    pre_vote,
-                } => {
-                    let mut resp = VoteResponse {
+                PeerResponse::Vote { epoch, granted } => {
+                    let resp = VoteResponse {
                         error_code: 0,
                         topics: vec![vote_resp::TopicData {
                             topic_name: METADATA_TOPIC.to_string(),
@@ -635,13 +633,6 @@ pub mod wire {
                         }],
                         ..Default::default()
                     };
-                    // Echo pre_vote in an internal tagged field so the candidate
-                    // can match the response to its round (the JVM schema has no
-                    // pre_vote response field; an unknown tag is ignored there).
-                    resp.unknown_tagged_fields = UnknownTaggedFields(vec![UnknownTaggedField {
-                        tag: PRE_VOTE_ECHO_TAG,
-                        bytes: Bytes::from_static(if *pre_vote { &[1u8] } else { &[0u8] }),
-                    }]);
                     encode_body(&resp, VOTE_VERSION)
                 }
                 PeerResponse::Ack { epoch } => {
@@ -731,22 +722,16 @@ pub mod wire {
             }
         }
 
-        /// Decode a Vote response body (api 52).
+        /// Decode a Vote response body (api 52). The round (pre-vote vs real) is
+        /// not on the wire — the engine infers it from the candidate's role.
         #[must_use]
         pub fn decode_vote(buf: &[u8]) -> Option<Self> {
             let mut cur = buf;
             let resp = VoteResponse::decode(&mut cur, VOTE_VERSION).ok()?;
             let p = resp.topics.first()?.partitions.first()?;
-            let pre_vote = resp
-                .unknown_tagged_fields
-                .0
-                .iter()
-                .find(|f| f.tag == PRE_VOTE_ECHO_TAG)
-                .is_some_and(|f| f.bytes.first().copied() == Some(1));
             Some(PeerResponse::Vote {
                 epoch: epoch_from_wire(p.leader_epoch),
                 granted: p.vote_granted,
-                pre_vote,
             })
         }
 
@@ -835,6 +820,7 @@ pub mod wire {
         #[test]
         fn vote_request_round_trips() {
             let req = PeerRequest::Vote {
+                voter_id: 9,
                 candidate_epoch: 3,
                 candidate: 7,
                 last_epoch: 2,
@@ -869,15 +855,46 @@ pub mod wire {
         }
 
         #[test]
-        fn vote_response_round_trips_with_pre_vote_echo() {
-            for pre_vote in [false, true] {
-                let resp = PeerResponse::Vote {
-                    epoch: 3,
-                    granted: true,
-                    pre_vote,
-                };
-                assert!(PeerResponse::decode_vote(&resp.encode()) == Some(resp));
-            }
+        fn vote_response_round_trips() {
+            let resp = PeerResponse::Vote {
+                epoch: 3,
+                granted: true,
+            };
+            assert!(PeerResponse::decode_vote(&resp.encode()) == Some(resp));
+        }
+
+        #[test]
+        fn decodes_jvm_style_response_without_echo_tag() {
+            // A real JVM `VoteResponse` is byte-faithful Kafka v2 with no Crabka
+            // echo tag. Build one straight from the generated protocol type
+            // (bypassing `PeerResponse::Vote::encode`) and confirm `decode_vote`
+            // tolerates it — the regression guard for the removed
+            // `PRE_VOTE_ECHO_TAG`.
+            let resp = VoteResponse {
+                error_code: 0,
+                topics: vec![vote_resp::TopicData {
+                    topic_name: METADATA_TOPIC.to_string(),
+                    partitions: vec![vote_resp::PartitionData {
+                        partition_index: METADATA_PARTITION,
+                        error_code: 0,
+                        leader_id: -1,
+                        leader_epoch: epoch_to_wire(7),
+                        vote_granted: true,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let bytes = encode_body(&resp, VOTE_VERSION);
+            let decoded = PeerResponse::decode_vote(&bytes).unwrap();
+            assert!(
+                decoded
+                    == PeerResponse::Vote {
+                        epoch: 7,
+                        granted: true
+                    }
+            );
         }
 
         #[test]

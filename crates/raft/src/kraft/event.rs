@@ -23,12 +23,13 @@ pub enum Event {
         candidate_log_end: LogEnd,
         pre_vote: bool,
     },
-    /// A peer answered our Vote.
+    /// A peer answered our Vote. The round (pre-vote vs real vote) is NOT on the
+    /// wire — the candidate infers it from its own `Prospective`/`Candidate`
+    /// role + epoch (KIP-996; mirrors Kafka's field-less `VoteResponse`).
     ReceiveVoteResponse {
         from: NodeId,
         epoch: LeaderEpoch,
         vote_granted: bool,
-        pre_vote: bool,
     },
     /// A leader announces its epoch to us.
     ReceiveBeginQuorumEpoch {
