@@ -240,13 +240,30 @@ impl KraftController {
         // A fresh voter arms its election timer so a bootstrap cluster elects
         // without an injected event. Observers/followers leave it disarmed.
         let election_at = if core.is_voter() && initial_leader.is_none() {
-            // Same deterministic per-(node, epoch) jitter the core applies to
-            // re-election timers, so the FIRST election round is also staggered
-            // across closely-synchronized voters (otherwise a bare majority that
-            // boots in lockstep splits the vote on round one).
-            let jitter =
-                crate::kraft::core::election_jitter_ms(me, initial_epoch, election_timeout_ms);
-            Some(clock_base + Duration::from_millis(election_timeout_ms + jitter))
+            if core.quorum_state().voters.len() == 1 {
+                // Sole voter: there is no peer to race, so the election
+                // timeout + jitter stagger — which exists only to prevent a
+                // lockstep-booting majority from splitting the vote on round
+                // one — is pure startup latency. Fire on the first tick;
+                // `start_election`'s lone-voter fast win (it already holds the
+                // only vote, so prevote reaches majority immediately) promotes
+                // this node to leader at once. Without this, a standalone
+                // broker waits the full ~8.5s timeout before even starting the
+                // election it is guaranteed to win.
+                Some(clock_base)
+            } else {
+                // Same deterministic per-(node, epoch) jitter the core applies
+                // to re-election timers, so the FIRST election round is also
+                // staggered across closely-synchronized voters (otherwise a
+                // bare majority that boots in lockstep splits the vote on round
+                // one).
+                let jitter = crate::kraft::core::election_jitter_ms(
+                    me,
+                    initial_epoch,
+                    election_timeout_ms,
+                );
+                Some(clock_base + Duration::from_millis(election_timeout_ms + jitter))
+            }
         } else {
             None
         };
