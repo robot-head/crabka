@@ -176,13 +176,13 @@ pub struct TieredStorage {
     pub s3: Option<S3StorageSpec>,
     /// KIP-405: pick the
     /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-    /// the broker pods run. When absent, every broker pod uses the
-    /// in-memory fixture (compatible with the emptyDir-only
-    /// deployment). When set to `Topic`, the broker activates the
+    /// the broker pods run. When absent (or set to `type: Topic`),
+    /// the broker activates the durable
     /// `crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`
     /// against the internal `__remote_log_metadata` topic, so
     /// tier-segment metadata survives pod restarts and is consistent
-    /// across brokers in the cluster.
+    /// across brokers in the cluster. The in-memory fixture is
+    /// selected only by an explicit `type: InMemory` (test/dev only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_manager: Option<MetadataManagerSpec>,
     /// KIP-405: durable storage for the local-tier
@@ -338,7 +338,7 @@ impl TieredStorage {
 
 /// KIP-405: which
 /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-/// the broker pods use. Defaults to `InMemory`
+/// the broker pods use. Defaults to topic-backed (`type: Topic`)
 /// when this field is omitted.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -346,7 +346,8 @@ pub struct MetadataManagerSpec {
     /// Implementation selector.
     #[serde(rename = "type")]
     pub kind: MetadataManagerType,
-    /// Topic-backed tuning. Required when `kind == Topic`, must be
+    /// Topic-backed tuning. Optional when `kind == Topic` (broker
+    /// fills defaults for bootstrap and topic parameters), must be
     /// absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topic: Option<TopicMetadataManagerSpec>,
@@ -357,17 +358,17 @@ impl MetadataManagerSpec {
     ///
     /// # Errors
     ///
-    /// Fails when the discriminator and `topic` field disagree, or
-    /// when a topic-backed configuration omits `bootstrap`.
+    /// Fails when `type=InMemory` is paired with a `topic` sub-block,
+    /// or when a topic-backed configuration supplies a `topic` block
+    /// with invalid fields (e.g. empty `bootstrap`, non-positive
+    /// `numPartitions`). A bare `type=Topic` with no `topic` block is
+    /// valid — the broker fills all defaults.
     pub fn validate(&self) -> Result<(), String> {
         match (self.kind, &self.topic) {
             (MetadataManagerType::InMemory, Some(_)) => {
                 Err("metadataManager.type=InMemory must not set `topic`".into())
             }
-            (MetadataManagerType::Topic, None) => {
-                Err("metadataManager.type=Topic requires `topic` (bootstrap at minimum)".into())
-            }
-            (MetadataManagerType::InMemory, None) => Ok(()),
+            (MetadataManagerType::Topic | MetadataManagerType::InMemory, None) => Ok(()),
             (MetadataManagerType::Topic, Some(topic)) => topic.validate(),
         }
     }
@@ -377,14 +378,16 @@ impl MetadataManagerSpec {
 /// how to render.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum MetadataManagerType {
-    /// In-memory fixture from `crabka_remote_storage`. Default.
+    /// In-memory fixture from `crabka_remote_storage`.
     /// Tier-segment metadata does not survive pod restarts.
-    #[default]
+    /// Selected only by an explicit `type: InMemory` (test/dev).
     InMemory,
     /// Production topic-backed manager from
-    /// `crabka_remote_storage_topic`. Pair with
-    /// [`MetadataManagerSpec::topic`] for the bootstrap address and
-    /// topic-creation parameters.
+    /// `crabka_remote_storage_topic`. Default. An optional
+    /// [`MetadataManagerSpec::topic`] sub-block tunes bootstrap
+    /// address and topic-creation parameters; the broker fills
+    /// defaults when it is omitted.
+    #[default]
     Topic,
 }
 
@@ -1341,7 +1344,9 @@ authorization:
     }
 
     #[test]
-    fn metadata_manager_topic_without_topic_is_rejected() {
+    fn metadata_manager_topic_without_topic_is_valid() {
+        // A bare type=Topic with no topic sub-block is valid; the broker
+        // fills default bootstrap/partitions from its own config.
         let ts = TieredStorage {
             kind: TieredStorageType::Local,
             s3: None,
@@ -1351,8 +1356,7 @@ authorization:
             }),
             persistence: None,
         };
-        let err = ts.validate().unwrap_err();
-        assert!(err.contains("requires `topic`"), "got: {err}");
+        assert!(ts.validate().is_ok());
     }
 
     #[test]

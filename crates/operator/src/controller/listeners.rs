@@ -3973,6 +3973,52 @@ mod toml_rendering_tests {
     }
 
     #[test]
+    fn render_broker_toml_emits_kafka_metadata_for_default_metadata_manager() {
+        // An empty metadataManager block (MetadataManagerSpec::default(), i.e.
+        // kind=Topic, topic=None) must also render the topic-backed RLMM header,
+        // consistent with omitting the field entirely.
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Local,
+            s3: None,
+            metadata_manager: Some(crate::crd::kafka::MetadataManagerSpec {
+                kind: crate::crd::kafka::MetadataManagerType::default(),
+                topic: None,
+            }),
+            persistence: None,
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+            None,
+        );
+        assert!(
+            t.contains("[remote_storage.kafka_metadata]"),
+            "expected kafka_metadata block for default MetadataManagerSpec, got:\n{t}"
+        );
+        // No bootstrap line — the bare header is enough; broker fills defaults.
+        assert!(
+            !t.contains("bootstrap ="),
+            "unexpected bootstrap line for bare Topic manager, got:\n{t}"
+        );
+    }
+
+    #[test]
     fn render_broker_toml_emits_remote_storage_s3_full_spec() {
         let mut addrs = std::collections::BTreeMap::new();
         addrs.insert(
