@@ -13,6 +13,18 @@ use crate::builder::{AutoOffsetReset, IsolationLevel};
 use crate::consumer::{Consumer, ConsumerRecord};
 use crate::error::ConsumerError;
 
+/// Synthetic leader id meaning "leader unknown → use the bootstrap connection".
+/// Matches `BrokerPool`'s bootstrap slot so a fallback Fetch is sent via
+/// `Client::send` rather than `Client::broker(id)`.
+const BOOTSTRAP_LEADER: i32 = -1;
+
+/// One fetchable partition's request fields:
+/// `(partition, fetch_offset, current_leader_epoch, last_fetched_epoch)`.
+type FetchSpec = (i32, i64, i32, i32);
+
+/// Partitions to fetch, grouped first by leader id, then by topic.
+type FetchByLeader = HashMap<i32, HashMap<String, Vec<FetchSpec>>>;
+
 impl Consumer {
     /// Returns the records from every v2 batch the broker returned per
     /// assigned partition, or an empty vec on timeout. Under
@@ -44,10 +56,28 @@ impl Consumer {
             return Ok(Vec::new());
         }
 
+        // Group the fetchable partitions by their leader id so each FetchRequest
+        // reaches the broker that actually hosts the partition. On a
+        // multi-broker cluster the bootstrap connection is rarely the leader of
+        // every partition, and a Fetch sent to a non-leader returns
+        // NOT_LEADER_OR_FOLLOWER instead of records. The per-partition leader
+        // lives in the `positions` sidecar (populated by `refresh_leader_epochs`
+        // from Metadata, whose `refresh_metadata` also teaches the pool each
+        // broker's address so `Client::broker(id)` can connect).
+        //
+        // A partition whose leader is unknown (or whose advertised address is
+        // unusable) falls back to the bootstrap connection (synthetic id `-1`)
+        // for this round. The `refresh_leader_epochs` pass at the top of every
+        // poll already re-pulls Metadata, so the next poll re-targets it once
+        // the leader is learnable — no extra refresh needed here.
+        //
         // (partition, fetch_offset, current_leader_epoch, last_fetched_epoch).
         // Lock order: next_offsets first, then positions (matching the
         // coordinator's order so poll can never deadlock against a rebalance).
-        let mut by_topic: HashMap<String, Vec<(i32, i64, i32, i32)>> = HashMap::new();
+        // Both guards are dropped before any per-leader Fetch is issued — the
+        // sends are await points and we must never hold a Mutex guard across an
+        // `.await`.
+        let mut by_leader: FetchByLeader = HashMap::new();
         {
             let offsets = self.next_offsets.lock().await;
             let positions = self.positions.lock().await;
@@ -62,53 +92,76 @@ impl Consumer {
                 }
                 let next = offsets.get(&(t.clone(), *p)).copied().unwrap_or(0);
                 let pos = positions.get(&(t.clone(), *p)).copied().unwrap_or_default();
-                by_topic.entry(t.clone()).or_default().push((
-                    *p,
-                    next,
-                    pos.leader_epoch,
-                    pos.offset_epoch,
-                ));
+                // Route to the leader when its id is known AND the pool has a
+                // dialable address for it; otherwise fall back to the bootstrap
+                // connection. `knows_broker` is a synchronous registry lookup
+                // (no await), so it's safe to call while the offsets/positions
+                // guards are held. A leader whose advertised address is unusable
+                // (e.g. port 0 from an in-process test broker) is treated as
+                // unknown — the bootstrap broker is the leader in that
+                // single-broker case anyway.
+                let leader = if pos.leader_id >= 0 && self.client.knows_broker(pos.leader_id) {
+                    pos.leader_id
+                } else {
+                    BOOTSTRAP_LEADER
+                };
+                by_leader
+                    .entry(leader)
+                    .or_default()
+                    .entry(t.clone())
+                    .or_default()
+                    .push((*p, next, pos.leader_epoch, pos.offset_epoch));
             }
         }
 
         let topic_ids = self.topic_ids.lock().await.clone();
-        let topics: Vec<FetchTopic> = by_topic
-            .into_iter()
-            .map(|(name, plist)| {
-                let topic_id = topic_ids.get(&name).copied().unwrap_or_default();
-                FetchTopic {
-                    topic: name,
-                    topic_id,
-                    partitions: plist
-                        .into_iter()
-                        .map(
-                            |(p, off, leader_epoch, last_fetched_epoch)| FetchPartition {
-                                partition: p,
-                                fetch_offset: off,
-                                current_leader_epoch: leader_epoch,
-                                last_fetched_epoch,
-                                partition_max_bytes: 1 << 20,
-                                ..Default::default()
-                            },
-                        )
-                        .collect(),
-                    ..Default::default()
-                }
-            })
-            .collect();
-
         let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
-        let resp = self
-            .client
-            .send(FetchRequest {
+
+        // Issue one Fetch per leader. All guards are released; we collect every
+        // response before re-locking to process them. Sent sequentially so a
+        // single parked leader can't starve the others' deadlines beyond the
+        // per-request timeout (and to keep the borrow on `self.client` simple).
+        let mut responses = Vec::with_capacity(by_leader.len());
+        for (leader, by_topic) in by_leader {
+            let topics: Vec<FetchTopic> = by_topic
+                .into_iter()
+                .map(|(name, plist)| {
+                    let topic_id = topic_ids.get(&name).copied().unwrap_or_default();
+                    FetchTopic {
+                        topic: name,
+                        topic_id,
+                        partitions: plist
+                            .into_iter()
+                            .map(
+                                |(p, off, leader_epoch, last_fetched_epoch)| FetchPartition {
+                                    partition: p,
+                                    fetch_offset: off,
+                                    current_leader_epoch: leader_epoch,
+                                    last_fetched_epoch,
+                                    partition_max_bytes: 1 << 20,
+                                    ..Default::default()
+                                },
+                            )
+                            .collect(),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            let req = FetchRequest {
                 max_wait_ms: timeout_ms,
                 min_bytes: 1,
                 max_bytes: 50 * 1024 * 1024,
                 isolation_level: self.isolation_level.wire(),
                 topics,
                 ..Default::default()
-            })
-            .await?;
+            };
+            let resp = if leader == BOOTSTRAP_LEADER {
+                self.client.send(req).await?
+            } else {
+                self.client.broker(leader).send(req).await?
+            };
+            responses.push(resp);
+        }
 
         // 3. Decode each partition's RecordBatches, advance next-offsets.
         //
@@ -132,8 +185,17 @@ impl Consumer {
             self.assigned.lock().await.iter().cloned().collect();
 
         let mut out: Vec<ConsumerRecord> = Vec::new();
+        // Set when a NOT_LEADER_OR_FOLLOWER response carried no current_leader
+        // hint: we refresh metadata after the processing loop (we can't `.await`
+        // while the `offsets`/`positions` guards are held) so the next poll
+        // re-targets the new leader.
+        let mut refresh_after_processing = false;
         let mut offsets = self.next_offsets.lock().await;
-        for topic in &resp.responses {
+        // Process every per-leader response with the identical per-partition
+        // logic (error-first, offset advance, fetch_floor, read_committed). The
+        // partition key is unique across leaders, so the order responses are
+        // drained in doesn't matter.
+        for topic in responses.iter().flat_map(|resp| &resp.responses) {
             let topic_name = if topic.topic.is_empty() {
                 id_to_name.get(&topic.topic_id).cloned().unwrap_or_default()
             } else {
@@ -192,9 +254,34 @@ impl Consumer {
                         }
                         continue;
                     }
+                    6 /* NOT_LEADER_OR_FOLLOWER */ => {
+                        // A routing miss, NOT a truncation: we sent the Fetch to
+                        // a broker that no longer leads this partition (e.g. a
+                        // leadership change since the last metadata refresh).
+                        // Re-target the leader so the next poll routes correctly;
+                        // do NOT set awaiting_validation (nothing diverged).
+                        let mut positions = self.positions.lock().await;
+                        if part.current_leader.leader_id >= 0 {
+                            // The broker handed us the new leader inline (KIP-320
+                            // current_leader hint). Adopt it immediately.
+                            let p = positions.entry(key.clone()).or_default();
+                            p.leader_id = part.current_leader.leader_id;
+                            p.leader_epoch = part.current_leader.leader_epoch;
+                        } else {
+                            // No hint: force a metadata refresh after this loop
+                            // so the next poll learns the new leader. Reset the
+                            // stale leader id so the bootstrap fallback (and a
+                            // re-flag, if metadata advances the epoch) kicks in.
+                            if let Some(p) = positions.get_mut(&key) {
+                                p.leader_id = -1;
+                            }
+                            drop(positions);
+                            refresh_after_processing = true;
+                        }
+                        continue;
+                    }
                     74 /* FENCED_LEADER_EPOCH */
-                    | 75 /* UNKNOWN_LEADER_EPOCH */
-                    | 6 /* NOT_LEADER_OR_FOLLOWER */ => {
+                    | 75 /* UNKNOWN_LEADER_EPOCH */ => {
                         let mut positions = self.positions.lock().await;
                         if let Some(p) = positions.get_mut(&key) {
                             // Force refresh_leader_epochs to re-flag against
@@ -318,6 +405,16 @@ impl Consumer {
                     }
                 }
             }
+        }
+        // Drop the offsets guard before any `.await`: refreshing metadata is an
+        // RPC, and we must never hold a Mutex guard across an await point.
+        drop(offsets);
+        if refresh_after_processing {
+            // Best-effort: a NOT_LEADER_OR_FOLLOWER without a current_leader
+            // hint means our cached leader is stale; learn the new one so the
+            // next poll routes correctly. A failure is non-fatal — the next
+            // refresh_leader_epochs pass retries.
+            let _ = self.client.refresh_metadata().await;
         }
         Ok(out)
     }

@@ -14,7 +14,6 @@ use tokio_util::sync::CancellationToken;
 use crabka_client_core::Client;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
 use crabka_protocol::owned::join_group_response::JoinGroupResponse;
-use crabka_protocol::owned::metadata_request::MetadataRequest;
 use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
 use crabka_protocol::owned::sync_group_response::SyncGroupResponse;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
@@ -202,7 +201,11 @@ impl Consumer {
         // 3. Always issue a Metadata to resolve topic_ids (needed for
         //    Fetch v ≥ 13). If we are the leader, also use the partition
         //    counts to compute the assignment.
-        let md = client.send(MetadataRequest::default()).await?;
+        //    `refresh_metadata` (not a bare `send`) so the main client's
+        //    BrokerPool learns each broker's (id → addr) mapping up front,
+        //    letting `poll`/`validate` route to partition leaders immediately
+        //    rather than waiting for the first `refresh_leader_epochs` pass.
+        let md = client.refresh_metadata().await?;
         let mut topic_ids: HashMap<String, WireUuid> = HashMap::new();
         let mut topic_partitions: HashMap<String, i32> = HashMap::new();
         for t in &md.topics {

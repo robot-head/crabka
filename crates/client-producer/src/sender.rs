@@ -205,6 +205,11 @@ async fn send_one(cfg: &SenderConfig, topic: &str, partition: i32, batch: InProg
     };
 
     // 5. Send with retries.
+    // NOTE (out of scope here): like the consumer's Fetch used to, this Produce
+    // goes over the bootstrap connection rather than the partition leader. On a
+    // multi-broker cluster that misroutes writes. The consumer now groups by
+    // leader via `Client::broker(id)`; the producer should follow suit in a
+    // separate change.
     let mut attempts: i32 = 0;
     let resp = loop {
         attempts += 1;

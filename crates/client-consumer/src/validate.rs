@@ -6,8 +6,6 @@
 
 use std::collections::HashMap;
 
-use crabka_protocol::owned::metadata_request::MetadataRequest;
-
 use crate::consumer::Consumer;
 use crate::error::ConsumerError;
 use crate::position::{ValidationOutcome, classify};
@@ -17,7 +15,12 @@ impl Consumer {
     /// `Metadata`. A partition whose metadata leader epoch is greater than the
     /// epoch we last consumed (`offset_epoch`) is flagged `awaiting_validation`.
     pub(crate) async fn refresh_leader_epochs(&self) -> Result<(), ConsumerError> {
-        let md = self.client.send(MetadataRequest::default()).await?;
+        // `refresh_metadata` (not a bare `send(MetadataRequest)`) so the main
+        // client's BrokerPool learns each broker's (id → addr) mapping — this
+        // is what lets `poll`/`validate` route Fetch and OffsetForLeaderEpoch
+        // to the partition *leader* via `Client::broker(id)` instead of always
+        // hitting the bootstrap connection.
+        let md = self.client.refresh_metadata().await?;
         let mut positions = self.positions.lock().await;
         for t in &md.topics {
             let Some(name) = &t.name else { continue };
@@ -46,7 +49,8 @@ impl Consumer {
         // Snapshot the work to do under the lock, then issue RPCs unlocked.
         // Lock order: next_offsets first, then positions — matching the
         // coordinator's established order, so we never deadlock against poll.
-        let to_validate: Vec<(String, i32, i64, i32, i32)> = {
+        // (topic, partition, offset, offset_epoch, leader_epoch, leader_id).
+        let to_validate: Vec<(String, i32, i64, i32, i32, i32)> = {
             let offsets = self.next_offsets.lock().await;
             let mut positions = self.positions.lock().await;
             // Defensive: clear awaiting_validation for any partition whose
@@ -64,18 +68,43 @@ impl Consumer {
                 .filter(|(_, p)| p.awaiting_validation && p.offset_epoch >= 0)
                 .filter_map(|((t, part), p)| {
                     let off = *offsets.get(&(t.clone(), *part))?;
-                    Some((t.clone(), *part, off, p.offset_epoch, p.leader_epoch))
+                    Some((
+                        t.clone(),
+                        *part,
+                        off,
+                        p.offset_epoch,
+                        p.leader_epoch,
+                        p.leader_id,
+                    ))
                 })
                 .collect()
         };
 
         let mut truncated: HashMap<(String, i32), i64> = HashMap::new();
-        for (topic, partition, offset, offset_epoch, leader_epoch) in to_validate {
-            // RPC issued with no lock held.
-            let answer = self
-                .client
-                .offset_for_leader_epoch(&topic, partition, leader_epoch, offset_epoch)
-                .await?;
+        for (topic, partition, offset, offset_epoch, leader_epoch, leader_id) in to_validate {
+            // RPC issued with no lock held. KIP-320 requires the
+            // OffsetForLeaderEpoch reach the partition *leader* — it is the
+            // only replica with the authoritative epoch→end-offset history.
+            // Route to the leader when its id is known and the pool has a
+            // dialable address for it (registry populated by
+            // `refresh_leader_epochs` → `refresh_metadata`); fall back to the
+            // bootstrap connection otherwise (e.g. single-broker test brokers
+            // advertising port 0, where bootstrap is the leader anyway).
+            let answer = if leader_id >= 0 && self.client.knows_broker(leader_id) {
+                self.client
+                    .offset_for_leader_epoch_on(
+                        leader_id,
+                        &topic,
+                        partition,
+                        leader_epoch,
+                        offset_epoch,
+                    )
+                    .await?
+            } else {
+                self.client
+                    .offset_for_leader_epoch(&topic, partition, leader_epoch, offset_epoch)
+                    .await?
+            };
 
             // Re-check the partition is still assigned + epoch unchanged before
             // applying — a rebalance may have moved it.

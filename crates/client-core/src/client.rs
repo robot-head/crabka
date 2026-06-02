@@ -61,6 +61,15 @@ impl Client {
         conn.send(req).await
     }
 
+    /// Whether the pool knows a dialable address for `broker_id` (learned via
+    /// [`refresh_metadata`](Client::refresh_metadata), port not `0`). Lets a
+    /// caller choose between [`broker`](Client::broker) routing and the
+    /// bootstrap [`send`](Client::send) without a speculative connect.
+    #[must_use]
+    pub fn knows_broker(&self, broker_id: i32) -> bool {
+        self.pool.knows_broker(broker_id)
+    }
+
     /// Return a [`BrokerHandle`] that routes requests to a specific broker by id.
     ///
     /// The broker must have been registered via [`refresh_metadata`] first.
@@ -113,6 +122,38 @@ impl Client {
         leader_epoch: i32,
     ) -> Result<crate::offset_for_leader_epoch::EpochEndOffset, ClientError> {
         let conn = self.pool.bootstrap_connection().await?;
+        crate::offset_for_leader_epoch::offset_for_leader_epoch(
+            &conn,
+            topic,
+            partition,
+            current_leader_epoch,
+            leader_epoch,
+        )
+        .await
+    }
+
+    /// Send a single-partition `OffsetForLeaderEpoch` (`api_key=23`) to a
+    /// *specific* broker by id, via [`BrokerPool::get`]. Mirrors
+    /// [`offset_for_leader_epoch`](Client::offset_for_leader_epoch) but targets
+    /// the partition leader instead of the bootstrap connection — KIP-320
+    /// requires the validation RPC reach the partition leader, which is the
+    /// only replica with the authoritative epoch→end-offset history.
+    ///
+    /// The broker must already be in the pool's registry (populated by
+    /// [`refresh_metadata`](Client::refresh_metadata)).
+    ///
+    /// # Errors
+    /// `Disconnected` if `broker_id` is not in the registry; transport /
+    /// version-negotiation failure; or a partition not present in the response.
+    pub async fn offset_for_leader_epoch_on(
+        &self,
+        broker_id: i32,
+        topic: &str,
+        partition: i32,
+        current_leader_epoch: i32,
+        leader_epoch: i32,
+    ) -> Result<crate::offset_for_leader_epoch::EpochEndOffset, ClientError> {
+        let conn = self.pool.get(broker_id).await?;
         crate::offset_for_leader_epoch::offset_for_leader_epoch(
             &conn,
             topic,

@@ -80,13 +80,33 @@ impl BrokerPool {
 
     /// Update the (id, addr) address registry from a list of brokers, typically
     /// sourced from a `MetadataResponse`. Does not open any new connections.
+    ///
+    /// Brokers advertising port `0` are skipped: that is not a dialable address
+    /// (it shows up for in-process test brokers whose advertised port never got
+    /// rewritten to the real bound port). Leaving such an entry out means
+    /// [`get`](BrokerPool::get) reports `Disconnected` for that id, letting a
+    /// caller fall back to the bootstrap connection rather than attempting a
+    /// doomed `host:0` connect.
     pub fn refresh_brokers(&self, brokers: &[BrokerInfo]) {
         for b in brokers {
+            if b.port == 0 {
+                continue;
+            }
             let addr_str = format!("{}:{}", b.host, b.port);
             if let Ok(addr) = addr_str.parse::<SocketAddr>() {
                 self.by_addr.insert(b.id, addr);
             }
         }
+    }
+
+    /// Whether the (id → addr) registry knows a dialable address for this
+    /// broker id (i.e. [`refresh_brokers`](BrokerPool::refresh_brokers) learned
+    /// it and the port was not `0`). A caller can use this to decide between
+    /// routing to a specific broker and falling back to the bootstrap
+    /// connection, without a speculative connect.
+    #[must_use]
+    pub fn knows_broker(&self, broker_id: i32) -> bool {
+        self.by_addr.contains_key(&broker_id)
     }
 
     /// Close every open connection in the pool. Consumes the pool.
