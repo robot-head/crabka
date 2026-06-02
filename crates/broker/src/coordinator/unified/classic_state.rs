@@ -191,6 +191,20 @@ pub struct Group {
     /// Pass-3 omissions then strand partitions on no member). Cleared on
     /// every transition into `PreparingRebalance`.
     pub joined_this_round: std::collections::HashSet<String>,
+    /// `true` while the current `PreparingRebalance` round opened from an
+    /// `Empty` group — a brand-new group or one whose members had all left
+    /// (e.g. after a warm-up consumer joins and leaves). Such a round honors
+    /// the full `INITIAL_REBALANCE_DELAY` batching window — mirroring Apache
+    /// Kafka's `InitialDelayedJoin` — instead of eager-completing the moment
+    /// the first member shows up, so a herd of consumers starting together
+    /// lands in a single generation. Eager-completing a from-`Empty` round
+    /// instead strands the first joiner in a solo generation and forces an
+    /// immediate re-rebalance when the next member arrives, thrashing
+    /// produce+fetch under load. `false` for rebalances triggered by a
+    /// membership change in a group that still had members (`Stable` →
+    /// `PreparingRebalance`), which complete as soon as every still-live
+    /// member rejoins.
+    pub rebalance_from_empty: bool,
 }
 
 impl Group {
@@ -207,6 +221,7 @@ impl Group {
             static_members: HashMap::new(),
             rebalance_deadline: None,
             joined_this_round: std::collections::HashSet::new(),
+            rebalance_from_empty: false,
         }
     }
 
@@ -274,12 +289,18 @@ impl Group {
             self.static_members
                 .insert(instance_id, member.member_id.clone());
         }
+        let was_empty = matches!(self.state, GroupState::Empty);
         let was_first_or_stable = matches!(self.state, GroupState::Empty | GroupState::Stable);
         let member_id = member.member_id.clone();
         self.members.insert(member_id.clone(), member);
         if was_first_or_stable {
             self.state = GroupState::PreparingRebalance;
             self.joined_this_round.clear();
+            // A round that opens from `Empty` batches the startup herd over
+            // `INITIAL_REBALANCE_DELAY` (see `rebalance_from_empty`); one that
+            // opens from `Stable` is a live-membership change and
+            // eager-completes once every still-live member rejoins.
+            self.rebalance_from_empty = was_empty;
         }
         if matches!(self.state, GroupState::PreparingRebalance) {
             self.joined_this_round.insert(member_id);
@@ -338,6 +359,7 @@ impl Group {
         self.state = GroupState::CompletingRebalance;
         self.rebalance_deadline = None;
         self.joined_this_round.clear();
+        self.rebalance_from_empty = false;
     }
 
     /// Set each member's `protocol_metadata` to its proposal for `name`.
@@ -402,6 +424,10 @@ impl Group {
                 self.protocol_name = None;
             } else {
                 self.state = GroupState::PreparingRebalance;
+                // Live-membership change (a member timed out), not a
+                // start-from-empty herd: eager-complete once the survivors
+                // rejoin rather than holding the initial-delay window.
+                self.rebalance_from_empty = false;
             }
         }
         dropped
