@@ -400,6 +400,138 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
     (broker, log_dir, remote_dir)
 }
 
+/// While the topic-backed RLMM has not yet activated (bootstrap points at a
+/// dead port so the retry loop never succeeds), the RLM copy task must not
+/// tier any segment — `add_remote_log_segment_metadata` is called first,
+/// and a `NotReady` error causes the copy task to skip the segment entirely.
+/// This proves the fail-closed guarantee: no orphaned objects accumulate in
+/// the remote store while the RLMM is unavailable.
+///
+/// The topic config and produce volume mirror
+/// [`topic_rlmm_copy_then_fetch_round_trip`] exactly, so "0 tiered objects"
+/// is genuinely discriminating: the analogous loopback test tiers ≥ 1.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copy_task_skips_tiering_while_rlmm_not_ready() {
+    const TOPIC: &str = "tiered-not-ready-itest";
+
+    support::init_tracing();
+
+    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(1).await;
+    let listen = client_addrs[0];
+
+    let log_dir = tempfile::TempDir::new().expect("log tempdir");
+    let remote_dir = tempfile::TempDir::new().expect("remote tempdir");
+
+    let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.listen_addr = listen;
+    cfg.advertised_listener = listen.to_string();
+    cfg.controller_listen_addr = controller_addrs[0];
+    cfg.controller_quorum_voters = vec![(1, controller_addrs[0])];
+    cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
+        dir: remote_dir.path().to_path_buf(),
+    });
+    // Fast ticks so the copy task gets plenty of chances to (not) tier.
+    cfg.remote_log_manager_interval = Duration::from_millis(200);
+    // Dead port: the retry loop can never dial the bootstrap; the SwappableRlmm
+    // stays on the NotReadyRlmm stub for the entire test.
+    cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
+        bootstrap: "127.0.0.1:1".into(),
+        num_partitions: 1,
+        replication: 1,
+        snapshot_interval: Duration::from_hours(1),
+        snapshot_dir: log_dir.path().join("rlmm-snap"),
+        security: None,
+    });
+
+    let broker = Broker::start(cfg).await.expect("broker starts");
+    let client = build_client(&broker).await;
+
+    // Create the same tiered topic config as the loopback round-trip test.
+    let resp = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: TOPIC.into(),
+                num_partitions: 1,
+                replication_factor: 1,
+                configs: vec![
+                    CreatableTopicConfig {
+                        name: "remote.storage.enable".into(),
+                        value: Some("true".into()),
+                        ..Default::default()
+                    },
+                    CreatableTopicConfig {
+                        name: "segment.bytes".into(),
+                        value: Some("1024".into()),
+                        ..Default::default()
+                    },
+                    CreatableTopicConfig {
+                        name: "local.retention.bytes".into(),
+                        value: Some("1".into()),
+                        ..Default::default()
+                    },
+                    CreatableTopicConfig {
+                        name: "retention.bytes".into(),
+                        value: Some("-1".into()),
+                        ..Default::default()
+                    },
+                    CreatableTopicConfig {
+                        name: "retention.ms".into(),
+                        value: Some("-1".into()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("CreateTopics");
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics failed: {:?}",
+        resp.topics[0].error_message
+    );
+
+    // Wait for the tiered config to propagate into the partition's LogConfig
+    // (same gate as the loopback round-trip test).
+    let cfg_deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(pcfg) = broker.partition_log_config_for_test(TOPIC, 0)
+            && pcfg.remote_storage_enable
+            && pcfg.segment_bytes == 1024
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= cfg_deadline,
+            "tiered-storage topic config never propagated within 10s; saw {:?}",
+            broker.partition_log_config_for_test(TOPIC, 0)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Same 80 records as the loopback round-trip — enough to seal several
+    // 1 KiB segments and give the copy task ample segments to try to tier.
+    broker
+        .produce_records_for_test(TOPIC, 0, 80)
+        .await
+        .expect("produce records");
+
+    // Several copy-task ticks (200 ms interval × ~10 ticks).
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // The RLMM is still NotReady, so add_remote_log_segment_metadata returns
+    // NotReady and the copy task must have skipped every segment.
+    let tiered = count_remote_log_files(remote_dir.path());
+    assert!(
+        tiered == 0,
+        "expected no tiered objects while RLMM not ready, found {tiered}"
+    );
+
+    broker.shutdown().await;
+}
+
 /// The full copy→metadata→read round-trip, but the broker's only listener
 /// is SASL_PLAINTEXT/PLAIN. The RLMM's internal metadata client must
 /// authenticate as the inter-broker PLAIN principal to bootstrap the
