@@ -16,7 +16,7 @@ use bytes::{Bytes, BytesMut};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::produce_request::{PartitionProduceData, ProduceRequest};
 use crabka_protocol::owned::produce_response::{
-    PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
+    LeaderIdAndEpoch, PartitionProduceResponse, ProduceResponse, TopicProduceResponse,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::RecordsPayload;
@@ -225,6 +225,7 @@ pub(crate) async fn handle(
                     &producer_state,
                     &log_dir_status,
                     &image,
+                    broker.config.node_id,
                     &broker.metrics,
                 ))
                 .await?;
@@ -303,6 +304,7 @@ async fn process_partition(
     producer_state: &Arc<crate::producer_state::ProducerState>,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
     image: &Arc<crabka_metadata::MetadataImage>,
+    this_node_id: crabka_metadata::NodeId,
     metrics: &crate::metrics::BrokerMetrics,
 ) -> Result<PartitionProduceResponse, BrokerError> {
     let idx = part_data.index;
@@ -331,13 +333,68 @@ async fn process_partition(
         }
     };
 
-    let part = if topic_name.is_empty() {
-        None
-    } else {
-        partitions.get(topic_name, idx)
-    };
-    let Some(part) = part else {
+    // ── leadership gate (Kafka: only the LEADER accepts Produce) ──────
+    // Only the partition leader may accept a Produce. A Produce misrouted
+    // to a non-leader must be rejected so the client refreshes its
+    // metadata and re-targets — it must NOT be appended to a local
+    // follower replica (the real leader would never see those records and
+    // the follower's append would be discarded on its next truncating
+    // Fetch from the leader → silent data loss).
+    //
+    // The authoritative leader is the metadata IMAGE's `partition.leader`,
+    // the same source the Fetch handler uses for its KIP-320 / KIP-951
+    // `current_leader` hint. We deliberately do NOT gate on the broker's
+    // local `leader_partitions` / `is_coordinator_for` set: that set is
+    // recomputed on every metadata change and is transiently empty while
+    // raft leadership settles on a freshly-booted broker, so it would
+    // spuriously reject a legitimate leader's Produces (see the same
+    // hazard documented for the transactional path below). The image
+    // reflects committed leadership, so a just-elected leader's own image
+    // already names it the leader; the only residual window is a follower
+    // whose image hasn't yet caught up to a leadership change, which
+    // correctly returns NOT_LEADER (the client retries against the new
+    // leader) rather than appending to the wrong replica.
+    //
+    // Partition-level absence in the image (topic exists but this index
+    // doesn't, or the topic is unknown) maps to UNKNOWN_TOPIC_OR_PARTITION
+    // (3); presence-but-not-leader maps to NOT_LEADER_OR_FOLLOWER (6) with
+    // a `current_leader` hint (encodes at Produce v10+, KIP-951) so the
+    // client re-routes without a full Metadata round-trip.
+    if topic_name.is_empty() {
         out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
+        return Ok(out);
+    }
+    let (leader, leader_epoch) = match image.partition(topic_name, idx) {
+        // Topic exists but this partition index doesn't, or the topic is
+        // unknown cluster-wide.
+        None => {
+            out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
+            return Ok(out);
+        }
+        Some(pr) => (pr.leader, pr.leader_epoch),
+    };
+    if leader != this_node_id {
+        out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
+        out.current_leader = LeaderIdAndEpoch {
+            leader_id: i32::try_from(leader).unwrap_or(-1),
+            leader_epoch,
+            ..Default::default()
+        };
+        return Ok(out);
+    }
+
+    // We are the image-designated leader. The local replica must exist;
+    // if the local writer-actor hasn't been spun up yet (supervisor
+    // reconcile lagging the image on a just-elected leader), treat it as a
+    // transient not-leader — the client retries and the append lands once
+    // the writer is ready, rather than failing the produce outright.
+    let Some(part) = partitions.get(topic_name, idx) else {
+        out.error_code = codes::NOT_LEADER_OR_FOLLOWER;
+        out.current_leader = LeaderIdAndEpoch {
+            leader_id: i32::try_from(leader).unwrap_or(-1),
+            leader_epoch,
+            ..Default::default()
+        };
         return Ok(out);
     };
 
