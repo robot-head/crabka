@@ -604,12 +604,7 @@ impl<L: SimNodeLog> Sim<L> {
             Action::SendVoteRequest { epoch, pre_vote } => {
                 self.broadcast_vote_request(id, epoch, pre_vote);
             }
-            Action::ReplyVote {
-                to,
-                epoch,
-                granted,
-                pre_vote,
-            } => {
+            Action::ReplyVote { to, epoch, granted } => {
                 self.send(
                     id,
                     to,
@@ -617,7 +612,6 @@ impl<L: SimNodeLog> Sim<L> {
                         from: id,
                         epoch,
                         vote_granted: granted,
-                        pre_vote,
                     },
                 );
             }

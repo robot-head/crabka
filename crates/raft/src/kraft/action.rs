@@ -13,12 +13,13 @@ pub enum TimerKind {
 pub enum Action {
     /// Broadcast a Vote request to all other voters (pre- or real vote).
     SendVoteRequest { epoch: LeaderEpoch, pre_vote: bool },
-    /// Reply to a Vote request.
+    /// Reply to a Vote request. (Kafka's `VoteResponse` carries no pre-vote
+    /// flag — the candidate matches the reply to its round by its own role, so
+    /// the responder does not echo `pre_vote`.)
     ReplyVote {
         to: NodeId,
         epoch: LeaderEpoch,
         granted: bool,
-        pre_vote: bool,
     },
     /// New leader announces its epoch to all voters.
     SendBeginQuorumEpoch { epoch: LeaderEpoch },
