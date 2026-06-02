@@ -342,7 +342,9 @@ async fn contested_election_crabka_counts_jvm_prevote() {
         (3, format!("127.0.0.1:{p3}").parse().unwrap()),
     ];
 
-    // Short Crabka election timeout so the survivor re-elects promptly.
+    // Slow Crabka pre-vote retries (2s) so they sit well above the JVM's 300ms
+    // fetch-timeout — giving the JVM a quiet window between pre-votes to time out
+    // the dead leader and promote itself to Prospective (then grant the survivor).
     let dir1 = TempDir::new().unwrap();
     let dir2 = TempDir::new().unwrap();
     let mut cfg1 = crabka_controller_config(
@@ -361,8 +363,8 @@ async fn contested_election_crabka_counts_jvm_prevote() {
         cluster_id,
         dir2.path(),
     );
-    cfg1.controller_election_timeout = Duration::from_millis(300);
-    cfg2.controller_election_timeout = Duration::from_millis(300);
+    cfg1.controller_election_timeout = Duration::from_millis(2000);
+    cfg2.controller_election_timeout = Duration::from_millis(2000);
 
     let (c1, c2): (BrokerHandle, BrokerHandle) = {
         let s1 = tokio::spawn(Broker::start(cfg1));
@@ -381,8 +383,8 @@ async fn contested_election_crabka_counts_jvm_prevote() {
          controller.listener.names=CONTROLLER\n\
          listeners=CONTROLLER://0.0.0.0:{p3}\n\
          listener.security.protocol.map=CONTROLLER:PLAINTEXT\n\
-         controller.quorum.fetch.timeout.ms=1000\n\
-         controller.quorum.election.timeout.ms=8000\n\
+         controller.quorum.fetch.timeout.ms=300\n\
+         controller.quorum.election.timeout.ms=10000\n\
          log.dirs=/tmp/kraft-controller-logs\n"
     );
     let propdir = TempDir::new().unwrap();
