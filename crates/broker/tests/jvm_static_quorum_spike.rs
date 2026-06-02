@@ -429,6 +429,62 @@ async fn contested_election_crabka_counts_jvm_prevote() {
     let epoch0 = c1.controller_quorum_state_for_test().current_term;
     eprintln!("phase 1: Crabka leader={leader0} epoch={epoch0}");
 
+    // ── Phase 1b: WAIT for the JVM voter to actually join AND catch up. ──────
+    // The two Crabka nodes agree on a leader in ~1-2s, but the JVM container
+    // takes ~20-40s to boot and replicate. If we kill the leader before the JVM
+    // is a functional, caught-up voter, the lone survivor (1 of 3) has no
+    // reachable majority and stays stuck forever. So gate the kill on the JVM
+    // log showing BOTH a role transition (Follower/Leader) AND high-water-mark
+    // catch-up — the same join signals the sibling `static_mixed_jvm_crabka_quorum`
+    // test relies on. Generous deadline to tolerate a slow JVM boot.
+    let join_deadline = std::time::Instant::now() + Duration::from_secs(70);
+    let mut jvm_joined = false;
+    let mut last_jvm_log = String::new();
+    while std::time::Instant::now() < join_deadline {
+        let logs = Command::new("docker")
+            .args(["logs", CONTESTED_CONTAINER])
+            .output()
+            .expect("docker logs");
+        last_jvm_log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&logs.stdout),
+            String::from_utf8_lossy(&logs.stderr)
+        );
+        let transitioned = last_jvm_log.contains("Completed transition to FollowerState")
+            || last_jvm_log.contains("Completed transition to LeaderState");
+        let caught_up =
+            last_jvm_log.contains("finished catching up to the current high water mark");
+        if transitioned && caught_up {
+            jvm_joined = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    if !jvm_joined {
+        eprintln!("==== JVM controller logs (tail) — JVM NEVER JOINED ====");
+        for line in last_jvm_log
+            .lines()
+            .rev()
+            .take(40)
+            .collect::<Vec<_>>()
+            .iter()
+            .rev()
+        {
+            eprintln!("{line}");
+        }
+        let _ = std::fs::write("/tmp/jvm_contested.log", &last_jvm_log);
+        docker_rm(CONTESTED_CONTAINER);
+        // Best-effort cleanup of the in-process brokers; the process is dying.
+        c1.shutdown().await;
+        c2.shutdown().await;
+        panic!(
+            "JVM voter id 3 did not join the quorum (no Follower/Leader transition + HWM \
+             catch-up) within 70s — this is a pre-existing JVM-join problem, not the \
+             KIP-996 pre-vote fix. See /tmp/jvm_contested.log."
+        );
+    }
+    eprintln!("phase 1b: JVM voter joined and caught up to HWM — safe to kill the leader");
+
     // ── Phase 2: kill the Crabka leader; the survivor needs the JVM's grants. ─
     let (killed, survivor, survivor_id) = if leader0 == 1 {
         (c1, c2, 2u64)
@@ -439,14 +495,27 @@ async fn contested_election_crabka_counts_jvm_prevote() {
     eprintln!("phase 2: killed Crabka leader {leader0}; survivor is {survivor_id}");
 
     // ── Phase 3: the surviving Crabka voter must win a new election. ─────────
+    // Trace the survivor's quorum state every ~2s so a stuck recovery is legible:
+    // does `current_term` climb past epoch0 (the survivor IS promoting in some
+    // rounds) or is it truly pinned at the old epoch (no majority reachable)?
     let recover_deadline = std::time::Instant::now() + Duration::from_mins(1);
     let mut recovered = false;
+    let mut tick = 0u32;
     while std::time::Instant::now() < recover_deadline {
         let qs = survivor.controller_quorum_state_for_test();
+        if tick.is_multiple_of(4) {
+            eprintln!(
+                "[recovery t={}s] survivor {survivor_id} view: leader={:?} term={} (was {epoch0})",
+                tick / 2,
+                qs.current_leader,
+                qs.current_term,
+            );
+        }
         if qs.current_leader == Some(survivor_id) && qs.current_term > epoch0 {
             recovered = true;
             break;
         }
+        tick += 1;
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let final_qs = survivor.controller_quorum_state_for_test();
@@ -467,6 +536,21 @@ async fn contested_election_crabka_counts_jvm_prevote() {
     );
     let _ = std::fs::write("/tmp/jvm_contested.log", &log_text);
     let jvm_fatal_fault = log_text.contains("Encountered fatal fault");
+
+    // Dump the JVM log tail to stderr (pass or fail) — it shows whether the JVM
+    // granted/rejected the survivor's preVote/Vote, and whether it tried to
+    // become candidate/leader itself.
+    eprintln!("==== JVM controller logs (tail) — contested election ====");
+    for line in log_text
+        .lines()
+        .rev()
+        .take(40)
+        .collect::<Vec<_>>()
+        .iter()
+        .rev()
+    {
+        eprintln!("{line}");
+    }
 
     docker_rm(CONTESTED_CONTAINER);
     survivor.shutdown().await;
