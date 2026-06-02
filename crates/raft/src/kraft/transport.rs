@@ -854,15 +854,30 @@ pub mod wire {
         }
 
         #[test]
-        fn vote_response_decodes_without_any_tagged_field() {
-            // A JVM `VoteResponse` carries no Crabka echo tag; decode must still
-            // succeed (regression guard for the removed `PRE_VOTE_ECHO_TAG`).
-            let encoded = PeerResponse::Vote {
-                epoch: 7,
-                granted: true,
-            }
-            .encode();
-            let decoded = PeerResponse::decode_vote(&encoded).unwrap();
+        fn decodes_jvm_style_response_without_echo_tag() {
+            // A real JVM `VoteResponse` is byte-faithful Kafka v2 with no Crabka
+            // echo tag. Build one straight from the generated protocol type
+            // (bypassing `PeerResponse::Vote::encode`) and confirm `decode_vote`
+            // tolerates it — the regression guard for the removed
+            // `PRE_VOTE_ECHO_TAG`.
+            let resp = VoteResponse {
+                error_code: 0,
+                topics: vec![vote_resp::TopicData {
+                    topic_name: METADATA_TOPIC.to_string(),
+                    partitions: vec![vote_resp::PartitionData {
+                        partition_index: METADATA_PARTITION,
+                        error_code: 0,
+                        leader_id: -1,
+                        leader_epoch: epoch_to_wire(7),
+                        vote_granted: true,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let bytes = encode_body(&resp, VOTE_VERSION);
+            let decoded = PeerResponse::decode_vote(&bytes).unwrap();
             assert!(
                 decoded
                     == PeerResponse::Vote {

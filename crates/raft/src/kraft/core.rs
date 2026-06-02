@@ -1268,6 +1268,14 @@ mod tests {
         assert!(matches!(m.role(), Role::Candidate { .. }));
         assert!(!m.role().is_leader());
         assert!(actions.is_empty());
+        // The ignored stale grant must not have entered the real-vote tally:
+        // after promotion the Candidate's grant set holds only our self-vote.
+        if let Role::Candidate { granted, .. } = m.role() {
+            assert!(granted.len() == 1);
+            assert!(!granted.contains(&3));
+        } else {
+            panic!("expected Candidate");
+        }
     }
 
     #[test]
