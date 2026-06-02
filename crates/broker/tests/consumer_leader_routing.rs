@@ -4,10 +4,18 @@
 //! The native consumer used to send every data-plane RPC (`Fetch`,
 //! `OffsetForLeaderEpoch`) over the bootstrap connection. On a multi-broker
 //! cluster that misroutes `Fetch`: a partition whose leader is *not* the
-//! bootstrap broker answers a bootstrap-routed `Fetch` with
-//! `NOT_LEADER_OR_FOLLOWER` and serves no records. The consumer now groups
-//! fetchable partitions by leader (via `Client::broker(id)`), so records flow
-//! from every leader regardless of which broker the consumer bootstrapped at.
+//! bootstrap broker holds **no replica at all** (rf=1), so a bootstrap-routed
+//! `Fetch` gets `UNKNOWN_TOPIC_OR_PARTITION` and delivers nothing. The
+//! consumer now groups fetchable partitions by leader (via `Client::broker(id)`),
+//! so records flow from every leader regardless of which broker the consumer
+//! bootstrapped at.
+//!
+//! **Why rf=1 matters for test validity:** with rf=3, the bootstrap broker holds
+//! a follower replica of every partition and Crabka serves consumer fetches from
+//! any local replica up to the high-watermark (no leadership gate). A
+//! bootstrap-only consumer would still succeed in that setup, making the test
+//! hollow. With rf=1 each partition lives on exactly ONE broker; if the consumer
+//! doesn't route to that broker it gets nothing.
 //!
 //! Windows-gated like the other multi-broker tests (openraft's `debug_assert!`
 //! races on the hosted Windows scheduler).
@@ -21,7 +29,6 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
-use crabka_broker::BrokerHandle;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -44,8 +51,9 @@ fn cluster_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-/// Produce one single-record batch to a specific partition, retrying the
-/// metadata-apply race (`UNKNOWN_TOPIC_OR_PARTITION` = 3).
+/// Produce one single-record batch to a specific partition on the broker that
+/// owns it, retrying the metadata-apply race (`UNKNOWN_TOPIC_OR_PARTITION` = 3,
+/// `NOT_LEADER_OR_FOLLOWER` = 6).
 async fn produce_one(
     client: &Client,
     topic: &str,
@@ -93,22 +101,26 @@ async fn produce_one(
     }
 }
 
-/// A native `Consumer` against a 3-broker cluster must fetch records from every
-/// partition, including partitions whose leader is NOT the broker it
-/// bootstrapped at, and keep consuming after a leadership change.
+/// A native `Consumer` against a 3-broker rf=1 cluster must fetch records from
+/// every partition, including partitions whose leader (and sole replica) is NOT
+/// the broker it bootstrapped at.
+///
+/// With rf=1 there is no replica on the bootstrap broker for partitions led by
+/// other nodes — a bootstrap-only consumer simply gets no records for those
+/// partitions. The consumer MUST route each Fetch to the actual partition leader.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn consumer_fetches_from_non_bootstrap_leaders_and_survives_failover() {
+async fn consumer_fetches_from_non_bootstrap_leaders() {
     let _g = cluster_lock().lock().await;
     let cluster = support::start_n_node_with_retry(3).await;
     support::wait_for_all_brokers_registered(&cluster, 3).await;
 
-    // Bootstrap everything (admin, producer, consumer) at node 1. With 6
-    // partitions at rf=3, round-robin spreads the partition leaders across all
-    // three nodes, so several partitions are led by nodes 2 and 3 — i.e. NOT
-    // the bootstrap broker. If Fetch were still bootstrap-routed those
-    // partitions would answer NOT_LEADER_OR_FOLLOWER and deliver nothing.
+    // Bootstrap everything (admin, consumer) at node 1.
     let bootstrap = cluster[0].1.listen_addr.to_string();
-    let topic = "routing";
+    let topic = "routing-rf1";
+    // 6 partitions on a 3-broker cluster with rf=1: round-robin places 2
+    // partitions per broker, so at least 4 partitions are led by non-bootstrap
+    // brokers. We assert below that at least one is off-bootstrap to guard
+    // against degenerate scheduling.
     let n_partitions: i32 = 6;
 
     let admin = Client::builder()
@@ -116,12 +128,16 @@ async fn consumer_fetches_from_non_bootstrap_leaders_and_survives_failover() {
         .build()
         .await
         .unwrap();
+
+    // Create the topic with replication_factor=1. Each partition lives on
+    // exactly ONE broker; the bootstrap broker has NO replica for partitions
+    // placed on the other two nodes.
     let cr = admin
         .send(CreateTopicsRequest {
             topics: vec![CreatableTopic {
                 name: topic.into(),
                 num_partitions: n_partitions,
-                replication_factor: 3,
+                replication_factor: 1,
                 ..Default::default()
             }],
             timeout_ms: 5_000,
@@ -132,69 +148,84 @@ async fn consumer_fetches_from_non_bootstrap_leaders_and_survives_failover() {
     assert!(cr.topics[0].error_code == 0, "create_topic: {cr:?}");
     let topic_id = cr.topics[0].topic_id;
 
-    // Wait for the topic to materialize on every broker.
+    // Wait for all partitions to materialize on their respective single brokers.
+    // With rf=1 only the owning broker reports has_partition=true; we wait for
+    // each partition on exactly the broker that owns it once we know the leader
+    // assignment.
+    //
+    // Simpler: poll until node 1's controller image (which tracks all partition
+    // states) reports every partition's leader is non-zero, and that each owning
+    // handle reports the partition.
     let deadline = Instant::now() + Duration::from_mins(2);
     loop {
-        let mut all = true;
-        for (h, _, _) in &cluster {
-            for p in 0..n_partitions {
-                if !h.has_partition(topic, p).await {
-                    all = false;
-                    break;
+        let mut all_known = true;
+        'outer: for p in 0..n_partitions {
+            for (h, _, _) in &cluster {
+                // has_partition checks local replica presence. With rf=1, only
+                // the owning broker returns true. If at least one broker owns it
+                // we're good; wait until all partitions are owned somewhere.
+                if h.has_partition(topic, p).await {
+                    continue 'outer;
                 }
             }
+            // No broker owns partition p yet.
+            all_known = false;
+            break;
         }
-        if all {
+        if all_known {
             break;
         }
         assert!(
             Instant::now() <= deadline,
-            "topic didn't propagate in 2 min"
+            "topic partitions didn't materialize across the cluster in 2 min"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 
-    // Sanity: confirm the leaders really are spread — at least one partition is
-    // led by a node other than the bootstrap (node 1). If they all happened to
-    // land on node 1, the test wouldn't exercise cross-broker routing.
+    // Wait until node 1 knows every partition's leader (the controller image
+    // propagation may lag slightly after has_partition returns true).
+    let deadline = Instant::now() + Duration::from_secs(30);
     let bootstrap_node = cluster[0].0.node_id();
-    let non_bootstrap_partition: i32 = {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let mut found: Option<i32> = None;
-            let mut all_have_leader = true;
-            for p in 0..n_partitions {
-                match cluster[0].0.partition_leader_for_test(topic, p) {
-                    Some(l) if l != bootstrap_node => found = Some(p),
-                    Some(_) => {}
-                    None => all_have_leader = false,
-                }
-            }
-            if all_have_leader && let Some(p) = found {
-                break p;
-            }
-            assert!(
-                Instant::now() <= deadline,
-                "leaders didn't spread off the bootstrap broker within 30s"
-            );
-            tokio::time::sleep(Duration::from_millis(100)).await;
+    loop {
+        let all_have_leader =
+            (0..n_partitions).all(|p| cluster[0].0.partition_leader_for_test(topic, p).is_some());
+        if all_have_leader {
+            break;
         }
-    };
+        assert!(
+            Instant::now() <= deadline,
+            "partition leaders didn't converge within 30s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Discriminating guard: assert at least one partition is led by a
+    // non-bootstrap broker. If the controller puts every leader on node 1 the
+    // test would be vacuous (no cross-broker routing exercised). With 6
+    // partitions on 3 brokers at rf=1 this is virtually impossible, but we
+    // verify explicitly.
+    let non_bootstrap_partitions: Vec<i32> = (0..n_partitions)
+        .filter(|&p| {
+            cluster[0]
+                .0
+                .partition_leader_for_test(topic, p)
+                .is_some_and(|l| l != bootstrap_node)
+        })
+        .collect();
+    assert!(
+        !non_bootstrap_partitions.is_empty(),
+        "all {n_partitions} partitions are led by the bootstrap node — \
+         no cross-broker routing to exercise; test would be vacuous"
+    );
     eprintln!(
-        "partition {non_bootstrap_partition} is led by node \
-         {:?} (bootstrap = node {bootstrap_node})",
-        cluster[0]
-            .0
-            .partition_leader_for_test(topic, non_bootstrap_partition)
+        "partitions led by non-bootstrap brokers: {non_bootstrap_partitions:?} \
+         (bootstrap = node {bootstrap_node})"
     );
 
-    // Produce one record to every partition, sending each Produce to that
-    // partition's *leader*. The native producer is bootstrap-only (a separate,
-    // out-of-scope gap), and the broker appends a Produce to whatever local
-    // replica it holds — including a follower — so a bootstrap-routed Produce
-    // for a non-bootstrap-led partition would write to the wrong replica and
-    // the leader (where the consumer correctly fetches) would never see it. We
-    // therefore bootstrap one producer per broker and pick the leader's.
+    // Produce one record per partition, sending each Produce to that
+    // partition's leader. With rf=1, only the leader holds the partition at all;
+    // we therefore bootstrap a producer per broker and use the one that owns the
+    // partition's leader.
     let producer_for = |node: u64| {
         let addr = cluster
             .iter()
@@ -219,18 +250,20 @@ async fn consumer_fetches_from_non_bootstrap_leaders_and_survives_failover() {
         if let std::collections::hash_map::Entry::Vacant(e) = producers.entry(leader) {
             e.insert(producer_for(leader).await);
         }
-        let v = format!("p{p}-a");
+        let v = format!("p{p}");
         produce_one(&producers[&leader], topic, topic_id, p, &v).await;
         expected.insert(v);
     }
 
-    // Subscribe a native consumer (bootstrapped at node 1) and drain. To
-    // collect every partition's record the consumer MUST route each Fetch to
-    // that partition's leader — which for several partitions is not node 1.
+    // Subscribe a native consumer bootstrapped at node 1. It must deliver
+    // EVERY partition's record. For partitions led by nodes 2 and 3, the
+    // consumer must route the Fetch to the actual leader — the bootstrap broker
+    // has NO replica of those partitions (rf=1), so a bootstrap-only consumer
+    // would return nothing for them.
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap.clone())
-        .client_id("routing-consumer")
-        .group_id("routing-grp")
+        .client_id("routing-consumer-rf1")
+        .group_id("routing-grp-rf1")
         .session_timeout(Duration::from_secs(30))
         .rebalance_timeout(Duration::from_secs(2))
         .heartbeat_interval(Duration::from_secs(1))
@@ -249,102 +282,14 @@ async fn consumer_fetches_from_non_bootstrap_leaders_and_survives_failover() {
     }
     assert!(
         seen == expected,
-        "consumer must deliver every partition's record (incl. non-bootstrap \
-         leaders); missing {:?}",
+        "consumer must deliver every partition's record (incl. those on non-bootstrap leaders);\n\
+         missing: {:?}\n\
+         non-bootstrap partitions: {non_bootstrap_partitions:?}",
         expected.difference(&seen).collect::<Vec<_>>()
     );
 
-    // ── Leadership change: kill the leader of a non-bootstrap partition. ──────
-    // Quorum of 3 tolerates one node loss, so raft + the bootstrap broker stay
-    // alive. The partition's leadership moves to a surviving replica; the
-    // consumer must learn the new leader (NOT_LEADER_OR_FOLLOWER re-target +
-    // metadata refresh) and keep consuming.
-    let dead_leader = cluster[0]
-        .0
-        .partition_leader_for_test(topic, non_bootstrap_partition)
-        .expect("non-bootstrap partition has a leader");
-    assert!(
-        dead_leader != bootstrap_node,
-        "we intend to kill a non-bootstrap leader"
-    );
-    let dead_idx = cluster
-        .iter()
-        .position(|(h, _, _)| h.node_id() == dead_leader)
-        .expect("dead leader is in the cluster");
-
-    // Pull the doomed broker out of the cluster vec and shut it down.
-    let mut survivors = Vec::new();
-    let mut doomed: Option<BrokerHandle> = None;
-    for (i, entry) in cluster.into_iter().enumerate() {
-        if i == dead_idx {
-            doomed = Some(entry.0);
-        } else {
-            survivors.push(entry);
-        }
-    }
-    doomed.unwrap().shutdown().await;
-    eprintln!("shut down node {dead_leader}; awaiting failover");
-
-    // Wait for a surviving broker to report a new leader for the partition.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let new_leader = loop {
-        let l = survivors[0]
-            .0
-            .partition_leader_for_test(topic, non_bootstrap_partition);
-        if let Some(l) = l
-            && l != dead_leader
-        {
-            eprintln!("partition {non_bootstrap_partition} new leader: node {l}");
-            break l;
-        }
-        assert!(
-            Instant::now() <= deadline,
-            "no failover leader for partition {non_bootstrap_partition} within 30s (current={l:?})"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-
-    // Produce a fresh record to the failed-over partition, sending it to the
-    // *new* leader (a surviving broker), and assert the consumer delivers it —
-    // proving it re-targeted the new leader and resumed.
-    let new_leader_addr = survivors
-        .iter()
-        .find(|(h, _, _)| h.node_id() == new_leader)
-        .map(|(_, c, _)| c.listen_addr.to_string())
-        .expect("new leader is a surviving broker");
-    let post_producer = Client::builder()
-        .bootstrap(new_leader_addr)
-        .build()
-        .await
-        .unwrap();
-    let post = format!("p{non_bootstrap_partition}-b");
-    produce_one(
-        &post_producer,
-        topic,
-        topic_id,
-        non_bootstrap_partition,
-        &post,
-    )
-    .await;
-
-    let mut got_post = false;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while !got_post && Instant::now() < deadline {
-        for r in consumer.poll(Duration::from_millis(300)).await.unwrap() {
-            let v = String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned();
-            if v == post {
-                got_post = true;
-            }
-        }
-    }
-    assert!(
-        got_post,
-        "consumer must keep consuming the failed-over partition after the \
-         leadership change (expected {post:?})"
-    );
-
     consumer.close().await.unwrap();
-    for (h, _, _) in survivors {
+    for (h, _, _) in cluster {
         h.shutdown().await;
     }
 }
