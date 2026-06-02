@@ -32,6 +32,8 @@ pub enum Key {
     NextGen(crate::coordinator::unified::persistence_next_gen::NextGenKey),
     /// KIP-932 share-group record types (versions 9–13).
     Share(crate::coordinator::unified::share::persistence::ShareGroupKey),
+    /// KIP-1071 streams-group record types (versions 15–21).
+    Streams(crate::coordinator::unified::streams::persistence::StreamsGroupKey),
 }
 
 pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
@@ -61,6 +63,9 @@ pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
         )),
         9..=14 => Ok(Key::Share(
             crate::coordinator::unified::share::persistence::parse_share_key(version, buf)?,
+        )),
+        15..=21 => Ok(Key::Streams(
+            crate::coordinator::unified::streams::persistence::parse_streams_key(version, buf)?,
         )),
         _ => Err(BrokerError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("unknown __consumer_offsets key version"),
@@ -403,7 +408,7 @@ mod tests {
                 assert!(topic == "topic");
                 assert!(partition == 7);
             }
-            k @ (Key::GroupMetadata { .. } | Key::NextGen(_) | Key::Share(_)) => {
+            k @ (Key::GroupMetadata { .. } | Key::NextGen(_) | Key::Share(_) | Key::Streams(_)) => {
                 panic!("expected OffsetCommit, got {k:?}")
             }
         }
@@ -414,7 +419,7 @@ mod tests {
         let key = GroupMetadataValue::encode_key("grp");
         match parse_key(&key).unwrap() {
             Key::GroupMetadata { group_id } => assert!(group_id == "grp"),
-            k @ (Key::OffsetCommit { .. } | Key::NextGen(_) | Key::Share(_)) => {
+            k @ (Key::OffsetCommit { .. } | Key::NextGen(_) | Key::Share(_) | Key::Streams(_)) => {
                 panic!("expected GroupMetadata, got {k:?}")
             }
         }

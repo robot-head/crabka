@@ -207,6 +207,7 @@ fn apply_record(
         Key::Share(share_key) => {
             apply_share_record(coordinator, share_key, value_bytes)?;
         }
+        Key::Streams(streams_key) => apply_streams_record(coordinator, streams_key, value_bytes)?,
     }
     Ok(())
 }
@@ -327,6 +328,74 @@ fn apply_share_record(
     Ok(())
 }
 
+fn apply_streams_record(
+    coordinator: &Arc<GroupCoordinator>,
+    key: crate::coordinator::unified::streams::persistence::StreamsGroupKey,
+    value_bytes: &bytes::Bytes,
+) -> Result<(), BrokerError> {
+    use crate::coordinator::unified::streams::persistence as sp;
+    match key {
+        sp::StreamsGroupKey::GroupMetadata { group_id } => {
+            coordinator.mark_streams(&group_id);
+            let v = sp::StreamsGroupMetadataValue::decode(value_bytes)?;
+            coordinator.replay_streams_group_metadata(&group_id, v.epoch);
+        }
+        sp::StreamsGroupKey::MemberMetadata {
+            group_id,
+            member_id,
+        } => {
+            coordinator.mark_streams(&group_id);
+            coordinator.replay_streams_member_metadata(
+                &group_id,
+                &member_id,
+                sp::StreamsGroupMemberMetadataValue::decode(value_bytes)?,
+            );
+        }
+        sp::StreamsGroupKey::Topology { group_id } => {
+            coordinator.mark_streams(&group_id);
+            coordinator.replay_streams_topology(
+                &group_id,
+                sp::StreamsGroupTopologyValue::decode(value_bytes)?,
+            );
+        }
+        sp::StreamsGroupKey::PartitionMetadata { group_id } => {
+            coordinator.mark_streams(&group_id);
+            coordinator.replay_streams_partition_metadata(
+                &group_id,
+                sp::StreamsGroupPartitionMetadataValue::decode(value_bytes)?,
+            );
+        }
+        sp::StreamsGroupKey::TargetAssignmentMetadata { group_id } => {
+            coordinator.mark_streams(&group_id);
+            let v = sp::StreamsGroupTargetAssignmentMetadataValue::decode(value_bytes)?;
+            coordinator.replay_streams_target_assignment_metadata(&group_id, v.assignment_epoch);
+        }
+        sp::StreamsGroupKey::TargetAssignmentMember {
+            group_id,
+            member_id,
+        } => {
+            coordinator.mark_streams(&group_id);
+            coordinator.replay_streams_target_assignment_member(
+                &group_id,
+                &member_id,
+                sp::StreamsGroupTargetAssignmentMemberValue::decode(value_bytes)?,
+            );
+        }
+        sp::StreamsGroupKey::CurrentMemberAssignment {
+            group_id,
+            member_id,
+        } => {
+            coordinator.mark_streams(&group_id);
+            coordinator.replay_streams_current_member_assignment(
+                &group_id,
+                &member_id,
+                sp::StreamsGroupCurrentMemberAssignmentValue::decode(value_bytes)?,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Apply a tombstone (record with `value = None`). Classic offset-commit /
 /// group-metadata tombstones are no-ops during replay (preserved from the
 /// classic coordinator, whose in-memory snapshot is rebuilt fresh on restart);
@@ -336,6 +405,7 @@ fn apply_tombstone(coordinator: &Arc<GroupCoordinator>, key: Key) {
     match key {
         Key::NextGen(ng_key) => coordinator.replay_next_gen_tombstone(&ng_key),
         Key::Share(share_key) => coordinator.replay_share_tombstone(&share_key),
+        Key::Streams(streams_key) => coordinator.replay_streams_tombstone(&streams_key),
         Key::OffsetCommit { .. } | Key::GroupMetadata { .. } => {}
     }
 }
@@ -487,6 +557,7 @@ mod tests {
             crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             Arc::new(EmptyMeta),
             Arc::new(InMemoryOffsetsLog::default()),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         ));
 
         let tid = Uuid([9; 16]);
@@ -550,6 +621,106 @@ mod tests {
         assert!(!seed.members.contains_key("m1"), "tombstone removed member");
     }
 
+    /// Replaying a streams-group's records (group metadata, member metadata,
+    /// current assignment) must lock the group type to Streams and reconstruct
+    /// the cached seed; a member tombstone scrubs that member from the seed.
+    #[tokio::test]
+    async fn streams_group_records_replay_into_seed() {
+        use crate::coordinator::unified::GroupCoordinator;
+        use crate::coordinator::unified::offsets_log::fake::InMemoryOffsetsLog;
+        use crate::coordinator::unified::reconciler::ReconcileInput;
+        use crate::coordinator::unified::streams::persistence as sp;
+        use std::collections::BTreeMap;
+
+        #[derive(Debug)]
+        struct EmptyMeta;
+        impl crate::coordinator::unified::actor::MetadataProvider for EmptyMeta {
+            fn snapshot(&self) -> ReconcileInput {
+                ReconcileInput::default()
+            }
+        }
+
+        let coord = Arc::new(GroupCoordinator::new(
+            crate::coordinator::unified::config::NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            Arc::new(EmptyMeta),
+            Arc::new(InMemoryOffsetsLog::default()),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        ));
+
+        // Drive the same path bootstrap takes: parse_key on the encoded key,
+        // then apply_record on the value bytes.
+        let recs: Vec<(bytes::Bytes, bytes::Bytes)> = vec![
+            (
+                sp::encode_streams_key(&sp::StreamsGroupKey::GroupMetadata {
+                    group_id: "stg".into(),
+                }),
+                sp::StreamsGroupMetadataValue { epoch: 7 }.encode(),
+            ),
+            (
+                sp::encode_streams_key(&sp::StreamsGroupKey::MemberMetadata {
+                    group_id: "stg".into(),
+                    member_id: "m1".into(),
+                }),
+                sp::StreamsGroupMemberMetadataValue {
+                    instance_id: None,
+                    rack_id: None,
+                    client_id: "c1".into(),
+                    client_host: "/127.0.0.1".into(),
+                    process_id: "p1".into(),
+                    user_endpoint: None,
+                    client_tags: vec![],
+                    rebalance_timeout_ms: 60_000,
+                    topology_epoch: 2,
+                }
+                .encode(),
+            ),
+            (
+                sp::encode_streams_key(&sp::StreamsGroupKey::CurrentMemberAssignment {
+                    group_id: "stg".into(),
+                    member_id: "m1".into(),
+                }),
+                sp::StreamsGroupCurrentMemberAssignmentValue {
+                    member_epoch: 7,
+                    previous_member_epoch: 6,
+                    state: 0,
+                    active: BTreeMap::from([("0".to_string(), vec![0, 1])]),
+                    standby: BTreeMap::new(),
+                    warmup: BTreeMap::new(),
+                    active_pending_revocation: BTreeMap::new(),
+                }
+                .encode(),
+            ),
+        ];
+        let batch = RecordBatch::default();
+        let mut acc = Replayed::default();
+        for (k, v) in recs {
+            let key = persistence::parse_key(&k).unwrap();
+            apply_record(&coord, &mut acc, key, &v, &batch).unwrap();
+        }
+
+        // Type locked to Streams + seed reconstructed.
+        assert!(coord.group_type("stg") == Some(crate::coordinator::unified::GroupType::Streams));
+        let seed = coord.cached_streams_seed("stg").expect("seed cached");
+        assert!(seed.group_epoch == 7);
+        assert!(seed.members.contains_key("m1"));
+        assert!(seed.current_per_member["m1"].member_epoch == 7);
+
+        // A member tombstone scrubs the member from the seed.
+        let tomb_key = persistence::parse_key(&sp::encode_streams_key(
+            &sp::StreamsGroupKey::MemberMetadata {
+                group_id: "stg".into(),
+                member_id: "m1".into(),
+            },
+        ))
+        .unwrap();
+        apply_tombstone(&coord, tomb_key);
+        let seed = coord
+            .cached_streams_seed("stg")
+            .expect("seed still present");
+        assert!(!seed.members.contains_key("m1"), "tombstone removed member");
+    }
+
     fn test_coordinator(
         controller: &Arc<dyn crate::metadata_source::MetadataSource>,
         partitions: &Arc<PartitionRegistry>,
@@ -564,6 +735,7 @@ mod tests {
                 controller: controller.clone(),
             }),
             offsets_log,
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         ))
     }
 

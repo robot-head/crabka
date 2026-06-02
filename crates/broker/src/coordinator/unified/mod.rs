@@ -17,6 +17,7 @@ pub(crate) mod persistence;
 pub mod persistence_next_gen;
 pub mod reconciler;
 pub mod share;
+pub mod streams;
 
 use std::sync::Arc;
 
@@ -29,6 +30,8 @@ use group::Group;
 use offsets_log::OffsetsLog;
 use share::actor::{ShareGroupActorHandle, ShareGroupActorMessage};
 use share::config::ShareGroupConfig;
+use streams::actor::{StreamsGroupActorHandle, StreamsGroupActorMessage};
+use streams::config::StreamsGroupConfig;
 
 use crate::coordinator::{DeleteGroupError, GroupSnapshot};
 
@@ -41,6 +44,7 @@ pub enum GroupType {
     Classic,
     NextGen,
     Share,
+    Streams,
 }
 
 #[derive(Debug)]
@@ -74,6 +78,34 @@ pub struct GroupCoordinator {
     /// pure-coordinator unit tests, where the lifecycle hook is a no-op.
     pub(crate) share_persister:
         std::sync::OnceLock<Arc<crate::share_coordinator::persister_client::SharePersister>>,
+
+    // ── KIP-1071 streams groups ──────────────────────────────────────────
+    pub streams_config: Arc<StreamsGroupConfig>,
+    /// Per-`group_id` streams-group actor handles (KIP-1071).
+    pub streams_groups: Arc<DashMap<String, Arc<StreamsGroupActorHandle>>>,
+    /// Bootstrap-time streams-group accumulator; drained by `finalize_bootstrap`.
+    pub streams_seeds: Arc<DashMap<String, StreamsGroupSeed>>,
+    /// Last-known-good streams-group state, the streams analogue of
+    /// `seeds_cache`.
+    pub streams_seeds_cache: Arc<DashMap<String, StreamsGroupSeed>>,
+    /// KIP-1071 metadata authority. Set once in `Broker::start`. Per-group
+    /// streams actors read it (via [`Self::metadata_source`]) for the full
+    /// `MetadataImage` (topology resolution + internal-topic creation). `None`
+    /// in the pure-coordinator unit tests, where reconcile no-ops to `NotReady`.
+    pub(crate) metadata_source: std::sync::OnceLock<MetadataSourceHandle>,
+}
+
+/// `Debug`-able wrapper around an `Arc<dyn MetadataSource>` so it can live in
+/// the `#[derive(Debug)]` [`GroupCoordinator`]. The trait object itself is not
+/// `Debug`; this prints an opaque placeholder.
+#[derive(Clone)]
+pub(crate) struct MetadataSourceHandle(pub(crate) Arc<dyn crate::metadata_source::MetadataSource>);
+
+impl std::fmt::Debug for MetadataSourceHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MetadataSourceHandle")
+            .finish_non_exhaustive()
+    }
 }
 
 impl GroupCoordinator {
@@ -82,6 +114,7 @@ impl GroupCoordinator {
         share_config: ShareGroupConfig,
         metadata: Arc<dyn MetadataProvider>,
         offsets_log: Arc<dyn OffsetsLog>,
+        streams_config: StreamsGroupConfig,
     ) -> Self {
         Self {
             config: Arc::new(config),
@@ -96,6 +129,11 @@ impl GroupCoordinator {
             seeds_cache: Arc::new(DashMap::new()),
             share_seeds_cache: Arc::new(DashMap::new()),
             share_persister: std::sync::OnceLock::new(),
+            streams_config: Arc::new(streams_config),
+            streams_groups: Arc::new(DashMap::new()),
+            streams_seeds: Arc::new(DashMap::new()),
+            streams_seeds_cache: Arc::new(DashMap::new()),
+            metadata_source: std::sync::OnceLock::new(),
         }
     }
 
@@ -116,6 +154,22 @@ impl GroupCoordinator {
         &self,
     ) -> Option<&Arc<crate::share_coordinator::persister_client::SharePersister>> {
         self.share_persister.get()
+    }
+
+    /// Install the KIP-1071 metadata source. Called once in `Broker::start`. A
+    /// second call is silently ignored (the `OnceLock` keeps the first value).
+    pub(crate) fn set_metadata_source(&self, src: Arc<dyn crate::metadata_source::MetadataSource>) {
+        let _ = self.metadata_source.set(MetadataSourceHandle(src));
+    }
+
+    /// The installed metadata source, if any. `None` in unit tests that
+    /// construct a bare `GroupCoordinator`; streams reconcile then no-ops to
+    /// `NotReady`.
+    #[must_use]
+    pub(crate) fn metadata_source(
+        &self,
+    ) -> Option<Arc<dyn crate::metadata_source::MetadataSource>> {
+        self.metadata_source.get().map(|h| h.0.clone())
     }
 
     /// Replace the cached seed for `group_id` with `seed`. Called by the
@@ -157,6 +211,12 @@ impl GroupCoordinator {
             .or_insert(GroupType::Share);
     }
 
+    pub fn mark_streams(&self, group_id: &str) {
+        self.group_types
+            .entry(group_id.into())
+            .or_insert(GroupType::Streams);
+    }
+
     /// Replace the cached share-group seed for `group_id`. Called by the
     /// share actor after every successful `OffsetsLog::append`.
     pub fn update_share_cache(&self, group_id: &str, seed: ShareGroupSeed) {
@@ -167,6 +227,20 @@ impl GroupCoordinator {
     #[must_use]
     pub fn cached_share_seed(&self, group_id: &str) -> Option<ShareGroupSeed> {
         self.share_seeds_cache
+            .get(group_id)
+            .map(|e| e.value().clone())
+    }
+
+    /// Replace the cached streams-group seed for `group_id`. Called by the
+    /// streams actor after every successful `OffsetsLog::append`.
+    pub fn update_streams_cache(&self, group_id: &str, seed: StreamsGroupSeed) {
+        self.streams_seeds_cache.insert(group_id.into(), seed);
+    }
+
+    /// Fetch the most recently cached streams-group seed for `group_id`, if any.
+    #[must_use]
+    pub fn cached_streams_seed(&self, group_id: &str) -> Option<StreamsGroupSeed> {
+        self.streams_seeds_cache
             .get(group_id)
             .map(|e| e.value().clone())
     }
@@ -290,6 +364,54 @@ impl GroupCoordinator {
     #[must_use]
     pub fn share_group_ids(&self) -> Vec<String> {
         self.share_groups.iter().map(|e| e.key().clone()).collect()
+    }
+
+    // ── KIP-1071 streams-group registry ──────────────────────────────────
+
+    #[must_use]
+    pub fn get_or_create_streams(self: &Arc<Self>, group_id: &str) -> Arc<StreamsGroupActorHandle> {
+        if let Some(h) = self.streams_groups.get(group_id) {
+            // Dead-actor detection: a closed mpsc sender means the actor exited
+            // (typically after a log-write failure). Drop the entry and respawn.
+            if !h.value().tx.is_closed() {
+                return h.value().clone();
+            }
+            drop(h);
+            self.streams_groups.remove(group_id);
+        }
+        let h = Arc::new(StreamsGroupActorHandle::spawn(
+            group_id.into(),
+            self.streams_config.clone(),
+            self.offsets_log.clone(),
+            self.metadata_source(),
+            self.clone(),
+        ));
+        let inserted = self
+            .streams_groups
+            .entry(group_id.into())
+            .or_insert(h)
+            .value()
+            .clone();
+        if let Some(seed) = self.cached_streams_seed(group_id) {
+            let _ = inserted.tx.try_send(StreamsGroupActorMessage::Seed(seed));
+        }
+        inserted
+    }
+
+    #[must_use]
+    pub fn find_streams(&self, group_id: &str) -> Option<Arc<StreamsGroupActorHandle>> {
+        self.streams_groups.get(group_id).map(|e| e.value().clone())
+    }
+
+    /// Snapshot the ids of every live streams group (KIP-1071). Mirrors
+    /// [`share_group_ids`](Self::share_group_ids); used by `ListGroups` to emit
+    /// `group_type="streams"` entries without a per-group `Describe` hop.
+    #[must_use]
+    pub fn streams_group_ids(&self) -> Vec<String> {
+        self.streams_groups
+            .iter()
+            .map(|e| e.key().clone())
+            .collect()
     }
 
     /// Ids of every live next-gen (KIP-848) consumer group actor. Mirrors
@@ -635,6 +757,126 @@ impl GroupCoordinator {
         }
     }
 
+    // ── KIP-1071 streams-group replay ─────────────────────────────────────
+
+    pub fn replay_streams_group_metadata(&self, group_id: &str, epoch: i32) {
+        {
+            let mut seed = self.streams_seeds.entry(group_id.into()).or_default();
+            seed.group_epoch = epoch;
+        }
+        let mut cached = self.streams_seeds_cache.entry(group_id.into()).or_default();
+        cached.group_epoch = epoch;
+    }
+    pub fn replay_streams_member_metadata(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        v: streams::persistence::StreamsGroupMemberMetadataValue,
+    ) {
+        {
+            let mut seed = self.streams_seeds.entry(group_id.into()).or_default();
+            seed.members.insert(member_id.into(), v.clone());
+        }
+        let mut cached = self.streams_seeds_cache.entry(group_id.into()).or_default();
+        cached.members.insert(member_id.into(), v);
+    }
+    pub fn replay_streams_topology(
+        &self,
+        group_id: &str,
+        v: streams::persistence::StreamsGroupTopologyValue,
+    ) {
+        {
+            let mut seed = self.streams_seeds.entry(group_id.into()).or_default();
+            seed.topology = Some(v.clone());
+        }
+        let mut cached = self.streams_seeds_cache.entry(group_id.into()).or_default();
+        cached.topology = Some(v);
+    }
+    pub fn replay_streams_partition_metadata(
+        &self,
+        group_id: &str,
+        v: streams::persistence::StreamsGroupPartitionMetadataValue,
+    ) {
+        {
+            let mut seed = self.streams_seeds.entry(group_id.into()).or_default();
+            seed.partition_metadata = Some(v.clone());
+        }
+        let mut cached = self.streams_seeds_cache.entry(group_id.into()).or_default();
+        cached.partition_metadata = Some(v);
+    }
+    pub fn replay_streams_target_assignment_metadata(&self, group_id: &str, assignment_epoch: i32) {
+        {
+            let mut seed = self.streams_seeds.entry(group_id.into()).or_default();
+            seed.assignment_epoch = assignment_epoch;
+        }
+        let mut cached = self.streams_seeds_cache.entry(group_id.into()).or_default();
+        cached.assignment_epoch = assignment_epoch;
+    }
+    pub fn replay_streams_target_assignment_member(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        v: streams::persistence::StreamsGroupTargetAssignmentMemberValue,
+    ) {
+        {
+            let mut seed = self.streams_seeds.entry(group_id.into()).or_default();
+            seed.target_per_member.insert(member_id.into(), v.clone());
+        }
+        let mut cached = self.streams_seeds_cache.entry(group_id.into()).or_default();
+        cached.target_per_member.insert(member_id.into(), v);
+    }
+    pub fn replay_streams_current_member_assignment(
+        &self,
+        group_id: &str,
+        member_id: &str,
+        v: streams::persistence::StreamsGroupCurrentMemberAssignmentValue,
+    ) {
+        {
+            let mut seed = self.streams_seeds.entry(group_id.into()).or_default();
+            seed.current_per_member.insert(member_id.into(), v.clone());
+        }
+        let mut cached = self.streams_seeds_cache.entry(group_id.into()).or_default();
+        cached.current_per_member.insert(member_id.into(), v);
+    }
+
+    /// Apply a tombstone for a streams-group key. Removes the corresponding
+    /// entry from both `streams_seeds` and `streams_seeds_cache`.
+    pub fn replay_streams_tombstone(&self, key: &streams::persistence::StreamsGroupKey) {
+        use streams::persistence::StreamsGroupKey as K;
+        let group_id = match key {
+            K::GroupMetadata { group_id }
+            | K::MemberMetadata { group_id, .. }
+            | K::Topology { group_id }
+            | K::PartitionMetadata { group_id }
+            | K::TargetAssignmentMetadata { group_id }
+            | K::TargetAssignmentMember { group_id, .. }
+            | K::CurrentMemberAssignment { group_id, .. } => group_id.as_str(),
+        };
+        let scrub = |seed: &mut StreamsGroupSeed| match key {
+            K::GroupMetadata { .. } => seed.group_epoch = 0,
+            K::MemberMetadata { member_id, .. } => {
+                seed.members.remove(member_id);
+            }
+            K::Topology { .. } => seed.topology = None,
+            K::PartitionMetadata { .. } => seed.partition_metadata = None,
+            K::TargetAssignmentMetadata { .. } => seed.assignment_epoch = 0,
+            K::TargetAssignmentMember { member_id, .. } => {
+                seed.target_per_member.remove(member_id);
+            }
+            K::CurrentMemberAssignment { member_id, .. } => {
+                seed.current_per_member.remove(member_id);
+            }
+        };
+        {
+            if let Some(mut s) = self.streams_seeds.get_mut(group_id) {
+                scrub(s.value_mut());
+            }
+        }
+        if let Some(mut s) = self.streams_seeds_cache.get_mut(group_id) {
+            scrub(s.value_mut());
+        }
+    }
+
     pub fn finalize_bootstrap(self: &Arc<Self>) {
         let group_ids: Vec<String> = self.seeds.iter().map(|e| e.key().clone()).collect();
         for gid in group_ids {
@@ -649,6 +891,13 @@ impl GroupCoordinator {
             if let Some((_, seed)) = self.share_seeds.remove(&gid) {
                 let handle = self.get_or_create_share(&gid);
                 let _ = handle.tx.try_send(ShareGroupActorMessage::Seed(seed));
+            }
+        }
+        let streams_ids: Vec<String> = self.streams_seeds.iter().map(|e| e.key().clone()).collect();
+        for gid in streams_ids {
+            if let Some((_, seed)) = self.streams_seeds.remove(&gid) {
+                let handle = self.get_or_create_streams(&gid);
+                let _ = handle.tx.try_send(StreamsGroupActorMessage::Seed(seed));
             }
         }
     }
@@ -741,6 +990,27 @@ pub struct ShareGroupSeed {
     pub state_partition_metadata: share::persistence::ShareGroupStatePartitionMetadataValue,
 }
 
+/// Hydration seed for a [`streams::actor::StreamsGroupActorHandle`] (KIP-1071).
+/// All fields come from streams-group records decoded out of
+/// `__consumer_offsets`.
+#[derive(Debug, Default, Clone)]
+pub struct StreamsGroupSeed {
+    pub group_epoch: i32,
+    pub assignment_epoch: i32,
+    pub topology: Option<streams::persistence::StreamsGroupTopologyValue>,
+    pub partition_metadata: Option<streams::persistence::StreamsGroupPartitionMetadataValue>,
+    pub members:
+        std::collections::HashMap<String, streams::persistence::StreamsGroupMemberMetadataValue>,
+    pub target_per_member: std::collections::HashMap<
+        String,
+        streams::persistence::StreamsGroupTargetAssignmentMemberValue,
+    >,
+    pub current_per_member: std::collections::HashMap<
+        String,
+        streams::persistence::StreamsGroupCurrentMemberAssignmentValue,
+    >,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,6 +1033,7 @@ mod tests {
             ShareGroupConfig::default(),
             metadata,
             Arc::new(InMemoryOffsetsLog::default()),
+            StreamsGroupConfig::default(),
         ))
     }
 

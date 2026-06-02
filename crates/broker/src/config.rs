@@ -329,6 +329,9 @@ pub struct BrokerConfig {
     /// KIP-932 share-group configuration.
     pub share_group: Box<crate::coordinator::unified::share::config::ShareGroupConfig>,
 
+    /// KIP-1071 streams-group (Streams rebalance protocol) configuration.
+    pub streams_group: Box<crate::coordinator::unified::streams::config::StreamsGroupConfig>,
+
     /// KIP-932 share-coordinator (persister) configuration. Controls the
     /// `__share_group_state` internal topic geometry and snapshot folding.
     pub share_coordinator: Box<crate::share_coordinator::config::ShareCoordinatorConfig>,
@@ -585,6 +588,9 @@ impl BrokerConfig {
             share_group: Box::new(
                 crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             ),
+            streams_group: Box::new(
+                crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+            ),
             share_coordinator: Box::new(
                 crate::share_coordinator::config::ShareCoordinatorConfig::default(),
             ),
@@ -840,6 +846,9 @@ impl Default for BrokerConfig {
             ),
             share_group: Box::new(
                 crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            ),
+            streams_group: Box::new(
+                crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
             ),
             share_coordinator: Box::new(
                 crate::share_coordinator::config::ShareCoordinatorConfig::default(),

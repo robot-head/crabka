@@ -1448,6 +1448,7 @@ impl Broker {
                 controller: controller.clone(),
             }),
             offsets_log,
+            config.streams_group.as_ref().clone(),
         ));
         let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
@@ -1511,6 +1512,7 @@ impl Broker {
             ),
         );
         group_coordinator.set_share_persister(share_persister.clone());
+        group_coordinator.set_metadata_source(controller.clone());
 
         // 4a'''. Share-partition leader manager (KIP-932 Slice C): owns the
         //        in-memory acquisition state machines for the (group, topic,

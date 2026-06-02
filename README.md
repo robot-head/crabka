@@ -70,6 +70,12 @@ What works today:
   `ShareAcknowledge` RPCs, the share-state coordinator and `__share_group_state`
   topic, the share-group admin offset APIs, and a native share consumer —
   validated against the JVM share-group client.
+- Streams rebalance protocol (KIP-1071): broker-side task assignment for Kafka
+  Streams groups — the `StreamsGroupHeartbeat` / `StreamsGroupDescribe` RPCs,
+  topology ingestion with internal repartition/changelog topic auto-creation,
+  active/standby/warmup task assignment via the highly-available assignor with
+  changelog catch-up, `__consumer_offsets` persistence, and the `streams.version`
+  feature gate. Live classic↔streams group migration is not yet wired.
 - TLS / mTLS, SASL (PLAIN, SCRAM-256/512, OAUTHBEARER with JWKS / signed-JWT
   and opaque-token introspection, GSSAPI/Kerberos), SASL re-authentication
   (KIP-368), delegation tokens (KIP-48 / KIP-373), ACL authorization, the OPA
@@ -86,8 +92,10 @@ the pluggable server-side assignor surface, and `subscribed_topic_regex` are all
 in tree — but live classic↔next-gen group migration is not yet wired (the
 conversion predicates exist and are unit-tested; the triggers are not). Tiered
 storage (KIP-405) is partial: the `crabka-remote-storage-topic` (KIP-405
-production RLMM) crate is in tree but not yet wired into the broker. A Kafka
-Connect / Streams / MirrorMaker equivalent is not yet implemented. ZooKeeper mode
+production RLMM) crate is in tree but not yet wired into the broker. The
+broker-side Streams rebalance protocol (KIP-1071) is implemented and serves real
+JVM Streams-group admin clients, but the Kafka Streams *client* library itself —
+along with a Kafka Connect / MirrorMaker equivalent — is not. ZooKeeper mode
 and ZK→KRaft migration are deliberately out of scope — Crabka is KRaft-only.
 
 ## Architecture
@@ -189,6 +197,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | `OffsetDelete` admin API (KIP-496) | ✅ |
 | Next-gen consumer group protocol (KIP-848) | ⚠️ |
 | Share groups / queues (KIP-932) | ✅ |
+| Streams rebalance protocol (KIP-1071) | ⚠️ |
 
 ### Replication & durability
 
@@ -471,7 +480,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 |-----|-------|:------:|
 | [KIP-714](https://cwiki.apache.org/confluence/display/KAFKA/KIP-714) | Client metrics & observability push | ✅ |
 | [KIP-932](https://cwiki.apache.org/confluence/display/KAFKA/KIP-932) | Queues for Kafka (share groups) | ✅ |
-| [KIP-1071](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1071) | Streams rebalance protocol | ❌ |
+| [KIP-1071](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1071) | Streams rebalance protocol | ⚠️ |
 
 ## Published crates
 

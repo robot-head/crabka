@@ -1279,6 +1279,7 @@ mod tests {
             crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             empty_metadata(),
             log.clone(),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         ));
         (coord, log)
     }
@@ -1694,6 +1695,7 @@ mod tests {
             crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             empty_metadata(),
             log,
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         ));
         let handle = coord.get_or_create_consumer("g").expect("consumer actor");
 
