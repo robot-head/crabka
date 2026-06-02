@@ -162,12 +162,34 @@ impl Consumer {
                 match part.error_code {
                     0 => {}
                     1 /* OFFSET_OUT_OF_RANGE */ => {
-                        // Reset per policy; None surfaces a LogTruncation error.
-                        // Read the current fetch offset from the held guard —
-                        // reset_offset_for must not re-lock next_offsets here.
+                        // Reset per policy using the response's log_start_offset
+                        // (the broker includes it in every OOR partition response).
+                        // We must NOT use a hardcoded 0: if retention has moved
+                        // log_start forward, re-fetching from 0 re-triggers OOR
+                        // forever. Mirrors what the replicator does on OOR.
+                        // No RPC needed — log_start_offset is already in `part`.
                         let fetch_offset = offsets.get(&key).copied().unwrap_or(-1);
-                        let safe = self.reset_offset_for(&key, fetch_offset)?;
-                        offsets.insert(key.clone(), safe);
+                        let log_start = part.log_start_offset;
+                        let (topic, partition) = (key.0.clone(), key.1);
+                        match self.auto_offset_reset {
+                            AutoOffsetReset::Earliest => {
+                                // Reset to the real log start, not 0.
+                                offsets.insert(key.clone(), log_start);
+                            }
+                            AutoOffsetReset::Latest => {
+                                // Plant i64::MAX sentinel; resolved next poll
+                                // by resolve_latest_sentinels via ListOffsets.
+                                offsets.insert(key.clone(), i64::MAX);
+                            }
+                            AutoOffsetReset::None => {
+                                return Err(ConsumerError::LogTruncation {
+                                    topic,
+                                    partition,
+                                    fetch_offset,
+                                    safe_offset: log_start,
+                                });
+                            }
+                        }
                         continue;
                     }
                     74 /* FENCED_LEADER_EPOCH */
@@ -202,6 +224,14 @@ impl Consumer {
                 let Some(batches) = payload.as_v2() else {
                     continue;
                 };
+                // The broker returns whole record batches whose last offset is
+                // >= the requested fetch_offset, even when the batch starts
+                // before it (e.g. after an OFFSET_OUT_OF_RANGE reset or when
+                // a single large batch straddles log_start). Kafka's JVM
+                // client skips any records below the position; we do the same.
+                // Capture the position now — before `next_offset_after` updates
+                // it — so the filter baseline matches the actual fetch offset.
+                let fetch_floor = offsets.get(&key).copied().unwrap_or(0);
                 // read_committed filtering happens entirely client-side: the
                 // broker returns verbatim on-disk bytes (control batches,
                 // aborted records and all) plus an `aborted_transactions`
@@ -258,6 +288,12 @@ impl Consumer {
                     }
                     for r in &batch.records {
                         let offset = batch.base_offset + i64::from(r.offset_delta);
+                        // Skip records that precede the fetch floor: the broker
+                        // returned a whole batch whose base_offset < our
+                        // position (straddle case — see fetch_floor comment).
+                        if offset < fetch_floor {
+                            continue;
+                        }
                         out.push(ConsumerRecord {
                             topic: topic_name.clone(),
                             partition: part.partition_index,
@@ -349,30 +385,6 @@ impl Consumer {
 }
 
 impl Consumer {
-    /// Resolve the safe offset for an `OFFSET_OUT_OF_RANGE` reset under the
-    /// configured policy. `None` policy surfaces a `LogTruncation` error.
-    ///
-    /// `fetch_offset` is passed in by the caller (read from the already-held
-    /// `next_offsets` guard) rather than re-locked here: this runs inside the
-    /// poll loop while that guard is held, and `tokio::sync::Mutex` is not
-    /// re-entrant — re-locking would deadlock.
-    fn reset_offset_for(
-        &self,
-        key: &(String, i32),
-        fetch_offset: i64,
-    ) -> Result<i64, ConsumerError> {
-        match self.auto_offset_reset {
-            AutoOffsetReset::Earliest => Ok(0),
-            AutoOffsetReset::Latest => Ok(i64::MAX), // resolved next poll
-            AutoOffsetReset::None => Err(ConsumerError::LogTruncation {
-                topic: key.0.clone(),
-                partition: key.1,
-                fetch_offset,
-                safe_offset: 0,
-            }),
-        }
-    }
-
     /// Apply truncations detected by the proactive validate pass to
     /// `next_offsets`, honoring `auto.offset.reset` (None → error on the first
     /// truncated partition).

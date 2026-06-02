@@ -448,13 +448,6 @@ async fn delete_records_before(client: &Client, topic: &str, partition: i32, off
 /// `ListOffsets(-1)`. Records produced after that point are then consumed
 /// cleanly — proving genuine recovery (no error, fetch resumes), not a silent
 /// stall.
-///
-/// NB: this exercises the `Latest` reset, not `Earliest`. The `Earliest`
-/// branch of `reset_offset_for` currently returns a literal `0` rather than
-/// resolving the live `log_start_offset`, so after a `DeleteRecords` trim it
-/// re-fetches 0, hits `OFFSET_OUT_OF_RANGE` again, and loops without ever
-/// recovering. Asserting "Earliest resumes" would therefore be a false claim
-/// against today's implementation; see the spawned follow-up task.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumer_resets_on_offset_out_of_range_latest() {
     let dir = TempDir::new().unwrap();
@@ -535,20 +528,106 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
     broker.shutdown().await;
 }
 
+/// `OFFSET_OUT_OF_RANGE` recovery under `auto.offset.reset=earliest`.
+///
+/// A consumer parked at offset 0 has its log trimmed out from under it
+/// (`DeleteRecords` moves `log_start` to 5). The next `Fetch` from 0 is below
+/// the log start, so the broker returns `OFFSET_OUT_OF_RANGE` (code 1). The
+/// error-first poll loop resets per policy: `Earliest` must reset to the
+/// response's `log_start_offset` (5 in this test), NOT to the literal 0,
+/// because resetting to 0 would re-trigger `OFFSET_OUT_OF_RANGE` endlessly
+/// (the real root cause this test catches). After recovery the consumer
+/// resumes from the new log start and delivers the records that survived the
+/// trim, plus any produced afterwards — proving genuine recovery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn consumer_resets_on_offset_out_of_range_earliest() {
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let producer = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("p")
+        .build()
+        .await
+        .unwrap();
+    create_topic(&producer, "oor-earliest").await;
+    // Produce 8 records at offsets 0–7.
+    produce(
+        &producer,
+        "oor-earliest",
+        &["a", "b", "c", "d", "e", "f", "g", "h"],
+    )
+    .await;
+
+    // Trim log_start to 5; a consumer starting at 0 is now below the log.
+    let low = delete_records_before(&producer, "oor-earliest", 0, 5).await;
+    assert!(low == 5, "expected low_watermark 5, got {low}");
+    assert!(broker.partition_log_start_for_test("oor-earliest", 0) == Some(5));
+
+    let mut consumer = Consumer::builder()
+        .bootstrap(&bootstrap)
+        .client_id("c")
+        .group_id("oor-earliest-grp")
+        .session_timeout(Duration::from_secs(30))
+        .rebalance_timeout(Duration::from_secs(2))
+        .heartbeat_interval(Duration::from_secs(1))
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .subscribe(["oor-earliest".to_string()])
+        .build()
+        .await
+        .unwrap();
+
+    // Drive polls until we have consumed at least the 3 records that survived
+    // the trim (offsets 5, 6, 7 → "f", "g", "h"). The consumer must NOT loop
+    // forever on OFFSET_OUT_OF_RANGE; it must recover by jumping to
+    // log_start_offset (5) and delivering from there.
+    let mut seen: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && seen.len() < 3 {
+        for r in consumer
+            .poll(Duration::from_millis(300))
+            .await
+            .expect("Earliest OOR reset must not error")
+        {
+            // Every delivered record must be at or after the new log start.
+            // If we ever see an offset < 5, the consumer re-fetched from 0
+            // instead of from log_start — the original bug.
+            assert!(
+                r.offset >= 5,
+                "recovered Earliest fetch must be at/after log_start (5), got offset {}",
+                r.offset
+            );
+            seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
+        }
+    }
+    assert!(
+        seen == vec!["f", "g", "h"],
+        "consumer recovered and consumed the surviving records from log_start, got {seen:?}"
+    );
+
+    consumer.close().await.unwrap();
+    broker.shutdown().await;
+}
+
 /// `auto.offset.reset=none` surfaces `OFFSET_OUT_OF_RANGE` as a
 /// `ConsumerError::LogTruncation` instead of silently resetting.
 ///
 /// Same induced divergence as the `Latest` test (`DeleteRecords` trims
 /// `log_start` past the consumer's offset), but the `None` policy means
-/// `reset_offset_for` returns the error rather than a safe offset. `poll()`
-/// must propagate `Err(ConsumerError::LogTruncation { .. })` carrying the
-/// out-of-range fetch offset.
+/// the OOR arm returns an error rather than a safe offset. `poll()` must
+/// propagate `Err(ConsumerError::LogTruncation { .. })` carrying the
+/// out-of-range fetch offset and the response's `log_start_offset` as
+/// the `safe_offset`.
 ///
 /// A fresh `None` consumer starts at the `i64::MAX` sentinel (resolved to the
 /// live log-end), so it would never be out of range. To seat a below-trim
-/// position deterministically, an `Earliest` seed consumer commits offset 0
-/// for the group first; the `None` consumer then inherits that committed 0,
-/// which is below the trimmed `log_start`.
+/// position deterministically, an `Earliest` seed consumer first commits
+/// offset 0 for the group (BEFORE the trim), and then `DeleteRecords` moves
+/// `log_start` forward past that committed 0. The `None` consumer then inherits
+/// the below-trim committed offset and hits `OFFSET_OUT_OF_RANGE`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn consumer_none_policy_surfaces_log_truncation() {
     let dir = TempDir::new().unwrap();
@@ -566,12 +645,13 @@ async fn consumer_none_policy_surfaces_log_truncation() {
     create_topic(&producer, "oor-none").await;
     produce(&producer, "oor-none", &["a", "b", "c", "d", "e", "f"]).await;
 
-    let low = delete_records_before(&producer, "oor-none", 0, 4).await;
-    assert!(low == 4, "expected low_watermark 4, got {low}");
-
-    // Seed: commit offset 0 for the group (Earliest seats at 0, below the trim).
+    // Seed: commit offset 0 for the group BEFORE the trim. The Earliest
+    // consumer primes its next_offset to 0 during assignment; we wait for
+    // the coordinator to settle (without polling/consuming records) and then
+    // commit the initial 0 position. DeleteRecords then advances log_start
+    // to 4, stranding the group's committed 0 below the new log start.
     {
-        let mut seed = Consumer::builder()
+        let seed = Consumer::builder()
             .bootstrap(&bootstrap)
             .client_id("seed")
             .group_id("oor-none-grp")
@@ -583,12 +663,24 @@ async fn consumer_none_policy_surfaces_log_truncation() {
             .build()
             .await
             .unwrap();
-        // One poll establishes the position; Earliest loops at 0 (never
-        // advances past the trim), so the committed offset is 0.
-        let _ = seed.poll(Duration::from_millis(300)).await;
+        // The coordinator runs as a background task; wait for it to complete
+        // prime_offsets (which seats next_offset = 0 for Earliest with no
+        // existing commit). We check assignment() rather than poll()-ing so
+        // that we don't consume records and advance the position.
+        let settle = Instant::now() + Duration::from_secs(10);
+        while seed.assignment().await.is_empty() {
+            assert!(Instant::now() < settle, "seed assignment did not settle");
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        // next_offsets is 0 (Earliest, primed during assignment, no records
+        // fetched yet that would advance it). Committing 0 seats the group.
         seed.commit_sync().await.unwrap();
         seed.close().await.unwrap();
     }
+
+    // Now trim past offset 0; the group's committed 0 is now below log_start.
+    let low = delete_records_before(&producer, "oor-none", 0, 4).await;
+    assert!(low == 4, "expected low_watermark 4, got {low}");
 
     let mut consumer = Consumer::builder()
         .bootstrap(&bootstrap)
