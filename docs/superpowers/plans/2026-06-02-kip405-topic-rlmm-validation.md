@@ -56,6 +56,9 @@ Tasks are grouped into batches; within a batch the file sets are disjoint and ta
 - Modify: `crates/broker/src/config.rs` (replace `remote_log_metadata_kafka` field; add `RlmmKind`; `KafkaRlmmConfig::default`; update `for_tests`/`default` builders; update unit tests `~887-911`)
 - Modify: `crates/broker/src/file_config.rs:879-893` (map `[remote_storage.kafka_metadata]` → `RlmmKind`)
 - Modify: `crates/broker/src/lib.rs` (export `RlmmKind` next to `KafkaRlmmConfig`)
+- Modify: `crates/broker/src/broker.rs` (re-key the kickoff `~2056` and RLMM construction `~2147-2156` onto `RlmmKind` — **minimal**: keep the in-memory placeholder and the existing one-shot bootstrap so the crate compiles; Task 3 adds fail-closed + retry)
+
+> **Ordering note (important):** `config.rs` and `broker.rs` are in the **same crate**, so renaming the field breaks `broker.rs` until it's re-keyed. Task 1 must therefore re-key `broker.rs` too (Step 8b), but only minimally — it keeps `InmemoryRemoteLogMetadataManager` as the swappable placeholder and the existing one-shot `bootstrap_topic_rlmm` body. Task 3 then swaps the placeholder to `NotReadyRlmm` and adds the retry loop. This keeps Task 1's build green.
 
 **Context:** Today `BrokerConfig.remote_log_metadata_kafka: Option<KafkaRlmmConfig>` selects the RLMM — `None`⇒in-memory, `Some`⇒topic-backed (`config.rs:443`). We replace it with `RlmmKind` so topic-backed is the production default and in-memory is an explicit opt-out. `KafkaRlmmConfig` keeps its fields (`config.rs:453-482`); `bootstrap` and `snapshot_dir` may be empty sentinels filled in at broker start.
 
@@ -204,13 +207,57 @@ pub use config::{BootstrapMode, BrokerConfig, KafkaRlmmConfig, RemoteStorageBack
 
 The two tests at `config.rs:~887-911` construct `KafkaRlmmConfig { … }` with all fields — they still compile (fields unchanged). No change needed unless the struct changed. Confirm they still build.
 
-- [ ] **Step 8: Fix all other construction sites that set `remote_log_metadata_kafka`**
+- [ ] **Step 8a: Fix all other construction sites that set `remote_log_metadata_kafka`**
 
 Grep and update every remaining reference (tests set it to `Some(KafkaRlmmConfig{..})` → `RlmmKind::TopicBacked(KafkaRlmmConfig{..})`):
 ```bash
 grep -rn "remote_log_metadata_kafka" crates/
 ```
 Expected hits to fix: `crates/broker/tests/tiered_storage_topic_rlmm.rs:69,386`, `crates/broker/tests/tiered_storage_metadata_assign.rs`. Change each `cfg.remote_log_metadata_kafka = Some(KafkaRlmmConfig{..});` to `cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig{..});` and add the import.
+
+- [ ] **Step 8b: Re-key `broker.rs` onto `RlmmKind` (minimal — keep in-memory placeholder + one-shot bootstrap)**
+
+`broker.rs` is in the same crate as `config.rs`, so it must be re-keyed now or the crate won't compile. Make **only** these two changes; do **not** add `NotReadyRlmm` or the retry loop (that's Task 3).
+
+1. Kickoff (`broker.rs:2056-2057`): change
+```rust
+        let kafka_swap_kickoff: Option<KafkaSwapKickoff> =
+            config.remote_log_metadata_kafka.as_ref().map(|cfg| {
+```
+to
+```rust
+        let kafka_swap_kickoff: Option<KafkaSwapKickoff> = match &config.remote_log_metadata {
+            crate::config::RlmmKind::InMemory => None,
+            crate::config::RlmmKind::TopicBacked(cfg) => Some({
+```
+Keep the existing body. In the constructed `KafkaRlmmConfig { … }` (`~2111-2118`), derive `snapshot_dir` when empty:
+```rust
+                    snapshot_dir: if cfg.snapshot_dir.as_os_str().is_empty() {
+                        config.log_dir.join("remote-log-metadata")
+                    } else {
+                        cfg.snapshot_dir.clone()
+                    },
+```
+Close the arm: the `Some({ … })` wraps the `KafkaSwapKickoff { … }` value — end with `})` then `};`.
+
+2. RLMM construction (`broker.rs:2147-2156`): change the `if config.remote_log_metadata_kafka.is_some() { … } else { … }` to a match that keeps the **in-memory placeholder** for now:
+```rust
+            let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
+            let (rlmm, kafka_swap_target): (
+                Arc<dyn crabka_remote_storage::RemoteLogMetadataManager>,
+                Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
+            ) = match &config.remote_log_metadata {
+                crate::config::RlmmKind::TopicBacked(_) => {
+                    let swap =
+                        Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(placeholder));
+                    let typed: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                        swap.clone();
+                    (typed, Some(swap))
+                }
+                crate::config::RlmmKind::InMemory => (placeholder, None),
+            };
+```
 
 - [ ] **Step 9: Run tests + clippy + fmt**
 
@@ -221,12 +268,15 @@ cargo build -p crabka-broker --all-targets
 cargo clippy -p crabka-broker --all-targets -- -D warnings
 cargo fmt --all
 ```
-Expected: the three new tests PASS; workspace compiles; clippy clean.
+Expected: the three new config tests PASS; the broker crate **compiles** (Step 8b kept it green); clippy clean. Also run the existing tiered tests to confirm no regression:
+```bash
+cargo test -p crabka-broker --test tiered_storage_topic_rlmm --test tiered_storage_metadata_assign
+```
 
 - [ ] **Step 10: Commit**
 
 ```bash
-git -C <worktree> add crates/broker/src/config.rs crates/broker/src/file_config.rs crates/broker/src/lib.rs crates/broker/tests/tiered_storage_topic_rlmm.rs crates/broker/tests/tiered_storage_metadata_assign.rs
+git -C <worktree> add crates/broker/src/config.rs crates/broker/src/file_config.rs crates/broker/src/lib.rs crates/broker/src/broker.rs crates/broker/tests/tiered_storage_topic_rlmm.rs crates/broker/tests/tiered_storage_metadata_assign.rs
 git -C <worktree> -c user.name="Matt Stone" -c user.email="matthew.d.stone@gmail.com" commit -m "$(cat <<'EOF'
 feat(broker): RlmmKind enum — topic-backed RLMM is the tiered-storage default
 
@@ -477,50 +527,14 @@ In `crates/broker/src/metrics.rs`, mirror the `tiered_storage_rlmm_topic_backed`
 Run: `cargo test -p crabka-broker --lib metrics::tests::tiered_storage_rlmm_bootstrap_attempts_counts_up`
 Expected: PASS.
 
-- [ ] **Step 5: Re-key the kickoff on `RlmmKind` + derive snapshot_dir**
+- [ ] **Step 5: (already done in Task 1) — kickoff is on `RlmmKind` + derives snapshot_dir**
 
-In `crates/broker/src/broker.rs`, change the kickoff binding (line ~2056-2057) from:
-```rust
-        let kafka_swap_kickoff: Option<KafkaSwapKickoff> =
-            config.remote_log_metadata_kafka.as_ref().map(|cfg| {
-```
-to a form that only builds a kickoff for the topic-backed kind:
-```rust
-        let kafka_swap_kickoff: Option<KafkaSwapKickoff> = match &config.remote_log_metadata {
-            crate::config::RlmmKind::InMemory => None,
-            crate::config::RlmmKind::TopicBacked(cfg) => Some({
-```
-Keep the existing body (`listeners`, `inter`, `proto`, `security`, `bootstrap` derivation) unchanged. In the constructed `KafkaRlmmConfig { … }` (line ~2111-2118), derive `snapshot_dir` when empty:
-```rust
-                    snapshot_dir: if cfg.snapshot_dir.as_os_str().is_empty() {
-                        config.log_dir.join("remote-log-metadata")
-                    } else {
-                        cfg.snapshot_dir.clone()
-                    },
-```
-Close the `match` arm correctly (the `Some({ … })` wraps the `KafkaSwapKickoff { … }` value; end with `})` and `};`).
+Task 1 Step 8b already re-keyed the kickoff (`broker.rs:2056`) onto `RlmmKind` and added the `snapshot_dir`-when-empty derivation. **No change here.** Confirm it's present before proceeding; if missing, apply it now (see Task 1 Step 8b).
 
-- [ ] **Step 6: Boot the swappable on `NotReadyRlmm`, gated on `RlmmKind`**
+- [ ] **Step 6: Swap the placeholder from in-memory to `NotReadyRlmm`**
 
-In `crates/broker/src/broker.rs`, replace the RLMM construction block (lines ~2145-2156). Today:
+In `crates/broker/src/broker.rs`, the RLMM construction match (landed in Task 1 Step 8b) currently uses `InmemoryRemoteLogMetadataManager` as the `TopicBacked` placeholder. Change **only** the `TopicBacked` arm so the swappable boots on the fail-closed stub:
 ```rust
-            let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-                Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
-            let (rlmm, kafka_swap_target): (...) =
-                if config.remote_log_metadata_kafka.is_some() {
-                    let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(placeholder));
-                    let typed: Arc<dyn ...> = swap.clone();
-                    (typed, Some(swap))
-                } else {
-                    (placeholder, None)
-                };
-```
-Replace with:
-```rust
-            let (rlmm, kafka_swap_target): (
-                Arc<dyn crabka_remote_storage::RemoteLogMetadataManager>,
-                Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
-            ) = match &config.remote_log_metadata {
                 crate::config::RlmmKind::TopicBacked(_) => {
                     // Fail-closed: until the topic-backed manager swaps in, every
                     // RLMM call returns NotReady. The copy task skips tiering
@@ -532,13 +546,8 @@ Replace with:
                         swap.clone();
                     (typed, Some(swap))
                 }
-                crate::config::RlmmKind::InMemory => {
-                    let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-                        Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
-                    (placeholder, None)
-                }
-            };
 ```
+Leave the `InMemory` arm (plain `InmemoryRemoteLogMetadataManager`) unchanged. The standalone `let placeholder = …` line from Task 1 Step 8b can now move inside the `InMemory` arm (it's no longer shared) — adjust so there's no unused binding (clippy will flag it otherwise).
 
 - [ ] **Step 7: Add the retry loop to `bootstrap_topic_rlmm`**
 
