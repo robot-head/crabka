@@ -363,8 +363,8 @@ async fn contested_election_crabka_counts_jvm_prevote() {
         cluster_id,
         dir2.path(),
     );
-    cfg1.controller_election_timeout = Duration::from_millis(2000);
-    cfg2.controller_election_timeout = Duration::from_millis(2000);
+    cfg1.controller_election_timeout = Duration::from_secs(2);
+    cfg2.controller_election_timeout = Duration::from_secs(2);
 
     let (c1, c2): (BrokerHandle, BrokerHandle) = {
         let s1 = tokio::spawn(Broker::start(cfg1));

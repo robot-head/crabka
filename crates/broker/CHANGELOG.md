@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- `__consumer_offsets` bootstrap is now leader-gated: only the controller leader
+  registers the topic, and followers wait for it to replicate. Previously every
+  broker raced to create it, and concurrent boots appended two conflicting
+  `TopicRecord`s (different random `topic_id`) plus per-node `PartitionRecord`s
+  to the metadata log — which fatal-faulted any JVM controller replicating that
+  far (`duplicate TopicRecord ... with a different ID`).
+
 ## [0.1.1] — 2026-05-29
 
 

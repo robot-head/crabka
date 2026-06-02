@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   JVM peer never sends. A JVM voter's pre-vote grant is now counted, so a
   Crabka-led election no longer stalls in a mixed JVM+Crabka quorum.
 
+- Outgoing `VoteRequest`s now address the recipient voter (`voterId` set to the
+  target node id instead of `-1`), built per-recipient in `broadcast_vote`. A
+  JVM voter previously rejected Crabka's (pre-)votes as not addressed to it; it
+  now grants them. Validated end to end: a JVM voter grants a Crabka candidate's
+  pre-vote and real vote in a contested mixed-quorum election.
+
 ## [0.1.1] — 2026-05-29
 
 
