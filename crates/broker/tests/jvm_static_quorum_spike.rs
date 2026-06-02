@@ -301,3 +301,185 @@ async fn static_mixed_jvm_crabka_quorum() {
          metadata.version not loaded); see JVM logs"
     );
 }
+
+const CONTESTED_CONTAINER: &str = "crabka-kip996-contested";
+
+/// KIP-996 CONTESTED-ELECTION ACCEPTANCE TEST (Docker-gated, `#[ignore]`).
+///
+/// 2 Crabka voters (ids 1,2) + 1 `apache/kafka:4.0.0` voter (id 3) form a static
+/// 3-voter quorum. After the Crabka leader is killed, only 1 Crabka voter + the
+/// JVM voter survive, so the surviving Crabka candidate can only reach majority
+/// if the JVM grants its PRE-VOTE and real vote. This is the path the old
+/// `PRE_VOTE_ECHO_TAG` shortcut broke (a JVM pre-vote grant was dropped). The JVM
+/// is tuned to release the dead leader fast but self-nominate slowly so the
+/// surviving Crabka node wins; recovery to a new Crabka leader at a higher epoch
+/// is the proof.
+///
+/// Run:
+/// ```text
+/// cargo test -p crabka-broker --test jvm_static_quorum_spike \
+///   contested_election_crabka_counts_jvm_prevote -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker + a published controller port"]
+#[allow(clippy::too_many_lines)]
+async fn contested_election_crabka_counts_jvm_prevote() {
+    support::init_tracing();
+    docker_rm(CONTESTED_CONTAINER);
+
+    let cluster_id = Uuid::from_u128(0x4b69_7039_3936_4350_7245_566f_7445_7374);
+    let cid_str = kafka_cluster_id_string(cluster_id);
+
+    let (client_addrs, controller_addrs) = support::bind_and_drop_ports(3).await;
+    let p1 = controller_addrs[0].port();
+    let p2 = controller_addrs[1].port();
+    let p3 = controller_addrs[2].port();
+    let crabka_ctrl_1: SocketAddr = format!("0.0.0.0:{p1}").parse().unwrap();
+    let crabka_ctrl_2: SocketAddr = format!("0.0.0.0:{p2}").parse().unwrap();
+    let crabka_voters: Vec<(u64, SocketAddr)> = vec![
+        (1, format!("127.0.0.1:{p1}").parse().unwrap()),
+        (2, format!("127.0.0.1:{p2}").parse().unwrap()),
+        (3, format!("127.0.0.1:{p3}").parse().unwrap()),
+    ];
+
+    // Short Crabka election timeout so the survivor re-elects promptly.
+    let dir1 = TempDir::new().unwrap();
+    let dir2 = TempDir::new().unwrap();
+    let mut cfg1 = crabka_controller_config(
+        0,
+        client_addrs[0],
+        crabka_ctrl_1,
+        &crabka_voters,
+        cluster_id,
+        dir1.path(),
+    );
+    let mut cfg2 = crabka_controller_config(
+        1,
+        client_addrs[1],
+        crabka_ctrl_2,
+        &crabka_voters,
+        cluster_id,
+        dir2.path(),
+    );
+    cfg1.controller_election_timeout = Duration::from_millis(300);
+    cfg2.controller_election_timeout = Duration::from_millis(300);
+
+    let (c1, c2): (BrokerHandle, BrokerHandle) = {
+        let s1 = tokio::spawn(Broker::start(cfg1));
+        let s2 = tokio::spawn(Broker::start(cfg2));
+        (
+            s1.await.unwrap().expect("crabka voter 1 start"),
+            s2.await.unwrap().expect("crabka voter 2 start"),
+        )
+    };
+
+    // JVM voter id 3: release the dead leader fast, self-nominate slowly.
+    let props = format!(
+        "process.roles=controller\n\
+         node.id=3\n\
+         controller.quorum.voters=1@host.docker.internal:{p1},2@host.docker.internal:{p2},3@localhost:{p3}\n\
+         controller.listener.names=CONTROLLER\n\
+         listeners=CONTROLLER://0.0.0.0:{p3}\n\
+         listener.security.protocol.map=CONTROLLER:PLAINTEXT\n\
+         controller.quorum.fetch.timeout.ms=1000\n\
+         controller.quorum.election.timeout.ms=8000\n\
+         log.dirs=/tmp/kraft-controller-logs\n"
+    );
+    let propdir = TempDir::new().unwrap();
+    let proppath = propdir.path().join("controller.properties");
+    std::fs::write(&proppath, props).unwrap();
+    let entry = format!(
+        "/opt/kafka/bin/kafka-storage.sh format -t {cid_str} --config /tmp/c.properties --ignore-formatted && \
+         exec /opt/kafka/bin/kafka-server-start.sh /tmp/c.properties"
+    );
+    let status = Command::new("docker")
+        .args([
+            "run",
+            "-d",
+            "--name",
+            CONTESTED_CONTAINER,
+            "--add-host=host.docker.internal:host-gateway",
+            "-p",
+            &format!("{p3}:{p3}"),
+            "-v",
+            &format!("{}:/tmp/c.properties", proppath.display()),
+            "--entrypoint",
+            "bash",
+            KAFKA_IMAGE,
+            "-c",
+            &entry,
+        ])
+        .status()
+        .expect("docker run JVM controller");
+    assert!(status.success(), "docker run failed");
+
+    // ── Phase 1: a Crabka node leads and the JVM joins as a follower. ───────
+    let deadline = std::time::Instant::now() + Duration::from_secs(50);
+    let mut leader0: Option<u64> = None;
+    while std::time::Instant::now() < deadline {
+        let l1 = c1.controller_leader_id().await;
+        let l2 = c2.controller_leader_id().await;
+        if l1.is_some() && l1 == l2 && matches!(l1, Some(1 | 2)) {
+            leader0 = l1;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let leader0 = leader0.expect("Crabka 2/3 majority did not elect a leader in {1,2}");
+    let epoch0 = c1.controller_quorum_state_for_test().current_term;
+    eprintln!("phase 1: Crabka leader={leader0} epoch={epoch0}");
+
+    // ── Phase 2: kill the Crabka leader; the survivor needs the JVM's grants. ─
+    let (killed, survivor, survivor_id) = if leader0 == 1 {
+        (c1, c2, 2u64)
+    } else {
+        (c2, c1, 1u64)
+    };
+    killed.shutdown().await;
+    eprintln!("phase 2: killed Crabka leader {leader0}; survivor is {survivor_id}");
+
+    // ── Phase 3: the surviving Crabka voter must win a new election. ─────────
+    let recover_deadline = std::time::Instant::now() + Duration::from_mins(1);
+    let mut recovered = false;
+    while std::time::Instant::now() < recover_deadline {
+        let qs = survivor.controller_quorum_state_for_test();
+        if qs.current_leader == Some(survivor_id) && qs.current_term > epoch0 {
+            recovered = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let final_qs = survivor.controller_quorum_state_for_test();
+    eprintln!(
+        "phase 3: survivor view leader={:?} epoch={} (was {epoch0})",
+        final_qs.current_leader, final_qs.current_term
+    );
+
+    // Capture JVM logs for diagnosis regardless of outcome.
+    let logs = Command::new("docker")
+        .args(["logs", CONTESTED_CONTAINER])
+        .output()
+        .expect("docker logs");
+    let log_text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&logs.stdout),
+        String::from_utf8_lossy(&logs.stderr)
+    );
+    let _ = std::fs::write("/tmp/jvm_contested.log", &log_text);
+    let jvm_fatal_fault = log_text.contains("Encountered fatal fault");
+
+    docker_rm(CONTESTED_CONTAINER);
+    survivor.shutdown().await;
+
+    assert!(
+        recovered,
+        "surviving Crabka voter {survivor_id} did not win a new election at a \
+         higher epoch after the leader died — the JVM's pre-vote grant was not \
+         counted (KIP-996 interop regression). survivor view: leader={:?} epoch={} (was {epoch0})",
+        final_qs.current_leader, final_qs.current_term
+    );
+    assert!(
+        !jvm_fatal_fault,
+        "JVM controller fatal-faulted during the contested election; see /tmp/jvm_contested.log"
+    );
+}
