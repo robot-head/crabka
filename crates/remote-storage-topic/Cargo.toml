@@ -11,11 +11,11 @@ description = "Topic-backed RemoteLogMetadataManager for Crabka (KIP-405 product
 workspace = true
 
 [dependencies]
-crabka-remote-storage = { version = "0.1", path = "../remote-storage" }
-crabka-client-admin = { version = "0.1", path = "../client-admin" }
-crabka-client-core = { version = "0.1", path = "../client-core" }
-crabka-client-producer = { version = "0.1", path = "../client-producer" }
-crabka-protocol = { version = "0.1", path = "../protocol" }
+crabka-remote-storage = { version = "0.2", path = "../remote-storage" }
+crabka-client-admin = { version = "0.2", path = "../client-admin" }
+crabka-client-core = { version = "0.2", path = "../client-core" }
+crabka-client-producer = { version = "0.2", path = "../client-producer" }
+crabka-protocol = { version = "0.2", path = "../protocol" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
@@ -27,5 +27,5 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-security = { version = "0.1", path = "../security" }
+crabka-security = { version = "0.2", path = "../security" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util", "time"] }

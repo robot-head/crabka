@@ -17,7 +17,7 @@ workspace = true
 [dependencies]
 clap = { workspace = true }
 crabka-security = { workspace = true }
-crabka-metadata = { version = "0.1", path = "../metadata" }
+crabka-metadata = { version = "0.2", path = "../metadata" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
 serde-wincode = { workspace = true }
