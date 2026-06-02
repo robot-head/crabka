@@ -2146,24 +2146,29 @@ impl Broker {
             // because its `start` does a loopback `AdminClient` call
             // to provision `__remote_log_metadata`, and the broker's
             // listener accept loop is spawned later in this function.
-            // Boot with an in-memory placeholder behind a
-            // `SwappableRlmm` facade, then spawn a task that builds
-            // the `TopicBasedRemoteLogMetadataManager` once the
+            // Boot behind a `SwappableRlmm` facade, then spawn a task that
+            // builds the `TopicBasedRemoteLogMetadataManager` once the
             // listener is serving and swaps it in.
-            let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-                Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
             let (rlmm, kafka_swap_target): (
                 Arc<dyn crabka_remote_storage::RemoteLogMetadataManager>,
                 Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
             ) = match &config.remote_log_metadata {
                 crate::config::RlmmKind::TopicBacked(_) => {
-                    let swap =
-                        Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(placeholder));
+                    // Fail-closed: until the topic-backed manager swaps in, every
+                    // RLMM call returns NotReady. The copy task skips tiering
+                    // (no orphaned RSM objects) and remote reads retry.
+                    let not_ready: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                        Arc::new(crabka_remote_storage_topic::NotReadyRlmm::new());
+                    let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(not_ready));
                     let typed: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
                         swap.clone();
                     (typed, Some(swap))
                 }
-                crate::config::RlmmKind::InMemory => (placeholder, None),
+                crate::config::RlmmKind::InMemory => {
+                    let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                        Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
+                    (placeholder, None)
+                }
             };
 
             let partitions = partitions.clone();
@@ -2456,10 +2461,20 @@ fn needed_metadata_partitions(
 /// transient `high_water_marks` failure at assignment time.
 const RLMM_RECONCILE_TICK: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Maximum backoff between successive topic-backed RLMM bootstrap attempts.
+const RLMM_BOOTSTRAP_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Next backoff after a failed RLMM bootstrap attempt: double, capped.
+fn next_rlmm_backoff(cur: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
+    (cur * 2).min(max)
+}
+
 /// Construct the topic-backed
 /// [`crabka_remote_storage::RemoteLogMetadataManager`] against the
-/// broker's loopback listener and swap it into `swap`. On failure
-/// logs and returns; the broker stays on the in-memory placeholder.
+/// broker's loopback listener and swap it into `swap`. Retries with
+/// bounded backoff until success or shutdown; the broker stays on the
+/// fail-closed [`crabka_remote_storage_topic::NotReadyRlmm`] placeholder
+/// while retrying.
 async fn bootstrap_topic_rlmm(
     swap: Arc<crabka_remote_storage_topic::SwappableRlmm>,
     cfg: KafkaSwapKickoff,
@@ -2477,32 +2492,59 @@ async fn bootstrap_topic_rlmm(
         client_id: format!("crabka-rlmm-broker-{}", cfg.broker_id),
         security: cfg.cfg.security.map(|b| *b),
     };
-    let log = match crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg).await {
-        Ok(log) => log,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "topic-backed RLMM failed to start; staying on in-memory placeholder"
-            );
-            return;
-        }
-    };
-    let manager = match crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager::start(
-        log,
-        runtime,
-        cfg.cfg.snapshot_dir.clone(),
-        cfg.cfg.snapshot_interval,
-    )
-    .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "topic-backed RLMM manager start failed; staying on in-memory placeholder"
-            );
-            return;
-        }
+
+    // Retry the topic-backed bootstrap with bounded backoff until it succeeds
+    // or the broker shuts down. Until then the SwappableRlmm stays on the
+    // fail-closed NotReadyRlmm placeholder.
+    let mut backoff = std::time::Duration::from_millis(250);
+    let manager = loop {
+        metrics.tiered_storage_rlmm_bootstrap_attempts.inc();
+        // KafkaMetadataEventLog::start and TopicBasedRemoteLogMetadataManager::start
+        // return different error types, so we handle them with separate match arms.
+        let log = match crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg.clone())
+            .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
+                    "topic-backed RLMM log start failed; retrying");
+                tokio::select! {
+                    () = shutdown.cancelled() => {
+                        tracing::debug!("topic-backed RLMM bootstrap cancelled during backoff");
+                        return;
+                    }
+                    () = tokio::time::sleep(backoff) => {}
+                }
+                backoff = next_rlmm_backoff(backoff, RLMM_BOOTSTRAP_BACKOFF_MAX);
+                continue;
+            }
+        };
+        let manager = match crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager::start(
+            log.clone(),
+            runtime.clone(),
+            cfg.cfg.snapshot_dir.clone(),
+            cfg.cfg.snapshot_interval,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
+                        "topic-backed RLMM manager start failed; retrying");
+                tokio::select! {
+                    () = shutdown.cancelled() => {
+                        tracing::debug!("topic-backed RLMM bootstrap cancelled during backoff");
+                        return;
+                    }
+                    () = tokio::time::sleep(backoff) => {}
+                }
+                backoff = next_rlmm_backoff(backoff, RLMM_BOOTSTRAP_BACKOFF_MAX);
+                continue;
+            }
+        };
+        // `log` is owned by `manager`; we don't need a separate handle.
+        let _ = log;
+        break manager;
     };
     // Keep the concrete handle so the reconciler can call
     // `reconcile_assignment`; the swap facade only needs the trait object.
@@ -2790,6 +2832,15 @@ mod tests {
         let handle = Broker::start(config).await.unwrap();
         assert!(handle.listen_addr().port() != 0);
         handle.shutdown().await;
+    }
+
+    #[test]
+    fn rlmm_backoff_doubles_then_caps() {
+        use std::time::Duration;
+        let max = Duration::from_secs(10);
+        assert!(next_rlmm_backoff(Duration::from_millis(250), max) == Duration::from_millis(500));
+        assert!(next_rlmm_backoff(Duration::from_secs(8), max) == max); // 16s capped to 10s
+        assert!(next_rlmm_backoff(max, max) == max);
     }
 
     #[tokio::test]

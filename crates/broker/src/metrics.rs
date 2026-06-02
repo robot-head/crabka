@@ -232,6 +232,9 @@ pub struct BrokerMetrics {
     /// against clusters that asked for `metadataManager: Topic` to catch
     /// a stuck bootstrap.
     pub tiered_storage_rlmm_topic_backed: Gauge,
+    /// Number of topic-backed RLMM bootstrap attempts; climbs while stuck
+    /// retrying, flat once `tiered_storage_rlmm_topic_backed` flips to 1.
+    pub tiered_storage_rlmm_bootstrap_attempts: Counter,
     /// Per-topic counter of v0/v1 → v2 record-batch
     /// up-conversions on the Produce path. Mirrors Kafka's
     /// `BrokerTopicMetrics.ProduceMessageConversionsPerSec`. Bumped
@@ -297,6 +300,7 @@ impl BrokerMetrics {
         let api_requests: Family<ApiKeyLabel, Counter> = Family::default();
         let unsupported_api_requests: Family<ApiKeyLabel, Counter> = Family::default();
         let tiered_storage_rlmm_topic_backed = Gauge::default();
+        let tiered_storage_rlmm_bootstrap_attempts = Counter::default();
         let produce_message_conversions: Family<TopicLabel, Counter> = Family::default();
         let fetch_message_conversions: Family<TopicLabel, Counter> = Family::default();
         let unclean_leader_elections_total = Counter::default();
@@ -547,6 +551,13 @@ impl BrokerMetrics {
             tiered_storage_rlmm_topic_backed.clone(),
         );
         registry.register(
+            "tiered_storage_rlmm_bootstrap_attempts",
+            "Number of topic-backed RLMM bootstrap attempts; climbs while \
+             stuck retrying, flat once tiered_storage_rlmm_topic_backed \
+             flips to 1.",
+            tiered_storage_rlmm_bootstrap_attempts.clone(),
+        );
+        registry.register(
             "produce_message_conversions",
             "Cumulative count of v0/v1 → v2 record-batch \
              up-conversions on the Produce path, per topic. Mirrors \
@@ -612,6 +623,7 @@ impl BrokerMetrics {
             api_requests,
             unsupported_api_requests,
             tiered_storage_rlmm_topic_backed,
+            tiered_storage_rlmm_bootstrap_attempts,
             produce_message_conversions,
             fetch_message_conversions,
             unclean_leader_elections_total,
@@ -1096,6 +1108,15 @@ mod tests {
         // SwappableRlmm swap.
         m.tiered_storage_rlmm_topic_backed.set(1);
         assert!(m.tiered_storage_rlmm_topic_backed.get() == 1);
+    }
+
+    #[test]
+    fn tiered_storage_rlmm_bootstrap_attempts_counts_up() {
+        let m = BrokerMetrics::new();
+        assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 0);
+        m.tiered_storage_rlmm_bootstrap_attempts.inc();
+        m.tiered_storage_rlmm_bootstrap_attempts.inc();
+        assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 2);
     }
 
     #[test]
