@@ -391,7 +391,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-73](https://cwiki.apache.org/confluence/display/KAFKA/KIP-73) | Replication quotas | ✅ |
 | [KIP-101](https://cwiki.apache.org/confluence/display/KAFKA/KIP-101) | Leader-epoch-based truncation | ✅ |
 | [KIP-279](https://cwiki.apache.org/confluence/display/KAFKA/KIP-279) | Fix leader/follower log divergence | ✅ |
-| [KIP-320](https://cwiki.apache.org/confluence/display/KAFKA/KIP-320) | Detect & handle log truncation (leader epoch in fetch) | ⚠️ |
+| [KIP-320](https://cwiki.apache.org/confluence/display/KAFKA/KIP-320) | Detect & handle log truncation (leader epoch in fetch) | ✅ |
 | [KIP-392](https://cwiki.apache.org/confluence/display/KAFKA/KIP-392) | Fetch from closest replica (rack-aware) | ✅ |
 | [KIP-455](https://cwiki.apache.org/confluence/display/KAFKA/KIP-455) | Replica reassignment admin API | ✅ |
 | [KIP-460](https://cwiki.apache.org/confluence/display/KAFKA/KIP-460) | Admin leader election (`ElectLeaders`) | ✅ |

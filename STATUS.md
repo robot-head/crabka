@@ -5137,3 +5137,21 @@ introspection metadata).
   actually exercise the KIP-890 EOS path — `transaction.version` JVM-level EOS
   validation remains pending the CI multi-broker environment (the single-broker
   `transaction.version` integration tests pass).
+
+## Slice — KIP-320 log-truncation detection (complete) (2026-06-02)
+
+- **Leader side**: `FetchResponse` now returns `diverging_epoch` (the last
+  leader epoch whose end-offset is ≤ the follower's fetch offset) and
+  `current_leader` (epoch + leader-id) whenever the follower's
+  `last_fetched_epoch` diverges from the local log.
+- **Follower side**: the replication fetch loop reads `diverging_epoch` and
+  truncates in-band before resuming replication, eliminating the pre-320
+  extra `OffsetsForLeaderEpoch` round-trip.
+- **Native consumer**: proactive `OffsetForLeaderEpoch` position validation
+  on assignment / seek, error-first poll handling (`OutOfRange` / `OFFSET_OUT_OF_RANGE`),
+  `committed_leader_epoch` stored and round-tripped through `__consumer_offsets`,
+  and an `auto.offset.reset = None` policy that surfaces a `LogTruncation`
+  error rather than silently resetting.
+- **Mixed-JVM scenario**: authored and validated against a JVM consumer on a
+  Crabka broker to confirm Java-faithful behaviour across the truncation path.
+- README KIP-320 row flipped to ✅.
