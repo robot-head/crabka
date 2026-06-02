@@ -876,6 +876,7 @@ fn filter_incremental_response(
                         || p.log_start_offset != prev.last_log_start_offset
                         || p.preferred_read_replica != prev.last_preferred_read_replica
                         || aborted_hash != prev.last_aborted_txns_hash
+                        || p.diverging_epoch.end_offset >= 0
                 }
                 // Partition not in the cached set — newly added by this
                 // request. Always send it once so the client sees its
