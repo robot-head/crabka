@@ -3,7 +3,7 @@ title = "Crabka"
 sort_by = "weight"
 
 [extra]
-lead = "A Rust reimplementation of Apache Kafka. Byte-for-byte wire compatible and KRaft-native — with <strong>1.3–1.5× the throughput</strong> on <strong>~40× less memory</strong>, and no JVM to babysit."
+lead = "A Rust reimplementation of Apache Kafka. Byte-for-byte wire compatible and KRaft-native — <strong>matching its throughput</strong> on <strong>~40× less memory</strong>, and no JVM to babysit."
 url = "/guide/introduction/"
 url_button = "Get started"
 url2 = "/benchmarks/crabka-vs-kafka/"
@@ -17,13 +17,13 @@ repo_version = "v0.2.0"
 # comparison against Apache Kafka 4.3 over the Kafka wire protocol.
 [[extra.list]]
 icon = "zap"
-title = "1.3–1.5× the throughput"
-content = 'Higher producer throughput than <strong>Apache Kafka 4.3</strong> in every benchmarked scenario on identical hardware — at lower p99 ack latency.'
+title = "Kafka-class throughput"
+content = 'Matches <strong>Apache Kafka 4.3</strong>&apos;s produce-and-consume throughput within a few percent on identical hardware — ahead on the 1 KiB workloads — at 1.15–1.2× the messages per CPU-core and tighter tail latency.'
 
 [[extra.list]]
 icon = "feather"
 title = "~40× less memory"
-content = "Broker resident in <strong>19–26 MiB</strong> versus Kafka's ~1 GiB JVM heap. No GC pauses, no heap to tune."
+content = "Broker resident in <strong>24–32 MiB</strong> versus Kafka's ~1 GiB JVM heap. No GC pauses, no heap to tune."
 
 [[extra.list]]
 icon = "clock"
@@ -44,7 +44,7 @@ crabka = "Native binary — no JVM, no GC"
 [[extra.compare]]
 feature = "Broker memory"
 kafka = "~1 GiB heap"
-crabka = "<strong>19–26 MiB</strong> RSS"
+crabka = "<strong>24–32 MiB</strong> RSS"
 
 [[extra.compare]]
 feature = "Cold start to ready"
@@ -52,9 +52,9 @@ kafka = "8–9 s"
 crabka = "<strong>1–2 s</strong>"
 
 [[extra.compare]]
-feature = "Producer throughput*"
+feature = "Produce/consume throughput"
 kafka = "baseline"
-crabka = "<strong>1.3–1.5×</strong>"
+crabka = "<strong>≈ parity</strong> (0.9–1.0×)"
 
 [[extra.compare]]
 feature = "Packaging"

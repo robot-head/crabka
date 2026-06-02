@@ -40,6 +40,26 @@ Distributed under the Apache License 2.0 as a derivative work.
 - **Batteries included.** Native producer/consumer/admin clients, a Kubernetes
   operator, and an automated rebalancer live in the same workspace.
 
+## Performance
+
+On a single 4-vCPU box, driven by the same Rust load driver over the Kafka wire
+protocol against both stacks, Crabka matches **Apache Kafka 4.3**'s
+produce-and-consume throughput within a few percent — ahead on the 1 KiB
+workloads — while resident in **24–32 MiB** versus Kafka's ~1 GiB JVM heap
+(**32–43× lighter**), sustaining **1.15–1.2× more messages per CPU-core**, with
+tighter tail latency and a **1–2 s** cold start versus 8–9 s.
+
+| scenario (1 broker, RF=1, 6 partitions) | Crabka | Kafka 4.3 | broker peak RSS |
+|---|--:|--:|--:|
+| 100 B saturate (1P/1C) | 5 549 msgs/s | 5 892 msgs/s | **24 MiB** vs 1 027 MiB |
+| 1 KiB saturate (2P/2C) | 11 253 msgs/s | 10 924 msgs/s | **32 MiB** vs 1 040 MiB |
+| 1 KiB `acks=all` (1P/1C) | 4 289 msgs/s | 4 232 msgs/s | **32 MiB** vs 1 039 MiB |
+
+Same host, same driver, same wire protocol; brokers run one at a time. Full
+methodology, latency percentiles, and a JVM heap-floor sweep:
+[**Crabka vs Apache Kafka 4.3**](https://robot-head.github.io/crabka/benchmarks/crabka-vs-kafka/).
+Reproduce locally with [`bench/local/run-local-bench.sh`](bench/local).
+
 ## Project status
 
 Crabka is in **beta** (`v0.2.0`). The Kafka-parity surface — wire protocol,
