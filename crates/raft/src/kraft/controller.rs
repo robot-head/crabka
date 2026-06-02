@@ -257,11 +257,8 @@ impl KraftController {
                 // staggered across closely-synchronized voters (otherwise a
                 // bare majority that boots in lockstep splits the vote on round
                 // one).
-                let jitter = crate::kraft::core::election_jitter_ms(
-                    me,
-                    initial_epoch,
-                    election_timeout_ms,
-                );
+                let jitter =
+                    crate::kraft::core::election_jitter_ms(me, initial_epoch, election_timeout_ms);
                 Some(clock_base + Duration::from_millis(election_timeout_ms + jitter))
             }
         } else {
