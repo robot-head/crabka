@@ -56,6 +56,7 @@ mod coordinator;
 mod error;
 mod offset_wire;
 mod poll;
+mod position;
 mod share;
 
 pub use assignor::Assignor;
