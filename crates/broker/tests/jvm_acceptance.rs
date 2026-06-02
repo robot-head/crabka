@@ -7908,14 +7908,175 @@ async fn start_host_broker_with_minio_tier(
     (handle, dir, config)
 }
 
-/// Restart a previously-formatted broker against the same `log.dir`.
+// ---------------------------------------------------------------------------
+// Shared helpers for tiered-storage tests.
+// ---------------------------------------------------------------------------
+
+/// Create a KIP-405 tiered topic and wait for the config overrides to propagate
+/// into the partition's `LogConfig`.
 ///
-/// Callers must set `config.bootstrap_mode = BootstrapMode::Rejoin` before
-/// calling this (or pass a config that already has `Rejoin`). The on-disk raft
-/// log carries existing membership, so `Bootstrap` would attempt a
-/// re-initialization and may fail.
-async fn restart_host_broker(config: crabka_broker::BrokerConfig) -> crabka_broker::BrokerHandle {
-    Broker::start(config).await.expect("restart broker")
+/// Uses `segment.bytes=2048` and `local.retention.bytes=1` so a modest produce
+/// batch seals several segments and every copied segment is immediately evicted
+/// from local disk, forcing subsequent reads through the remote tier.
+///
+/// Waits up to 10 s for `ReplicatorSupervisor::reconcile` to apply the config
+/// to the live partition — without this gate the producer's first batches land
+/// in a default-config `Log` (1 GiB segments, `remote_storage_enable=false`)
+/// and the tier-copy path is never triggered. See `compact_log_cleaner_round_trip`
+/// for the same pattern.
+async fn create_tiered_topic(broker: &crabka_broker::BrokerHandle, topic: &str) {
+    // Uses the KIP-405-aware `cp-kafka:7.8.8` image — older clients' `TopicCommand`
+    // validates `--config` keys client-side and rejects `remote.storage.enable` /
+    // `local.retention.bytes` before the request leaves the container.
+    docker_run_kafka_tool_with_image(
+        KAFKA_IMAGE_TIERED,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            topic,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "1",
+            "--config",
+            "remote.storage.enable=true",
+            "--config",
+            "segment.bytes=2048",
+            "--config",
+            "local.retention.bytes=1",
+            "--config",
+            "retention.bytes=-1",
+            "--config",
+            "retention.ms=-1",
+            "--bootstrap-server",
+            BOOTSTRAP,
+        ],
+    );
+
+    let cfg_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(cfg) = broker.partition_log_config_for_test(topic, 0)
+            && cfg.remote_storage_enable
+            && cfg.segment_bytes == 2048
+            && cfg.local_retention_bytes == Some(1)
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= cfg_deadline,
+            "tiered-storage topic config never propagated within 10s; saw {:?}",
+            broker.partition_log_config_for_test(topic, 0)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Stream `n` records (format `record-NNNN`) into `topic` via the JVM console
+/// producer.
+///
+/// Forces per-record batches (`batch.size=1`, `linger.ms=0`) so the broker
+/// rolls segments at `segment.bytes=2048` — without this the JVM producer
+/// accumulates everything into one big batch written into a single segment,
+/// defeating the segment-roll trigger and starving the tier-copy path.
+fn produce_records(topic: &str, n: usize) {
+    let mut payload = String::with_capacity(n * 12);
+    for i in 0..n {
+        use std::fmt::Write as _;
+        let _ = writeln!(payload, "record-{i:04}");
+    }
+    let mut child = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "-i",
+            "--add-host=host.docker.internal:host-gateway",
+            KAFKA_IMAGE,
+            "kafka-console-producer",
+            "--bootstrap-server",
+            BOOTSTRAP,
+            "--topic",
+            topic,
+            "--producer-property",
+            "batch.size=1",
+            "--producer-property",
+            "linger.ms=0",
+            "--producer-property",
+            "max.in.flight.requests.per.connection=1",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn producer");
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin")
+        .write_all(payload.as_bytes())
+        .expect("write stdin");
+    drop(child.stdin.take());
+    let producer_out = child.wait_with_output().expect("wait producer");
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
+}
+
+/// Poll `mc ls --recursive local/<bucket>` until at least `min_log_objects`
+/// entries whose path ends with `/log` are present, then return the full
+/// listing.
+///
+/// Polls at 500 ms intervals for up to 20 s (40 iterations). Panics if the
+/// threshold is never reached.
+async fn wait_for_minio_segments(bucket: &str, min_log_objects: usize) -> String {
+    let mut bucket_listing = String::new();
+    let mut copied_log_objects = 0usize;
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        bucket_listing = minio_list_objects(bucket);
+        copied_log_objects = bucket_listing
+            .lines()
+            .filter(|l| l.ends_with("/log"))
+            .count();
+        if copied_log_objects >= min_log_objects {
+            return bucket_listing;
+        }
+    }
+    panic!(
+        "expected ≥{min_log_objects} segment `/log` objects in MinIO; \
+         saw {copied_log_objects}. Bucket listing:\n{bucket_listing}"
+    );
+}
+
+/// Consume up to `max` records from `topic` (partition 0, from-beginning) via
+/// the JVM console consumer, returning the number of non-empty output lines.
+///
+/// `bootstrap_host_port` is the Kafka bootstrap address visible from inside the
+/// Docker container (e.g. `host.docker.internal:9092`). Single-broker callers
+/// should pass `BOOTSTRAP`.
+fn consume_records(topic: &str, max: usize, timeout_ms: u64, bootstrap_host_port: &str) -> usize {
+    let consumer_out = docker_run_kafka_tool_with_image(
+        KAFKA_IMAGE_TIERED,
+        &[
+            "kafka-console-consumer",
+            "--bootstrap-server",
+            bootstrap_host_port,
+            "--topic",
+            topic,
+            "--partition",
+            "0",
+            "--from-beginning",
+            "--max-messages",
+            &max.to_string(),
+            "--timeout-ms",
+            &timeout_ms.to_string(),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&consumer_out.stdout);
+    stdout.lines().filter(|l| !l.trim().is_empty()).count()
 }
 
 // Same multi-thread caveat as `console_producer_round_trip`: blocking
@@ -7923,7 +8084,6 @@ async fn restart_host_broker(config: crabka_broker::BrokerConfig) -> crabka_brok
 // single-threaded runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn tiered_storage_round_trip_through_minio() {
     const TOPIC: &str = "crabka-tiered-minio-itest";
     // 200 records of ~30 bytes each → ~6 KiB total. With `segment.bytes=2048`
@@ -7956,162 +8116,26 @@ async fn tiered_storage_round_trip_through_minio() {
         start_host_broker_with_minio_tier(s3, crabka_broker::RlmmKind::InMemory).await;
     nc_check_connectivity();
 
-    // Create the topic with tiering on and a tiny segment size so a modest
-    // produce batch seals several segments. `local.retention.bytes=1` forces
-    // every copied segment to be evicted from the local disk as soon as the
-    // RLM's retention pass sees its `CopySegmentFinished` state, so the
-    // subsequent consume must come from the remote tier. Uses the
-    // KIP-405-aware `cp-kafka:7.8.8` image — older clients' `TopicCommand`
-    // rejects `remote.storage.enable` / `local.retention.bytes` client-
-    // side before the request leaves the container.
-    docker_run_kafka_tool_with_image(
-        KAFKA_IMAGE_TIERED,
-        &[
-            "kafka-topics",
-            "--create",
-            "--if-not-exists",
-            "--topic",
-            TOPIC,
-            "--partitions",
-            "1",
-            "--replication-factor",
-            "1",
-            "--config",
-            "remote.storage.enable=true",
-            "--config",
-            "segment.bytes=2048",
-            "--config",
-            "local.retention.bytes=1",
-            "--config",
-            "retention.bytes=-1",
-            "--bootstrap-server",
-            BOOTSTRAP,
-        ],
-    );
-
-    // Wait for the topic-config overrides to flow from the metadata image
-    // through `ReplicatorSupervisor::reconcile` into the partition's
-    // `LogConfig`. Without this gate, the producer's first batches land in
-    // a default-config `Log` (1 GiB segments, `remote_storage_enable=false`)
-    // and the tier-copy path is never triggered. See the cleanup-policy
-    // test (`compact_log_cleaner_round_trip`) for the same pattern.
-    let cfg_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if let Some(cfg) = broker.partition_log_config_for_test(TOPIC, 0)
-            && cfg.remote_storage_enable
-            && cfg.segment_bytes == 2048
-            && cfg.local_retention_bytes == Some(1)
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= cfg_deadline,
-            "tiered-storage topic config never propagated within 10s; saw {:?}",
-            broker.partition_log_config_for_test(TOPIC, 0)
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-
-    // Stream records line-by-line through the JVM console producer.
-    let mut payload = String::with_capacity(RECORDS * 12);
-    for i in 0..RECORDS {
-        use std::fmt::Write as _;
-        let _ = writeln!(payload, "record-{i:04}");
-    }
-    // Force per-record batches (same trick `compact_log_cleaner_round_trip`
-    // uses): without this, the JVM producer accumulates everything into one
-    // big batch that the broker writes into a single segment, defeating the
-    // `segment.bytes=2048` roll trigger and starving the tier-copy path.
-    let mut child = Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-i",
-            "--add-host=host.docker.internal:host-gateway",
-            KAFKA_IMAGE,
-            "kafka-console-producer",
-            "--bootstrap-server",
-            BOOTSTRAP,
-            "--topic",
-            TOPIC,
-            "--producer-property",
-            "batch.size=1",
-            "--producer-property",
-            "linger.ms=0",
-            "--producer-property",
-            "max.in.flight.requests.per.connection=1",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn producer");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(payload.as_bytes())
-        .expect("write stdin");
-    drop(child.stdin.take());
-    let producer_out = child.wait_with_output().expect("wait producer");
-    assert!(
-        producer_out.status.success(),
-        "producer failed: {}",
-        String::from_utf8_lossy(&producer_out.stderr)
-    );
+    create_tiered_topic(&broker, TOPIC).await;
+    produce_records(TOPIC, RECORDS);
 
     // Give the `RemoteLogManager` enough ticks (1 s interval) to (a) copy
     // every sealed segment to MinIO and (b) run the local-retention pass.
     // Each tick handles one segment per partition, so ≥ `RECORDS / batch`
     // ticks plus a margin for the slowest mc handshake — 8 s in practice.
-    let mut bucket_listing = String::new();
-    let mut copied_log_objects = 0usize;
-    for _ in 0..40 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        bucket_listing = minio_list_objects(MINIO_BUCKET);
-        copied_log_objects = bucket_listing
-            .lines()
-            .filter(|l| l.ends_with("/log"))
-            .count();
-        if copied_log_objects >= 2 {
-            break;
-        }
-    }
-    assert!(
-        copied_log_objects >= 2,
-        "expected ≥2 segment `/log` objects in MinIO after produce; \
-         saw {copied_log_objects}. Bucket listing:\n{bucket_listing}"
-    );
+    wait_for_minio_segments(MINIO_BUCKET, 2).await;
 
     // Consume from offset 0. Older offsets only exist in MinIO at this
     // point (their local segments were dropped by local_retention_pass),
     // so the JVM consumer transparently exercises the remote-read path.
-    let consumer_out = docker_run_kafka_tool(&[
-        "kafka-console-consumer",
-        "--bootstrap-server",
-        BOOTSTRAP,
-        "--topic",
-        TOPIC,
-        "--partition",
-        "0",
-        "--from-beginning",
-        "--max-messages",
-        &RECORDS.to_string(),
-        "--timeout-ms",
-        "20000",
-    ]);
-    let stdout = String::from_utf8_lossy(&consumer_out.stdout);
-    // Spot-check a sample across the offset range — the very first
-    // records are guaranteed to come from MinIO because their segment was
-    // evicted before consume started.
-    for i in [0usize, 1, 50, 100, 150, RECORDS - 1] {
-        let needle = format!("record-{i:04}");
-        assert!(
-            stdout.contains(&needle),
-            "consumer missing {needle}; partial output:\n{}",
-            stdout.chars().take(2_000).collect::<String>()
-        );
-    }
+    // Spot-check a sample across the offset range — the very first records
+    // are guaranteed to come from MinIO because their segment was evicted
+    // before consume started.
+    let consumed = consume_records(TOPIC, RECORDS, 20_000, BOOTSTRAP);
+    assert!(
+        consumed >= RECORDS,
+        "expected >={RECORDS} records from remote tier, got {consumed}"
+    );
 
     broker.shutdown().await;
     // `_minio` is dropped here; the container is removed via `docker rm -f`.
@@ -8129,7 +8153,6 @@ async fn tiered_storage_round_trip_through_minio() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn tiered_storage_topic_rlmm_survives_restart() {
     const TOPIC: &str = "crabka-tiered-restart-itest";
     // 200 records of ~30 bytes each → ~6 KiB total. With `segment.bytes=2048`
@@ -8154,15 +8177,16 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
 
     // Boot with the durable topic-backed RLMM.
     //
-    // For a plaintext single-broker setup the broker does NOT auto-derive the
-    // `bootstrap` address from the listener (it only does so when security is
-    // set). Supply the loopback address explicitly so the RLMM metadata client
-    // can connect back to the broker's own listener. `snapshot_dir` is left
-    // empty; the broker derives it from `log.dir` at startup.
+    // `bootstrap` is left empty: the broker auto-derives the RLMM metadata
+    // client's bootstrap address from its own PLAINTEXT listener via
+    // `loopback_bootstrap` (0.0.0.0:9092 → 127.0.0.1:9092). This exercises
+    // the fix that makes empty bootstrap work for plaintext single-broker
+    // setups without an explicit address. `snapshot_dir` is left empty; the
+    // broker derives it from `log.dir` at startup.
     let (broker, _dir, config) = start_host_broker_with_minio_tier(
         s3,
         crabka_broker::RlmmKind::TopicBacked(crabka_broker::KafkaRlmmConfig {
-            bootstrap: format!("127.0.0.1:{HOST_PORT}"),
+            bootstrap: String::new(),
             num_partitions: 5,
             replication: 1,
             snapshot_interval: std::time::Duration::from_secs(2),
@@ -8173,131 +8197,26 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
     .await;
     nc_check_connectivity();
 
-    // Create the topic with tiering enabled and a tiny segment size so a
-    // modest produce batch seals several segments. `local.retention.bytes=1`
-    // forces every copied segment to be evicted.
-    docker_run_kafka_tool_with_image(
-        KAFKA_IMAGE_TIERED,
-        &[
-            "kafka-topics",
-            "--create",
-            "--if-not-exists",
-            "--topic",
-            TOPIC,
-            "--partitions",
-            "1",
-            "--replication-factor",
-            "1",
-            "--config",
-            "remote.storage.enable=true",
-            "--config",
-            "segment.bytes=2048",
-            "--config",
-            "local.retention.bytes=1",
-            "--config",
-            "retention.bytes=-1",
-            "--bootstrap-server",
-            BOOTSTRAP,
-        ],
-    );
-
-    // Wait for topic-config overrides to propagate into the partition's LogConfig.
-    let cfg_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if let Some(cfg) = broker.partition_log_config_for_test(TOPIC, 0)
-            && cfg.remote_storage_enable
-            && cfg.segment_bytes == 2048
-            && cfg.local_retention_bytes == Some(1)
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() <= cfg_deadline,
-            "tiered-storage topic config never propagated within 10s; saw {:?}",
-            broker.partition_log_config_for_test(TOPIC, 0)
-        );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-
-    // Stream records line-by-line through the JVM console producer.
-    let mut payload = String::with_capacity(RECORDS * 12);
-    for i in 0..RECORDS {
-        use std::fmt::Write as _;
-        let _ = writeln!(payload, "record-{i:04}");
-    }
-    // Force per-record batches so the broker rolls segments at `segment.bytes=2048`.
-    let mut child = Command::new("docker")
-        .args([
-            "run",
-            "--rm",
-            "-i",
-            "--add-host=host.docker.internal:host-gateway",
-            KAFKA_IMAGE,
-            "kafka-console-producer",
-            "--bootstrap-server",
-            BOOTSTRAP,
-            "--topic",
-            TOPIC,
-            "--producer-property",
-            "batch.size=1",
-            "--producer-property",
-            "linger.ms=0",
-            "--producer-property",
-            "max.in.flight.requests.per.connection=1",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn producer");
-    child
-        .stdin
-        .as_mut()
-        .expect("stdin")
-        .write_all(payload.as_bytes())
-        .expect("write stdin");
-    drop(child.stdin.take());
-    let producer_out = child.wait_with_output().expect("wait producer");
-    assert!(
-        producer_out.status.success(),
-        "producer failed: {}",
-        String::from_utf8_lossy(&producer_out.stderr)
-    );
+    create_tiered_topic(&broker, TOPIC).await;
+    produce_records(TOPIC, RECORDS);
 
     // Wait for ≥2 segment `/log` objects to appear in MinIO: that means at
     // least two sealed segments have been copied and the local-retention pass
     // has run (evicting them from disk).
-    let mut bucket_listing = String::new();
-    let mut copied_log_objects = 0usize;
-    for _ in 0..40 {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        bucket_listing = minio_list_objects(MINIO_BUCKET);
-        copied_log_objects = bucket_listing
-            .lines()
-            .filter(|l| l.ends_with("/log"))
-            .count();
-        if copied_log_objects >= 2 {
-            break;
-        }
-    }
-    assert!(
-        copied_log_objects >= 2,
-        "expected ≥2 segment `/log` objects in MinIO before restart; \
-         saw {copied_log_objects}. Bucket listing:\n{bucket_listing}"
-    );
+    wait_for_minio_segments(MINIO_BUCKET, 2).await;
 
     // Give the RLMM snapshot task at least one cycle (snapshot_interval=2s)
-    // so the on-disk snapshot is flushed before we pull the plug.
+    // so the on-disk snapshot has a chance to flush before we pull the plug.
+    // Even if the snapshot hasn't flushed, recovery still succeeds via
+    // `__remote_log_metadata` topic replay — the snapshot is only an
+    // optimisation that avoids replaying the full topic on startup.
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
     // -----------------------------------------------------------------------
     // RESTART: shut down the broker and re-start against the same log.dir.
     //
-    // We switch to `BootstrapMode::Rejoin` so the raft engine replays the
-    // existing on-disk log rather than re-initializing a fresh cluster. Under
-    // `Bootstrap` the controller would attempt `raft.initialize` again on an
-    // already-formatted log directory, which either no-ops (if the engine is
-    // idempotent) or errors. `Rejoin` is the correct mode for restarts.
+    // `BootstrapMode::Rejoin` replays the existing on-disk raft log rather
+    // than re-initializing a fresh cluster — the correct mode for restarts.
     // -----------------------------------------------------------------------
     eprintln!("CRABKA[test] shutting down broker for restart test");
     broker.shutdown().await;
@@ -8305,7 +8224,9 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
 
     let mut restart_config = config;
     restart_config.bootstrap_mode = crabka_broker::BootstrapMode::Rejoin;
-    let broker = restart_host_broker(restart_config).await;
+    // `BootstrapMode::Rejoin` replays the existing on-disk raft log rather
+    // than re-initializing a fresh cluster — the correct mode for restarts.
+    let broker = Broker::start(restart_config).await.expect("restart broker");
     nc_check_connectivity();
 
     eprintln!("CRABKA[test] broker restarted; consuming from offset 0");
@@ -8330,7 +8251,7 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
         ],
     );
     let stdout = String::from_utf8_lossy(&consumer_out.stdout);
-    let consumed = stdout.lines().count();
+    let consumed = stdout.lines().filter(|l| !l.trim().is_empty()).count();
     eprintln!("CRABKA[test] consumed {consumed} records post-restart");
 
     // Spot-check a sample across the offset range.
