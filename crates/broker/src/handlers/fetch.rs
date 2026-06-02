@@ -19,7 +19,8 @@ use tokio::sync::Notify;
 use crabka_metadata::AclOperation;
 use crabka_protocol::owned::fetch_request::FetchRequest;
 use crabka_protocol::owned::fetch_response::{
-    AbortedTransaction, FetchResponse, FetchableTopicResponse, PartitionData,
+    AbortedTransaction, EpochEndOffset, FetchResponse, FetchableTopicResponse, LeaderIdAndEpoch,
+    PartitionData,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::records::{RecordBatch, RecordsPayload};
@@ -140,6 +141,7 @@ pub(crate) async fn handle(
                     .map(|fp| EffectivePartition {
                         partition: fp.partition,
                         current_leader_epoch: fp.current_leader_epoch,
+                        last_fetched_epoch: fp.last_fetched_epoch,
                         fetch_offset: fp.fetch_offset,
                         partition_max_bytes: fp.partition_max_bytes,
                     })
@@ -225,6 +227,10 @@ pub(crate) async fn handle(
             let fetch_offset = fp.fetch_offset;
             let max_bytes = fp.partition_max_bytes;
             let req_current_leader_epoch = fp.current_leader_epoch;
+            // KIP-320: epoch of the last record the fetcher has already consumed.
+            // -1 means "not set" (v0–v11 or incremental partitions that never
+            // carried the field).
+            let req_last_fetched_epoch = fp.last_fetched_epoch;
 
             let mut out = PartitionData {
                 partition_index: idx,
@@ -281,6 +287,54 @@ pub(crate) async fn handle(
                         codes::FENCED_LEADER_EPOCH
                     } else {
                         codes::UNKNOWN_LEADER_EPOCH
+                    };
+                    // KIP-320: tell the fetcher who the current leader is so it
+                    // can re-target without a full Metadata round-trip. Encodes
+                    // only at Fetch v12+ (codegen gates the tagged field).
+                    let leader_id = image
+                        .partition(&topic_name, idx)
+                        .map_or(-1, |pr| i32::try_from(pr.leader).unwrap_or(-1));
+                    out.current_leader = LeaderIdAndEpoch {
+                        leader_id,
+                        leader_epoch: our_epoch,
+                        ..Default::default()
+                    };
+                    pending.push(PendingRead {
+                        topic_name: topic_name.clone(),
+                        topic_id,
+                        partition_index: idx,
+                        fetch_offset,
+                        max_bytes,
+                        read_committed,
+                        is_follower_fetch,
+                        partition: None,
+                        out,
+                        cpu_micros: 0,
+                    });
+                    continue;
+                }
+            }
+
+            // KIP-320 divergence detection. A v12+ fetcher includes the leader
+            // epoch of its last fetched record (`last_fetched_epoch`). If the
+            // leader's epoch history says that epoch/offset diverged, return a
+            // `diverging_epoch` and serve no records, so the follower/consumer
+            // truncates instead of appending on top of a divergent suffix.
+            if req_last_fetched_epoch >= 0
+                && let Some(part) = part_opt.as_ref()
+            {
+                let (found_epoch, end_offset) = {
+                    let log = part.log.lock().expect("log mutex poisoned");
+                    let leo = log.log_end_offset();
+                    log.epoch_checkpoint()
+                        .epoch_and_offset_for(req_last_fetched_epoch, leo)
+                };
+                if found_epoch < req_last_fetched_epoch || end_offset < fetch_offset {
+                    out.error_code = codes::NONE;
+                    out.diverging_epoch = EpochEndOffset {
+                        epoch: found_epoch,
+                        end_offset,
+                        ..Default::default()
                     };
                     pending.push(PendingRead {
                         topic_name: topic_name.clone(),
@@ -690,6 +744,10 @@ struct EffectiveTopic {
 struct EffectivePartition {
     partition: i32,
     current_leader_epoch: i32,
+    /// KIP-320: the leader epoch of the last fetched record as reported by
+    /// the fetcher. `-1` means "not set" (v0–v11 fetchers or session-cached
+    /// partitions that never set the field).
+    last_fetched_epoch: i32,
     fetch_offset: i64,
     partition_max_bytes: i32,
 }
@@ -715,6 +773,7 @@ fn group_cached_into_effective_topics(
         entry.partitions.push(EffectivePartition {
             partition: k.partition,
             current_leader_epoch: s.current_leader_epoch,
+            last_fetched_epoch: s.last_fetched_epoch,
             fetch_offset: s.fetch_offset,
             partition_max_bytes: s.max_bytes,
         });
@@ -780,6 +839,7 @@ fn snapshot_response_state(
                 state.fetch_offset = ep.fetch_offset;
                 state.max_bytes = ep.partition_max_bytes;
                 state.current_leader_epoch = ep.current_leader_epoch;
+                state.last_fetched_epoch = ep.last_fetched_epoch;
             }
             out.push((key, state));
         }
