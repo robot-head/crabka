@@ -280,7 +280,12 @@ jobs:
   # then a single `report` produces the lcov.
   broker-integration:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 30-minute budget: this runs the whole non-ignored broker suite (plus
+    # client-admin) twice under llvm-cov instrumentation (~2-3x slowdown), and
+    # the suite has grown substantially (share groups, client metrics, etc.).
+    # The work progresses steadily; it just no longer fits the old 15-minute
+    # wall. (A genuinely hung test still surfaces well inside half an hour.)
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       # `llvm-cov clean` + two instrumented `--no-report` runs generate a large
