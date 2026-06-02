@@ -10,7 +10,7 @@ url2 = "/benchmarks/crabka-vs-kafka/"
 url2_button = "See the benchmarks"
 repo_url = "https://github.com/robot-head/crabka"
 repo_license = "Apache 2.0"
-repo_version = "v0.1.1"
+repo_version = "v0.2.0"
 
 # --- Headline numbers (rendered as the stat band under the hero). ---
 # Sourced from /benchmarks/crabka-vs-kafka/ — a single-box, like-for-like
@@ -69,7 +69,7 @@ crabka = "Safe Rust — <code>unsafe</code> forbidden"
 [[extra.compare]]
 feature = "Metadata quorum"
 kafka = "KRaft"
-crabka = "KRaft (<code>openraft</code>)"
+crabka = "KRaft — native Rust, real KIP-595 wire"
 
 [[extra.compare]]
 feature = "Wire protocol"
@@ -110,7 +110,7 @@ content = "No JDK, no ZooKeeper, no separate controller process. One binary to s
 [[extra.features]]
 icon = "layers"
 title = "KRaft-native"
-content = 'Metadata lives in an <code>openraft</code>-backed quorum from day one — snapshots, dynamic reconfiguration, and split controller/broker roles included.'
+content = 'Metadata lives in a native KRaft quorum from day one — speaking the real KIP-595 wire (interoperable with JVM controllers), with snapshots, dynamic reconfiguration, and split controller/broker roles included.'
 
 [[extra.features]]
 icon = "lock"
@@ -146,3 +146,7 @@ Crabka is a Rust reimplementation of Apache Kafka. It speaks the Kafka wire
 protocol byte-for-byte, runs its metadata quorum on KRaft, and ships native
 Rust clients, a Kubernetes operator, and a Cruise-Control-equivalent
 rebalancer — all without a JVM.
+
+With Kafka parity now broad and validated against the JVM, Crabka is in
+**beta**: greenfield and pre-1.0, ready for evaluation and non-critical
+workloads, not yet hardened by production deployment.

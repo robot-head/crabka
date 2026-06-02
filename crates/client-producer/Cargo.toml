@@ -14,9 +14,9 @@ workspace = true
 default = []
 
 [dependencies]
-crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.1", path = "../client-core" }
-crabka-compression = { version = "0.1", path = "../compression" }
+crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.2", path = "../client-core" }
+crabka-compression = { version = "0.2", path = "../compression" }
 bon = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
@@ -27,9 +27,9 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.1", path = "../broker" }
-crabka-log = { version = "0.1", path = "../log" }
-crabka-client-consumer = { version = "0.1", path = "../client-consumer" }
-crabka-security = { version = "0.1", path = "../security" }
+crabka-broker = { version = "0.2", path = "../broker" }
+crabka-log = { version = "0.2", path = "../log" }
+crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
+crabka-security = { version = "0.2", path = "../security" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
