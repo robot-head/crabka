@@ -419,8 +419,8 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
     let (client_addrs, controller_addrs) = support::bind_and_drop_ports(1).await;
     let listen = client_addrs[0];
 
-    let log_dir = tempfile::TempDir::new().expect("log tempdir");
-    let remote_dir = tempfile::TempDir::new().expect("remote tempdir");
+    let log_dir = TempDir::new().expect("log tempdir");
+    let remote_dir = TempDir::new().expect("remote tempdir");
 
     let mut cfg = BrokerConfig::for_tests(log_dir.path().to_path_buf());
     cfg.listen_addr = listen;
@@ -500,6 +500,7 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
         if let Some(pcfg) = broker.partition_log_config_for_test(TOPIC, 0)
             && pcfg.remote_storage_enable
             && pcfg.segment_bytes == 1024
+            && pcfg.local_retention_bytes == Some(1)
         {
             break;
         }
