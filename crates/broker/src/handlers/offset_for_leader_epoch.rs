@@ -34,7 +34,15 @@ pub(crate) fn handle(
 ) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
     let req_bytes = req_bytes.to_vec();
     let partitions = broker.partitions.clone();
+    // Test-only: count served OFLE requests so the KIP-320 proactive-validation
+    // integration test can prove the consumer's validate pass issued an OFLE
+    // RPC (vs. the reactive in-band fetch paths, which issue none).
+    #[cfg(any(test, feature = "test-helpers"))]
+    let ofle_counter = broker.offset_for_leader_epoch_requests.clone();
     Box::pin(async move {
+        #[cfg(any(test, feature = "test-helpers"))]
+        ofle_counter.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+
         let mut cur: &[u8] = &req_bytes;
         let req = OffsetForLeaderEpochRequest::decode(&mut cur, version)?;
 
