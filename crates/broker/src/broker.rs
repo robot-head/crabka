@@ -2469,6 +2469,25 @@ fn next_rlmm_backoff(cur: std::time::Duration, max: std::time::Duration) -> std:
     (cur * 2).min(max)
 }
 
+/// Back off after a failed RLMM bootstrap attempt. Sleeps for the current
+/// backoff (advancing it toward the cap), or returns `false` if shutdown
+/// fired during the sleep so the caller can abort the bootstrap.
+async fn rlmm_bootstrap_backoff(
+    backoff: &mut std::time::Duration,
+    shutdown: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        () = shutdown.cancelled() => {
+            tracing::debug!("topic-backed RLMM bootstrap cancelled during backoff");
+            false
+        }
+        () = tokio::time::sleep(*backoff) => {
+            *backoff = next_rlmm_backoff(*backoff, RLMM_BOOTSTRAP_BACKOFF_MAX);
+            true
+        }
+    }
+}
+
 /// Construct the topic-backed
 /// [`crabka_remote_storage::RemoteLogMetadataManager`] against the
 /// broker's loopback listener and swap it into `swap`. Retries with
@@ -2508,14 +2527,9 @@ async fn bootstrap_topic_rlmm(
             Err(e) => {
                 tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
                     "topic-backed RLMM log start failed; retrying");
-                tokio::select! {
-                    () = shutdown.cancelled() => {
-                        tracing::debug!("topic-backed RLMM bootstrap cancelled during backoff");
-                        return;
-                    }
-                    () = tokio::time::sleep(backoff) => {}
+                if !rlmm_bootstrap_backoff(&mut backoff, &shutdown).await {
+                    return;
                 }
-                backoff = next_rlmm_backoff(backoff, RLMM_BOOTSTRAP_BACKOFF_MAX);
                 continue;
             }
         };
@@ -2530,20 +2544,16 @@ async fn bootstrap_topic_rlmm(
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
-                        "topic-backed RLMM manager start failed; retrying");
-                tokio::select! {
-                    () = shutdown.cancelled() => {
-                        tracing::debug!("topic-backed RLMM bootstrap cancelled during backoff");
-                        return;
-                    }
-                    () = tokio::time::sleep(backoff) => {}
+                    "topic-backed RLMM manager start failed; retrying");
+                if !rlmm_bootstrap_backoff(&mut backoff, &shutdown).await {
+                    return;
                 }
-                backoff = next_rlmm_backoff(backoff, RLMM_BOOTSTRAP_BACKOFF_MAX);
                 continue;
             }
         };
-        // `log` is owned by `manager`; we don't need a separate handle.
-        let _ = log;
+        // `log` is an `Arc`; `manager` holds its own clone. Drop the local
+        // binding here — we don't need a separate handle to the log.
+        drop(log);
         break manager;
     };
     // Keep the concrete handle so the reconciler can call

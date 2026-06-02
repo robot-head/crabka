@@ -225,10 +225,11 @@ pub struct BrokerMetrics {
     /// KIP-405: `1` when this broker has finished swapping in
     /// the topic-backed `RemoteLogMetadataManager` and is
     /// answering metadata queries from the durable
-    /// `__remote_log_metadata` topic; `0` while still on the in-memory
-    /// placeholder (the default until a configured
-    /// `[remote_storage.kafka_metadata]` bootstrap completes). Operators
-    /// alert on `min_over_time(tiered_storage_rlmm_topic_backed[5m]) == 0`
+    /// `__remote_log_metadata` topic; `0` while still on the
+    /// fail-closed `NotReadyRlmm` placeholder (the default until a
+    /// configured `[remote_storage.kafka_metadata]` bootstrap completes).
+    /// Operators alert on
+    /// `min_over_time(tiered_storage_rlmm_topic_backed[5m]) == 0`
     /// against clusters that asked for `metadataManager: Topic` to catch
     /// a stuck bootstrap.
     pub tiered_storage_rlmm_topic_backed: Gauge,
@@ -544,10 +545,10 @@ impl BrokerMetrics {
             "tiered_storage_rlmm_topic_backed",
             "KIP-405: 1 when this broker is answering remote-log \
              metadata queries from the durable __remote_log_metadata topic \
-             (production RLMM); 0 while still on the in-memory \
-             placeholder. Bumped to 1 by the bootstrap task after a \
-             successful SwappableRlmm swap; stays at 0 for clusters that \
-             never asked for `metadataManager: Topic`.",
+             (production RLMM); 0 while still on the fail-closed \
+             NotReadyRlmm placeholder. Bumped to 1 by the bootstrap task \
+             after a successful SwappableRlmm swap; stays at 0 for \
+             clusters that never asked for `metadataManager: Topic`.",
             tiered_storage_rlmm_topic_backed.clone(),
         );
         registry.register(
