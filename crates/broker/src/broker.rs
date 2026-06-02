@@ -517,7 +517,8 @@ impl BrokerHandle {
     /// Test-only: read the `tiered_storage_rlmm_topic_backed` gauge. `1`
     /// once the slice-48f bootstrap has swapped the in-memory placeholder
     /// for the topic-backed [`crabka_remote_storage::RemoteLogMetadataManager`],
-    /// `0` before that (or when `remote_log_metadata_kafka` is unset).
+    /// `0` before the swap completes, or when `remote_log_metadata` is
+    /// `RlmmKind::InMemory`.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
@@ -2114,6 +2115,7 @@ impl Broker {
                         num_partitions: cfg.num_partitions,
                         replication: cfg.replication,
                         snapshot_interval: cfg.snapshot_interval,
+                        // snapshot_dir is only empty for the programmatic BrokerConfig::default(); the TOML path (file_config.rs) already materialises it from log.dir.
                         snapshot_dir: if cfg.snapshot_dir.as_os_str().is_empty() {
                             config.log_dir.join("remote-log-metadata")
                         } else {

@@ -2154,4 +2154,23 @@ kdc_url = "tcp://kdc:88"
             "FileConfig schema has properties"
         );
     }
+
+    #[test]
+    fn kafka_metadata_in_memory_true_opts_out_to_in_memory_rlmm() {
+        let toml = r#"
+[remote_storage]
+storage_dir = "/tmp/tier"
+
+[remote_storage.kafka_metadata]
+in_memory = true
+"#;
+        let file: FileConfig = toml::from_str(toml).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        assert!(
+            matches!(cfg.remote_log_metadata, crate::config::RlmmKind::InMemory),
+            "in_memory = true must opt out to RlmmKind::InMemory, got {:?}",
+            cfg.remote_log_metadata
+        );
+    }
 }
