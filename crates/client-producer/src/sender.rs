@@ -5,10 +5,13 @@
 //! `Receiver` end of the wake channel (the `Producer` holds the
 //! `wake_tx` `Sender`), the `flush_notify`, the `accumulators` map, and
 //! the `next_seq` map. On every linger tick or wake signal it walks the
-//! accumulators, seals + drains a batch from each, builds a v2
-//! `RecordBatch`, frames a `ProduceRequest`, sends it via `Client`, and
-//! resolves each record's `oneshot::Sender` from the per-partition
-//! response.
+//! accumulators, seals + drains a batch from each, and builds a v2
+//! `RecordBatch` per partition (allocating its `base_sequence`). It then
+//! groups the drained batches by partition-**leader** and sends one
+//! `ProduceRequest` per leader via `Client::broker(id)` — falling back to the
+//! bootstrap `Client::send` when the leader is unknown — re-routing on
+//! `NOT_LEADER_OR_FOLLOWER` / `UNKNOWN_TOPIC_OR_PARTITION`, and resolving each
+//! record's `oneshot::Sender` from the per-partition response.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -37,11 +40,24 @@ use crate::transactional::TxnState;
 /// Wire error codes referenced when interpreting `PartitionProduceResponse`.
 mod codes {
     pub const NONE: i16 = 0;
+    /// The Produce reached a broker that does not lead the partition (stale
+    /// routing). Refresh metadata, re-resolve the leader, and retry.
+    pub const UNKNOWN_TOPIC_OR_PARTITION: i16 = 3;
+    /// The Produce reached a broker that does not lead the partition. With
+    /// rf=1 a misroute to a non-hosting broker surfaces as
+    /// `UNKNOWN_TOPIC_OR_PARTITION`; a misroute to a follower surfaces here.
+    pub const NOT_LEADER_OR_FOLLOWER: i16 = 6;
     pub const OUT_OF_ORDER_SEQUENCE_NUMBER: i16 = 45;
     pub const DUPLICATE_SEQUENCE_NUMBER: i16 = 46;
     /// `INVALID_PRODUCER_EPOCH` per the canonical Apache Kafka table (code 47).
     pub const INVALID_PRODUCER_EPOCH: i16 = 47;
 }
+
+/// Synthetic leader id meaning "leader unknown → use the bootstrap connection".
+/// Matches the consumer's convention (`poll.rs`): a partition whose leader id is
+/// `< 0` or whose advertised address the pool can't dial falls back to the
+/// bootstrap `Client::send` rather than `Client::broker(id)`.
+const BOOTSTRAP_LEADER: i32 = -1;
 
 /// All the bits of state the sender task needs. The builder constructs
 /// one of these, hands it to [`run`], and drops it.
@@ -57,6 +73,11 @@ pub(crate) struct SenderConfig {
     pub retries: i32,
     pub retry_backoff: Duration,
     pub metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
+    /// Per-`(topic, partition)` leader-id cache, shared with the `Producer`.
+    /// Populated from `Metadata` (see `Producer::partitions_for`); the sender
+    /// consults it to route each Produce to the partition leader and refreshes
+    /// it on `NOT_LEADER_OR_FOLLOWER` / `UNKNOWN_TOPIC_OR_PARTITION`.
+    pub partition_leaders: Arc<DashMap<(String, i32), i32>>,
     pub accumulators: Arc<DashMap<(String, i32), Arc<Mutex<Accumulator>>>>,
     pub next_seq: Arc<DashMap<(String, i32), i32>>,
     pub state: Arc<AtomicU8>,
@@ -98,12 +119,45 @@ pub(crate) async fn run(mut cfg: SenderConfig) {
     drain_once(&mut cfg).await;
 }
 
-/// Walk every accumulator, seal its current batch, pop one ready batch,
-/// and send it. Notifies `flush_notify` when there was nothing to do —
-/// that's the signal `Producer::flush` waits on.
+/// One drained partition's batch, prepared for sending: the encoded v2
+/// `RecordBatch` (with its `base_sequence` already allocated), the topic id, and
+/// the `PendingRecord`s whose oneshot acks the response resolves.
+///
+/// The `record_batch` is built **once** (sequence allocated once) so a
+/// re-route or retry resends the identical bytes — preserving per-partition
+/// idempotent sequencing: the leader sees each partition's `base_sequence`
+/// exactly once, in increasing order, regardless of which broker it reaches.
+struct PreparedBatch {
+    topic: String,
+    partition: i32,
+    topic_id: Uuid,
+    record_batch: RecordBatch,
+    records: Vec<PendingRecord>,
+}
+
+/// Walk every accumulator, seal its current batch, pop one ready batch, build
+/// the per-partition `RecordBatch` (allocating its `base_sequence`), then group
+/// the prepared batches by partition-leader and send one `ProduceRequest` per
+/// leader. Notifies `flush_notify` when there was nothing to do — that's the
+/// signal `Producer::flush` waits on.
+///
+/// **Per-partition ordering / idempotence.** Each `(topic, partition)`
+/// contributes at most ONE batch per drain cycle, and `drain_once` runs to
+/// completion (all per-leader sends + their bounded retries) before the next
+/// cycle. Sequences are allocated per-partition as each batch is built, so a
+/// partition's batches still reach its leader in strictly increasing
+/// `base_sequence` order with no gaps or reordering — routing changes only the
+/// destination broker, never the order or the allocated sequence.
 async fn drain_once(cfg: &mut SenderConfig) {
     let keys: Vec<(String, i32)> = cfg.accumulators.iter().map(|e| e.key().clone()).collect();
-    let mut any_work = false;
+
+    // 1. Drain one ready batch per partition and prepare it (build the v2
+    //    RecordBatch, allocating its base_sequence). `in_flight` is incremented
+    //    per drained batch while the accumulator lock is held, exactly as
+    //    before, so a concurrent `flush` never sees a batch that is neither in
+    //    the accumulator nor counted in flight. We decrement once per prepared
+    //    batch after its leader's request completes (success or failure).
+    let mut prepared: Vec<PreparedBatch> = Vec::new();
     for key in keys {
         let acc = match cfg.accumulators.get(&key) {
             Some(a) => a.value().clone(),
@@ -113,25 +167,344 @@ async fn drain_once(cfg: &mut SenderConfig) {
             let mut a = acc.lock().await;
             a.seal_current();
             let b = a.ready.pop_front();
-            // Account for the batch as in-flight while still holding the
-            // accumulator lock, so a concurrent `flush` never observes a window
-            // where the batch is neither in the accumulator nor counted here.
             if b.is_some() {
                 cfg.in_flight.fetch_add(1, Ordering::AcqRel);
             }
             b
         };
         let Some(batch) = batch else { continue };
-        any_work = true;
-        send_one(cfg, &key.0, key.1, batch).await;
-        if cfg.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
-            // Last in-flight batch just completed; wake any `flush` waiter
-            // promptly instead of making it poll out its timeout.
-            cfg.flush_notify.notify_waiters();
+        prepared.push(prepare_batch(cfg, &key.0, key.1, batch).await);
+    }
+
+    if prepared.is_empty() {
+        cfg.flush_notify.notify_waiters();
+        return;
+    }
+
+    // 2. Group prepared batches by their partition leader, then send one
+    //    ProduceRequest per leader. `send_to_leaders` decrements `in_flight`
+    //    once per batch as each completes and wakes any `flush` waiter when the
+    //    last in-flight batch lands.
+    send_to_leaders(cfg, prepared, 0).await;
+}
+
+/// Resolve a partition's leader id from the cache. Returns [`BOOTSTRAP_LEADER`]
+/// when the leader is unknown (`< 0`), uncached, or the pool has no dialable
+/// address for it (e.g. a port-0 in-process test broker) — those cases fall
+/// back to the bootstrap connection.
+fn resolve_leader(cfg: &SenderConfig, topic: &str, partition: i32) -> i32 {
+    match cfg
+        .partition_leaders
+        .get(&(topic.to_string(), partition))
+        .map(|e| *e.value())
+    {
+        Some(id) if id >= 0 && cfg.client.knows_broker(id) => id,
+        _ => BOOTSTRAP_LEADER,
+    }
+}
+
+/// Build the v2 `RecordBatch` for a drained partition batch, allocating its
+/// `base_sequence` range from `next_seq`. The result is sent (and any retry
+/// resent) verbatim, so the sequence is allocated exactly once per batch.
+async fn prepare_batch(
+    cfg: &SenderConfig,
+    topic: &str,
+    partition: i32,
+    batch: InProgressBatch,
+) -> PreparedBatch {
+    // Allocate the base_sequence range for this batch (once).
+    let base_sequence = {
+        let mut entry = cfg
+            .next_seq
+            .entry((topic.to_string(), partition))
+            .or_insert(0);
+        let cur = *entry;
+        let count = i32::try_from(batch.records.len()).unwrap_or(i32::MAX);
+        *entry = cur.wrapping_add(count);
+        cur
+    };
+
+    // Resolve the topic_id from the metadata cache (zero is fine — the broker
+    // falls back to the `name` field for v ≤ 12).
+    let topic_id = cfg
+        .metadata_cache
+        .lock()
+        .await
+        .get(topic)
+        .map_or(Uuid::ZERO, |m| m.topic_id);
+
+    // Snapshot the transactional pid/epoch once per batch.
+    let txn_snapshot = txn_pid_snapshot(cfg).await;
+
+    let record_batch = build_record_batch(cfg, &batch, base_sequence, txn_snapshot);
+
+    PreparedBatch {
+        topic: topic.to_string(),
+        partition,
+        topic_id,
+        record_batch,
+        records: batch.records,
+    }
+}
+
+/// Group the prepared per-partition batches by leader id and send one
+/// `ProduceRequest` per leader. Each partition's batch appears in exactly one
+/// leader's request, so per-partition sequencing is untouched by the grouping.
+///
+/// `reroute_depth` bounds the recursive re-route triggered by a
+/// `NOT_LEADER_OR_FOLLOWER` / `UNKNOWN_TOPIC_OR_PARTITION` response: once it
+/// reaches `cfg.retries`, a still-misrouted batch is failed rather than retried
+/// forever (the producer's existing bounded-retry budget).
+async fn send_to_leaders(cfg: &SenderConfig, prepared: Vec<PreparedBatch>, reroute_depth: i32) {
+    // Group by leader id. Resolution is a synchronous registry lookup (no
+    // await), so the cache is read here and the per-leader sends happen below
+    // with no lock held across the `.await`.
+    let mut by_leader: HashMap<i32, Vec<PreparedBatch>> = HashMap::new();
+    for pb in prepared {
+        let leader = resolve_leader(cfg, &pb.topic, pb.partition);
+        by_leader.entry(leader).or_default().push(pb);
+    }
+
+    // Send sequentially so a single parked leader can't starve the others'
+    // deadlines beyond the per-request timeout, mirroring the consumer's poll.
+    for (leader, batches) in by_leader {
+        send_leader_group(cfg, leader, batches, reroute_depth).await;
+    }
+}
+
+/// Decrement `in_flight` for a completed batch, waking any `flush` waiter when
+/// it was the last one outstanding.
+fn finish_in_flight(cfg: &SenderConfig) {
+    if cfg.in_flight.fetch_sub(1, Ordering::AcqRel) == 1 {
+        cfg.flush_notify.notify_waiters();
+    }
+}
+
+/// Send one `ProduceRequest` carrying every batch routed to `leader`, with
+/// bounded retries. On a partition-level routing error
+/// (`NOT_LEADER_OR_FOLLOWER` / `UNKNOWN_TOPIC_OR_PARTITION`) the affected
+/// partitions are re-resolved and retried — by recursing into
+/// [`send_to_leaders`] with just those batches after a metadata refresh, so a
+/// re-routed partition's batch (same allocated `base_sequence`) reaches its new
+/// leader. Each batch's `in_flight` slot is released exactly once, when its
+/// terminal outcome (ack or failure) is reached.
+#[allow(clippy::too_many_lines)] // single per-leader send+response state machine; splitting hurts readability
+async fn send_leader_group(
+    cfg: &SenderConfig,
+    leader: i32,
+    batches: Vec<PreparedBatch>,
+    reroute_depth: i32,
+) {
+    // Frame a multi-topic ProduceRequest from the grouped batches. Partition
+    // data for the same topic is merged under one TopicProduceData entry.
+    let req = build_produce_request(cfg, &batches);
+
+    let mut attempts: i32 = 0;
+    let resp = loop {
+        attempts += 1;
+        let send = if leader == BOOTSTRAP_LEADER {
+            cfg.client.send(req.clone()).await
+        } else {
+            cfg.client.broker(leader).send(req.clone()).await
+        };
+        match send {
+            Ok(r) => break r,
+            Err(e) => {
+                if attempts > cfg.retries {
+                    tracing::error!(
+                        leader,
+                        error = %e,
+                        "producer giving up after {attempts} attempts",
+                    );
+                    // Fail every batch in this group; release each in-flight slot.
+                    // `ClientError` is not `Clone`, so the real transport error
+                    // goes to the first batch and the rest get `Closed` (same
+                    // policy `fail_batch` uses within a single multi-record batch).
+                    let mut iter = batches.into_iter();
+                    if let Some(first) = iter.next() {
+                        fail_batch(first.records, ProducerError::Client(e));
+                        finish_in_flight(cfg);
+                    }
+                    for pb in iter {
+                        fail_batch(pb.records, ProducerError::Closed);
+                        finish_in_flight(cfg);
+                    }
+                    return;
+                }
+                // A transport failure to a specific leader may mean its address
+                // is stale; refresh metadata so a retry (and the next cycle) can
+                // re-resolve. Best-effort — the retry re-sends to the same id.
+                let _ = cfg.client.refresh_metadata().await;
+                tracing::warn!(leader, error = %e, "produce attempt {attempts} failed; retrying");
+                tokio::time::sleep(cfg.retry_backoff).await;
+            }
+        }
+    };
+
+    // Resolve each batch's per-partition response. Batches whose partition
+    // returned a routing error are collected for re-resolution; all others
+    // reach a terminal outcome here (and release their in-flight slot).
+    let mut to_reroute: Vec<PreparedBatch> = Vec::new();
+    let mut refresh_needed = false;
+    for pb in batches {
+        let part_resp = resp
+            .responses
+            .iter()
+            .find(|t| {
+                t.name == pb.topic || (pb.topic_id != Uuid::ZERO && t.topic_id == pb.topic_id)
+            })
+            .and_then(|t| {
+                t.partition_responses
+                    .iter()
+                    .find(|p| p.index == pb.partition)
+            });
+        let Some(part_resp) = part_resp else {
+            fail_batch(pb.records, ProducerError::Closed);
+            finish_in_flight(cfg);
+            continue;
+        };
+
+        match part_resp.error_code {
+            codes::NONE | codes::DUPLICATE_SEQUENCE_NUMBER => {
+                // DUPLICATE_SEQUENCE_NUMBER means the broker already committed
+                // this batch — same base_offset is returned, so we can ack the
+                // caller as if the original write succeeded.
+                let base_offset = part_resp.base_offset;
+                let partition = pb.partition;
+                for r in pb.records {
+                    let _ = r.ack.send(Ok(RecordMetadata {
+                        topic_index: 0,
+                        partition,
+                        offset: base_offset + i64::from(r.offset_delta),
+                        timestamp_ms: r.timestamp_ms,
+                    }));
+                }
+                finish_in_flight(cfg);
+            }
+            codes::OUT_OF_ORDER_SEQUENCE_NUMBER | codes::INVALID_PRODUCER_EPOCH => {
+                cfg.state
+                    .compare_exchange(
+                        STATE_ACTIVE,
+                        STATE_FENCED,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .ok();
+                fail_batch(pb.records, ProducerError::FencedProducer);
+                finish_in_flight(cfg);
+            }
+            codes::NOT_LEADER_OR_FOLLOWER | codes::UNKNOWN_TOPIC_OR_PARTITION => {
+                // Stale routing: we produced to a broker that doesn't lead this
+                // partition. Adopt any inline leader hint immediately; otherwise
+                // mark for a metadata refresh. Re-resolve + retry below. Do NOT
+                // release the in-flight slot — the batch is still outstanding
+                // (it carries the already-allocated base_sequence, which we
+                // resend verbatim so sequencing stays monotonic).
+                let hint = part_resp.current_leader.leader_id;
+                if hint >= 0 {
+                    cfg.partition_leaders
+                        .insert((pb.topic.clone(), pb.partition), hint);
+                } else {
+                    refresh_needed = true;
+                }
+                to_reroute.push(pb);
+            }
+            code => {
+                fail_batch(pb.records, ProducerError::Server(code));
+                finish_in_flight(cfg);
+            }
         }
     }
-    if !any_work {
-        cfg.flush_notify.notify_waiters();
+
+    if to_reroute.is_empty() {
+        return;
+    }
+
+    // Bounded retry: if we've already re-routed `cfg.retries` times and the
+    // partition still isn't reaching its leader, give up rather than loop
+    // forever. Fail the still-misrouted batches with the routing error code so
+    // the caller sees a real Server error, and release their in-flight slots.
+    if reroute_depth >= cfg.retries {
+        for pb in to_reroute {
+            fail_batch(
+                pb.records,
+                ProducerError::Server(codes::NOT_LEADER_OR_FOLLOWER),
+            );
+            finish_in_flight(cfg);
+        }
+        return;
+    }
+
+    // Refresh metadata so the next resolution learns the current leaders, then
+    // re-group and resend just the re-routable batches. The refresh also
+    // re-populates the pool's address registry. We update `partition_leaders`
+    // from the fresh Metadata so the immediate re-resolve routes correctly.
+    if refresh_needed && let Ok(md) = cfg.client.refresh_metadata().await {
+        for t in &md.topics {
+            let Some(name) = &t.name else { continue };
+            if t.error_code != 0 {
+                continue;
+            }
+            for p in &t.partitions {
+                cfg.partition_leaders
+                    .insert((name.clone(), p.partition_index), p.leader_id);
+            }
+        }
+    }
+    // Backoff between the failed attempt and the re-resolved send avoids a hot
+    // loop if the leader is mid-election.
+    tokio::time::sleep(cfg.retry_backoff).await;
+    Box::pin(send_to_leaders(cfg, to_reroute, reroute_depth + 1)).await;
+}
+
+/// Build a multi-topic `ProduceRequest` from a leader's grouped batches.
+/// Partitions of the same topic are merged under a single `TopicProduceData`.
+fn build_produce_request(cfg: &SenderConfig, batches: &[PreparedBatch]) -> ProduceRequest {
+    // Transactional state is uniform across a drain cycle's batches (the
+    // producer is either inside a txn or not). Derive the request-level
+    // transactional_id from whether any batch was stamped transactional.
+    let is_txn = batches
+        .iter()
+        .any(|b| b.record_batch.attributes.is_transactional());
+    let req_txn_id = if is_txn {
+        cfg.transactional_id.clone()
+    } else {
+        None
+    };
+
+    // Merge partition data by topic, preserving the order batches were drained.
+    let mut topic_order: Vec<String> = Vec::new();
+    let mut by_topic: HashMap<String, (Uuid, Vec<PartitionProduceData>)> = HashMap::new();
+    for pb in batches {
+        let entry = by_topic.entry(pb.topic.clone()).or_insert_with(|| {
+            topic_order.push(pb.topic.clone());
+            (pb.topic_id, Vec::new())
+        });
+        entry.1.push(PartitionProduceData {
+            index: pb.partition,
+            records: Some(pb.record_batch.clone().into()),
+            ..Default::default()
+        });
+    }
+    let topic_data: Vec<TopicProduceData> = topic_order
+        .into_iter()
+        .map(|name| {
+            let (topic_id, partition_data) = by_topic.remove(&name).expect("topic in order list");
+            TopicProduceData {
+                name,
+                topic_id,
+                partition_data,
+                ..Default::default()
+            }
+        })
+        .collect();
+
+    ProduceRequest {
+        transactional_id: req_txn_id,
+        acks: cfg.acks.wire(),
+        timeout_ms: i32::try_from(cfg.request_timeout.as_millis()).unwrap_or(i32::MAX),
+        topic_data,
+        ..Default::default()
     }
 }
 
@@ -147,135 +520,6 @@ async fn txn_pid_snapshot(cfg: &SenderConfig) -> Option<(i64, i16)> {
         Some(*cfg.txn_pid_epoch.lock().await)
     } else {
         None
-    }
-}
-
-/// Send a single (topic, partition) batch and resolve its records'
-/// oneshot acks from the response.
-async fn send_one(cfg: &SenderConfig, topic: &str, partition: i32, batch: InProgressBatch) {
-    // 1. Allocate the base_sequence range for this batch.
-    let base_sequence = {
-        let mut entry = cfg
-            .next_seq
-            .entry((topic.to_string(), partition))
-            .or_insert(0);
-        let cur = *entry;
-        let count = i32::try_from(batch.records.len()).unwrap_or(i32::MAX);
-        *entry = cur.wrapping_add(count);
-        cur
-    };
-
-    // 2. Resolve the topic_id from the metadata cache (zero is fine —
-    //    the broker falls back to the `name` field for v ≤ 12).
-    let topic_id = cfg
-        .metadata_cache
-        .lock()
-        .await
-        .get(topic)
-        .map_or(Uuid::ZERO, |m| m.topic_id);
-
-    // 3. Snapshot the transactional pid/epoch once per batch.
-    //    Per-batch snapshot: if the caller races begin_transaction() and
-    //    send() the result is unspecified — that is a user bug and we don't
-    //    add extra synchronisation to paper over it.
-    let txn_snapshot = txn_pid_snapshot(cfg).await;
-
-    // 4. Build the v2 RecordBatch (compression handled by RecordBatch::encode).
-    let record_batch = build_record_batch(cfg, &batch, base_sequence, txn_snapshot);
-
-    // 5. Frame the ProduceRequest.
-    //    Pass the transactional_id when we are inside a transaction so the
-    //    broker can associate the batch with the ongoing txn.
-    let req_txn_id = txn_snapshot.and(cfg.transactional_id.clone());
-    let req = ProduceRequest {
-        transactional_id: req_txn_id,
-        acks: cfg.acks.wire(),
-        timeout_ms: i32::try_from(cfg.request_timeout.as_millis()).unwrap_or(i32::MAX),
-        topic_data: vec![TopicProduceData {
-            name: topic.to_string(),
-            topic_id,
-            partition_data: vec![PartitionProduceData {
-                index: partition,
-                records: Some(record_batch.into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-
-    // 5. Send with retries.
-    // NOTE (out of scope here): like the consumer's Fetch used to, this Produce
-    // goes over the bootstrap connection rather than the partition leader. On a
-    // multi-broker cluster that misroutes writes. The consumer now groups by
-    // leader via `Client::broker(id)`; the producer should follow suit in a
-    // separate change.
-    let mut attempts: i32 = 0;
-    let resp = loop {
-        attempts += 1;
-        match cfg.client.send(req.clone()).await {
-            Ok(r) => break r,
-            Err(e) => {
-                if attempts > cfg.retries {
-                    tracing::error!(
-                        topic,
-                        partition,
-                        error = %e,
-                        "producer giving up after {attempts} attempts",
-                    );
-                    fail_batch(batch.records, ProducerError::Client(e));
-                    return;
-                }
-                tracing::warn!(topic, partition, error = %e, "produce attempt {attempts} failed; retrying");
-                tokio::time::sleep(cfg.retry_backoff).await;
-            }
-        }
-    };
-
-    // 6. Resolve the per-(topic, partition) entry in the response.
-    //    Produce v13+ omits the topic name on the wire and carries only
-    //    `topic_id`, so we match either field. With a single topic per
-    //    request, falling back to "first entry" is also safe — but
-    //    keeping the structural match is more honest about intent.
-    let part_resp = resp
-        .responses
-        .iter()
-        .find(|t| t.name == topic || (topic_id != Uuid::ZERO && t.topic_id == topic_id))
-        .or_else(|| resp.responses.first())
-        .and_then(|t| t.partition_responses.iter().find(|p| p.index == partition));
-    let Some(part_resp) = part_resp else {
-        fail_batch(batch.records, ProducerError::Closed);
-        return;
-    };
-
-    match part_resp.error_code {
-        codes::NONE | codes::DUPLICATE_SEQUENCE_NUMBER => {
-            // DUPLICATE_SEQUENCE_NUMBER means the broker already committed
-            // this batch — same base_offset is returned, so we can ack the
-            // caller as if the original write succeeded.
-            for r in batch.records {
-                let _ = r.ack.send(Ok(RecordMetadata {
-                    topic_index: 0,
-                    partition,
-                    offset: part_resp.base_offset + i64::from(r.offset_delta),
-                    timestamp_ms: r.timestamp_ms,
-                }));
-            }
-        }
-        codes::OUT_OF_ORDER_SEQUENCE_NUMBER | codes::INVALID_PRODUCER_EPOCH => {
-            cfg.state
-                .compare_exchange(
-                    STATE_ACTIVE,
-                    STATE_FENCED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .ok();
-            fail_batch(batch.records, ProducerError::FencedProducer);
-        }
-        code => {
-            fail_batch(batch.records, ProducerError::Server(code));
-        }
     }
 }
 
