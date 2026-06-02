@@ -3114,23 +3114,27 @@ pub fn render_broker_toml(
             }
         }
 
-        // KIP-405: `[remote_storage.kafka_metadata]` opts
-        // the broker pods into the topic-backed RLMM. Omitted when
-        // `metadataManager` is unset or `type = InMemory`.
-        if let Some(mm) = ts.metadata_manager.as_ref()
-            && let crate::crd::kafka::MetadataManagerType::Topic = mm.kind
-        {
-            let topic = mm
-                .topic
+        // KIP-405: `[remote_storage.kafka_metadata]` opts the broker pods into
+        // the topic-backed RLMM. This is the production default whenever tiered
+        // storage is enabled. Only an explicit `type: InMemory` opts out.
+        let is_in_memory = ts
+            .metadata_manager
+            .as_ref()
+            .is_some_and(|mm| matches!(mm.kind, crate::crd::kafka::MetadataManagerType::InMemory));
+        if !is_in_memory {
+            let topic = ts
+                .metadata_manager
                 .as_ref()
-                .expect("MetadataManagerType::Topic requires metadataManager.topic");
+                .and_then(|mm| mm.topic.as_ref());
             let _ = writeln!(out, "[remote_storage.kafka_metadata]");
-            let _ = writeln!(out, "bootstrap = \"{}\"", toml_escape(&topic.bootstrap));
-            if let Some(np) = topic.num_partitions {
-                let _ = writeln!(out, "num_partitions = {np}");
-            }
-            if let Some(rf) = topic.replication {
-                let _ = writeln!(out, "replication = {rf}");
+            if let Some(t) = topic {
+                let _ = writeln!(out, "bootstrap = \"{}\"", toml_escape(&t.bootstrap));
+                if let Some(np) = t.num_partitions {
+                    let _ = writeln!(out, "num_partitions = {np}");
+                }
+                if let Some(rf) = t.replication {
+                    let _ = writeln!(out, "replication = {rf}");
+                }
             }
             out.push('\n');
         }
@@ -3928,6 +3932,43 @@ mod toml_rendering_tests {
         assert!(
             !t.contains("[remote_storage.kafka_metadata]"),
             "kafka_metadata block leaked for InMemory, got:\n{t}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_kafka_metadata_by_default_when_tiered_and_mm_unset() {
+        // Tiered storage ON (Local), metadataManager entirely unset → the topic-backed
+        // RLMM block must STILL be rendered (it's the production default).
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Local,
+            s3: None,
+            metadata_manager: None,
+            persistence: None,
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+            None,
+        );
+        assert!(
+            t.contains("[remote_storage.kafka_metadata]"),
+            "expected kafka_metadata block by default, got:\n{t}"
         );
     }
 
