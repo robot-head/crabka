@@ -182,6 +182,7 @@ impl Consumer {
                             topic: topic_name.clone(),
                             partition: part.partition_index,
                             offset,
+                            leader_epoch: -1, // Task 8 will replace with real epoch
                             timestamp: batch.base_timestamp + r.timestamp_delta,
                             key: r.key.clone(),
                             value: r.value.clone(),

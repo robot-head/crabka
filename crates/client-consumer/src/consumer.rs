@@ -42,6 +42,8 @@ pub struct Consumer {
     pub(crate) assigned: Arc<Mutex<Vec<(String, i32)>>>,
     /// Next offset to fetch per partition.
     pub(crate) next_offsets: Arc<Mutex<HashMap<(String, i32), i64>>>,
+    /// KIP-320 per-partition leader-epoch metadata, keyed like `next_offsets`.
+    pub(crate) positions: Arc<Mutex<HashMap<(String, i32), crate::position::PartitionPosition>>>,
     /// Topic UUIDs resolved at build time. Required by Fetch v ≥ 13
     /// (which carries `topic_id` instead of the topic name).
     pub(crate) topic_ids: Arc<Mutex<HashMap<String, WireUuid>>>,
@@ -61,6 +63,7 @@ pub struct ConsumerRecord {
     pub topic: String,
     pub partition: i32,
     pub offset: i64,
+    pub leader_epoch: i32,
     pub timestamp: i64,
     pub key: Option<Bytes>,
     pub value: Option<Bytes>,
@@ -281,6 +284,8 @@ impl Consumer {
 
         // 5. Fetch existing committed offsets so poll() resumes correctly.
         let mut next_offsets: HashMap<(String, i32), i64> = HashMap::new();
+        let mut positions: HashMap<(String, i32), crate::position::PartitionPosition> =
+            HashMap::new();
         if !assigned_partitions.is_empty() {
             let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
             for (t, p) in &assigned_partitions {
@@ -292,7 +297,7 @@ impl Consumer {
                 ))
                 .await?;
             let id_to_name = crate::offset_wire::id_to_name(&topic_ids);
-            for (name, partition_index, committed) in
+            for (name, partition_index, committed, committed_epoch) in
                 crate::offset_wire::parse_offset_fetch(&of, &id_to_name)
             {
                 let starting = if committed >= 0 {
@@ -301,10 +306,17 @@ impl Consumer {
                     match auto_offset_reset {
                         AutoOffsetReset::Earliest => 0,
                         // Resolved by poll() on first call.
-                        AutoOffsetReset::Latest => i64::MAX,
+                        AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
                     }
                 };
-                next_offsets.insert((name, partition_index), starting);
+                next_offsets.insert((name.clone(), partition_index), starting);
+                positions.insert(
+                    (name, partition_index),
+                    crate::position::PartitionPosition {
+                        offset_epoch: committed_epoch,
+                        ..Default::default()
+                    },
+                );
             }
         }
 
@@ -331,6 +343,7 @@ impl Consumer {
 
         let assigned = Arc::new(Mutex::new(assigned_partitions));
         let next_offsets = Arc::new(Mutex::new(next_offsets));
+        let positions = Arc::new(Mutex::new(positions));
         let topic_ids = Arc::new(Mutex::new(topic_ids));
 
         let shutdown = CancellationToken::new();
@@ -343,6 +356,7 @@ impl Consumer {
             subscribed_topics: subscribe.clone(),
             assigned: Arc::clone(&assigned),
             next_offsets: Arc::clone(&next_offsets),
+            positions: Arc::clone(&positions),
             topic_ids: Arc::clone(&topic_ids),
             session_timeout,
             rebalance_timeout,
@@ -360,6 +374,7 @@ impl Consumer {
             subscribed_topics: subscribe,
             assigned,
             next_offsets,
+            positions,
             topic_ids,
             session_timeout,
             heartbeat_interval,

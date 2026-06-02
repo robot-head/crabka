@@ -114,6 +114,7 @@ pub(crate) struct CoordinatorState {
     pub subscribed_topics: Vec<String>,
     pub assigned: Arc<Mutex<Vec<(String, i32)>>>,
     pub next_offsets: Arc<Mutex<HashMap<(String, i32), i64>>>,
+    pub positions: Arc<Mutex<HashMap<(String, i32), crate::position::PartitionPosition>>>,
     pub topic_ids: Arc<Mutex<HashMap<String, WireUuid>>>,
     pub session_timeout: Duration,
     pub rebalance_timeout: Duration,
@@ -374,8 +375,9 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
 /// case the new owner re-delivers a few records (at-least-once).
 async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
     let revoked_set: HashSet<&(String, i32)> = revoked.iter().collect();
-    let offsets: HashMap<(String, i32), i64> = {
+    let offsets: HashMap<(String, i32), (i64, i32)> = {
         let off = state.next_offsets.lock().await;
+        let pos = state.positions.lock().await;
         off.iter()
             // Only commit partitions where we actually consumed something. A
             // next_offset still at its reset baseline (0 = Earliest, i64::MAX =
@@ -383,7 +385,10 @@ async fn commit_revoked(state: &CoordinatorState, revoked: &[(String, i32)]) {
             // preserve — committing it just adds a blocking round-trip that
             // widens the mid-rebalance generation-race window.
             .filter(|(k, v)| revoked_set.contains(k) && **v > 0 && **v != i64::MAX)
-            .map(|(k, v)| (k.clone(), *v))
+            .map(|(k, v)| {
+                let epoch = pos.get(k).map_or(-1, |p| p.offset_epoch);
+                (k.clone(), (*v, epoch))
+            })
             .collect()
     };
     if offsets.is_empty() {
@@ -635,20 +640,23 @@ async fn prime_offsets(
 
     let id_to_name = id_to_name(&topic_ids);
     let mut offsets = state.next_offsets.lock().await;
+    let mut positions = state.positions.lock().await;
     let mut seen: HashSet<(String, i32)> = HashSet::new();
-    for (name, partition_index, committed) in parse_offset_fetch(&of, &id_to_name) {
+    for (name, partition_index, committed, committed_epoch) in parse_offset_fetch(&of, &id_to_name)
+    {
         let starting = if committed >= 0 {
             committed
         } else {
             match state.auto_offset_reset {
                 AutoOffsetReset::Earliest => 0,
                 // Resolved lazily by poll::resolve_latest_sentinels.
-                AutoOffsetReset::Latest => i64::MAX,
+                AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
             }
         };
         let key = (name, partition_index);
         seen.insert(key.clone());
-        offsets.insert(key, starting);
+        offsets.insert(key.clone(), starting);
+        positions.entry(key).or_default().offset_epoch = committed_epoch;
     }
     // The broker may omit partitions that have no commit record at all;
     // ensure every requested partition has an entry so poll() can find it.
@@ -656,9 +664,10 @@ async fn prime_offsets(
         if !seen.contains(tp) {
             let starting = match state.auto_offset_reset {
                 AutoOffsetReset::Earliest => 0,
-                AutoOffsetReset::Latest => i64::MAX,
+                AutoOffsetReset::Latest | AutoOffsetReset::None => i64::MAX,
             };
             offsets.insert(tp.clone(), starting);
+            positions.entry(tp.clone()).or_default();
         }
     }
     Ok(())
