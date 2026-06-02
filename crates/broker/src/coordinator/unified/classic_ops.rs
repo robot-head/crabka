@@ -40,9 +40,10 @@ pub(super) enum JoinAction {
     /// Park the reply; `state.rebalance_deadline` has been set (the actor
     /// completes the rebalance when it fires).
     Park,
-    /// Every still-live member has joined this round and the group has
-    /// rebalanced before (`generation_id > 0`): complete the rebalance now and
-    /// drain all parked joiners (mirrors the old `wake_other_joiners` path).
+    /// Every still-live member has joined this round and the round was
+    /// triggered by a membership change in a group that still had members
+    /// (not a start-from-`Empty` herd): complete the rebalance now and drain
+    /// all parked joiners (mirrors the old `wake_other_joiners` path).
     CompleteNow,
 }
 
@@ -140,9 +141,16 @@ pub(super) fn handle_join(
     }
 
     // 6. Early-complete once every still-live member has rejoined this round —
-    //    but only after the first rebalance (gen > 0); the very first rebalance
-    //    burns the full INITIAL_REBALANCE_DELAY (Kafka's batching semantic).
-    let complete_now = state.generation_id > 0
+    //    but only for a rebalance triggered by a membership change in a group
+    //    that still had members. A round that opened from `Empty` (a fresh
+    //    group, or one whose members all left — e.g. after a warm-up consumer
+    //    joins and leaves) burns the full INITIAL_REBALANCE_DELAY so a herd of
+    //    consumers starting together batches into one generation, mirroring
+    //    Kafka's `InitialDelayedJoin`. Eager-completing a from-`Empty` round
+    //    strands the first joiner in a solo generation and forces an immediate
+    //    re-rebalance when the next member arrives, which thrashes
+    //    produce+fetch under concurrent load.
+    let complete_now = !state.rebalance_from_empty
         && matches!(state.state, GroupState::PreparingRebalance)
         && state.all_members_joined_this_round();
     if complete_now {
@@ -394,6 +402,9 @@ pub(super) fn handle_leave(
     }
     if any_removed && !state.members.is_empty() && matches!(state.state, GroupState::Stable) {
         state.state = GroupState::PreparingRebalance;
+        // A member left a live group: this is a membership-change rebalance,
+        // not a start-from-empty herd, so the survivors eager-complete.
+        state.rebalance_from_empty = false;
         state.rebalance_deadline = Some(
             Instant::now()
                 + state
@@ -557,11 +568,36 @@ mod tests {
             handle_join(&mut g, &join_req("m2", None), "h"),
             JoinAction::Park
         ));
-        // m1 rejoins → all members joined this round, gen>0 → CompleteNow.
+        // m1 rejoins → all members joined this round, from a live (Stable)
+        // group → CompleteNow.
         assert!(matches!(
             handle_join(&mut g, &join_req("m1", None), "h"),
             JoinAction::CompleteNow
         ));
+    }
+
+    #[test]
+    fn join_into_reemptied_group_parks_to_batch_herd() {
+        // A group that has rebalanced before (gen > 0) and then went `Empty`
+        // — e.g. a warm-up consumer joined and left — must NOT eager-complete
+        // a solo generation when the first new member rejoins. It parks for
+        // the INITIAL_REBALANCE_DELAY window so a herd of consumers starting
+        // together batches into one generation. Regression test for the
+        // produce+consume throughput collapse triggered by re-joining a group
+        // a prior consumer had already used.
+        let mut g = ClassicState::new("g");
+        let _ = handle_join(&mut g, &join_req("warmup", None), "h");
+        g.complete_rebalance("range"); // gen 1
+        g.remove_member("warmup"); // group is now Empty, generation still 1
+        assert!(g.state == GroupState::Empty);
+        assert!(g.generation_id == 1);
+        // First real member rejoins the re-emptied group: Park (batch the
+        // herd), NOT CompleteNow, even though the group has rebalanced before.
+        assert!(matches!(
+            handle_join(&mut g, &join_req("m1", None), "h"),
+            JoinAction::Park
+        ));
+        assert!(g.rebalance_from_empty);
     }
 
     #[test]
