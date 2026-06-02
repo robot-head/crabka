@@ -2,8 +2,6 @@
 //! the pure truncation-decision used by the proactive validate pass and the
 //! in-band `diverging_epoch` path.
 
-#![allow(dead_code)]
-
 /// Epoch metadata for one assigned partition. The fetch *offset* itself lives
 /// in `Consumer::next_offsets`; this carries the leader-epoch state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

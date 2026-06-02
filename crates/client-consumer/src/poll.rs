@@ -9,7 +9,7 @@ use crabka_protocol::owned::list_offsets_request::{
     ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
 };
 
-use crate::builder::IsolationLevel;
+use crate::builder::{AutoOffsetReset, IsolationLevel};
 use crate::consumer::{Consumer, ConsumerRecord};
 use crate::error::ConsumerError;
 
@@ -28,6 +28,15 @@ impl Consumer {
         //    ListOffsets(timestamp=-1).
         self.resolve_latest_sentinels().await?;
 
+        // KIP-320: refresh leader epochs and proactively validate any position
+        // whose leader epoch advanced, before fetching. Truncated partitions
+        // are reset here (or surfaced for auto.offset.reset=None below).
+        self.refresh_leader_epochs().await?;
+        let truncated = self.validate_positions().await?;
+        if !truncated.is_empty() {
+            self.apply_truncation(&truncated).await?;
+        }
+
         // 2. Build a FetchRequest covering every assigned partition.
         let assigned = self.assigned.lock().await.clone();
         if assigned.is_empty() {
@@ -35,12 +44,30 @@ impl Consumer {
             return Ok(Vec::new());
         }
 
-        let mut by_topic: HashMap<String, Vec<(i32, i64)>> = HashMap::new();
+        // (partition, fetch_offset, current_leader_epoch, last_fetched_epoch).
+        // Lock order: next_offsets first, then positions (matching the
+        // coordinator's order so poll can never deadlock against a rebalance).
+        let mut by_topic: HashMap<String, Vec<(i32, i64, i32, i32)>> = HashMap::new();
         {
             let offsets = self.next_offsets.lock().await;
+            let positions = self.positions.lock().await;
             for (t, p) in &assigned {
+                // Skip partitions still awaiting validation — they must not be
+                // fetched until proven consistent.
+                if positions
+                    .get(&(t.clone(), *p))
+                    .is_some_and(|x| x.awaiting_validation)
+                {
+                    continue;
+                }
                 let next = offsets.get(&(t.clone(), *p)).copied().unwrap_or(0);
-                by_topic.entry(t.clone()).or_default().push((*p, next));
+                let pos = positions.get(&(t.clone(), *p)).copied().unwrap_or_default();
+                by_topic.entry(t.clone()).or_default().push((
+                    *p,
+                    next,
+                    pos.leader_epoch,
+                    pos.offset_epoch,
+                ));
             }
         }
 
@@ -54,12 +81,16 @@ impl Consumer {
                     topic_id,
                     partitions: plist
                         .into_iter()
-                        .map(|(p, off)| FetchPartition {
-                            partition: p,
-                            fetch_offset: off,
-                            partition_max_bytes: 1 << 20,
-                            ..Default::default()
-                        })
+                        .map(
+                            |(p, off, leader_epoch, last_fetched_epoch)| FetchPartition {
+                                partition: p,
+                                fetch_offset: off,
+                                current_leader_epoch: leader_epoch,
+                                last_fetched_epoch,
+                                partition_max_bytes: 1 << 20,
+                                ..Default::default()
+                            },
+                        )
                         .collect(),
                     ..Default::default()
                 }
@@ -114,6 +145,49 @@ impl Consumer {
                 if !still_owned.contains(&(topic_name.clone(), part.partition_index)) {
                     continue;
                 }
+
+                let key = (topic_name.clone(), part.partition_index);
+
+                // KIP-320 in-band truncation: leader served no records and told
+                // us where to truncate (diverging_epoch.end_offset >= 0).
+                if part.diverging_epoch.end_offset >= 0 {
+                    self.handle_truncation_in_poll(
+                        &mut offsets,
+                        &key,
+                        part.diverging_epoch.end_offset,
+                    )?;
+                    continue;
+                }
+                // Error-first: inspect the partition error_code before decoding.
+                match part.error_code {
+                    0 => {}
+                    1 /* OFFSET_OUT_OF_RANGE */ => {
+                        // Reset per policy; None surfaces a LogTruncation error.
+                        // Read the current fetch offset from the held guard —
+                        // reset_offset_for must not re-lock next_offsets here.
+                        let fetch_offset = offsets.get(&key).copied().unwrap_or(-1);
+                        let safe = self.reset_offset_for(&key, fetch_offset)?;
+                        offsets.insert(key.clone(), safe);
+                        continue;
+                    }
+                    74 /* FENCED_LEADER_EPOCH */
+                    | 75 /* UNKNOWN_LEADER_EPOCH */
+                    | 6 /* NOT_LEADER_OR_FOLLOWER */ => {
+                        // Mark for validation + metadata refresh next poll.
+                        let mut positions = self.positions.lock().await;
+                        if let Some(p) = positions.get_mut(&key) {
+                            p.awaiting_validation = true;
+                            // Force refresh_leader_epochs to re-flag against
+                            // fresher metadata next poll.
+                            p.leader_epoch = -1;
+                        }
+                        continue;
+                    }
+                    other => {
+                        return Err(ConsumerError::Server(other));
+                    }
+                }
+
                 let Some(payload) = &part.records else {
                     continue;
                 };
@@ -182,7 +256,7 @@ impl Consumer {
                             topic: topic_name.clone(),
                             partition: part.partition_index,
                             offset,
-                            leader_epoch: -1, // Task 8 will replace with real epoch
+                            leader_epoch: batch.partition_leader_epoch,
                             timestamp: batch.base_timestamp + r.timestamp_delta,
                             key: r.key.clone(),
                             value: r.value.clone(),
@@ -190,7 +264,16 @@ impl Consumer {
                     }
                 }
                 if let Some(next) = next_offset_after(batches) {
-                    offsets.insert((topic_name.clone(), part.partition_index), next);
+                    offsets.insert(key.clone(), next);
+                    // Advance the position's offset_epoch to the highest batch
+                    // leader epoch consumed, so the next Fetch sends the correct
+                    // last_fetched_epoch (KIP-320). Lock order holds: offsets is
+                    // already locked, positions acquired second.
+                    if let Some(last_epoch) = batches.iter().map(|b| b.partition_leader_epoch).max()
+                    {
+                        let mut positions = self.positions.lock().await;
+                        positions.entry(key.clone()).or_default().offset_epoch = last_epoch;
+                    }
                 }
             }
         }
@@ -255,6 +338,76 @@ impl Consumer {
                 offsets.insert((t.name.clone(), p.partition_index), p.offset);
             }
         }
+        Ok(())
+    }
+}
+
+impl Consumer {
+    /// Resolve the safe offset for an `OFFSET_OUT_OF_RANGE` reset under the
+    /// configured policy. `None` policy surfaces a `LogTruncation` error.
+    ///
+    /// `fetch_offset` is passed in by the caller (read from the already-held
+    /// `next_offsets` guard) rather than re-locked here: this runs inside the
+    /// poll loop while that guard is held, and `tokio::sync::Mutex` is not
+    /// re-entrant — re-locking would deadlock.
+    fn reset_offset_for(
+        &self,
+        key: &(String, i32),
+        fetch_offset: i64,
+    ) -> Result<i64, ConsumerError> {
+        match self.auto_offset_reset {
+            AutoOffsetReset::Earliest => Ok(0),
+            AutoOffsetReset::Latest => Ok(i64::MAX), // resolved next poll
+            AutoOffsetReset::None => Err(ConsumerError::LogTruncation {
+                topic: key.0.clone(),
+                partition: key.1,
+                fetch_offset,
+                safe_offset: 0,
+            }),
+        }
+    }
+
+    /// Apply truncations detected by the proactive validate pass to
+    /// `next_offsets`, honoring `auto.offset.reset` (None → error on the first
+    /// truncated partition).
+    async fn apply_truncation(
+        &self,
+        truncated: &HashMap<(String, i32), i64>,
+    ) -> Result<(), ConsumerError> {
+        let mut offsets = self.next_offsets.lock().await;
+        for (key, safe_offset) in truncated {
+            if let AutoOffsetReset::None = self.auto_offset_reset {
+                let fetch_offset = offsets.get(key).copied().unwrap_or(-1);
+                return Err(ConsumerError::LogTruncation {
+                    topic: key.0.clone(),
+                    partition: key.1,
+                    fetch_offset,
+                    safe_offset: *safe_offset,
+                });
+            }
+            offsets.insert(key.clone(), *safe_offset);
+        }
+        Ok(())
+    }
+
+    /// In-band `diverging_epoch` handler used inside the poll loop while the
+    /// `next_offsets` guard is already held.
+    fn handle_truncation_in_poll(
+        &self,
+        offsets: &mut HashMap<(String, i32), i64>,
+        key: &(String, i32),
+        safe_offset: i64,
+    ) -> Result<(), ConsumerError> {
+        if let AutoOffsetReset::None = self.auto_offset_reset {
+            let fetch_offset = offsets.get(key).copied().unwrap_or(-1);
+            return Err(ConsumerError::LogTruncation {
+                topic: key.0.clone(),
+                partition: key.1,
+                fetch_offset,
+                safe_offset,
+            });
+        }
+        offsets.insert(key.clone(), safe_offset);
         Ok(())
     }
 }

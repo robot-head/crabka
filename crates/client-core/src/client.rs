@@ -95,6 +95,34 @@ impl Client {
         Ok(resp)
     }
 
+    /// Send a single-partition `OffsetForLeaderEpoch` (`api_key=23`) via the
+    /// bootstrap connection. Thin wrapper over the free
+    /// [`offset_for_leader_epoch`](crate::offset_for_leader_epoch) helper used
+    /// by the consumer's KIP-320 position-validation pass; `Client` does not
+    /// otherwise expose its connection, so this borrows the same bootstrap
+    /// connection `send` uses.
+    ///
+    /// # Errors
+    /// Transport / version-negotiation failure, or a partition not present in
+    /// the response.
+    pub async fn offset_for_leader_epoch(
+        &self,
+        topic: &str,
+        partition: i32,
+        current_leader_epoch: i32,
+        leader_epoch: i32,
+    ) -> Result<crate::offset_for_leader_epoch::EpochEndOffset, ClientError> {
+        let conn = self.pool.bootstrap_connection().await?;
+        crate::offset_for_leader_epoch::offset_for_leader_epoch(
+            &conn,
+            topic,
+            partition,
+            current_leader_epoch,
+            leader_epoch,
+        )
+        .await
+    }
+
     /// Close the client and all pooled connections.
     pub fn close(self) {
         if let Some(pool) = Arc::into_inner(self.pool) {

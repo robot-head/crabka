@@ -55,6 +55,10 @@ pub struct Consumer {
     pub(crate) coordinator_handle: Option<JoinHandle<()>>,
     /// Controls which records are returned by `poll`.
     pub(crate) isolation_level: IsolationLevel,
+    /// What `poll` does on a missing offset / detected truncation. `None`
+    /// surfaces `ConsumerError::LogTruncation`; otherwise the safe offset is
+    /// applied (KIP-320).
+    pub(crate) auto_offset_reset: AutoOffsetReset,
 }
 
 /// One record returned by `Consumer::poll`.
@@ -382,6 +386,7 @@ impl Consumer {
             coordinator_shutdown: shutdown,
             coordinator_handle: Some(coord_handle),
             isolation_level,
+            auto_offset_reset,
         })
     }
 }

@@ -288,6 +288,10 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
             {
                 let mut off = state.next_offsets.lock().await;
                 off.retain(|k, _| new_set.contains(k));
+                // Prune the KIP-320 position sidecar in lockstep so stale
+                // epoch metadata for dropped partitions doesn't accumulate.
+                let mut pos = state.positions.lock().await;
+                pos.retain(|k, _| new_set.contains(k));
             }
             state.generation_id = new_generation;
         }
@@ -333,8 +337,11 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<(), ConsumerError> {
                 commit_revoked(state, &revoked).await;
                 {
                     let mut off = state.next_offsets.lock().await;
+                    let mut pos = state.positions.lock().await;
                     for p in &revoked {
                         off.remove(p);
+                        // Prune the KIP-320 position sidecar in lockstep.
+                        pos.remove(p);
                     }
                 }
 
