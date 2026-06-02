@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
-description = "Metadata Raft quorum (openraft adapters + Controller) for Crabka"
+description = "Metadata KRaft quorum (KIP-595 KraftController) for Crabka"
 
 [lints]
 workspace = true
@@ -15,7 +15,6 @@ crabka-metadata = { version = "0.1", path = "../metadata" }
 crabka-log = { version = "0.1", path = "../log" }
 crabka-protocol = { version = "0.1", path = "../protocol", default-features = false }
 crabka-client-core = { version = "0.1", path = "../client-core" }
-openraft = { workspace = true }
 async-trait = { workspace = true }
 wincode = { workspace = true }
 serde-wincode = { workspace = true }

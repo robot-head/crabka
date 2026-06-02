@@ -24,7 +24,7 @@ use crate::types::NodeId;
 ///    [`crate::ControllerHandle::add_learner`] +
 ///    [`crate::ControllerHandle::change_membership`].
 /// 3. After the initial format, restarted brokers use `Rejoin` — their
-///    on-disk raft log already carries the membership and openraft replays
+///    on-disk raft log already carries the membership and the engine replays
 ///    it during `Raft::new`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapMode {
@@ -43,7 +43,7 @@ pub enum BootstrapMode {
 
     /// Restart a previously-formatted broker. The on-disk raft log encodes
     /// the cluster's current membership; `Controller::start` skips
-    /// `initialize` and openraft replays existing state during `Raft::new`.
+    /// recovers existing state from the on-disk log + checkpoint at startup.
     Rejoin,
 }
 
@@ -85,6 +85,9 @@ pub struct ControllerConfig {
     pub max_bytes_between_snapshots: u64,
     /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
     pub max_snapshot_interval: Duration,
+    /// Snapshot once committed offset advances this many records past the last
+    /// snapshot, then prune the log below it. `0` disables snapshotting.
+    pub snapshot_interval_records: u64,
 }
 
 impl std::fmt::Debug for ControllerConfig {
@@ -110,6 +113,7 @@ impl std::fmt::Debug for ControllerConfig {
                 &self.max_bytes_between_snapshots,
             )
             .field("max_snapshot_interval", &self.max_snapshot_interval)
+            .field("snapshot_interval_records", &self.snapshot_interval_records)
             .finish()
     }
 }
@@ -146,6 +150,7 @@ impl ControllerConfig {
             handshake: None,
             max_bytes_between_snapshots: 20 * 1024 * 1024,
             max_snapshot_interval: Duration::from_hours(1),
+            snapshot_interval_records: 0,
         }
     }
 }

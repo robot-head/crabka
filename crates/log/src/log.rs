@@ -405,8 +405,21 @@ impl Log {
                 actual: offset,
             });
         }
+        let leader_epoch = batch.partition_leader_epoch;
         batch.base_offset = offset;
-        self.append_preserving_offset(batch)
+        self.append_preserving_offset(batch)?;
+        // Mirror the leader-side epoch bookkeeping in [`Log::append`]: record the
+        // batch's leader epoch when it advances past the latest recorded epoch,
+        // so a follower's leader-epoch checkpoint tracks replicated epochs.
+        if leader_epoch >= 0
+            && self
+                .epoch_checkpoint
+                .latest_epoch()
+                .is_none_or(|e| leader_epoch > e)
+        {
+            self.epoch_checkpoint.append(leader_epoch, offset)?;
+        }
+        Ok(())
     }
 
     /// Internal helper shared by [`Log::append`] and [`Log::append_at`].
@@ -697,6 +710,11 @@ impl Log {
         }
         // After truncation, LSO can't exceed log_end_offset.
         self.lso = self.lso.min(self.log_end_offset());
+        // Drop leader-epoch checkpoint entries for the truncated-away tail so
+        // latest_epoch()/end_offset_for_epoch() don't report epochs that no
+        // longer have records (mirrors Kafka's truncateFromEnd).
+        self.epoch_checkpoint
+            .truncate_from_end(self.log_end_offset())?;
         Ok(())
     }
 
@@ -1564,6 +1582,28 @@ mod tests {
                     }
                 ]
         );
+    }
+
+    #[test]
+    fn truncate_to_drops_stale_epoch_checkpoint_entries() {
+        use tempfile::TempDir;
+        let dir = TempDir::new().unwrap();
+        let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
+        // Epoch 1 at offsets 0..3, then epoch 7 starting at offset 3.
+        let mut b1 = sample_batch_with_epoch(3, 1);
+        log.append(&mut b1).unwrap();
+        let epoch7_start = log.log_end_offset();
+        let mut b2 = sample_batch_with_epoch(2, 7);
+        log.append(&mut b2).unwrap();
+        assert!(log.epoch_checkpoint().latest_epoch() == Some(7));
+
+        // Truncate away the entire epoch-7 tail.
+        log.truncate_to(epoch7_start).unwrap();
+
+        assert!(log.epoch_checkpoint().latest_epoch() == Some(1));
+        let leo = log.log_end_offset();
+        assert!(log.epoch_checkpoint().end_offset_for_epoch(7, leo) == -1);
+        assert!(log.epoch_checkpoint().end_offset_for_epoch(1, leo) == leo);
     }
 
     #[test]

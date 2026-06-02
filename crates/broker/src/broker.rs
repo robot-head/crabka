@@ -206,6 +206,17 @@ impl BrokerHandle {
         *self._broker.controller.watch_leader().borrow()
     }
 
+    /// Test-only: the controller's current quorum state (leader epoch, HWM,
+    /// per-voter matched index). Used by the mixed-quorum acceptance test to
+    /// observe whether the Crabka leader commits/advances and whether a peer
+    /// voter (e.g. a JVM follower) is fetching.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn controller_quorum_state_for_test(&self) -> crabka_raft::QuorumState {
+        self._broker.controller.quorum_state()
+    }
+
     /// Number of brokers currently registered in this broker's
     /// `MetadataImage`. Used by replication integration tests to wait
     /// for all peers to come up before issuing `CreateTopics`.
@@ -1075,44 +1086,89 @@ impl Broker {
         {
             let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
 
-            // KIP-853 standalone self-bootstrap: a `Bootstrap` node with no
-            // seeded `VotersRecord` (an in-process/single-node start that
-            // didn't run `format --standalone`) forms a single-voter cluster
-            // of itself. Seed both the openraft membership (`initial_voters`)
-            // and the metadata log (a `V1Voters` record submitted after
-            // election in step 2b) so the two stay in lockstep. Multi-node
-            // clusters seed voters via `format` or grow via auto-join
-            // (`BootstrapMode::Join`), so neither path lands here.
-            if initial_voters.is_empty()
-                && matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
-            {
-                let self_voter = crabka_metadata::Voter {
-                    id: config.node_id,
-                    directory_id: config.directory_id,
-                    endpoints: vec![crabka_metadata::VoterEndpoint {
-                        name: "CONTROLLER".to_string(),
-                        host: config.controller_listen_addr.ip().to_string(),
-                        port: config.controller_listen_addr.port(),
-                    }],
-                    kraft_version: crabka_metadata::KRaftVersionRange::default(),
+            // KIP-595 static voters: the engine reconstructs its voter set from
+            // `ControllerConfig.initial_voters` every boot (static this slice;
+            // KIP-853 dynamic reconfig is Slice 5). When no `VotersRecord` was
+            // loaded from `bootstrap.records.bin` (the in-process start path that
+            // didn't run `crabka format`), build the static set from
+            // `controller_quorum_voters`. Two shapes:
+            //
+            //   * Single-voter (`len <= 1`): standalone self-bootstrap of *this*
+            //     node; self-elects on the first election timeout.
+            //   * Multi-voter (`len > 1`): the full configured voter set, so
+            //     every node starts with voters={all configured} and elects
+            //     among themselves over the real KIP-595 wire — no auto-join.
+            //
+            // This must run for `Rejoin` as well as `Bootstrap`: a restarted
+            // node recovers its committed metadata log from disk but the engine
+            // still derives `voters` (peer endpoints for dialing/forwarding)
+            // from `initial_voters`. Without this a `Rejoin` node would come up
+            // with an empty voter set — unable to dial peers or forward
+            // `submit_change` to the leader. Only `Bootstrap` additionally seeds
+            // the metadata log (the `V1Voters` + `V1KRaftVersion` pair submitted
+            // through raft in step 2b); a `Rejoin` node already has them
+            // committed on disk and must not re-submit.
+            if initial_voters.is_empty() && !config.controller_quorum_voters.is_empty() {
+                let voters = if config.controller_quorum_voters.len() > 1 {
+                    // Static N-voter set: one `Voter` per configured
+                    // `(node_id, controller_addr)`. The engine identifies
+                    // voters by node id for dialing (CONTROLLER endpoint) and
+                    // for vote-grant tallying; `directory_id` is carried in the
+                    // records but is not used by the engine's vote/peer logic
+                    // (verified against `kraft/network.rs::controller_addr` and
+                    // `kraft/core.rs`, which key on `NodeId` and use
+                    // `Uuid::nil()` for vote keys). So `directory_id` only needs
+                    // to be exact for self; peers get a deterministic
+                    // placeholder until KIP-853/JVM-interop (Slice 5/6) makes
+                    // peer directory ids load-bearing.
+                    let voters: Vec<crabka_metadata::Voter> = config
+                        .controller_quorum_voters
+                        .iter()
+                        .map(|&(node_id, addr)| crabka_metadata::Voter {
+                            id: node_id,
+                            directory_id: if node_id == config.node_id {
+                                config.directory_id
+                            } else {
+                                uuid::Uuid::nil()
+                            },
+                            endpoints: vec![crabka_metadata::VoterEndpoint {
+                                name: "CONTROLLER".to_string(),
+                                host: addr.ip().to_string(),
+                                port: addr.port(),
+                            }],
+                            kraft_version: crabka_metadata::KRaftVersionRange::default(),
+                        })
+                        .collect();
+                    tracing::info!(
+                        node_id = config.node_id,
+                        voter_count = voters.len(),
+                        mode = ?config.bootstrap_mode,
+                        "KIP-595 static multi-voter set: deriving voters from controller_quorum_voters"
+                    );
+                    crabka_metadata::VoterSet::from_voters(voters)
+                } else {
+                    let self_voter = crabka_metadata::Voter {
+                        id: config.node_id,
+                        directory_id: config.directory_id,
+                        endpoints: vec![crabka_metadata::VoterEndpoint {
+                            name: "CONTROLLER".to_string(),
+                            host: config.controller_listen_addr.ip().to_string(),
+                            port: config.controller_listen_addr.port(),
+                        }],
+                        kraft_version: crabka_metadata::KRaftVersionRange::default(),
+                    };
+                    tracing::info!(
+                        node_id = config.node_id,
+                        mode = ?config.bootstrap_mode,
+                        "KIP-595 single-voter set: forming/recovering single-voter cluster"
+                    );
+                    crabka_metadata::VoterSet::from_voters([self_voter])
                 };
-                let voters = crabka_metadata::VoterSet::from_voters([self_voter]);
-                tracing::info!(
-                    node_id = config.node_id,
-                    "KIP-853 standalone self-bootstrap: forming single-voter cluster"
-                );
-                bootstrap_records.insert(
-                    0,
-                    crabka_metadata::MetadataRecord::V1Voters(crabka_metadata::VotersRecord {
-                        voters: voters.clone(),
-                    }),
-                );
-                bootstrap_records.insert(
-                    0,
-                    crabka_metadata::MetadataRecord::V1KRaftVersion(
-                        crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
-                    ),
-                );
+                // The engine reconstructs its voter set from `initial_voters`
+                // (config-derived) every boot under KIP-595 static voters, so the
+                // `V1Voters` / `V1KRaftVersion` raft-control records are NOT seeded
+                // onto the KIP-631-framed metadata log here (they have no KIP-631
+                // counterpart; dynamic reconfiguration is a later slice).
                 initial_voters = voters;
 
                 // KIP-584/1022: a standalone self-bootstrap finalizes every
@@ -1147,6 +1203,7 @@ impl Broker {
                 handshake: handshake_opt,
                 max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
                 max_snapshot_interval: config.metadata_max_snapshot_interval,
+                snapshot_interval_records: config.metadata_snapshot_interval_records,
             };
             let handle = Arc::new(
                 crabka_raft::Controller::start_with_listener(controller_cfg, controller_listener)
@@ -1309,19 +1366,38 @@ impl Broker {
             //     Missing-file is treated as empty (handled by the loader),
             //     so the legacy zero-record path is a no-op and existing
             //     deployments / tests are byte-identical.
-            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap)
-                && !bootstrap_records.is_empty()
-            {
-                tracing::info!(
-                    count = bootstrap_records.len(),
-                    "submitting bootstrap records"
-                );
-                controller
-                    .submit_change(bootstrap_records)
-                    .await
-                    .map_err(|e| {
-                        BrokerError::Replication(format!("bootstrap submit failed: {e}"))
-                    })?;
+            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
+                // KIP-853 raft-control records (`V1Voters` / `V1KRaftVersion`)
+                // have no KIP-631 metadata-log counterpart and are never carried
+                // on the KIP-631-framed metadata log in this slice — the engine
+                // reconstructs its voter set from `initial_voters` (config) every
+                // boot. Drop them from the metadata-log submit; only the genuine
+                // metadata records (ACLs, SCRAM, quotas, …) are seeded.
+                bootstrap_records.retain(|r| {
+                    !matches!(
+                        r,
+                        crabka_metadata::MetadataRecord::V1Voters(_)
+                            | crabka_metadata::MetadataRecord::V1KRaftVersion(_)
+                    )
+                });
+                // The cluster-wide finalized features (`metadata.version` etc.)
+                // are already seeded into `bootstrap_records` by
+                // `bootstrap_feature_records` at the point the static voter set
+                // is derived (see above) — a JVM follower refuses to build its
+                // `FeaturesImage` without `metadata.version`, so every
+                // KRaft-faithful fresh cluster carries them in the committed log.
+                if !bootstrap_records.is_empty() {
+                    tracing::info!(
+                        count = bootstrap_records.len(),
+                        "submitting bootstrap records"
+                    );
+                    controller
+                        .submit_change(bootstrap_records)
+                        .await
+                        .map_err(|e| {
+                            BrokerError::Replication(format!("bootstrap submit failed: {e}"))
+                        })?;
+                }
             }
         }
 

@@ -15,7 +15,7 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
-use crabka_metadata::{MetadataImage, from_kafka_record};
+use crabka_metadata::{MetadataImage, from_kraft_value};
 use crabka_protocol::records::RecordBatch;
 use crabka_raft::{NodeId, OutboundDialer};
 
@@ -168,8 +168,16 @@ async fn fetch_once(
             }
         };
         let index = u64::try_from(batch.base_offset.max(0)).unwrap_or(0);
+        // The LeaderChange control batch carries no metadata records.
+        if batch.attributes.is_control_batch() {
+            new_offset = index + 1;
+            continue;
+        }
         for r in &batch.records {
-            match from_kafka_record(r) {
+            let Some(value) = r.value.as_ref() else {
+                continue;
+            };
+            match from_kraft_value(value, &next) {
                 Ok(rec) => {
                     if let Err(e) = next.validate(&rec) {
                         warn!(error = %e, "observer skipped record failing validation");

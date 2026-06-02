@@ -1,11 +1,13 @@
 //! Metadata Raft quorum for Crabka.
 //!
-//! `crabka-raft` adapts [openraft][openraft] to Crabka's storage
-//! ([`crabka_log`]) and transport ([`crabka_client_core`]). The public
-//! entry point is [`Controller::start`], which spawns an openraft node,
-//! opens a TCP listener for Crabka-private Raft RPCs (api keys 1000-
-//! 1002), and returns a [`ControllerHandle`] for submitting metadata
-//! changes and reading the current [`crabka_metadata::MetadataImage`].
+//! `crabka-raft` runs a hand-rolled KIP-595 `KRaft` consensus engine (the
+//! [`kraft::KraftController`]) over Crabka's storage ([`crabka_log`]) and
+//! transport ([`crabka_client_core`]). The public entry point is
+//! [`Controller::start`], which spawns the engine, opens a TCP listener serving
+//! the real KIP-595 RPCs (Fetch=1, Vote=52, BeginQuorumEpoch=53,
+//! EndQuorumEpoch=54) plus the Crabka-private observer/forward RPCs, and returns
+//! a [`ControllerHandle`] for submitting metadata changes and reading the
+//! current [`crabka_metadata::MetadataImage`].
 //!
 //! ## Quick start
 //!
@@ -35,13 +37,11 @@
 //! # }
 //! ```
 //!
-//! ## Out of scope
+//! ## Out of scope (deferred slices)
 //!
-//! - Snapshots / `InstallSnapshot` (handler is a stub).
-//! - Dynamic voter membership changes.
-//! - `KRaft` wire compatibility (api keys 52-55, `KRaft` Fetch).
-//!
-//! [openraft]: https://github.com/databendlabs/openraft
+//! - Cross-node snapshot transfer / `FetchSnapshot` catch-up (Slice 4).
+//! - Dynamic voter membership changes — static voters only (Slice 5).
+//! - Mixed JVM+Crabka quorum (Slice 6).
 
 #![doc(html_root_url = "https://docs.rs/crabka-raft/0.0.0")]
 
@@ -49,13 +49,11 @@ mod config;
 mod controller;
 mod error;
 pub mod handshake;
-mod log_store;
-mod metadata_fetch;
+pub mod kraft;
 mod network;
 pub mod reconfig;
 mod server;
 mod snapshot;
-mod state_machine;
 mod types;
 mod wire;
 
@@ -63,14 +61,11 @@ pub use config::{BootstrapMode, ControllerConfig};
 pub use controller::{Controller, ControllerHandle, QuorumState, SnapshotRange, SnapshotSlice};
 pub use error::RaftError;
 pub use handshake::{DuplexStream, RaftHandshakeError, RaftListenerHandshake};
-pub use metadata_fetch::{MetadataFetchSlice, encode_committed_records};
+pub use kraft::MetadataFetchSlice;
 pub use network::{OutboundDialer, PlaintextDialer};
 pub use reconfig::{AddVoter, ReconfigOutcome, RemoveVoter, UpdateVoter};
-pub use types::{AppData, AppDataResponse, Node, NodeId, Raft, TypeConfig};
+pub use types::{AppData, AppDataResponse, Node, NodeId};
 pub use wire::{
-    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_METADATA_FETCH,
-    API_KEY_SUBMIT_CHANGE, API_KEY_VOTE, CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse,
-    CrabkaInstallSnapshotRequest, CrabkaInstallSnapshotResponse, CrabkaLogEntry,
-    CrabkaMetadataFetchRequest, CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest,
-    CrabkaSubmitChangeResponse, CrabkaVoteRequest, CrabkaVoteResponse, PayloadKind,
+    API_KEY_METADATA_FETCH, API_KEY_SUBMIT_CHANGE, CrabkaMetadataFetchRequest,
+    CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse,
 };

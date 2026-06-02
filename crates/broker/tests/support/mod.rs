@@ -117,76 +117,51 @@ pub fn broker_config(
     cfg
 }
 
-/// Build a `BrokerConfig` for broker 0 (the bootstrap node). It binds a
-/// concrete (pre-bound) controller port so its self-bootstrap seed advertises
-/// a reachable endpoint, and an ephemeral client listener.
-fn bootstrap_broker_config(
-    bootstrap_client_addr: SocketAddr,
-    bootstrap_controller_addr: SocketAddr,
-    log_dir: &std::path::Path,
-) -> BrokerConfig {
-    let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
-    cfg.broker_id = 1;
-    cfg.node_id = 1;
-    // Bind a concrete (pre-bound) client port. The broker self-registers its
-    // `advertised_listener` host:port into the controller image *before* it
-    // binds its listeners and rewrites a `:0` advertised port to the real one
-    // — so a `:0` here would register port 0 and break the inter-broker
-    // heartbeat / replication dial. Give it a real port up front.
-    cfg.listen_addr = bootstrap_client_addr;
-    cfg.advertised_listener = bootstrap_client_addr.to_string();
-    cfg.directory_id = uuid::Uuid::from_u128(1);
-    cfg.bootstrap_mode = BootstrapMode::Bootstrap;
-    cfg.controller_listen_addr = bootstrap_controller_addr;
-    cfg.auto_join = false;
-    cfg.bootstrap_servers = vec![];
-    cfg
-}
-
-/// Build a `BrokerConfig` for a joiner (broker `i`, 0-indexed, `i >= 1`).
-/// Joiners boot in `Join` mode with `auto_join` enabled and
-/// `bootstrap_servers` pointing at the bootstrap broker's **client** listener
-/// — that's where the `AddRaftVoter` (`api_key` 80) handler lives (the
-/// controller listener only serves raft RPCs). They bind ephemeral ports for
-/// both listeners; auto-join advertises their *real* bound controller addr to
-/// the leader so its `add_learner` can dial them back.
-fn joiner_broker_config(
+/// Build a `BrokerConfig` for broker `i` (0-indexed) in a static `n`-voter
+/// cluster. Every broker boots in `Bootstrap` mode with the *same* configured
+/// `controller_quorum_voters` set, so each node seeds the full voter set and
+/// elects among the configured peers over the real KIP-595 wire — no
+/// auto-join (KIP-853 dynamic reconfig is Slice 5).
+fn static_voter_broker_config(
     i: usize,
     own_client_addr: SocketAddr,
-    bootstrap_client_addr: SocketAddr,
+    own_controller_addr: SocketAddr,
+    voters: &[(u64, SocketAddr)],
     log_dir: &std::path::Path,
 ) -> BrokerConfig {
     let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
     cfg.broker_id = i32::try_from(i + 1).unwrap();
     cfg.node_id = u64::try_from(i + 1).unwrap();
-    // Concrete (pre-bound) client port for self-registration — see the note in
-    // `bootstrap_broker_config`. The controller listener can stay `:0` because
-    // auto-join advertises its *real bound* controller addr to the leader.
+    // Bind a concrete (pre-bound) client port. The broker self-registers its
+    // `advertised_listener` host:port into the controller image *before* it
+    // binds its listeners and rewrites a `:0` advertised port to the real one
+    // — so a `:0` here would register port 0 and break the inter-broker
+    // heartbeat / replication dial. Give it a real port up front.
     cfg.listen_addr = own_client_addr;
     cfg.advertised_listener = own_client_addr.to_string();
+    // The controller listener must bind the *same* concrete port that this
+    // node advertises in the shared voter set, or its peers can't dial it.
+    cfg.controller_listen_addr = own_controller_addr;
     cfg.directory_id = uuid::Uuid::from_u128(u128::from(cfg.node_id));
-    cfg.bootstrap_mode = BootstrapMode::Join;
-    cfg.controller_listen_addr = "127.0.0.1:0".parse().unwrap();
-    cfg.auto_join = true;
-    cfg.bootstrap_servers = vec![bootstrap_client_addr];
+    cfg.bootstrap_mode = BootstrapMode::Bootstrap;
+    cfg.controller_quorum_voters = voters.to_vec();
+    cfg.auto_join = false;
+    cfg.bootstrap_servers = vec![];
     cfg
 }
 
 /// Boot an `n`-broker cluster with ephemeral ports + short raft timings via
-/// KIP-853 auto-join:
+/// **static multi-voter bootstrap** (KIP-595 Slice 3c):
 ///
-/// * Broker 0 boots in `Bootstrap` mode on a concrete controller port. Its
-///   standalone self-bootstrap forms a single-voter cluster of itself and it
-///   self-elects on the first election timeout (no contention).
-/// * Brokers 1..n boot in `Join` mode with `auto_join = true` and
-///   `bootstrap_servers = [broker0_client_addr]`. Each runs the auto-join
-///   loop, sending `AddRaftVoter(self)` to broker 0's client listener (the
-///   leader), which replicates the log, promotes them, and commits the new
-///   `V1Voters` set.
+/// * All `n` brokers boot in `Bootstrap` mode (`auto_join = false`), each
+///   configured with the *same* `controller_quorum_voters` = the full
+///   `[(1, ctrl_addr_1), …, (n, ctrl_addr_n)]` set.
+/// * Each node seeds the full static voter set and they elect a leader among
+///   themselves over the real KIP-595 wire — no `AddRaftVoter` / auto-join.
 ///
-/// Blocks until the leader's committed voter set reaches size `n`. Returns
-/// `(handle, config, tempdir)` triples preserving spawn order; `cluster[0]`
-/// is `broker_id` 1.
+/// Blocks until a leader emerges and reports the full `n`-voter committed set.
+/// Returns `(handle, config, tempdir)` triples preserving spawn order;
+/// `cluster[0]` is `broker_id` 1.
 pub async fn start_n_node(
     n: u64,
 ) -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, BrokerError> {
@@ -194,52 +169,82 @@ pub async fn start_n_node(
 
     let n_usize = usize::try_from(n).unwrap();
 
-    // Pre-bind concrete client ports for every broker (and one concrete
-    // controller port for broker 0's self-bootstrap seed). The broker
+    // Pre-bind concrete client + controller ports for every broker. The broker
     // self-registers its advertised client `host:port` into the controller
     // image *before* binding its listeners, so a `:0` advertised port would
     // register port 0 and break the inter-broker heartbeat / replication dial.
-    // The bind-and-drop trick avoids the TIME_WAIT trap of fixed ports across
-    // back-to-back cluster boots.
+    // The controller ports must be concrete up front too: they go into the
+    // shared static voter set so peers can dial each other. The bind-and-drop
+    // trick avoids the TIME_WAIT trap of fixed ports across back-to-back boots.
     let (client_addrs, controller_addrs) = bind_and_drop_ports(n_usize).await;
-    let bootstrap_controller_addr = controller_addrs[0];
 
-    // Broker 0: bootstrap. Must be up (and leader) before joiners can join.
-    let dir0 = TempDir::new().unwrap();
-    let cfg0 = bootstrap_broker_config(client_addrs[0], bootstrap_controller_addr, dir0.path());
-    let broker0 = Broker::start(cfg0.clone()).await?;
-    // The joiners send `AddRaftVoter` to the leader's *client* data-plane
-    // listener (that's where api_key 80 is served), not its controller
-    // listener — so point them at broker 0's bound client address.
-    let bootstrap_client_addr = broker0.listen_addr();
+    // The shared static voter set every node is configured with.
+    let voters: Vec<(u64, SocketAddr)> = (0..n_usize)
+        .map(|i| (u64::try_from(i + 1).unwrap(), controller_addrs[i]))
+        .collect();
 
-    // Brokers 1..n: join via auto-join. Their `Broker::start` returns once
-    // openraft hands them their first leader (the auto-join task keeps running
-    // in the background, driving the join, until they're voters).
-    let mut out: Vec<(BrokerHandle, BrokerConfig, TempDir)> = Vec::with_capacity(n_usize);
-    out.push((broker0, cfg0, dir0));
-    for (i, &own_client_addr) in client_addrs.iter().enumerate().take(n_usize).skip(1) {
+    // Start all n brokers in Bootstrap mode with the same voter set,
+    // *concurrently*. `Broker::start` blocks until the cold-boot controller
+    // sees a committed leader (step 2: it waits on `watch_leader` before
+    // submitting its self-registration), and a leader can only be elected once
+    // a majority of the static voter set is up and dialable. So a sequential
+    // `start().await` on the first broker would deadlock — it can never elect
+    // alone. Spawn every broker's `start` and join them.
+    let mut starts = Vec::with_capacity(n_usize);
+    let mut metas: Vec<(BrokerConfig, TempDir)> = Vec::with_capacity(n_usize);
+    for i in 0..n_usize {
         let dir = TempDir::new().unwrap();
-        let mut cfg = joiner_broker_config(i, own_client_addr, bootstrap_client_addr, dir.path());
-        let broker = Broker::start(cfg.clone()).await?;
-        // The controller listener used `:0`; record its real bound port so
-        // tests that read `cfg.controller_listen_addr` get the resolved value.
-        cfg.controller_listen_addr = broker.controller_addr();
+        let cfg = static_voter_broker_config(
+            i,
+            client_addrs[i],
+            controller_addrs[i],
+            &voters,
+            dir.path(),
+        );
+        let cfg_for_spawn = cfg.clone();
+        starts.push(tokio::spawn(
+            async move { Broker::start(cfg_for_spawn).await },
+        ));
+        metas.push((cfg, dir));
+    }
+
+    let mut out: Vec<(BrokerHandle, BrokerConfig, TempDir)> = Vec::with_capacity(n_usize);
+    for (handle, (cfg, dir)) in starts.into_iter().zip(metas) {
+        let broker = handle
+            .await
+            .map_err(|e| BrokerError::Startup(format!("broker start task panicked: {e}")))??;
         out.push((broker, cfg, dir));
     }
 
-    // Wait for the bootstrap broker's committed voter set to reach `n`. This is
-    // what proves auto-join converged. Bounded so a stuck join fails the test
-    // rather than hanging forever.
+    // Wait (bounded) for the static set to elect a leader and for *some* node
+    // to report the full `n`-voter committed set. With a static set every node
+    // is seeded with all `n` voters from the start, so once a leader emerges
+    // the count is `n` immediately; we poll all handles so whichever node won
+    // the election satisfies the check.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        if out[0].0.voter_count_for_test() >= n_usize {
+        let mut any_leader_with_full_set = false;
+        for (h, _, _) in &out {
+            if h.controller_leader_id().await.is_some() && h.voter_count_for_test() >= n_usize {
+                any_leader_with_full_set = true;
+                break;
+            }
+        }
+        if any_leader_with_full_set {
             break;
         }
         if std::time::Instant::now() > deadline {
+            let counts: Vec<usize> = out
+                .iter()
+                .map(|(h, _, _)| h.voter_count_for_test())
+                .collect();
+            let mut leaders = Vec::with_capacity(out.len());
+            for (h, _, _) in &out {
+                leaders.push(h.controller_leader_id().await);
+            }
             return Err(BrokerError::Startup(format!(
-                "auto-join did not reach {n_usize} voters within 30s (have {})",
-                out[0].0.voter_count_for_test()
+                "static cluster did not elect a leader with {n_usize} voters within 30s \
+                 (voter counts={counts:?}, leader_ids={leaders:?})"
             )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

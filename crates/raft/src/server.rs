@@ -1,5 +1,7 @@
-//! Accept loop for the controller TCP listener. Receives Crabka-private
-//! Raft RPCs and feeds them into the local `Raft` instance.
+//! Accept loop for the controller TCP listener. Receives inbound KIP-595 RPCs
+//! (Fetch=1, Vote=52, BeginQuorumEpoch=53, EndQuorumEpoch=54) plus the
+//! Crabka-private observer/forward RPCs and feeds them into the local
+//! [`KraftController`] engine.
 //!
 //! Wire shape matches `crabka_client_core::Connection::raw_request`:
 //!
@@ -7,42 +9,35 @@
 //! - Response: `len(i32) | correlation_id(i32) | tagged_fields(0u8) | body`
 //!
 //! `RequestHeader` v2 = `api_key(i16) api_version(i16) correlation_id(i32)
-//! client_id(NULLABLE_STRING) tagged_fields(varint=0)`. We parse and
-//! discard everything but `api_key` and `correlation_id`.
-//!
-//! The bodies are decoded by [`crate::wire`] into Crabka-private types
-//! and converted into openraft's `AppendEntriesRequest` / `VoteRequest` /
-//! `InstallSnapshotRequest`.
+//! client_id(NULLABLE_STRING) tagged_fields(varint=0)`. We parse and discard
+//! everything but `api_key`/`correlation_id` (the body is decoded by the
+//! engine's transport codec / the Crabka-private wire types).
 
 use std::sync::Arc;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use crate::error::RaftError;
-use crate::types::{AppData, Node, NodeId, Raft, TypeConfig};
+use crate::kraft::KraftController;
+use crate::kraft::transport::{Inbound, api_key};
 use crate::wire::{
-    API_KEY_APPEND_ENTRIES, API_KEY_INSTALL_SNAPSHOT, API_KEY_METADATA_FETCH,
-    API_KEY_SUBMIT_CHANGE, API_KEY_VOTE, CrabkaAppendEntriesRequest, CrabkaAppendEntriesResponse,
-    CrabkaInstallSnapshotRequest, CrabkaInstallSnapshotResponse, CrabkaMetadataFetchRequest,
+    API_KEY_METADATA_FETCH, API_KEY_SUBMIT_CHANGE, CrabkaMetadataFetchRequest,
     CrabkaMetadataFetchResponse, CrabkaSubmitChangeRequest, CrabkaSubmitChangeResponse,
-    CrabkaVoteRequest, CrabkaVoteResponse,
 };
 
-/// Kafka's `ApiVersions` API key. The controller TCP listener has to
-/// answer this because `crabka_client_core::Connection::connect`
-/// performs an `ApiVersions` handshake before any other request — the
-/// openraft network factory leans on that connection for the
-/// Crabka-private Raft RPCs.
+/// Kafka's `ApiVersions` API key. The controller TCP listener answers this
+/// because `crabka_client_core::Connection::connect` performs an `ApiVersions`
+/// handshake before any other request.
 const API_KEY_API_VERSIONS: i16 = 18;
 
 pub(crate) async fn run(
     listener: TcpListener,
-    raft: Arc<Raft>,
-    log_store: Arc<crate::log_store::RaftLogStore>,
+    engine: KraftController,
     shutdown: CancellationToken,
     handshake: Option<Arc<dyn crate::RaftListenerHandshake>>,
 ) {
@@ -56,8 +51,7 @@ pub(crate) async fn run(
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, peer)) => {
-                        let raft = raft.clone();
-                        let log_store = log_store.clone();
+                        let engine = engine.clone();
                         let shutdown = shutdown.clone();
                         let handshake = handshake.clone();
                         tokio::spawn(async move {
@@ -72,7 +66,7 @@ pub(crate) async fn run(
                             } else {
                                 Box::new(stream) as Box<dyn crate::DuplexStream>
                             };
-                            if let Err(e) = handle_conn(boxed, raft, log_store, shutdown).await {
+                            if let Err(e) = handle_conn(boxed, engine, shutdown).await {
                                 error!(%peer, error = %e, "controller connection error");
                             }
                         });
@@ -88,8 +82,7 @@ pub(crate) async fn run(
 
 async fn handle_conn<S>(
     mut stream: S,
-    raft: Arc<Raft>,
-    log_store: Arc<crate::log_store::RaftLogStore>,
+    engine: KraftController,
     shutdown: CancellationToken,
 ) -> Result<(), RaftError>
 where
@@ -99,33 +92,32 @@ where
         tokio::select! {
             () = shutdown.cancelled() => return Ok(()),
             res = read_one_request(&mut stream) => {
-                let (api_key, correlation_id, body) = match res {
+                let (api_key_n, api_version, correlation_id, body) = match res {
                     Ok(v) => v,
                     Err(e) => {
-                        // Treat peer EOF as a clean shutdown of this conn,
-                        // not an error to bubble up.
+                        // Treat peer EOF as a clean shutdown of this conn.
                         if is_eof(&e) {
                             return Ok(());
                         }
                         return Err(e);
                     }
                 };
-                // ApiVersions (api_key 18) is the bootstrap handshake
-                // performed by `crabka_client_core::Connection::connect`. It
-                // arrives at v0 with a header v1 (no tagged-fields byte) and
-                // expects a ResponseHeader v0 reply (also no tagged-fields
-                // byte). The Crabka-private Raft RPCs use flexible headers
-                // and prepend a tagged-fields byte to the response — but
-                // the ApiVersions response is the documented Kafka
-                // asymmetry that must NOT include it. We dispatch and
-                // serialise this path separately rather than poisoning the
-                // generic codec.
-                if api_key == API_KEY_API_VERSIONS {
-                    let resp = api_versions_response_body();
+                // ApiVersions (18) is the bootstrap handshake performed by
+                // `Connection::connect`. It arrives at v0 with a header v1 (no
+                // tagged-fields byte) and expects a ResponseHeader v0 reply (also
+                // no tagged-fields byte) — the documented Kafka asymmetry. We
+                // serialize it separately rather than poisoning the generic codec.
+                if api_key_n == API_KEY_API_VERSIONS {
+                    // ApiVersionsResponse always uses a v0 ResponseHeader (no
+                    // tagged-fields byte), but the BODY shape depends on the
+                    // request version: v0..=2 are non-flexible (i32 array), v3+
+                    // are flexible (compact array). Crabka's own client asks at
+                    // v0; the JVM controller asks at v4.
+                    let resp = api_versions_response_body(api_version);
                     write_response_no_tagged_fields(&mut stream, correlation_id, resp).await?;
                     continue;
                 }
-                let resp = dispatch(api_key, &body, &raft, &log_store).await?;
+                let resp = dispatch(api_key_n, body, &engine).await?;
                 write_response(&mut stream, correlation_id, resp).await?;
             }
         }
@@ -147,7 +139,7 @@ fn truncated(needed: usize) -> RaftError {
     RaftError::Protocol(crabka_protocol::ProtocolError::UnexpectedEof { needed })
 }
 
-async fn read_one_request<S>(stream: &mut S) -> Result<(i16, i32, Bytes), RaftError>
+async fn read_one_request<S>(stream: &mut S) -> Result<(i16, i16, i32, Bytes), RaftError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -165,8 +157,8 @@ where
     if cur.remaining() < fixed {
         return Err(truncated(fixed - cur.remaining()));
     }
-    let api_key = cur.get_i16();
-    let _api_version = cur.get_i16();
+    let api_key_n = cur.get_i16();
+    let api_version = cur.get_i16();
     let correlation_id = cur.get_i32();
 
     // Skip client_id: NULLABLE_STRING (i16 length + bytes; -1 = null).
@@ -186,7 +178,12 @@ where
         cur.advance(1);
     }
 
-    Ok((api_key, correlation_id, Bytes::copy_from_slice(cur)))
+    Ok((
+        api_key_n,
+        api_version,
+        correlation_id,
+        Bytes::copy_from_slice(cur),
+    ))
 }
 
 async fn write_response<S>(
@@ -199,7 +196,7 @@ where
 {
     let mut frame = BytesMut::with_capacity(4 + 1 + body.len());
     frame.put_i32(correlation_id);
-    frame.put_u8(0); // empty tagged_fields
+    frame.put_u8(0); // empty tagged_fields (ResponseHeader v1)
     frame.put_slice(&body);
 
     let mut len_prefix = [0u8; 4];
@@ -210,8 +207,8 @@ where
     Ok(())
 }
 
-/// Write a response without the leading tagged-fields byte. Used only
-/// by the `ApiVersions` v0 path, which decodes a `ResponseHeader v0`.
+/// Write a response without the leading tagged-fields byte. Used only by the
+/// `ApiVersions` v0 path, which decodes a `ResponseHeader v0`.
 async fn write_response_no_tagged_fields<S>(
     stream: &mut S,
     correlation_id: i32,
@@ -232,143 +229,113 @@ where
     Ok(())
 }
 
-/// Minimal `ApiVersionsResponse` v0: `error_code = 0`, empty
-/// `api_keys` array. The openraft network adapter doesn't consult the
-/// returned table — it always issues `raw_request` at version 0 against
-/// the Crabka-private api keys — so an empty list is harmless.
-fn api_versions_response_body() -> Bytes {
-    let mut out = BytesMut::with_capacity(6);
-    // error_code: INT16
-    out.put_i16(0);
-    // api_keys: ARRAY (v0 is non-flexible → length-prefixed by INT32, items omitted).
-    out.put_i32(0);
-    out.freeze()
+/// `ApiVersionsResponse` advertising the controller-listener APIs.
+///
+/// SPIKE TWEAK (KIP-595 Slice 5 — evaluate for promotion): a real
+/// `apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
+/// flexible (v2) request header, then consults the returned table to decide
+/// which version of `Vote`/`Fetch`/etc. to send. An EMPTY `api_keys` list made
+/// the JVM treat every raft RPC as `UNSUPPORTED_VERSION` and refuse to send
+/// `Vote` on the wire (captured in the slice-5 findings). Advertising the
+/// KIP-595 APIs at the versions Crabka's engine speaks lets the JVM proceed to
+/// real `Vote`/`Fetch`.
+///
+/// Body is the flexible (v3+) `ApiVersionsResponse` shape: `error_code(i16)`,
+/// `api_keys` compact-array of `{api_key(i16), min(i16), max(i16), tagged(0)}`,
+/// `throttle_time_ms(i32)`, response-level `tagged(0)`. Per the documented Kafka
+/// asymmetry, the *response header* stays v0 (no leading tagged-fields byte) —
+/// so this is written via [`write_response_no_tagged_fields`].
+fn api_versions_response_body(req_version: i16) -> Bytes {
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::api_versions_response::{ApiVersion, ApiVersionsResponse};
+    // (api_key, min_version, max_version) — versions Crabka's transport codec
+    // emits (Vote v2, Begin/End QuorumEpoch v1, Fetch v17, FetchSnapshot v1) plus
+    // ApiVersions itself.
+    const KEYS: &[(i16, i16, i16)] = &[
+        (1, 0, 17), // Fetch
+        (18, 0, 4), // ApiVersions
+        (52, 0, 2), // Vote
+        (53, 0, 1), // BeginQuorumEpoch
+        (54, 0, 1), // EndQuorumEpoch
+        (59, 0, 1), // FetchSnapshot
+    ];
+    let resp = ApiVersionsResponse {
+        error_code: 0,
+        api_keys: KEYS
+            .iter()
+            .map(|&(api_key, min_version, max_version)| ApiVersion {
+                api_key,
+                min_version,
+                max_version,
+                ..Default::default()
+            })
+            .collect(),
+        throttle_time_ms: 0,
+        ..Default::default()
+    };
+    // JVM dials at v4 (flexible); Crabka's own client at v0 (non-flexible). The
+    // codec emits the correct body shape per version: req v<=2 → non-flexible
+    // v0-shaped body, req v>=3 → flexible (compact) body. The v0 ApiVersions
+    // response HEADER asymmetry lives in the framing (`write_response_no_tagged_fields`),
+    // not here.
+    let body_version = req_version.clamp(0, 4);
+    let mut buf = BytesMut::new();
+    let _ = resp.encode(&mut buf, body_version);
+    buf.freeze()
 }
 
+/// Route an inbound RPC body to the engine and produce the response body.
+///
+/// The KIP-595 engine RPCs (1/52/53/54) go through [`KraftController::deliver`],
+/// which decodes the body, runs the core, and replies on a oneshot with the
+/// encoded response body. The Crabka-private 1003/1004 keep their bespoke
+/// request/response wire types.
 async fn dispatch(
-    api_key: i16,
-    body: &[u8],
-    raft: &Raft,
-    log_store: &Arc<crate::log_store::RaftLogStore>,
+    api_key_n: i16,
+    body: Bytes,
+    engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
-    match api_key {
-        API_KEY_APPEND_ENTRIES => {
-            let mut cur = body;
-            let req = CrabkaAppendEntriesRequest::decode_v0(&mut cur)?;
-            let req_term = req.term;
-            let openraft_req = convert_append_entries(req);
-            let res = raft
-                .append_entries(openraft_req)
-                .await
-                .map_err(|e| RaftError::Openraft(format!("{e:?}")))?;
-            // Map openraft's response variants onto the v0 wire shape so
-            // the leader's decoder can distinguish HigherVote (back off
-            // and rediscover) from Conflict (walk back prev_log_id) from
-            // Success. Returning a flat success=false with term=0 makes
-            // the leader interpret every failure as a Conflict, which
-            // panics openraft when prev_log_id was None.
-            let (success, term) = match &res {
-                openraft::raft::AppendEntriesResponse::Success
-                | openraft::raft::AppendEntriesResponse::PartialSuccess(_) => (true, 0i64),
-                openraft::raft::AppendEntriesResponse::HigherVote(v) => {
-                    (false, i64::try_from(v.leader_id.term).unwrap_or(i64::MAX))
-                }
-                openraft::raft::AppendEntriesResponse::Conflict => (false, req_term),
-            };
-            let mut out = Vec::with_capacity(32);
-            CrabkaAppendEntriesResponse {
-                success,
-                term,
-                last_log_index: 0,
-            }
-            .encode_v0(&mut out)?;
-            Ok(Bytes::from(out))
+    match api_key_n {
+        api_key::FETCH => {
+            deliver_inbound(engine, |reply| Inbound::Fetch { req: body, reply }).await
         }
-        API_KEY_VOTE => {
-            let mut cur = body;
-            let req = CrabkaVoteRequest::decode_v0(&mut cur)?;
-            // Reconstruct the candidate's `last_log_id` from the wire
-            // form so the receiver's "log up-to-date" check evaluates
-            // against the real candidate state. Sentinel `-1` (or any
-            // negative) means "no log entries"; anything else maps
-            // straight back to `LogId::new(...)`.
-            let last_log_id = if req.last_log_index < 0 || req.last_log_term < 0 {
-                None
-            } else {
-                Some(openraft::LogId {
-                    leader_id: openraft::LeaderId::new(
-                        u64::try_from(req.last_log_term).unwrap_or(0),
-                        u64::try_from(req.last_log_node_id.max(0)).unwrap_or(0),
-                    ),
-                    index: u64::try_from(req.last_log_index).unwrap_or(0),
-                })
-            };
-            let openraft_req = openraft::raft::VoteRequest {
-                vote: openraft::Vote::new(u64::try_from(req.term).unwrap_or(0), req.candidate_id),
-                last_log_id,
-            };
-            let res = raft
-                .vote(openraft_req)
-                .await
-                .map_err(|e| RaftError::Openraft(format!("{e:?}")))?;
-            let mut out = Vec::with_capacity(16);
-            CrabkaVoteResponse {
-                vote_granted: res.vote_granted,
-                term: i64::try_from(res.vote.leader_id.term).unwrap_or(i64::MAX),
-            }
-            .encode_v0(&mut out)?;
-            Ok(Bytes::from(out))
+        api_key::VOTE => deliver_inbound(engine, |reply| Inbound::Vote { req: body, reply }).await,
+        api_key::BEGIN_QUORUM_EPOCH => {
+            deliver_inbound(engine, |reply| Inbound::BeginQuorumEpoch {
+                req: body,
+                reply,
+            })
+            .await
         }
-        API_KEY_INSTALL_SNAPSHOT => {
-            use serde_wincode::SerdeCompat;
-            use wincode::{Deserialize as _, Serialize as _};
-            let mut cur = body;
-            let req = CrabkaInstallSnapshotRequest::decode_v0(&mut cur)?;
-            let vote: openraft::Vote<NodeId> =
-                <SerdeCompat<openraft::Vote<NodeId>>>::deserialize(&req.vote)?;
-            let meta: openraft::SnapshotMeta<NodeId, Node> =
-                <SerdeCompat<openraft::SnapshotMeta<NodeId, Node>>>::deserialize(&req.meta)?;
-            let or_req = openraft::raft::InstallSnapshotRequest {
-                vote,
-                meta,
-                offset: u64::try_from(req.offset).unwrap_or(0),
-                data: req.data.to_vec(),
-                done: req.done,
-            };
-            let resp = raft
-                .install_snapshot(or_req)
-                .await
-                .map_err(|e| RaftError::Openraft(format!("{e:?}")))?;
-            let vote_bytes = <SerdeCompat<openraft::Vote<NodeId>>>::serialize(&resp.vote)?;
-            let mut out = Vec::new();
-            CrabkaInstallSnapshotResponse {
-                vote: Bytes::from(vote_bytes),
-            }
-            .encode_v0(&mut out)?;
-            Ok(Bytes::from(out))
+        api_key::END_QUORUM_EPOCH => {
+            deliver_inbound(engine, |reply| Inbound::EndQuorumEpoch { req: body, reply }).await
         }
-        API_KEY_SUBMIT_CHANGE => dispatch_submit_change(body, raft).await,
-        API_KEY_METADATA_FETCH => dispatch_metadata_fetch(body, raft, log_store).await,
+        api_key::FETCH_SNAPSHOT => {
+            deliver_inbound(engine, |reply| Inbound::FetchSnapshot { req: body, reply }).await
+        }
+        API_KEY_SUBMIT_CHANGE => dispatch_submit_change(&body, engine).await,
+        API_KEY_METADATA_FETCH => dispatch_metadata_fetch(&body, engine).await,
         _ => Err(RaftError::Protocol(
             crabka_protocol::ProtocolError::InvalidValue("unknown controller api key"),
         )),
     }
 }
 
-/// Handle a follower-forwarded `Controller::submit_change` request. The
-/// follower has wrapped the bincode-encoded `Vec<MetadataRecord>` in a
-/// `CrabkaSubmitChangeRequest`; we hand the records to the local raft
-/// (which is presumably the leader) via `client_write`, then translate
-/// the openraft response into the `error_code` enum:
-///
-/// - `0`: applied cleanly (no per-record rejections).
-/// - `1`: not leader (the response carries `leader_hint` so the
-///   follower can retry against a different peer).
-/// - `2`: applied to the log, but the state machine rejected one or
-///   more records at apply time (e.g., a `CreateTopics` race).
-/// - `3`: opaque openraft failure — surface as `RaftError::NotLeader`
-///   on the caller side and let the higher layer translate.
-async fn dispatch_submit_change(body: &[u8], raft: &Raft) -> Result<Bytes, RaftError> {
+/// Deliver an [`Inbound`] to the engine and await the encoded response body.
+async fn deliver_inbound<F>(engine: &KraftController, make: F) -> Result<Bytes, RaftError>
+where
+    F: FnOnce(oneshot::Sender<Bytes>) -> Inbound,
+{
+    let (reply, rx) = oneshot::channel();
+    engine.deliver(make(reply)).await?;
+    rx.await.map_err(|_| RaftError::Shutdown)
+}
+
+/// Handle a follower-forwarded `submit_change` (1003). The forwarder wrapped a
+/// wincode-encoded `Vec<MetadataRecord>`; we submit it to the local engine
+/// (presumably the leader) and translate the result into the `error_code` enum:
+/// `0` applied, `1` not leader (with `leader_hint`), `2` metadata-rejected.
+async fn dispatch_submit_change(body: &[u8], engine: &KraftController) -> Result<Bytes, RaftError> {
     let mut cur = body;
     let req = CrabkaSubmitChangeRequest::decode_v0(&mut cur)?;
     let records: Vec<crabka_metadata::MetadataRecord> = match <serde_wincode::SerdeCompat<
@@ -388,24 +355,23 @@ async fn dispatch_submit_change(body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
             return Ok(Bytes::from(out));
         }
     };
-    let data = AppData { records };
-    let resp = match raft.client_write(data).await {
-        Ok(r) if r.data.rejected.is_empty() => CrabkaSubmitChangeResponse {
+    let resp = match engine.submit_change(records).await {
+        Ok(()) => CrabkaSubmitChangeResponse {
             error_code: 0,
             leader_hint: -1,
         },
-        Ok(_) => CrabkaSubmitChangeResponse {
+        Err(RaftError::Metadata(_)) => CrabkaSubmitChangeResponse {
             error_code: 2,
             leader_hint: -1,
         },
-        Err(openraft::error::RaftError::APIError(
-            openraft::error::ClientWriteError::ForwardToLeader(f),
-        )) => CrabkaSubmitChangeResponse {
+        Err(RaftError::NotLeader { current_leader }) => CrabkaSubmitChangeResponse {
             error_code: 1,
-            leader_hint: f.leader_id.map_or(-1, |l| i64::try_from(l).unwrap_or(-1)),
+            leader_hint: current_leader
+                .and_then(|l| i64::try_from(l).ok())
+                .unwrap_or(-1),
         },
         Err(e) => {
-            tracing::warn!(error = ?e, "submit-change client_write failed");
+            tracing::warn!(error = ?e, "submit-change failed");
             CrabkaSubmitChangeResponse {
                 error_code: 3,
                 leader_hint: -1,
@@ -417,33 +383,30 @@ async fn dispatch_submit_change(body: &[u8], raft: &Raft) -> Result<Bytes, RaftE
     Ok(Bytes::from(out))
 }
 
-/// Serve a slice of committed `__cluster_metadata` entries to a
-/// broker-only observer. Reads `[fetch_offset, high_watermark]` from the
-/// log store, encodes each entry as a Kafka record batch, and returns
-/// them plus `log_start_offset`, `high_watermark`, and a `leader_hint`.
+/// Serve a committed `__cluster_metadata` slice to a broker-only observer (1004)
+/// from the engine's `KraftLog`.
 async fn dispatch_metadata_fetch(
     body: &[u8],
-    raft: &Raft,
-    log_store: &Arc<crate::log_store::RaftLogStore>,
+    engine: &KraftController,
 ) -> Result<Bytes, RaftError> {
     let mut cur = body;
     let req = CrabkaMetadataFetchRequest::decode_v0(&mut cur)?;
-    let leader_hint = raft
-        .metrics()
-        .borrow()
-        .current_leader
-        .map_or(-1, |l| i64::try_from(l).unwrap_or(-1));
-
-    let fetch_offset = u64::try_from(req.fetch_offset.max(0)).unwrap_or(0);
+    let fetch_offset = req.fetch_offset.max(0);
     let max_bytes = usize::try_from(req.max_bytes.max(0)).unwrap_or(0);
-    let slice =
-        crate::metadata_fetch::read_committed_slice(raft, log_store, fetch_offset, max_bytes).await;
+    let slice = engine.metadata_fetch(fetch_offset, max_bytes).await?;
+    let leader_hint: i64 = engine
+        .quorum_state()
+        .await
+        .ok()
+        .and_then(|qs| qs.leader_id)
+        .and_then(|l| i64::try_from(l).ok())
+        .unwrap_or(-1);
 
     let resp = CrabkaMetadataFetchResponse {
         error_code: 0,
         leader_hint,
-        log_start_offset: i64::try_from(slice.log_start_offset).unwrap_or(i64::MAX),
-        high_watermark: i64::try_from(slice.high_watermark).unwrap_or(i64::MAX),
+        log_start_offset: slice.log_start_offset,
+        high_watermark: slice.high_watermark,
         records: slice.records,
     };
     let mut out = Vec::new();
@@ -451,51 +414,29 @@ async fn dispatch_metadata_fetch(
     Ok(Bytes::from(out))
 }
 
-fn convert_append_entries(
-    req: CrabkaAppendEntriesRequest,
-) -> openraft::raft::AppendEntriesRequest<TypeConfig> {
-    use serde_wincode::SerdeCompat;
-    use wincode::Deserialize as _;
-    let leader_node = u64::try_from(req.leader_id.max(0)).unwrap_or(0);
-    let entries = req
-        .entries
-        .into_iter()
-        .map(|e| {
-            let payload: openraft::EntryPayload<TypeConfig> =
-                <SerdeCompat<openraft::EntryPayload<TypeConfig>>>::deserialize(&e.payload)
-                    .unwrap_or(openraft::EntryPayload::Blank);
-            openraft::Entry {
-                log_id: openraft::LogId {
-                    leader_id: openraft::LeaderId::new(
-                        u64::try_from(e.log_term).unwrap_or(0),
-                        u64::try_from(e.log_node_id.max(0)).unwrap_or(0),
-                    ),
-                    index: u64::try_from(e.log_index).unwrap_or(0),
-                },
-                payload,
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn api_versions_body_advertises_kip595_set_both_shapes() {
+        use crabka_protocol::Decode;
+        use crabka_protocol::owned::api_versions_response::ApiVersionsResponse;
+        for req_v in [0i16, 4i16] {
+            let body = super::api_versions_response_body(req_v);
+            let v = req_v.clamp(0, 4);
+            let mut cur = &body[..];
+            let resp = ApiVersionsResponse::decode(&mut cur, v).expect("decode body");
+            assert!(cur.is_empty(), "no trailing bytes (req_v={req_v})");
+            assert!(resp.error_code == 0);
+            let keys: std::collections::BTreeSet<i16> =
+                resp.api_keys.iter().map(|k| k.api_key).collect();
+            for want in [1i16, 18, 52, 53, 54, 59] {
+                assert!(
+                    keys.contains(&want),
+                    "missing api_key {want} at req_v={req_v}"
+                );
             }
-        })
-        .collect();
-    openraft::raft::AppendEntriesRequest {
-        // AppendEntries can only be issued by an elected leader, so the
-        // wire-side vote must be reconstructed as `committed`. `Vote::new`
-        // yields an uncommitted vote, which trips openraft's
-        // `update_accepted` debug-assert (`vote must be committed`).
-        vote: openraft::Vote::new_committed(u64::try_from(req.term).unwrap_or(0), leader_node),
-        prev_log_id: (req.prev_log_index >= 0).then(|| openraft::LogId {
-            leader_id: openraft::LeaderId::new(
-                u64::try_from(req.prev_log_term).unwrap_or(0),
-                u64::try_from(req.prev_log_node_id.max(0)).unwrap_or(0),
-            ),
-            index: u64::try_from(req.prev_log_index).unwrap_or(0),
-        }),
-        entries,
-        leader_commit: (req.leader_commit >= 0).then(|| openraft::LogId {
-            leader_id: openraft::LeaderId::new(
-                u64::try_from(req.leader_commit_term.max(0)).unwrap_or(0),
-                u64::try_from(req.leader_commit_node_id.max(0)).unwrap_or(0),
-            ),
-            index: u64::try_from(req.leader_commit).unwrap_or(0),
-        }),
+            let vote = resp.api_keys.iter().find(|k| k.api_key == 52).unwrap();
+            assert!(vote.min_version == 0 && vote.max_version == 2);
+        }
     }
 }

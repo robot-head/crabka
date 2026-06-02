@@ -7,6 +7,7 @@ pub(crate) mod borrowed;
 mod crc;
 mod error;
 pub mod header;
+pub mod metadata;
 pub(crate) mod owned;
 mod payload;
 

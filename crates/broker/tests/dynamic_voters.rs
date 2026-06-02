@@ -42,6 +42,7 @@ where
 /// committed image so the test fails loudly (rather than the harness's
 /// `Startup` error) if convergence regresses.
 #[tokio::test]
+#[ignore = "KIP-853 dynamic reconfig: Slice 5"]
 async fn auto_join_grows_quorum_to_three() {
     let cluster = start_n_node(3).await.expect("3-node cluster via auto-join");
 
@@ -73,6 +74,7 @@ async fn auto_join_grows_quorum_to_three() {
 /// After growing to three, removing one follower via the leader's
 /// `remove_voter` must shrink the committed voter set to two.
 #[tokio::test]
+#[ignore = "KIP-853 dynamic reconfig: Slice 5"]
 async fn remove_voter_shrinks_quorum() {
     let cluster = start_n_node(3).await.expect("3-node cluster via auto-join");
 

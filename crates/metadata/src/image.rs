@@ -152,6 +152,17 @@ impl MetadataImage {
             .map(|(_, v)| v)
     }
 
+    /// The live partition count for `topic`, derived from the partitions
+    /// map rather than the stored `TopicRecord.partitions` field. This is
+    /// the authoritative count for the KIP-631 round-trip (the KIP-631
+    /// `TopicRecord` carries no partition count) and for the `validate`
+    /// partition-count-grew check. Returns 0 for an unknown topic or one
+    /// with no partition records yet applied.
+    #[must_use]
+    pub fn topic_partition_count(&self, topic: &str) -> i32 {
+        i32::try_from(self.partitions_of(topic).count()).unwrap_or(i32::MAX)
+    }
+
     /// Single-pass iterator over every partition in the image, yielding
     /// the flat `(topic_name, partition_index)` key alongside the record.
     /// O(P) in total partition count — the cluster-wide maintenance loops
@@ -417,11 +428,36 @@ impl MetadataImage {
                     self.topic_ids.remove(&prev.topic_id);
                 }
                 self.topic_ids.insert(t.topic_id, t.name.clone());
-                self.topics.insert(t.name.clone(), t.clone());
+                // The denormalized `partitions` count is a derived cache of the
+                // partitions map (KIP-631 `TopicRecord` carries no partition
+                // count), maintained incrementally as `V1Partition` records
+                // apply. A brand-new topic starts at 0 and the partition records
+                // that follow it in log order restore the real count; a
+                // re-registration of an existing topic keeps its partitions in
+                // the map, so preserve the running count rather than trusting
+                // the (KIP-631-zeroed) record field.
+                let mut rec = t.clone();
+                rec.partitions = self.topics.get(&t.name).map_or(0, |prev| prev.partitions);
+                self.topics.insert(t.name.clone(), rec);
             }
             MetadataRecord::V1Partition(p) => {
-                self.partitions
-                    .insert((p.topic.clone(), p.partition), p.clone());
+                // Maintain the owning topic's denormalized partition count / RF
+                // incrementally. Re-scanning the whole partitions map on every
+                // record (the previous approach) made log/snapshot replay
+                // O(P²); bumping the cached count only when a *new* partition
+                // key lands keeps apply O(1) while leaving the count a true
+                // derived view of the partitions map.
+                let is_new = self
+                    .partitions
+                    .insert((p.topic.clone(), p.partition), p.clone())
+                    .is_none();
+                if let Some(t) = self.topics.get_mut(&p.topic) {
+                    if is_new {
+                        t.partitions = t.partitions.saturating_add(1);
+                    }
+                    t.replication_factor =
+                        i16::try_from(p.replicas.len()).unwrap_or(t.replication_factor);
+                }
             }
             MetadataRecord::V1BrokerRegistration(b) => {
                 self.brokers.insert(b.node_id, b.clone());
@@ -744,17 +780,24 @@ impl MetadataImage {
                     // partitions strictly growing. CreatePartitions emits
                     // exactly this. Identical re-submits stay rejected so
                     // CreateTopics' idempotency contract still holds.
+                    // Partition count derives from the partitions map (the
+                    // KIP-631 round-trip does not carry the stored
+                    // `TopicRecord.partitions`), so the expansion check reads
+                    // the live count rather than `existing.partitions`.
                     if existing.topic_id != t.topic_id
                         || existing.replication_factor != t.replication_factor
-                        || t.partitions <= existing.partitions
+                        || t.partitions <= self.topic_partition_count(&t.name)
                     {
                         return Err(MetadataError::TopicExists(t.name.clone()));
                     }
                     return Ok(());
                 }
-                if t.partitions <= 0 {
-                    return Err(MetadataError::InvalidRecord("partitions must be > 0"));
-                }
+                // A new topic is valid regardless of the `TopicRecord.partitions`
+                // count: KIP-631 framing does not carry that field, so a
+                // freshly-decoded `V1Topic` round-trips back as partitions=0 with
+                // the real count arriving via the following `V1Partition` records.
+                // Partition-count validity (`> 0`) is enforced at the CreateTopics
+                // request boundary, not on the metadata-record apply path.
                 Ok(())
             }
             MetadataRecord::V1Partition(p) => {
@@ -1296,10 +1339,30 @@ mod tests {
         assert!(matches!(err, MetadataError::TopicExists(_)));
     }
 
+    /// Apply `count` partition records (indices `0..count`) for `topic` so
+    /// the image's derived partition count reflects a realistic topic. The
+    /// `validate` partition-count check reads this derived count, not the
+    /// stored `TopicRecord.partitions`.
+    fn apply_partitions(m: &mut MetadataImage, topic: &str, count: i32) {
+        for p in 0..count {
+            m.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: topic.into(),
+                partition: p,
+                leader: 1,
+                replicas: vec![1],
+                isr: vec![1],
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+            }));
+        }
+    }
+
     #[test]
     fn validate_topic_partition_count_increase_allowed() {
         let mut m = img();
         m.apply(&topic("t", 1));
+        apply_partitions(&mut m, "t", 1);
         let existing = m.topic("t").unwrap().clone();
         let updated = MetadataRecord::V1Topic(TopicRecord {
             name: "t".into(),
@@ -1314,6 +1377,7 @@ mod tests {
     fn validate_topic_partition_count_decrease_rejected() {
         let mut m = img();
         m.apply(&topic("t", 3));
+        apply_partitions(&mut m, "t", 3);
         let existing = m.topic("t").unwrap().clone();
         let updated = MetadataRecord::V1Topic(TopicRecord {
             name: "t".into(),

@@ -125,7 +125,12 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
 
     let (client_addrs, controller_addrs) = support::bind_and_drop_ports(2).await;
 
-    // Broker 0: bootstrap, concrete controller + data ports.
+    // KIP-595 Slice 3c static bootstrap: both brokers boot in `Bootstrap` mode
+    // with the same static 2-voter set (concrete controller ports) and elect
+    // among themselves over the SASL controller wire — no auto-join (KIP-853,
+    // Slice 5).
+    let voters: Vec<(u64, SocketAddr)> = vec![(1, controller_addrs[0]), (2, controller_addrs[1])];
+
     let dir0 = TempDir::new().unwrap();
     let mut cfg0 = BrokerConfig::for_tests(dir0.path().to_path_buf());
     cfg0.broker_id = 1;
@@ -133,36 +138,46 @@ async fn start_two_sasl() -> Result<Vec<(BrokerHandle, BrokerConfig, TempDir)>, 
     cfg0.directory_id = uuid::Uuid::from_u128(1);
     cfg0.bootstrap_mode = BootstrapMode::Bootstrap;
     cfg0.controller_listen_addr = controller_addrs[0];
+    cfg0.controller_quorum_voters = voters.clone();
     cfg0.auto_join = false;
     cfg0.bootstrap_servers = vec![];
     apply_sasl(&mut cfg0, client_addrs[0]);
-    let broker0 = Broker::start(cfg0.clone()).await?;
-    let bootstrap_ib_addr = broker0.listen_addr();
 
-    // Broker 1: join via auto-join, dialing broker 0's SASL data listener
-    // (where api_key 80 is served) — the inter-broker dialer runs SASL.
     let dir1 = TempDir::new().unwrap();
     let mut cfg1 = BrokerConfig::for_tests(dir1.path().to_path_buf());
     cfg1.broker_id = 2;
     cfg1.node_id = 2;
     cfg1.directory_id = uuid::Uuid::from_u128(2);
-    cfg1.bootstrap_mode = BootstrapMode::Join;
-    cfg1.controller_listen_addr = "127.0.0.1:0".parse().unwrap();
-    cfg1.auto_join = true;
-    cfg1.bootstrap_servers = vec![bootstrap_ib_addr];
+    cfg1.bootstrap_mode = BootstrapMode::Bootstrap;
+    cfg1.controller_listen_addr = controller_addrs[1];
+    cfg1.controller_quorum_voters = voters.clone();
+    cfg1.auto_join = false;
+    cfg1.bootstrap_servers = vec![];
     apply_sasl(&mut cfg1, client_addrs[1]);
-    let broker1 = Broker::start(cfg1.clone()).await?;
-    cfg1.controller_listen_addr = broker1.controller_addr();
 
-    // Block until auto-join converges on a 2-voter quorum.
+    // Start both concurrently: `Broker::start` blocks until a leader is
+    // committed, which needs a voter majority up, so a sequential
+    // `start().await` on broker0 alone would deadlock.
+    let cfg0_for_spawn = cfg0.clone();
+    let cfg1_for_spawn = cfg1.clone();
+    let join0 = tokio::spawn(async move { Broker::start(cfg0_for_spawn).await });
+    let join1 = tokio::spawn(async move { Broker::start(cfg1_for_spawn).await });
+    let broker0 = join0
+        .await
+        .map_err(|e| BrokerError::Startup(format!("broker0 task panicked: {e}")))??;
+    let broker1 = join1
+        .await
+        .map_err(|e| BrokerError::Startup(format!("broker1 task panicked: {e}")))??;
+
+    // Block until the static set converges on a 2-voter quorum.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        if broker0.voter_count_for_test() >= 2 {
+        if broker0.voter_count_for_test() >= 2 || broker1.voter_count_for_test() >= 2 {
             break;
         }
         if Instant::now() > deadline {
             return Err(BrokerError::Startup(format!(
-                "auto-join did not reach 2 voters within 30s (have {})",
+                "static cluster did not reach 2 voters within 30s (have {})",
                 broker0.voter_count_for_test()
             )));
         }
@@ -287,20 +302,37 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
     );
 
     // Locate the transaction coordinator for TID.
-    let fc = admin
-        .send(FindCoordinatorRequest {
-            key: TID.into(),
-            key_type: 1, // TRANSACTION
-            coordinator_keys: vec![TID.into()],
-            ..Default::default()
-        })
-        .await
-        .expect("find coordinator");
-    let (coord_node, coord_host, coord_port) = fc.coordinators.first().map_or_else(
-        || (fc.node_id, fc.host.clone(), fc.port),
-        |c| (c.node_id, c.host.clone(), c.port),
-    );
-    assert!(coord_node >= 0, "no txn coordinator: {fc:?}");
+    // The transaction coordinator partition (`__transaction_state[hash(TID)]`)
+    // is auto-created and its leader elected lazily on first access, so the
+    // initial FindCoordinator can race ahead of that election and briefly
+    // return COORDINATOR_NOT_AVAILABLE ("partition not found"). Poll until it
+    // resolves — matching the retry-with-deadline idiom used elsewhere in this
+    // test — so a genuine never-available coordinator still surfaces (after the
+    // deadline) rather than flaking on the timing window.
+    let fc_deadline = Instant::now() + Duration::from_secs(30);
+    let (coord_node, coord_host, coord_port) = loop {
+        let fc = admin
+            .send(FindCoordinatorRequest {
+                key: TID.into(),
+                key_type: 1, // TRANSACTION
+                coordinator_keys: vec![TID.into()],
+                ..Default::default()
+            })
+            .await
+            .expect("find coordinator");
+        let (node, host, port) = fc.coordinators.first().map_or_else(
+            || (fc.node_id, fc.host.clone(), fc.port),
+            |c| (c.node_id, c.host.clone(), c.port),
+        );
+        if node >= 0 {
+            break (node, host, port);
+        }
+        assert!(
+            Instant::now() <= fc_deadline,
+            "txn coordinator never became available: {fc:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
 
     // Pick the partition led by the broker that is NOT the coordinator, so
     // EndTxn must fan a marker to a *remote* leader over the SASL listener.

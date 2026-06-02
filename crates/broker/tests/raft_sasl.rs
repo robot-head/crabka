@@ -10,7 +10,6 @@
 #![cfg(not(target_os = "windows"))]
 
 use assert2::assert;
-use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -132,29 +131,21 @@ async fn start_two_brokers_with_controller_protocol(
         ctrl_addrs[1],
         &voters,
         dir1.path(),
-        BootstrapMode::Join,
+        BootstrapMode::Bootstrap,
         plain_user,
         plain_pass,
     );
 
-    let broker0 = Broker::start_with_controller_listener(cfg0, Some(ctrl_l0))
-        .await
-        .expect("start broker 0");
-
+    // KIP-595 Slice 3c static bootstrap: both brokers boot with the same
+    // static voter set and elect among themselves over the (SASL/plaintext)
+    // controller wire — no add_learner / change_membership (KIP-853, Slice 5).
     let cfg1_for_spawn = cfg1.clone();
     let join = tokio::spawn(async move {
         Broker::start_with_controller_listener(cfg1_for_spawn, Some(ctrl_l1)).await
     });
-
-    broker0
-        .add_learner(2, ctrl_addrs[1])
+    let broker0 = Broker::start_with_controller_listener(cfg0, Some(ctrl_l0))
         .await
-        .expect("add_learner(2)");
-    let target: BTreeSet<u64> = [1u64, 2u64].into_iter().collect();
-    broker0
-        .change_membership(target)
-        .await
-        .expect("change_membership");
+        .expect("start broker 0");
 
     let broker1 = join.await.expect("join spawn").expect("start broker 1");
     (broker0, broker1, dir0, dir1)
@@ -204,17 +195,24 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
     // both sides. Expect they never converge.
     init_tracing();
     let (ctrl_addrs, [ctrl_l1, ctrl_l2]) = reserve_ctrl_listeners().await;
-    let voters: Vec<(u64, SocketAddr)> = vec![(1, ctrl_addrs[0]), (2, ctrl_addrs[1])];
 
     let dir1 = TempDir::new().unwrap();
     let dir2 = TempDir::new().unwrap();
 
+    // Each broker is a *single-voter* standalone bootstrap of itself: b1's
+    // voter set is {1}, b2's is {2}. b1 self-elects immediately (so its
+    // `Broker::start` returns) and sees only itself. b2 likewise. Because
+    // their SASL creds mismatch (alice vs bob), neither can authenticate the
+    // other's raft listener — there is no path for the two single-voter
+    // clusters to merge, so b1's broker view never grows past 1. (A shared
+    // 2-voter set is unusable here: with bad creds no leader is ever elected,
+    // and `Broker::start` would block on its 2-minute leader-wait.)
     let c1 = sasl_broker_config(
         0,
         data_listen_addr(),
         ListenerProtocol::SaslPlaintext,
         ctrl_addrs[0],
-        &voters,
+        &[(1, ctrl_addrs[0])],
         dir1.path(),
         BootstrapMode::Bootstrap,
         "alice",
@@ -225,9 +223,9 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
         data_listen_addr(),
         ListenerProtocol::SaslPlaintext,
         ctrl_addrs[1],
-        &voters,
+        &[(2, ctrl_addrs[1])],
         dir2.path(),
-        BootstrapMode::Join,
+        BootstrapMode::Bootstrap,
         "bob",
         "burgers",
     );
@@ -236,28 +234,23 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
         .await
         .expect("start b1");
 
-    // Spawn b2: its `Broker::start` will block waiting for a raft leader
-    // (it's `Join` mode and will never see one because raft auth fails
-    // on both sides). We don't await its `Broker::start` completion —
-    // we just need its inbound listener up so b1 can attempt to dial it.
-    let c2_for_spawn = c2.clone();
-    let b2_join = tokio::spawn(async move {
-        Broker::start_with_controller_listener(c2_for_spawn, Some(ctrl_l2)).await
-    });
+    // Start b2 (its own single-voter cluster). With bad creds it can never
+    // join b1's cluster, but it self-elects fine, so this returns promptly.
+    let b2 = Broker::start_with_controller_listener(c2, Some(ctrl_l2))
+        .await
+        .expect("start b2");
 
-    // Give the brokers time to settle. With matched creds and add_learner +
-    // change_membership, convergence happens within ~1s; here we don't call
-    // those raft RPCs at all, AND auth would fail anyway. Wait 3s and
-    // assert broker 1 still sees only itself.
+    // Give the brokers time to (fail to) discover each other. Each is its own
+    // single-voter cluster and mismatched creds block any raft cross-talk, so
+    // b1 must still see only itself.
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(
         b1.broker_count().await < 2,
         "mismatched creds must not converge"
     );
+    let _ = &b2;
 
-    // Drop b2's spawn handle: it'll keep blocking, but tempdir cleanup
-    // + tokio runtime drop will terminate it.
-    b2_join.abort();
+    b2.shutdown().await;
     b1.shutdown().await;
 }
 
@@ -291,24 +284,18 @@ async fn controller_listener_plaintext_legacy_path_unchanged() {
     c2.advertised_listener = data_listen_addr().to_string();
     c2.controller_listen_addr = ctrl_addrs[1];
     c2.controller_quorum_voters = voters.clone();
-    c2.bootstrap_mode = BootstrapMode::Join;
+    c2.bootstrap_mode = BootstrapMode::Bootstrap;
     c2.controller_listener_protocol = ListenerProtocol::Plaintext;
 
-    let b1 = Broker::start_with_controller_listener(c1, Some(ctrl_l1))
-        .await
-        .expect("start b1");
+    // Static bootstrap: both brokers boot with the same voter set and elect
+    // over the plaintext controller wire — no add_learner / change_membership.
     let c2_for_spawn = c2.clone();
     let join = tokio::spawn(async move {
         Broker::start_with_controller_listener(c2_for_spawn, Some(ctrl_l2)).await
     });
-
-    b1.add_learner(2, ctrl_addrs[1])
+    let b1 = Broker::start_with_controller_listener(c1, Some(ctrl_l1))
         .await
-        .expect("add_learner(2)");
-    let target: BTreeSet<u64> = [1u64, 2u64].into_iter().collect();
-    b1.change_membership(target)
-        .await
-        .expect("change_membership");
+        .expect("start b1");
 
     let b2 = join.await.expect("join spawn").expect("start b2");
 

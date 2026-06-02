@@ -594,10 +594,14 @@ async fn three_node_jvm_round_trip() {
         })
         .collect();
 
-    // Bootstrap-then-join: start broker 0 alone (it self-elects as a
-    // singleton voter), then start brokers 1, 2 in Join mode and bring
-    // them into the cluster via add_learner + change_membership. Avoids
-    // openraft's cold-boot split-vote risk.
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them. (The old
+    // openraft bootstrap-then-join via add_learner/change_membership is gone
+    // with the static voter set.)
     let mut tempdirs: Vec<tempfile::TempDir> = Vec::with_capacity(3);
 
     // Broker 0 (Bootstrap).
@@ -624,9 +628,9 @@ async fn three_node_jvm_round_trip() {
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
-    let broker0 = Broker::start(cfg0).await.expect("broker start");
+    let h0 = tokio::spawn(async move { Broker::start(cfg0).await.expect("broker start") });
 
-    // Brokers 1, 2 (Join).
+    // Brokers 1, 2 (Bootstrap).
     let mut join_spawns = Vec::with_capacity(2);
     for i in 1..3 {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -648,7 +652,7 @@ async fn three_node_jvm_round_trip() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
-            bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
             ..BrokerConfig::default()
         };
         tempdirs.push(dir);
@@ -657,29 +661,9 @@ async fn three_node_jvm_round_trip() {
         }));
     }
 
-    // Bring the join brokers into the cluster: add as learners, then
-    // promote to voters in one change_membership.
-    let voter_addr = |i: usize| -> std::net::SocketAddr {
-        format!("127.0.0.1:{}", controller_ports[i])
-            .parse()
-            .expect("static addr")
-    };
-    broker0
-        .add_learner(2, voter_addr(1))
-        .await
-        .expect("add_learner 2");
-    broker0
-        .add_learner(3, voter_addr(2))
-        .await
-        .expect("add_learner 3");
-    broker0
-        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
-        .await
-        .expect("promote join brokers to voters");
-
-    // Join brokers' watch_leader fires and Broker::start returns.
+    // All voters boot concurrently; join their start futures to form the cluster.
     let mut cluster = Vec::with_capacity(3);
-    cluster.push((broker0, dir0));
+    cluster.push((h0.await.expect("spawn"), dir0));
     for (spawn, dir) in join_spawns.into_iter().zip(tempdirs) {
         cluster.push((spawn.await.expect("spawn"), dir));
     }
@@ -879,10 +863,14 @@ async fn three_node_replication_byte_compare() {
         })
         .collect();
 
-    // Bootstrap-then-join: start broker 0 alone (it self-elects as a
-    // singleton voter), then start brokers 1, 2 in Join mode and bring
-    // them into the cluster via add_learner + change_membership. Avoids
-    // openraft's cold-boot split-vote risk.
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them. (The old
+    // openraft bootstrap-then-join via add_learner/change_membership is gone
+    // with the static voter set.)
     let mut tempdirs: Vec<tempfile::TempDir> = Vec::with_capacity(3);
 
     // Broker 0 (Bootstrap).
@@ -908,9 +896,9 @@ async fn three_node_replication_byte_compare() {
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
-    let broker0 = Broker::start(cfg0).await.expect("broker start");
+    let h0 = tokio::spawn(async move { Broker::start(cfg0).await.expect("broker start") });
 
-    // Brokers 1, 2 (Join).
+    // Brokers 1, 2 (Bootstrap).
     let mut join_spawns = Vec::with_capacity(2);
     for i in 1..3 {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -932,7 +920,7 @@ async fn three_node_replication_byte_compare() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
-            bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
             ..BrokerConfig::default()
         };
         tempdirs.push(dir);
@@ -941,29 +929,9 @@ async fn three_node_replication_byte_compare() {
         }));
     }
 
-    // Bring the join brokers into the cluster: add as learners, then
-    // promote to voters in one change_membership.
-    let voter_addr = |i: usize| -> std::net::SocketAddr {
-        format!("127.0.0.1:{}", controller_ports[i])
-            .parse()
-            .expect("static addr")
-    };
-    broker0
-        .add_learner(2, voter_addr(1))
-        .await
-        .expect("add_learner 2");
-    broker0
-        .add_learner(3, voter_addr(2))
-        .await
-        .expect("add_learner 3");
-    broker0
-        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
-        .await
-        .expect("promote join brokers to voters");
-
-    // Join brokers' watch_leader fires and Broker::start returns.
+    // All voters boot concurrently; join their start futures to form the cluster.
     let mut cluster = Vec::with_capacity(3);
-    cluster.push((broker0, dir0));
+    cluster.push((h0.await.expect("spawn"), dir0));
     for (spawn, dir) in join_spawns.into_iter().zip(tempdirs) {
         cluster.push((spawn.await.expect("spawn"), dir));
     }
@@ -1337,10 +1305,9 @@ async fn acks_all_durability() {
         })
         .collect();
 
-    // Bootstrap-then-join: start broker 0 alone (it self-elects as a
-    // singleton voter), then start brokers 1, 2 in Join mode and bring
-    // them into the cluster via add_learner + change_membership. Avoids
-    // openraft's cold-boot split-vote risk.
+    // Static cold-boot (KIP-595): all three voters boot concurrently in
+    // Bootstrap mode, each seeded with the full static `controller_quorum_voters`
+    // set, and elect a leader among themselves.
     let mut tempdirs: Vec<tempfile::TempDir> = Vec::with_capacity(3);
 
     // Broker 0 (Bootstrap).
@@ -1362,11 +1329,13 @@ async fn acks_all_durability() {
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..crabka_broker::BrokerConfig::default()
     };
-    let broker0 = crabka_broker::Broker::start(cfg0)
-        .await
-        .expect("broker start");
+    let h0 = tokio::spawn(async move {
+        crabka_broker::Broker::start(cfg0)
+            .await
+            .expect("broker start")
+    });
 
-    // Brokers 1, 2 (Join).
+    // Brokers 1, 2 (Bootstrap).
     let mut join_spawns = Vec::with_capacity(2);
     for i in 1..3 {
         let dir = tempfile::tempdir().unwrap();
@@ -1384,7 +1353,7 @@ async fn acks_all_durability() {
             replica_lag_time_max_ms: 30_000,
             controller_election_timeout: std::time::Duration::from_secs(5),
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
-            bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
             ..crabka_broker::BrokerConfig::default()
         };
         tempdirs.push(dir);
@@ -1395,29 +1364,16 @@ async fn acks_all_durability() {
         }));
     }
 
-    // Bring the join brokers into the cluster: add as learners, then
-    // promote to voters in one change_membership.
-    let voter_addr = |i: usize| -> std::net::SocketAddr {
-        format!("127.0.0.1:{}", controller_ports[i])
-            .parse()
-            .expect("static addr")
-    };
-    broker0
-        .add_learner(2, voter_addr(1))
-        .await
-        .expect("add_learner 2");
-    broker0
-        .add_learner(3, voter_addr(2))
-        .await
-        .expect("add_learner 3");
-    broker0
-        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
-        .await
-        .expect("promote join brokers to voters");
-
-    // Join brokers' watch_leader fires and Broker::start returns.
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them. (The old
+    // openraft bootstrap-then-join via add_learner/change_membership is gone
+    // with the static voter set.)
     let mut cluster = Vec::with_capacity(3);
-    cluster.push((broker0, dir0));
+    cluster.push((h0.await.expect("spawn"), dir0));
     for (spawn, dir) in join_spawns.into_iter().zip(tempdirs) {
         cluster.push((spawn.await.expect("spawn"), dir));
     }
@@ -1540,10 +1496,9 @@ async fn acks_all_survives_leader_crash() {
         })
         .collect();
 
-    // Bootstrap-then-join: start broker 0 alone (it self-elects as a
-    // singleton voter), then start brokers 1, 2 in Join mode and bring
-    // them into the cluster via add_learner + change_membership. Avoids
-    // openraft's cold-boot split-vote risk.
+    // Static cold-boot (KIP-595): all three voters boot concurrently in
+    // Bootstrap mode, each seeded with the full static `controller_quorum_voters`
+    // set, and elect a leader among themselves.
     let mut tempdirs: Vec<tempfile::TempDir> = Vec::with_capacity(3);
 
     // Broker 0 (Bootstrap).
@@ -1565,11 +1520,13 @@ async fn acks_all_survives_leader_crash() {
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..crabka_broker::BrokerConfig::default()
     };
-    let broker0 = crabka_broker::Broker::start(cfg0)
-        .await
-        .expect("broker start");
+    let h0 = tokio::spawn(async move {
+        crabka_broker::Broker::start(cfg0)
+            .await
+            .expect("broker start")
+    });
 
-    // Brokers 1, 2 (Join).
+    // Brokers 1, 2 (Bootstrap).
     let mut join_spawns = Vec::with_capacity(2);
     for i in 1..3 {
         let dir = tempfile::tempdir().unwrap();
@@ -1587,7 +1544,7 @@ async fn acks_all_survives_leader_crash() {
             replica_lag_time_max_ms: 2_000,
             controller_election_timeout: std::time::Duration::from_millis(500),
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
-            bootstrap_mode: crabka_broker::BootstrapMode::Join,
+            bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
             ..crabka_broker::BrokerConfig::default()
         };
         tempdirs.push(dir);
@@ -1598,29 +1555,16 @@ async fn acks_all_survives_leader_crash() {
         }));
     }
 
-    // Bring the join brokers into the cluster: add as learners, then
-    // promote to voters in one change_membership.
-    let voter_addr = |i: usize| -> std::net::SocketAddr {
-        format!("127.0.0.1:{}", controller_ports[i])
-            .parse()
-            .expect("static addr")
-    };
-    broker0
-        .add_learner(2, voter_addr(1))
-        .await
-        .expect("add_learner 2");
-    broker0
-        .add_learner(3, voter_addr(2))
-        .await
-        .expect("add_learner 3");
-    broker0
-        .change_membership([1u64, 2u64, 3u64].into_iter().collect())
-        .await
-        .expect("promote join brokers to voters");
-
-    // Join brokers' watch_leader fires and Broker::start returns.
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them. (The old
+    // openraft bootstrap-then-join via add_learner/change_membership is gone
+    // with the static voter set.)
     let mut cluster: Vec<(crabka_broker::BrokerHandle, tempfile::TempDir)> = Vec::with_capacity(3);
-    cluster.push((broker0, dir0));
+    cluster.push((h0.await.expect("spawn"), dir0));
     for (spawn, dir) in join_spawns.into_iter().zip(tempdirs) {
         cluster.push((spawn.await.expect("spawn"), dir));
     }
@@ -3826,30 +3770,29 @@ async fn start_two_sasl_brokers(
         dir0.path().to_path_buf(),
         crabka_broker::BootstrapMode::Bootstrap,
     );
-    let broker0 = Broker::start(cfg0).await.expect("start broker 0");
-
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them. (The old
+    // openraft bootstrap-then-join via add_learner/change_membership is gone
+    // with the static voter set.)
     let cfg1 = mk_cfg(
         2,
         listen1,
         ctrl1,
         BOOTSTRAP_B1,
         dir1.path().to_path_buf(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
-    let join_handle = tokio::spawn(async move { Broker::start(cfg1).await });
-
-    // Bring broker 1 into the raft voter set.
-    broker0
-        .add_learner(2, ctrl1)
+    let h0 = tokio::spawn(async move { Broker::start(cfg0).await });
+    let h1 = tokio::spawn(async move { Broker::start(cfg1).await });
+    let broker0 = h0
         .await
-        .expect("add_learner for broker 1");
-    let target: std::collections::BTreeSet<u64> = [1_u64, 2_u64].into_iter().collect();
-    broker0
-        .change_membership(target)
-        .await
-        .expect("change_membership to {1,2}");
-
-    let broker1 = join_handle
+        .expect("broker 0 spawn join")
+        .expect("start broker 0");
+    let broker1 = h1
         .await
         .expect("broker 1 spawn join")
         .expect("broker 1 start");
@@ -4158,30 +4101,29 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
         dir0.path().to_path_buf(),
         crabka_broker::BootstrapMode::Bootstrap,
     );
-    let broker0 = Broker::start(cfg0).await.expect("start broker 0");
-
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them. (The old
+    // openraft bootstrap-then-join via add_learner/change_membership is gone
+    // with the static voter set.)
     let cfg1 = mk_cfg(
         2,
         listen1,
         ctrl1,
         BOOTSTRAP_B1,
         dir1.path().to_path_buf(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
-    let join_handle = tokio::spawn(async move { Broker::start(cfg1).await });
-
-    // Bring broker 1 into the raft voter set.
-    broker0
-        .add_learner(2, ctrl1)
+    let h0 = tokio::spawn(async move { Broker::start(cfg0).await });
+    let h1 = tokio::spawn(async move { Broker::start(cfg1).await });
+    let broker0 = h0
         .await
-        .expect("add_learner for broker 1");
-    let target: std::collections::BTreeSet<u64> = [1_u64, 2_u64].into_iter().collect();
-    broker0
-        .change_membership(target)
-        .await
-        .expect("change_membership to {1,2}");
-
-    let broker1 = join_handle
+        .expect("broker 0 spawn join")
+        .expect("start broker 0");
+    let broker1 = h1
         .await
         .expect("broker 1 spawn join")
         .expect("broker 1 start");
@@ -5436,62 +5378,51 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster(
         dir0.path().to_path_buf(),
         crabka_broker::BootstrapMode::Bootstrap,
     );
-    let broker0 = Broker::start(cfg0.clone()).await.expect("start broker 0");
-
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them. (The old
+    // openraft bootstrap-then-join via add_learner/change_membership is gone
+    // with the static voter set.)
     let cfg1 = mk_cfg(
         2,
         listen1,
         ctrl1,
         BOOTSTRAP_B1,
         dir1.path().to_path_buf(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
-    let join_handle1 = tokio::spawn({
-        let c = cfg1.clone();
-        async move { Broker::start(c).await }
-    });
-
-    // Bring broker 2 (node_id=2) into the raft voter set first.
-    broker0
-        .add_learner(2, ctrl1)
-        .await
-        .expect("add_learner for broker 1");
-    let target2: std::collections::BTreeSet<u64> = [1_u64, 2_u64].into_iter().collect();
-    broker0
-        .change_membership(target2)
-        .await
-        .expect("change_membership to {1,2}");
-
-    let broker1 = join_handle1
-        .await
-        .expect("broker 1 spawn join")
-        .expect("broker 1 start");
-
     let cfg2 = mk_cfg(
         3,
         listen2,
         ctrl2,
         BOOTSTRAP_B2,
         dir2.path().to_path_buf(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
-    let join_handle2 = tokio::spawn({
+    let h0 = tokio::spawn({
+        let c = cfg0.clone();
+        async move { Broker::start(c).await }
+    });
+    let h1 = tokio::spawn({
+        let c = cfg1.clone();
+        async move { Broker::start(c).await }
+    });
+    let h2 = tokio::spawn({
         let c = cfg2.clone();
         async move { Broker::start(c).await }
     });
-
-    // Bring broker 3 (node_id=3) into the raft voter set.
-    broker0
-        .add_learner(3, ctrl2)
+    let broker0 = h0
         .await
-        .expect("add_learner for broker 2");
-    let target3: std::collections::BTreeSet<u64> = [1_u64, 2_u64, 3_u64].into_iter().collect();
-    broker0
-        .change_membership(target3)
+        .expect("broker 0 spawn join")
+        .expect("start broker 0");
+    let broker1 = h1
         .await
-        .expect("change_membership to {1,2,3}");
-
-    let broker2 = join_handle2
+        .expect("broker 1 spawn join")
+        .expect("broker 1 start");
+    let broker2 = h2
         .await
         .expect("broker 2 spawn join")
         .expect("broker 2 start");
@@ -6360,60 +6291,51 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_users(
         dir0.path().to_path_buf(),
         crabka_broker::BootstrapMode::Bootstrap,
     );
-    let broker0 = Broker::start(cfg0.clone()).await.expect("start broker 0");
-
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them. (The old
+    // openraft bootstrap-then-join via add_learner/change_membership is gone
+    // with the static voter set.)
     let cfg1 = mk_cfg(
         2,
         listen1,
         ctrl1,
         BOOTSTRAP_B1,
         dir1.path().to_path_buf(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
-    let join_handle1 = tokio::spawn({
-        let c = cfg1.clone();
-        async move { Broker::start(c).await }
-    });
-
-    broker0
-        .add_learner(2, ctrl1)
-        .await
-        .expect("add_learner for broker 1");
-    let target2: std::collections::BTreeSet<u64> = [1_u64, 2_u64].into_iter().collect();
-    broker0
-        .change_membership(target2)
-        .await
-        .expect("change_membership to {1,2}");
-
-    let broker1 = join_handle1
-        .await
-        .expect("broker 1 spawn join")
-        .expect("broker 1 start");
-
     let cfg2 = mk_cfg(
         3,
         listen2,
         ctrl2,
         BOOTSTRAP_B2,
         dir2.path().to_path_buf(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
-    let join_handle2 = tokio::spawn({
+    let h0 = tokio::spawn({
+        let c = cfg0.clone();
+        async move { Broker::start(c).await }
+    });
+    let h1 = tokio::spawn({
+        let c = cfg1.clone();
+        async move { Broker::start(c).await }
+    });
+    let h2 = tokio::spawn({
         let c = cfg2.clone();
         async move { Broker::start(c).await }
     });
-
-    broker0
-        .add_learner(3, ctrl2)
+    let broker0 = h0
         .await
-        .expect("add_learner for broker 2");
-    let target3: std::collections::BTreeSet<u64> = [1_u64, 2_u64, 3_u64].into_iter().collect();
-    broker0
-        .change_membership(target3)
+        .expect("broker 0 spawn join")
+        .expect("start broker 0");
+    let broker1 = h1
         .await
-        .expect("change_membership to {1,2,3}");
-
-    let broker2 = join_handle2
+        .expect("broker 1 spawn join")
+        .expect("broker 1 start");
+    let broker2 = h2
         .await
         .expect("broker 2 spawn join")
         .expect("broker 2 start");
@@ -7350,60 +7272,51 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
         dir0.path().to_path_buf(),
         crabka_broker::BootstrapMode::Bootstrap,
     );
-    let broker0 = Broker::start(cfg0.clone()).await.expect("start broker 0");
-
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them. (The old
+    // openraft bootstrap-then-join via add_learner/change_membership is gone
+    // with the static voter set.)
     let cfg1 = mk_cfg(
         2,
         listen1,
         ctrl1,
         BOOTSTRAP_B1,
         dir1.path().to_path_buf(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
-    let join_handle1 = tokio::spawn({
-        let c = cfg1.clone();
-        async move { Broker::start(c).await }
-    });
-
-    broker0
-        .add_learner(2, ctrl1)
-        .await
-        .expect("add_learner for broker 1");
-    let target2: std::collections::BTreeSet<u64> = [1_u64, 2_u64].into_iter().collect();
-    broker0
-        .change_membership(target2)
-        .await
-        .expect("change_membership to {1,2}");
-
-    let broker1 = join_handle1
-        .await
-        .expect("broker 1 spawn join")
-        .expect("broker 1 start");
-
     let cfg2 = mk_cfg(
         3,
         listen2,
         ctrl2,
         BOOTSTRAP_B2,
         dir2.path().to_path_buf(),
-        crabka_broker::BootstrapMode::Join,
+        crabka_broker::BootstrapMode::Bootstrap,
     );
-    let join_handle2 = tokio::spawn({
+    let h0 = tokio::spawn({
+        let c = cfg0.clone();
+        async move { Broker::start(c).await }
+    });
+    let h1 = tokio::spawn({
+        let c = cfg1.clone();
+        async move { Broker::start(c).await }
+    });
+    let h2 = tokio::spawn({
         let c = cfg2.clone();
         async move { Broker::start(c).await }
     });
-
-    broker0
-        .add_learner(3, ctrl2)
+    let broker0 = h0
         .await
-        .expect("add_learner for broker 2");
-    let target3: std::collections::BTreeSet<u64> = [1_u64, 2_u64, 3_u64].into_iter().collect();
-    broker0
-        .change_membership(target3)
+        .expect("broker 0 spawn join")
+        .expect("start broker 0");
+    let broker1 = h1
         .await
-        .expect("change_membership to {1,2,3}");
-
-    let broker2 = join_handle2
+        .expect("broker 1 spawn join")
+        .expect("broker 1 start");
+    let broker2 = h2
         .await
         .expect("broker 2 spawn join")
         .expect("broker 2 start");

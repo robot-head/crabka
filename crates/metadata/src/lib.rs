@@ -19,6 +19,7 @@ mod feature;
 pub mod group_version;
 mod image;
 pub mod kafka_record;
+pub mod kraft_translate;
 pub mod metadata_version;
 mod records;
 pub mod transaction_version;
@@ -31,6 +32,9 @@ pub use feature::{
 };
 pub use image::{DelegationToken, EntityKey, MetadataImage, ThrottleKind, canonicalize_entity};
 pub use kafka_record::{KafkaRecordError, from_kafka_record, to_kafka_record};
+pub use kraft_translate::{
+    TranslateError, from_kraft, from_kraft_value, to_kraft, to_kraft_records, to_kraft_values,
+};
 pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientMetricsConfigRecord,
     ClientQuotaRecord, DelegationTokenRecord, DeleteDelegationTokenRecord,

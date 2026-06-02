@@ -82,6 +82,7 @@ impl InterBrokerCredentials {
 /// Build directly when embedding the broker as a library, or via the
 /// `crabka-broker` binary's clap CLI in production.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // a broad config struct; flags are independent knobs
 pub struct BrokerConfig {
     /// Broker id reported in `Metadata` responses. Default: 1.
     pub broker_id: i32,
@@ -172,6 +173,10 @@ pub struct BrokerConfig {
 
     /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
     pub metadata_max_snapshot_interval: std::time::Duration,
+
+    /// KIP-630: snapshot the metadata log once committed offset advances this
+    /// many records past the last snapshot, then prune below it.
+    pub metadata_snapshot_interval_records: u64,
 
     /// How this broker participates in cluster formation. See
     /// [`crabka_raft::BootstrapMode`] for the trade-offs. The first broker
@@ -544,6 +549,7 @@ impl BrokerConfig {
             controller_heartbeat_interval: std::time::Duration::from_millis(100),
             metadata_max_bytes_between_snapshots: 20 * 1024 * 1024,
             metadata_max_snapshot_interval: std::time::Duration::from_hours(1),
+            metadata_snapshot_interval_records: 10_000,
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             rack: None,
@@ -799,6 +805,7 @@ impl Default for BrokerConfig {
             controller_heartbeat_interval: std::time::Duration::from_millis(500),
             metadata_max_bytes_between_snapshots: 20 * 1024 * 1024,
             metadata_max_snapshot_interval: std::time::Duration::from_hours(1),
+            metadata_snapshot_interval_records: 10_000,
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             rack: None,
@@ -982,6 +989,12 @@ mod tests {
         let c = BrokerConfig::default();
         assert!(c.controller_election_timeout == std::time::Duration::from_secs(5));
         assert!(c.controller_heartbeat_interval == std::time::Duration::from_millis(500));
+    }
+
+    #[test]
+    fn default_metadata_snapshot_interval() {
+        let cfg = BrokerConfig::default();
+        assert!(cfg.metadata_snapshot_interval_records == 10_000);
     }
 
     #[test]

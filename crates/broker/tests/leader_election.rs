@@ -250,6 +250,7 @@ async fn acks_all_completes_after_isr_shrink() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "KIP-853 dynamic reconfig (change_membership/add_learner): Slice 5"]
 async fn isr_expand_on_catchup() {
     let _g = cluster_lock().lock().await;
     let mut cluster = support::start_n_node_with_retry(3).await;

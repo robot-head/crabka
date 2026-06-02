@@ -2,58 +2,30 @@
 //!
 //! The format layer: image ⇄ record sequence, the `.checkpoint` filename
 //! grammar, and the canonical on-disk bytes (header/data/footer Kafka
-//! `RecordBatch`es), plus the `persist`/`load_latest` helpers that write
-//! and recover the artifact and its `.meta` sidecar.
-
-use std::path::Path;
+//! `RecordBatch`es). The engine ([`crate::kraft::KraftController`]) writes the
+//! `.checkpoint` directly (no `.meta` sidecar) and recovers from it via
+//! [`SnapshotReader::read_records`].
 
 use bytes::{BufMut, Bytes, BytesMut};
-use openraft::SnapshotMeta;
-use serde_wincode::SerdeCompat;
-use wincode::{Deserialize as _, Serialize as _};
 
-use crabka_metadata::{MetadataImage, MetadataRecord};
-use crabka_protocol::records::header::Attributes;
+use crabka_metadata::{MetadataImage, MetadataRecord, from_kraft_value, to_kraft_values};
+use crabka_protocol::Encode;
+use crabka_protocol::owned::snapshot_footer_record::SnapshotFooterRecord;
+use crabka_protocol::owned::snapshot_header_record::SnapshotHeaderRecord;
+use crabka_protocol::records::metadata::control::{
+    ControlRecordType, control_record_key, encode_control_batch,
+};
 use crabka_protocol::records::{Record, RecordBatch};
+use uuid::Uuid;
 
 use crate::error::RaftError;
-use crate::types::{Node, NodeId};
-
-/// Control-record key type codes (KIP-630). The key of a control record
-/// is `i16 version` + `i16 type`.
-const CONTROL_TYPE_SNAPSHOT_HEADER: i16 = 3;
-const CONTROL_TYPE_SNAPSHOT_FOOTER: i16 = 4;
-
-/// Version stamped into the snapshot header/footer control records.
-const SNAPSHOT_HEADER_VERSION: i16 = 0;
-const SNAPSHOT_FOOTER_VERSION: i16 = 0;
 
 /// Identifies a snapshot by the log position it covers: `end_offset` is
 /// the offset of the last record contained in the snapshot, and `epoch`
-/// is the leader epoch at that offset. The on-disk artifact is named
-/// `<end_offset>-<epoch>.checkpoint` with both fields zero-padded so
-/// lexical sort matches numeric sort.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SnapshotId {
-    pub end_offset: i64,
-    pub epoch: i32,
-}
-
-impl SnapshotId {
-    pub(crate) fn file_name(self) -> String {
-        format!("{:020}-{:010}.checkpoint", self.end_offset, self.epoch)
-    }
-
-    pub(crate) fn parse(name: &str) -> Option<Self> {
-        let stem = name.strip_suffix(".checkpoint")?;
-        let (off, ep) = stem.split_once('-')?;
-        Some(Self {
-            end_offset: off.parse().ok()?,
-            epoch: ep.parse().ok()?,
-        })
-    }
-}
-
+/// is the leader epoch at that offset. The engine names the on-disk artifact
+/// `<end_offset>-<epoch>.checkpoint` (both fields zero-padded so lexical sort
+/// matches numeric sort) and parses it back directly.
+///
 /// Serializes a [`MetadataImage`] into the canonical KIP-630
 /// `.checkpoint` byte layout: a header control batch, one data batch of
 /// `MetadataRecord` values, then a footer control batch — concatenated
@@ -71,27 +43,59 @@ impl SnapshotWriter {
         let records = image.to_records();
         let mut out = BytesMut::new();
 
-        // (1) Header control batch at base_offset 0.
-        let mut header_key = Vec::with_capacity(4);
-        header_key.put_i16(SNAPSHOT_HEADER_VERSION);
-        header_key.put_i16(CONTROL_TYPE_SNAPSHOT_HEADER);
-        let mut header_value = Vec::with_capacity(10);
-        header_value.put_i16(SNAPSHOT_HEADER_VERSION);
-        header_value.put_i64(last_contained_log_timestamp);
-        encode_control_batch(&mut out, 0, header_key, header_value)?;
+        // (1) SnapshotHeader control batch at base_offset 0 — the real KIP-630
+        // `SnapshotHeaderRecord` (flexible message), encoded via the protocol
+        // control-batch builder so the JVM `kafka-dump-log` decoder parses it.
+        let header = SnapshotHeaderRecord {
+            version: 0,
+            last_contained_log_timestamp,
+            ..Default::default()
+        };
+        let mut header_body = BytesMut::new();
+        header.encode(&mut header_body, 0)?;
+        out.put_slice(&encode_control_batch(
+            0,
+            control_record_key(ControlRecordType::SnapshotHeader),
+            header_body.freeze(),
+        ));
 
-        // (2) Data batch at base_offset 1: one record per MetadataRecord.
-        if !records.is_empty() {
-            let last_offset_delta = i32::try_from(records.len() - 1).unwrap_or(i32::MAX);
-            let mut data_records = Vec::with_capacity(records.len());
-            for (i, rec) in records.iter().enumerate() {
-                let payload = <SerdeCompat<MetadataRecord>>::serialize(rec)?;
-                data_records.push(Record {
-                    offset_delta: i32::try_from(i).unwrap_or(i32::MAX),
-                    value: Some(Bytes::from(payload)),
-                    ..Default::default()
-                });
+        // (2) Data batch at base_offset 1: one record per KIP-631 value blob.
+        // Each `MetadataRecord` is translated against the very image being
+        // snapshotted (a whole-map V1TopicConfig diffs against its own image and
+        // so emits all-sets-no-tombstones — correct for a from-scratch snapshot).
+        let mut value_blobs: Vec<Bytes> = Vec::new();
+        for rec in &records {
+            // `V1Voters` / `V1KRaftVersion` are raft-control state living in the
+            // controller's `QuorumState` (config-seeded under KIP-595 static
+            // voters), NOT KIP-631 metadata-log records — they have no wire
+            // counterpart and are not JVM-readable as snapshot records. A
+            // follower catching up via `FetchSnapshot` re-applies the live voter
+            // set after install (see `install_fetched_snapshot`), and a
+            // restarting controller re-derives it on boot (see `spawn_with_image`),
+            // so omitting them here keeps the snapshot a faithful, JVM-readable
+            // image of the KIP-631 metadata log.
+            if matches!(
+                rec,
+                MetadataRecord::V1Voters(_) | MetadataRecord::V1KRaftVersion(_)
+            ) {
+                continue;
             }
+            let mut blobs = to_kraft_values(rec, image)
+                .map_err(|e| RaftError::ChangeRejected(format!("snapshot encode: {e}")))?;
+            value_blobs.append(&mut blobs);
+        }
+        let total_blobs = value_blobs.len();
+        if total_blobs > 0 {
+            let last_offset_delta = i32::try_from(total_blobs - 1).unwrap_or(i32::MAX);
+            let data_records = value_blobs
+                .into_iter()
+                .enumerate()
+                .map(|(i, blob)| Record {
+                    offset_delta: i32::try_from(i).unwrap_or(i32::MAX),
+                    value: Some(blob),
+                    ..Default::default()
+                })
+                .collect();
             let data_batch = RecordBatch {
                 base_offset: 1,
                 last_offset_delta,
@@ -101,45 +105,26 @@ impl SnapshotWriter {
             data_batch.encode(&mut out)?;
         }
 
-        // (3) Footer control batch.
-        let footer_base_offset = if records.is_empty() {
+        // (3) SnapshotFooter control batch (real KIP-630 `SnapshotFooterRecord`).
+        let footer_base_offset = if total_blobs == 0 {
             1
         } else {
-            1 + i64::try_from(records.len()).unwrap_or(i64::MAX)
+            1 + i64::try_from(total_blobs).unwrap_or(i64::MAX)
         };
-        let mut footer_key = Vec::with_capacity(4);
-        footer_key.put_i16(SNAPSHOT_FOOTER_VERSION);
-        footer_key.put_i16(CONTROL_TYPE_SNAPSHOT_FOOTER);
-        let mut footer_value = Vec::with_capacity(2);
-        footer_value.put_i16(SNAPSHOT_FOOTER_VERSION);
-        encode_control_batch(&mut out, footer_base_offset, footer_key, footer_value)?;
+        let footer = SnapshotFooterRecord {
+            version: 0,
+            ..Default::default()
+        };
+        let mut footer_body = BytesMut::new();
+        footer.encode(&mut footer_body, 0)?;
+        out.put_slice(&encode_control_batch(
+            footer_base_offset,
+            control_record_key(ControlRecordType::SnapshotFooter),
+            footer_body.freeze(),
+        ));
 
         Ok(out.freeze())
     }
-}
-
-/// Encode a single-record control `RecordBatch` (the control-batch
-/// attribute bit set) carrying `key`/`value` into `out`.
-fn encode_control_batch(
-    out: &mut BytesMut,
-    base_offset: i64,
-    key: Vec<u8>,
-    value: Vec<u8>,
-) -> Result<(), RaftError> {
-    let batch = RecordBatch {
-        base_offset,
-        attributes: Attributes::default().with_control(true),
-        last_offset_delta: 0,
-        records: vec![Record {
-            offset_delta: 0,
-            key: Some(Bytes::from(key)),
-            value: Some(Bytes::from(value)),
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
-    batch.encode(out)?;
-    Ok(())
 }
 
 /// Reads a canonical `.checkpoint` byte stream back into the sequence of
@@ -153,6 +138,11 @@ impl SnapshotReader {
     pub(crate) fn read_records(bytes: &[u8]) -> Result<Vec<MetadataRecord>, RaftError> {
         let mut cursor: &[u8] = bytes;
         let mut records = Vec::new();
+        // A context image accumulating decoded records in log order so each
+        // subsequent `from_kraft_value` resolves topic ids / whole-map config
+        // merges / ACL ids against prior records. The cluster id is irrelevant
+        // to translation, so a nil placeholder suffices.
+        let mut ctx = MetadataImage::new(Uuid::nil());
         while !cursor.is_empty() {
             let batch = RecordBatch::decode(&mut cursor)?;
             if batch.attributes.is_control_batch() {
@@ -162,7 +152,10 @@ impl SnapshotReader {
                 let Some(value) = rec.value.as_ref() else {
                     continue;
                 };
-                records.push(<SerdeCompat<MetadataRecord>>::deserialize(value)?);
+                let decoded = from_kraft_value(value, &ctx)
+                    .map_err(|e| RaftError::ChangeRejected(format!("snapshot decode: {e}")))?;
+                ctx.apply(&decoded);
+                records.push(decoded);
             }
         }
         Ok(records)
@@ -179,104 +172,43 @@ impl SnapshotReader {
     }
 }
 
-/// Write the `.checkpoint` artifact plus its `.meta` sidecar for `id`
-/// into `dir`. The checkpoint stays pure KIP-630 (record batches only);
-/// openraft's `SnapshotMeta` (`last_log_id` + `last_membership` + id) rides
-/// alongside in `<id>.checkpoint.meta` as bincode, mirroring the
-/// `vote.bin` sidecar pattern.
-///
-/// The `.meta` is written *before* the `.checkpoint`, making the
-/// `.checkpoint` the commit marker: [`load_latest`] keys off `.checkpoint`
-/// files, so a crash between the two writes leaves at worst an orphan
-/// `.meta` (ignored on recovery), never a `.checkpoint` whose sidecar is
-/// missing. Each file lands via temp + rename so neither is ever seen
-/// half-written.
-pub(crate) fn persist(
-    dir: &Path,
-    id: SnapshotId,
-    bytes: &[u8],
-    meta: &SnapshotMeta<NodeId, Node>,
-) -> Result<(), RaftError> {
-    std::fs::create_dir_all(dir).map_err(crabka_log::LogError::Io)?;
-    let meta_bytes = <SerdeCompat<SnapshotMeta<NodeId, Node>>>::serialize(meta)?;
-    write_atomic(&dir.join(format!("{}.meta", id.file_name())), &meta_bytes)?;
-    write_atomic(&dir.join(id.file_name()), bytes)?;
-    Ok(())
-}
-
-/// A loaded checkpoint: its id, the raw `.checkpoint` bytes, and the
-/// `SnapshotMeta` recovered from the sidecar.
-pub(crate) type LoadedSnapshot = (SnapshotId, Vec<u8>, SnapshotMeta<NodeId, Node>);
-
-/// Scan `dir` for `.checkpoint` artifacts, pick the highest
-/// `(end_offset, epoch)`, and load its bytes plus the `SnapshotMeta`
-/// sidecar. Returns `None` when the directory is absent or holds no
-/// checkpoint.
-pub(crate) fn load_latest(dir: &Path) -> Result<Option<LoadedSnapshot>, RaftError> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(RaftError::Storage(crabka_log::LogError::Io(e))),
-    };
-    let mut latest: Option<SnapshotId> = None;
-    for entry in entries {
-        let entry = entry.map_err(crabka_log::LogError::Io)?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else { continue };
-        let Some(id) = SnapshotId::parse(name) else {
-            continue;
-        };
-        if latest.is_none_or(|cur| (id.end_offset, id.epoch) > (cur.end_offset, cur.epoch)) {
-            latest = Some(id);
-        }
-    }
-    let Some(id) = latest else { return Ok(None) };
-    let bytes = std::fs::read(dir.join(id.file_name())).map_err(crabka_log::LogError::Io)?;
-    let meta_bytes = std::fs::read(dir.join(format!("{}.meta", id.file_name())))
-        .map_err(crabka_log::LogError::Io)?;
-    let meta = <SerdeCompat<SnapshotMeta<NodeId, Node>>>::deserialize(&meta_bytes)?;
-    Ok(Some((id, bytes, meta)))
-}
-
-/// Write `bytes` to `path` durably-ish: stage into a sibling `.tmp`
-/// file, then rename over `path`. Rename is atomic on the same
-/// filesystem, so concurrent readers see either the old file or the
-/// fully-written new one — never a partial write.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), RaftError> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).map_err(crabka_log::LogError::Io)?;
-    std::fs::rename(&tmp, path).map_err(crabka_log::LogError::Io)?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use assert2::assert;
 
-    use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_metadata::{
+        FeatureLevelRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
+    };
     use uuid::Uuid;
-
-    #[test]
-    fn snapshot_id_name_round_trips() {
-        let id = SnapshotId {
-            end_offset: 1847,
-            epoch: 3,
-        };
-        assert!(id.file_name() == "00000000000000001847-0000000003.checkpoint");
-        assert!(SnapshotId::parse(&id.file_name()) == Some(id));
-    }
 
     #[test]
     fn writer_reader_round_trips_image() {
         let cid = Uuid::new_v4();
         let mut image = MetadataImage::new(cid);
+        // A realistic topic: the `V1Topic` plus its partition records. KIP-631
+        // framing carries no partition count on the `TopicRecord`, so the round
+        // trip derives partitions/RF from the partition records — a bare
+        // `V1Topic` (declaring partitions but with no `V1Partition`s) would not
+        // round-trip its declared count.
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
             name: "orders".into(),
             topic_id: Uuid::new_v4(),
             partitions: 3,
             replication_factor: 2,
         }));
+        for p in 0..3 {
+            image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: "orders".into(),
+                partition: p,
+                leader: 1,
+                replicas: vec![1, 2],
+                isr: vec![1, 2],
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+            }));
+        }
 
         let bytes = SnapshotWriter::serialize(&image, 1_700_000_000_000).unwrap();
         let records = SnapshotReader::read_records(&bytes).unwrap();
@@ -329,45 +261,114 @@ mod tests {
         assert!(MetadataImage::from_records(cid, &records) == image);
     }
 
+    /// Docker-gated: a Crabka engine-produced KIP-630 snapshot (built by
+    /// `SnapshotWriter` from a real `MetadataImage` through the KIP-631
+    /// translation boundary) is parsed cleanly by the JVM
+    /// `kafka-dump-log --cluster-metadata-decoder`, proving the on-checkpoint
+    /// bytes are genuine KIP-631 records (`RegisterBroker` / `Topic` /
+    /// `Partition` / `Config`), not Crabka-private wincode.
+    ///
+    /// ```text
+    /// cargo test -p crabka-raft --lib snapshot -- --ignored --nocapture
+    /// ```
     #[test]
-    fn persist_then_load_latest_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let id = SnapshotId {
-            end_offset: 42,
-            epoch: 1,
-        };
-        let bytes = b"checkpoint-bytes".to_vec();
-        let meta = SnapshotMeta {
-            last_log_id: None,
-            last_membership: openraft::StoredMembership::default(),
-            snapshot_id: id.file_name(),
-        };
-        persist(dir.path(), id, &bytes, &meta).unwrap();
+    #[ignore = "requires Docker"]
+    fn jvm_dump_log_parses_engine_snapshot() {
+        use crabka_metadata::{BrokerConfigRecord, BrokerRegistrationRecord, TopicConfigRecord};
+        use std::io::Write as _;
+        use std::process::Command;
 
-        let (loaded_id, loaded_bytes, loaded_meta) = load_latest(dir.path())
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+        // RegisterBroker (apiKey 0).
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 1,
+                host: "broker-1".into(),
+                port: 9092,
+                rack: Some("rack-a".into()),
+                endpoints: vec![],
+            },
+        ));
+        // Config (apiKey 4), broker scope.
+        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+            node_id: 1,
+            config_name: "leader.replication.throttled.rate".into(),
+            config_value: Some("1048576".into()),
+        }));
+        // Topic (apiKey 2) + Partition (apiKey 3) ×2.
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "orders".into(),
+            topic_id: Uuid::new_v4(),
+            partitions: 2,
+            replication_factor: 1,
+        }));
+        for p in 0..2 {
+            image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+                topic: "orders".into(),
+                partition: p,
+                leader: 1,
+                replicas: vec![1],
+                isr: vec![1],
+                leader_epoch: 0,
+                adding_replicas: vec![],
+                removing_replicas: vec![],
+            }));
+        }
+        // Config (apiKey 4), topic scope.
+        image.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: "orders".into(),
+            overrides: [("retention.ms".to_string(), "604800000".to_string())].into(),
+        }));
+
+        let bytes = SnapshotWriter::serialize(&image, 1_700_000_000_000).unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        // kafka-dump-log infers the snapshot base offset from the file name.
+        let path = dir
+            .path()
+            .join("00000000000000000000-0000000000.checkpoint");
+        std::fs::File::create(&path)
             .unwrap()
-            .expect("checkpoint present");
-        assert!(loaded_id == id);
-        assert!(loaded_bytes == bytes);
-        assert!(loaded_meta.snapshot_id == id.file_name());
-    }
+            .write_all(&bytes)
+            .unwrap();
 
-    #[test]
-    fn load_latest_ignores_orphan_meta() {
-        // A crash between persist's two writes can leave a `.meta` with no
-        // `.checkpoint`. Since the `.checkpoint` is the commit marker,
-        // load_latest must treat that directory as having no snapshot.
-        let dir = tempfile::tempdir().unwrap();
-        let id = SnapshotId {
-            end_offset: 7,
-            epoch: 0,
-        };
-        std::fs::write(
-            dir.path().join(format!("{}.meta", id.file_name())),
-            b"orphan",
-        )
-        .unwrap();
-        assert!(load_latest(dir.path()).unwrap().is_none());
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "-v",
+                &format!("{}:/work", dir.path().display()),
+                "apache/kafka:4.0.0",
+                "/opt/kafka/bin/kafka-dump-log.sh",
+                "--cluster-metadata-decoder",
+                "--files",
+                "/work/00000000000000000000-0000000000.checkpoint",
+            ])
+            .output()
+            .expect("docker run kafka-dump-log");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        eprintln!("{text}");
+        assert!(out.status.success(), "kafka-dump-log failed: {text}");
+        // The JVM decoder names each record by its KIP-631 type. Their presence
+        // (and a clean exit) proves the translated bytes decode as real records.
+        // The JVM decoder prints each record's KIP-631 type in SCREAMING_SNAKE.
+        for needle in [
+            "REGISTER_BROKER_RECORD",
+            "TOPIC_RECORD",
+            "PARTITION_RECORD",
+            "CONFIG_RECORD",
+        ] {
+            assert!(text.contains(needle), "missing {needle} in dump: {text}");
+        }
+        // No record may fail the decoder's CRC / schema check.
+        assert!(
+            !text.contains("isvalid: false") && !text.to_lowercase().contains("could not"),
+            "dump-log reported an invalid record: {text}"
+        );
     }
 
     #[test]
