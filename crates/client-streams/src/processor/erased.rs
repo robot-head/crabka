@@ -23,7 +23,7 @@ pub enum ProcessorError {
 }
 
 /// A record with erased key/value, as it flows between nodes.
-#[allow(dead_code)]
+#[allow(dead_code)] // fields read in future tasks + tests
 pub(crate) struct ErasedRecord {
     pub key: Option<Box<dyn Any + Send>>,
     pub value: Box<dyn Any + Send>,
@@ -31,7 +31,6 @@ pub(crate) struct ErasedRecord {
 }
 
 impl ErasedRecord {
-    #[allow(dead_code)]
     pub fn new(
         key: Option<Box<dyn Any + Send>>,
         value: Box<dyn Any + Send>,

@@ -55,6 +55,7 @@ pub use membership::{
     TopicPartition,
 };
 pub use processor::{
-    BytesSerde, I64Serde, ProcessorError, Record, RecordContext, Serde, SerdeError, StringSerde,
+    BytesSerde, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier, Record,
+    RecordContext, Serde, SerdeError, StringSerde,
 };
 pub use topology::{BuiltTopology, Topology, TopologyError};
