@@ -19,7 +19,7 @@ use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubs
 use crabka_protocol::primitives::uuid::Uuid;
 use crabka_protocol::{Decode, Encode};
 
-use super::classic_state::Group as ClassicState;
+use super::classic_state::{Group as ClassicState, Member as ClassicMember, select_protocol};
 use super::consumer_state::{ClassicMemberFacade, GroupState as ConsumerState, MemberState};
 use super::persistence_next_gen::MemberAssignmentState;
 use super::reconciler::ReconcileInput;
@@ -118,6 +118,56 @@ pub(crate) fn convert_classic_to_consumer(classic: &ClassicState) -> ConsumerSta
     }
     state.dirty = true;
     state
+}
+
+/// Convert a consumer group back into a classic group (KIP-848 downgrade, 64d-E).
+/// Every member is re-expressed as a classic [`ClassicMember`] restored from its
+/// [`ClassicMemberFacade`]; its assignment seed is the server-computed target
+/// translated to a `ConsumerProtocolAssignment` blob, so the member keeps its
+/// partitions across the flip with no spurious revoke. Committed offsets live on
+/// the kind-agnostic `Group` container and are untouched here.
+///
+/// Precondition: every member is a hosted classic member (`classic.is_some()`),
+/// which holds once the last native consumer-protocol member has departed.
+pub(crate) fn convert_consumer_to_classic(
+    state: &ConsumerState,
+    image: &ReconcileInput,
+) -> ClassicState {
+    let mut classic = ClassicState::new(state.group_id.clone());
+    classic.protocol_type = Some("consumer".into());
+    for (mid, m) in &state.members {
+        let facade = m
+            .classic
+            .as_ref()
+            .expect("downgrade precondition: all members are hosted classic members");
+        let seed = target_to_consumer_assignment(&m.assigned_partitions, image);
+        let mut cm = ClassicMember::new(
+            mid.clone(),
+            m.client_id.clone(),
+            m.client_host.clone(),
+            facade.session_timeout,
+            m.rebalance_timeout,
+            facade.supported_protocols.clone(),
+        )
+        .with_instance_id(m.instance_id.clone());
+        cm.assignment = Some(seed);
+        classic.add_member(cm);
+    }
+    if let Some(name) = select_protocol(&classic.members) {
+        classic.complete_rebalance(&name);
+        // Drive to Stable so a downgraded member's first Heartbeat/SyncGroup
+        // reads its seed assignment instead of REBALANCE_IN_PROGRESS.
+        let assignments: std::collections::HashMap<String, bytes::Bytes> = classic
+            .members
+            .iter()
+            .filter_map(|(id, m)| m.assignment.clone().map(|a| (id.clone(), a)))
+            .collect();
+        classic.install_assignments(assignments);
+    }
+    // Set generation_id LAST so neither complete_rebalance (+1) nor
+    // install_assignments overrides the consumer group's epoch.
+    classic.generation_id = state.group_epoch.max(0);
+    classic
 }
 
 /// Translate a member's server-side target (topic-ID → partitions) into a
@@ -325,5 +375,75 @@ mod tests {
         let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
         assert!(decoded.assigned_partitions.len() == 1);
         assert!(decoded.assigned_partitions[0].topic == "orders");
+    }
+
+    #[test]
+    fn downgrade_re_expresses_members_as_classic() {
+        use crate::coordinator::unified::classic_state::GroupState as ClassicGroupState;
+        use crate::coordinator::unified::consumer_state::{
+            ClassicMemberFacade, GroupState, MemberState,
+        };
+        use crate::coordinator::unified::persistence_next_gen::MemberAssignmentState;
+        use std::time::{Duration, Instant};
+
+        let t1 = Uuid([1; 16]);
+        let image = ReconcileInput {
+            topic_id_by_name: [("orders".to_string(), t1)].into(),
+            ..Default::default()
+        };
+        let mut state = GroupState::new("g");
+        state.group_epoch = 7;
+        let m = MemberState {
+            member_id: "m1".into(),
+            instance_id: Some("inst-a".into()),
+            rack_id: None,
+            client_id: "c".into(),
+            client_host: "/127.0.0.1".into(),
+            subscribed_topic_names: ["orders".to_string()].into(),
+            subscribed_topic_regex: None,
+            compiled_regex: None,
+            server_assignor: None,
+            rebalance_timeout: Duration::from_mins(1),
+            member_epoch: 7,
+            previous_member_epoch: 6,
+            assignment_state: MemberAssignmentState::Stable,
+            assigned_partitions: [(t1, vec![0, 1])].into(),
+            partitions_pending_revocation: std::collections::HashMap::new(),
+            last_seen: Instant::now(),
+            classic: Some(ClassicMemberFacade {
+                generation_id: 7,
+                supported_protocols: vec![("range".into(), bytes::Bytes::from_static(b"meta"))],
+                session_timeout: Duration::from_secs(30),
+                last_synced_assignment: bytes::Bytes::new(),
+                awaiting_sync: false,
+            }),
+        };
+        state.add_or_update_member(m);
+
+        let classic = convert_consumer_to_classic(&state, &image);
+        assert!(classic.group_id == "g");
+        assert!(classic.generation_id == 7);
+        let member = classic.members.get("m1").expect("member preserved");
+        assert!(member.group_instance_id.as_deref() == Some("inst-a"));
+        assert!(member.session_timeout == Duration::from_secs(30));
+        let asn = member.assignment.clone().expect("seed assignment");
+        let mut cur = &asn[..];
+        let version = cur.get_i16();
+        assert!(version == 0);
+        let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
+        assert!(decoded.assigned_partitions[0].topic == "orders");
+        assert!(decoded.assigned_partitions[0].partitions == vec![0, 1]);
+        // Group must land in Stable so the first Heartbeat/SyncGroup after
+        // downgrade does not trigger a spurious full rebalance.
+        assert!(classic.state == ClassicGroupState::Stable);
+        // Seed assignment is still intact after stabilization.
+        let asn2 = member
+            .assignment
+            .clone()
+            .expect("seed assignment still set after stabilize");
+        assert!(asn2 == asn);
+        // complete_rebalance must have set the protocol metadata coherently.
+        assert!(classic.protocol_name.as_deref() == Some("range"));
+        assert!(classic.leader_id.as_deref() == Some("m1"));
     }
 }
