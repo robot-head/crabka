@@ -20,6 +20,7 @@ use crabka_broker::config::ListenerSpec;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+use crabka_client_producer::ConsumerGroupMetadata;
 use crabka_client_producer::{Producer, ProducerRecord};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_security::{ListenerProtocol, SaslMechanism};
@@ -443,7 +444,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
         // Commit the input consumer offset as part of the transaction.
         if let Some(offset_entry) = last_offset {
             producer
-                .send_offsets_to_transaction([offset_entry], "cpp-g")
+                .send_offsets_to_transaction([offset_entry], &input_consumer.group_metadata())
                 .await
                 .unwrap();
         }
@@ -515,7 +516,10 @@ async fn sasl_authenticated_transactional_flow_commits() {
     // send_offsets_to_transaction dials the group coordinator on a *second*
     // fresh connection — the other secondary connection that must carry SASL.
     producer
-        .send_offsets_to_transaction([(("sasl-txn".to_string(), 0), 3i64)], "sasl-cpp-g")
+        .send_offsets_to_transaction(
+            [(("sasl-txn".to_string(), 0), 3i64)],
+            &ConsumerGroupMetadata::for_group("sasl-cpp-g"),
+        )
         .await
         .unwrap();
     producer.commit_transaction().await.unwrap();
@@ -542,5 +546,172 @@ async fn sasl_authenticated_transactional_flow_commits() {
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
+    broker.shutdown().await;
+}
+
+// ── KIP-447 zombie fencing ──────────────────────────────────────────────────────
+
+/// A classic-group `TxnOffsetCommit` is fenced when it carries a stale
+/// generation (`ILLEGAL_GENERATION`) or an unknown member (`UNKNOWN_MEMBER_ID`),
+/// and accepted when the metadata matches the live group. Driven with raw
+/// `TxnOffsetCommitRequest`s so we control the metadata precisely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn txn_offset_commit_fences_classic_generation_and_member() {
+    use crabka_protocol::owned::txn_offset_commit_request::{
+        TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+    };
+
+    let (broker, bootstrap, _dir) = boot_single().await;
+    create_topic(&bootstrap, "fence-in").await;
+
+    // A real classic consumer joins, establishing the group's member id +
+    // generation.
+    let consumer = Consumer::builder()
+        .bootstrap(bootstrap.clone())
+        .group_id("fence-g")
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .subscribe(["fence-in".to_string()])
+        .build()
+        .await
+        .unwrap();
+    let meta = consumer.group_metadata();
+    // A non-empty member id proves the join completed; the fencing assertions
+    // below hold for whatever generation the group settled on (we send
+    // `generation_id + 1` for the stale case, which always mismatches).
+    assert!(
+        !meta.member_id.is_empty(),
+        "consumer should have a member id: {meta:?}"
+    );
+
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(bootstrap.clone())
+        .build()
+        .await
+        .unwrap();
+
+    let mk = |generation_id: i32, member_id: &str| TxnOffsetCommitRequest {
+        transactional_id: "fence-tid".into(),
+        group_id: "fence-g".into(),
+        producer_id: 0,
+        producer_epoch: 0,
+        generation_id,
+        member_id: member_id.into(),
+        topics: vec![TxnOffsetCommitRequestTopic {
+            name: "fence-in".into(),
+            partitions: vec![TxnOffsetCommitRequestPartition {
+                partition_index: 0,
+                committed_offset: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    // Stale generation → ILLEGAL_GENERATION (22).
+    let stale = client
+        .send(mk(meta.generation_id + 1, &meta.member_id))
+        .await
+        .unwrap();
+    assert!(
+        stale.topics[0].partitions[0].error_code == 22,
+        "stale generation should be ILLEGAL_GENERATION: {stale:?}"
+    );
+
+    // Correct generation but unknown member → UNKNOWN_MEMBER_ID (25).
+    let unknown = client
+        .send(mk(meta.generation_id, "ghost-member"))
+        .await
+        .unwrap();
+    assert!(
+        unknown.topics[0].partitions[0].error_code == 25,
+        "unknown member should be UNKNOWN_MEMBER_ID: {unknown:?}"
+    );
+
+    // Matching metadata → accepted (NONE = 0).
+    let ok = client
+        .send(mk(meta.generation_id, &meta.member_id))
+        .await
+        .unwrap();
+    assert!(
+        ok.topics[0].partitions[0].error_code == 0,
+        "valid metadata should commit: {ok:?}"
+    );
+
+    consumer.close().await.unwrap();
+    broker.shutdown().await;
+}
+
+/// A KIP-848 next-gen ("consumer"-protocol) `TxnOffsetCommit` is fenced when it
+/// carries a stale member epoch (`STALE_MEMBER_EPOCH`) and accepted at the
+/// current epoch. The member epoch travels in the `generation_id` field.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn txn_offset_commit_fences_next_gen_member_epoch() {
+    use crabka_protocol::owned::consumer_group_heartbeat_request::ConsumerGroupHeartbeatRequest;
+    use crabka_protocol::owned::txn_offset_commit_request::{
+        TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
+    };
+
+    let (broker, bootstrap, _dir) = boot_single().await;
+    create_topic(&bootstrap, "ng-in").await;
+
+    let client = crabka_client_core::Client::builder()
+        .bootstrap(bootstrap.clone())
+        .build()
+        .await
+        .unwrap();
+
+    // Establish a next-gen group member; after the first heartbeat the member
+    // is at epoch 1.
+    let mut hb = ConsumerGroupHeartbeatRequest {
+        group_id: "ng-g".into(),
+        member_id: String::new(),
+        member_epoch: 0,
+        rebalance_timeout_ms: 60_000,
+        ..Default::default()
+    };
+    hb.subscribed_topic_names = Some(vec!["ng-in".into()]);
+    let hb_resp = client.send(hb).await.unwrap();
+    assert!(hb_resp.error_code == 0, "heartbeat failed: {hb_resp:?}");
+    let member_id = hb_resp.member_id.clone().unwrap();
+    let epoch = hb_resp.member_epoch;
+    assert!(
+        epoch >= 1,
+        "member should have a positive epoch: {hb_resp:?}"
+    );
+
+    let mk = |epoch_val: i32| TxnOffsetCommitRequest {
+        transactional_id: "ng-tid".into(),
+        group_id: "ng-g".into(),
+        producer_id: 0,
+        producer_epoch: 0,
+        generation_id: epoch_val, // carries the member epoch for next-gen groups
+        member_id: member_id.clone(),
+        topics: vec![TxnOffsetCommitRequestTopic {
+            name: "ng-in".into(),
+            partitions: vec![TxnOffsetCommitRequestPartition {
+                partition_index: 0,
+                committed_offset: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    // Stale epoch (< current) → STALE_MEMBER_EPOCH (113).
+    let stale = client.send(mk(epoch - 1)).await.unwrap();
+    assert!(
+        stale.topics[0].partitions[0].error_code == 113,
+        "stale epoch should be STALE_MEMBER_EPOCH: {stale:?}"
+    );
+
+    // Current epoch + known member → accepted (NONE = 0).
+    let ok = client.send(mk(epoch)).await.unwrap();
+    assert!(
+        ok.topics[0].partitions[0].error_code == 0,
+        "current epoch should commit: {ok:?}"
+    );
+
     broker.shutdown().await;
 }
