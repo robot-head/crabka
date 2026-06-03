@@ -6,27 +6,27 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 
-use crabka_metadata::{MetadataImage, MetadataRecord};
+use crabka_metadata::{AclOperation, MetadataImage, MetadataRecord, ResourceType};
 use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
 use crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse;
 use crabka_protocol::{Decode, Encode};
 use crabka_raft::NodeId;
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 use crate::heartbeat::controller_state::ControllerLivenessState;
 use crate::leader_election::select_replacement_leader_for_shutdown;
 
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    ctx: &crate::handlers::RequestContext<'_>,
+) -> Result<Bytes, BrokerError> {
     let liveness = broker.liveness.clone();
     let controller = broker.controller.clone();
     let node_id = broker.config.node_id;
@@ -36,9 +36,25 @@ pub(crate) fn handle(
         .watch_leader()
         .borrow()
         .is_some_and(|n| n == node_id);
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
+    {
+        let mut cur: &[u8] = req_bytes;
         let req = BrokerHeartbeatRequest::decode(&mut cur, version)?;
+
+        // ── ACL preamble ────────────────────────────────────────────
+        // Inter-broker control-plane RPC: `ClusterAction` on
+        // `Cluster("kafka-cluster")`. On Deny → whole-response
+        // `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
+        {
+            let image = controller.current_image();
+            if cluster_action_denied(
+                broker.config.authorizer.as_ref(),
+                &image,
+                ctx.principal,
+                ctx.peer,
+            ) {
+                return denied_response(version);
+            }
+        }
 
         // Only the openraft leader handles heartbeats. NOT_CONTROLLER
         // tells the broker client to redirect.
@@ -86,7 +102,42 @@ pub(crate) fn handle(
         let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
-    })
+    }
+}
+
+/// `ClusterAction` on `Cluster("kafka-cluster")` gate. Returns `true`
+/// when the principal is denied (inter-broker control-plane RPC).
+fn cluster_action_denied(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &MetadataImage,
+    principal: &crabka_security::Principal,
+    host: &std::net::SocketAddr,
+) -> bool {
+    authorizer.authorize(
+        image,
+        &AuthorizationRequest {
+            principal,
+            host,
+            resource_type: ResourceType::Cluster,
+            resource_name: "kafka-cluster",
+            operation: AclOperation::ClusterAction,
+        },
+    ) == AuthorizationResult::Deny
+}
+
+/// Whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` response built on Deny.
+fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
+    let resp = BrokerHeartbeatResponse {
+        throttle_time_ms: 0,
+        error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+        is_caught_up: false,
+        is_fenced: true,
+        should_shut_down: false,
+        ..Default::default()
+    };
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
 }
 
 /// Scan partitions where `shutting_down` is currently leader, submit a
@@ -145,4 +196,42 @@ async fn drain_leaderships_for_shutdown(
     // `should_shut_down=true` only when this broker was already not
     // leading anything.
     Ok(leader_count == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    /// Empty ACLs + no super-users → every principal is denied
+    /// `ClusterAction`, so the denied response carries
+    /// `CLUSTER_AUTHORIZATION_FAILED`.
+    #[test]
+    fn cluster_action_denied_yields_cluster_authorization_failed() {
+        use crabka_protocol::owned::broker_heartbeat_response::{self, BrokerHeartbeatResponse};
+
+        let authorizer =
+            crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());
+        let image = MetadataImage::new(uuid::Uuid::nil());
+        let principal = crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        };
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+
+        assert!(cluster_action_denied(
+            &authorizer,
+            &image,
+            &principal,
+            &peer
+        ));
+
+        let bytes = denied_response(broker_heartbeat_response::MAX_VERSION).expect("encode");
+        let mut cur: &[u8] = &bytes;
+        let resp =
+            BrokerHeartbeatResponse::decode(&mut cur, broker_heartbeat_response::MAX_VERSION)
+                .unwrap();
+        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+    }
 }

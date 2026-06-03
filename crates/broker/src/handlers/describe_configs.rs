@@ -13,14 +13,15 @@
 //! supplies an explicit key list, only those keys are returned.
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 
+use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::describe_configs_request::DescribeConfigsRequest;
 use crabka_protocol::owned::describe_configs_response::{
     DescribeConfigsResourceResult, DescribeConfigsResponse, DescribeConfigsResult,
 };
 use crabka_protocol::{Decode, Encode};
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -143,24 +144,100 @@ fn describe_one(
     ok(Vec::new())
 }
 
-pub(crate) fn handle(
+/// Per-resource `DescribeConfigs` ACL check. Topic resources require
+/// `DescribeConfigs` on `Topic(name)`; Broker resources require
+/// `DescribeConfigs` on `Cluster("kafka-cluster")`. Returns the
+/// authorization-failed code to stamp on Deny, or `None` when allowed (or
+/// for resource types we don't gate — they get an empty configs list with
+/// no error, as before).
+fn resource_authz_failure(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &crabka_metadata::MetadataImage,
+    principal: &crabka_security::Principal,
+    host: &std::net::SocketAddr,
+    resource_type: i8,
+    resource_name: &str,
+) -> Option<i16> {
+    let (rt, name, failure_code): (ResourceType, &str, i16) = match resource_type {
+        RESOURCE_TYPE_TOPIC => (
+            ResourceType::Topic,
+            resource_name,
+            codes::TOPIC_AUTHORIZATION_FAILED,
+        ),
+        RESOURCE_TYPE_BROKER => (
+            ResourceType::Cluster,
+            "kafka-cluster",
+            codes::CLUSTER_AUTHORIZATION_FAILED,
+        ),
+        _ => return None,
+    };
+    let allow = authorizer.authorize(
+        image,
+        &AuthorizationRequest {
+            principal,
+            host,
+            resource_type: rt,
+            resource_name: name,
+            operation: AclOperation::DescribeConfigs,
+        },
+    );
+    (allow == AuthorizationResult::Deny).then_some(failure_code)
+}
+
+/// Build a `DescribeConfigsResult` carrying only the authorization-failed
+/// error code for a denied resource.
+fn denied_result(
+    resource_type: i8,
+    resource_name: String,
+    error_code: i16,
+) -> DescribeConfigsResult {
+    DescribeConfigsResult {
+        error_code,
+        error_message: Some("authorization failed".into()),
+        resource_type,
+        resource_name,
+        configs: Vec::new(),
+        ..Default::default()
+    }
+}
+
+#[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    ctx: &crate::handlers::RequestContext<'_>,
+) -> Result<Bytes, BrokerError> {
     let controller = broker.controller.clone();
 
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
+    {
+        let mut cur: &[u8] = req_bytes;
         let req = DescribeConfigsRequest::decode(&mut cur, version)?;
 
         let image = controller.current_image();
+        // ── ACL preamble ────────────────────────────────────────────
+        // Per-resource `DescribeConfigs`: Topic → `Topic(name)`; Broker →
+        // `Cluster("kafka-cluster")`. On Deny stamp the result entry with
+        // the matching authorization-failed code; authorized resources
+        // resolve normally.
         let results: Vec<DescribeConfigsResult> = req
             .resources
             .into_iter()
-            .map(|r| describe_one(&image, r))
+            .map(|r| {
+                if let Some(code) = resource_authz_failure(
+                    broker.config.authorizer.as_ref(),
+                    &image,
+                    ctx.principal,
+                    ctx.peer,
+                    r.resource_type,
+                    &r.resource_name,
+                ) {
+                    denied_result(r.resource_type, r.resource_name, code)
+                } else {
+                    describe_one(&image, r)
+                }
+            })
             .collect();
 
         let resp = DescribeConfigsResponse {
@@ -171,7 +248,7 @@ pub(crate) fn handle(
         let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
-    })
+    }
 }
 
 #[cfg(test)]
@@ -283,5 +360,51 @@ mod tests {
             by_name["interval.ms"].config_source,
             super::CONFIG_SOURCE_DEFAULT
         );
+    }
+
+    fn anon() -> crabka_security::Principal {
+        crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        }
+    }
+
+    #[test]
+    fn topic_resource_denied_yields_topic_authorization_failed() {
+        let authz = crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());
+        let image = MetadataImage::new(Uuid::nil());
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let code = super::resource_authz_failure(
+            &authz,
+            &image,
+            &anon(),
+            &peer,
+            super::RESOURCE_TYPE_TOPIC,
+            "t",
+        );
+        assert!(code == Some(crate::codes::TOPIC_AUTHORIZATION_FAILED));
+        let res = super::denied_result(
+            super::RESOURCE_TYPE_TOPIC,
+            "t".into(),
+            crate::codes::TOPIC_AUTHORIZATION_FAILED,
+        );
+        assert!(res.error_code == crate::codes::TOPIC_AUTHORIZATION_FAILED);
+    }
+
+    #[test]
+    fn broker_resource_denied_yields_cluster_authorization_failed() {
+        let authz = crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());
+        let image = MetadataImage::new(Uuid::nil());
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+        let code = super::resource_authz_failure(
+            &authz,
+            &image,
+            &anon(),
+            &peer,
+            super::RESOURCE_TYPE_BROKER,
+            "1",
+        );
+        assert!(code == Some(crate::codes::CLUSTER_AUTHORIZATION_FAILED));
     }
 }
