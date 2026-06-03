@@ -1,9 +1,7 @@
 //! KIP-447 consumer group metadata, handed to a transactional producer's
-//! [`send_offsets_to_transaction`] so the group coordinator can fence zombie
+//! `send_offsets_to_transaction` so the group coordinator can fence zombie
 //! producers via the consumer group's generation (classic) or member epoch
 //! (KIP-848 next-gen), instead of requiring one producer per input partition.
-//!
-//! [`send_offsets_to_transaction`]: crabka_client_producer::Producer::send_offsets_to_transaction
 
 /// The identity a consumer presents to a transactional producer for KIP-447
 /// offset-commit fencing. Mirrors the JVM's
