@@ -3114,26 +3114,34 @@ pub fn render_broker_toml(
             }
         }
 
-        // KIP-405: `[remote_storage.kafka_metadata]` opts
-        // the broker pods into the topic-backed RLMM. Omitted when
-        // `metadataManager` is unset or `type = InMemory`.
-        if let Some(mm) = ts.metadata_manager.as_ref()
-            && let crate::crd::kafka::MetadataManagerType::Topic = mm.kind
-        {
-            let topic = mm
-                .topic
+        // KIP-405: `[remote_storage.kafka_metadata]` is ALWAYS emitted when
+        // tiered storage is enabled. When the CR has `type: InMemory` we emit
+        // `in_memory = true` so the broker selects the in-memory RLMM (the
+        // broker's default when the backend is present is topic-backed, so
+        // omitting the block would silently run topic-backed instead of InMemory).
+        let is_in_memory = ts
+            .metadata_manager
+            .as_ref()
+            .is_some_and(|mm| matches!(mm.kind, crate::crd::kafka::MetadataManagerType::InMemory));
+        let _ = writeln!(out, "[remote_storage.kafka_metadata]");
+        if is_in_memory {
+            let _ = writeln!(out, "in_memory = true");
+        } else {
+            let topic = ts
+                .metadata_manager
                 .as_ref()
-                .expect("MetadataManagerType::Topic requires metadataManager.topic");
-            let _ = writeln!(out, "[remote_storage.kafka_metadata]");
-            let _ = writeln!(out, "bootstrap = \"{}\"", toml_escape(&topic.bootstrap));
-            if let Some(np) = topic.num_partitions {
-                let _ = writeln!(out, "num_partitions = {np}");
+                .and_then(|mm| mm.topic.as_ref());
+            if let Some(t) = topic {
+                let _ = writeln!(out, "bootstrap = \"{}\"", toml_escape(&t.bootstrap));
+                if let Some(np) = t.num_partitions {
+                    let _ = writeln!(out, "num_partitions = {np}");
+                }
+                if let Some(rf) = t.replication {
+                    let _ = writeln!(out, "replication = {rf}");
+                }
             }
-            if let Some(rf) = topic.replication {
-                let _ = writeln!(out, "replication = {rf}");
-            }
-            out.push('\n');
         }
+        out.push('\n');
     }
 
     // `[authorization]` block. Folds in the
@@ -3894,7 +3902,7 @@ mod toml_rendering_tests {
     }
 
     #[test]
-    fn render_broker_toml_omits_kafka_metadata_when_rlmm_inmemory() {
+    fn render_broker_toml_emits_in_memory_opt_out_when_rlmm_inmemory() {
         let mut addrs = std::collections::BTreeMap::new();
         addrs.insert(
             "PLAIN".into(),
@@ -3925,9 +3933,97 @@ mod toml_rendering_tests {
             Some(&ts),
             None,
         );
+        // The block must always be emitted so the broker knows to select InMemory.
         assert!(
-            !t.contains("[remote_storage.kafka_metadata]"),
-            "kafka_metadata block leaked for InMemory, got:\n{t}"
+            t.contains("[remote_storage.kafka_metadata]"),
+            "kafka_metadata block missing for InMemory, got:\n{t}"
+        );
+        assert!(
+            t.contains("in_memory = true"),
+            "in_memory = true missing for InMemory, got:\n{t}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_kafka_metadata_by_default_when_tiered_and_mm_unset() {
+        // Tiered storage ON (Local), metadataManager entirely unset → the topic-backed
+        // RLMM block must STILL be rendered (it's the production default).
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Local,
+            s3: None,
+            metadata_manager: None,
+            persistence: None,
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+            None,
+        );
+        assert!(
+            t.contains("[remote_storage.kafka_metadata]"),
+            "expected kafka_metadata block by default, got:\n{t}"
+        );
+    }
+
+    #[test]
+    fn render_broker_toml_emits_kafka_metadata_for_default_metadata_manager() {
+        // An empty metadataManager block (MetadataManagerSpec::default(), i.e.
+        // kind=Topic, topic=None) must also render the topic-backed RLMM header,
+        // consistent with omitting the field entirely.
+        let mut addrs = std::collections::BTreeMap::new();
+        addrs.insert(
+            "PLAIN".into(),
+            AdvertisedAddress {
+                host: "h".into(),
+                port: 9092,
+            },
+        );
+        let ts = crate::crd::kafka::TieredStorage {
+            kind: crate::crd::kafka::TieredStorageType::Local,
+            s3: None,
+            metadata_manager: Some(crate::crd::kafka::MetadataManagerSpec {
+                kind: crate::crd::kafka::MetadataManagerType::default(),
+                topic: None,
+            }),
+            persistence: None,
+        };
+        let t = render_broker_toml(
+            0,
+            &[synthesized_default_listener()],
+            &addrs,
+            "PLAIN",
+            &std::collections::BTreeMap::new(),
+            None,
+            None,
+            false,
+            None,
+            Some(&ts),
+            None,
+        );
+        assert!(
+            t.contains("[remote_storage.kafka_metadata]"),
+            "expected kafka_metadata block for default MetadataManagerSpec, got:\n{t}"
+        );
+        // No bootstrap line — the bare header is enough; broker fills defaults.
+        assert!(
+            !t.contains("bootstrap ="),
+            "unexpected bootstrap line for bare Topic manager, got:\n{t}"
         );
     }
 

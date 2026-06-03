@@ -672,18 +672,19 @@ spec:
                     description: |-
                       KIP-405: pick the
                       [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-                      the broker pods run. When absent, every broker pod uses the
-                      in-memory fixture (compatible with the emptyDir-only
-                      deployment). When set to `Topic`, the broker activates the
+                      the broker pods run. When absent (or set to `type: Topic`),
+                      the broker activates the durable
                       `crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`
                       against the internal `__remote_log_metadata` topic, so
                       tier-segment metadata survives pod restarts and is consistent
-                      across brokers in the cluster.
+                      across brokers in the cluster. The in-memory fixture is
+                      selected only by an explicit `type: InMemory` (test/dev only).
                     nullable: true
                     properties:
                       topic:
                         description: |-
-                          Topic-backed tuning. Required when `kind == Topic`, must be
+                          Topic-backed tuning. Optional when `kind == Topic` (broker
+                          fills defaults for bootstrap and topic parameters), must be
                           absent otherwise.
                         nullable: true
                         properties:

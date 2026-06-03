@@ -523,9 +523,10 @@ impl BrokerHandle {
     }
 
     /// Test-only: read the `tiered_storage_rlmm_topic_backed` gauge. `1`
-    /// once the slice-48f bootstrap has swapped the in-memory placeholder
+    /// once the bootstrap task has swapped the fail-closed `NotReadyRlmm`
     /// for the topic-backed [`crabka_remote_storage::RemoteLogMetadataManager`],
-    /// `0` before that (or when `remote_log_metadata_kafka` is unset).
+    /// `0` before the swap completes, or when `remote_log_metadata` is
+    /// `RlmmKind::InMemory`.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
     #[allow(clippy::used_underscore_binding)]
@@ -2078,8 +2079,9 @@ impl Broker {
         // single broker has exactly one of each.
         // Hoist the parameters for the topic-backed RLMM
         // bootstrap before `config` moves into the broker struct.
-        let kafka_swap_kickoff: Option<KafkaSwapKickoff> =
-            config.remote_log_metadata_kafka.as_ref().map(|cfg| {
+        let kafka_swap_kickoff: Option<KafkaSwapKickoff> = match &config.remote_log_metadata {
+            crate::config::RlmmKind::InMemory => None,
+            crate::config::RlmmKind::TopicBacked(cfg) => Some({
                 // Resolve the inter-broker listener: its advertised address is
                 // the RLMM bootstrap; its protocol + the broker's credentials +
                 // TLS client config form the metadata-client security policy.
@@ -2125,12 +2127,23 @@ impl Broker {
                 } else {
                     None
                 };
-                // Bootstrap = inter-broker listener advertised addr when secured;
-                // otherwise the operator-supplied (loopback) bootstrap is kept.
-                let bootstrap = if security.is_some() {
-                    inter.map_or_else(|| cfg.bootstrap.clone(), |l| l.advertised.clone())
-                } else {
+                // Bootstrap address for the in-process RLMM metadata client.
+                // Priority: explicit config wins; then inter-broker advertised
+                // addr for secured listeners (TLS SNI / SASL host must match);
+                // then loopback-derived from the primary data listener.
+                let bootstrap = if !cfg.bootstrap.is_empty() {
+                    // Operator/file-config supplied an explicit address — always honor it.
                     cfg.bootstrap.clone()
+                } else if security.is_some() {
+                    // Secured inter-broker listener: dial its advertised address so the TLS
+                    // SNI / SASL host match. Fall back to loopback if no inter-broker listener.
+                    inter.map_or_else(
+                        || loopback_bootstrap(config.listen_addr),
+                        |l| l.advertised.clone(),
+                    )
+                } else {
+                    // Plaintext, no explicit bootstrap: dial our own listener over loopback.
+                    loopback_bootstrap(config.listen_addr)
                 };
                 KafkaSwapKickoff {
                     cfg: crate::config::KafkaRlmmConfig {
@@ -2138,12 +2151,18 @@ impl Broker {
                         num_partitions: cfg.num_partitions,
                         replication: cfg.replication,
                         snapshot_interval: cfg.snapshot_interval,
-                        snapshot_dir: cfg.snapshot_dir.clone(),
+                        // snapshot_dir is only empty for the programmatic BrokerConfig::default(); the TOML path (file_config.rs) already materialises it from log.dir.
+                        snapshot_dir: if cfg.snapshot_dir.as_os_str().is_empty() {
+                            config.log_dir.join("remote-log-metadata")
+                        } else {
+                            cfg.snapshot_dir.clone()
+                        },
                         security,
                     },
                     broker_id: config.broker_id,
                 }
-            });
+            }),
+        };
         let (remote_reader, kafka_swap_target): (
             Option<Arc<crate::remote_reader::RemoteReader>>,
             Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
@@ -2163,21 +2182,29 @@ impl Broker {
             // because its `start` does a loopback `AdminClient` call
             // to provision `__remote_log_metadata`, and the broker's
             // listener accept loop is spawned later in this function.
-            // Boot with an in-memory placeholder behind a
-            // `SwappableRlmm` facade, then spawn a task that builds
-            // the `TopicBasedRemoteLogMetadataManager` once the
+            // Boot behind a `SwappableRlmm` facade, then spawn a task that
+            // builds the `TopicBasedRemoteLogMetadataManager` once the
             // listener is serving and swaps it in.
-            let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-                Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
             let (rlmm, kafka_swap_target): (
                 Arc<dyn crabka_remote_storage::RemoteLogMetadataManager>,
                 Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
-            ) = if config.remote_log_metadata_kafka.is_some() {
-                let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(placeholder));
-                let typed: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> = swap.clone();
-                (typed, Some(swap))
-            } else {
-                (placeholder, None)
+            ) = match &config.remote_log_metadata {
+                crate::config::RlmmKind::TopicBacked(_) => {
+                    // Fail-closed: until the topic-backed manager swaps in, every
+                    // RLMM call returns NotReady. The copy task skips tiering
+                    // (no orphaned RSM objects) and remote reads retry.
+                    let not_ready: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                        Arc::new(crabka_remote_storage_topic::NotReadyRlmm::new());
+                    let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(not_ready));
+                    let typed: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                        swap.clone();
+                    (typed, Some(swap))
+                }
+                crate::config::RlmmKind::InMemory => {
+                    let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
+                        Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
+                    (placeholder, None)
+                }
             };
 
             let partitions = partitions.clone();
@@ -2393,11 +2420,13 @@ impl Broker {
             listener_tasks.push(task);
         }
 
-        // Now that the listener accept loops are spawned,
-        // construct the topic-backed RLMM and swap it into the live
-        // `SwappableRlmm` facade. We deliberately fire-and-forget the
-        // build task: a connect failure here surfaces as a `warn!`
-        // and the broker keeps running on the in-memory placeholder.
+        // Now that the listener accept loops are spawned, launch the
+        // topic-backed RLMM bootstrap task.  The broker already serves
+        // behind the fail-closed `NotReadyRlmm` facade; the bootstrap
+        // task retries with backoff until the topic-backed manager
+        // starts or the broker shuts down.  Remote reads return a
+        // retryable `NotReady` error and the copy task skips tiering
+        // until the swap completes.
         if let Some(swap) = kafka_swap_target.as_ref()
             && let Some(kafka_cfg) = kafka_swap_kickoff.as_ref()
         {
@@ -2472,10 +2501,53 @@ fn needed_metadata_partitions(
 /// transient `high_water_marks` failure at assignment time.
 const RLMM_RECONCILE_TICK: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Maximum backoff between successive topic-backed RLMM bootstrap attempts.
+const RLMM_BOOTSTRAP_BACKOFF_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Next backoff after a failed RLMM bootstrap attempt: double, capped.
+fn next_rlmm_backoff(cur: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
+    (cur * 2).min(max)
+}
+
+/// A connectable loopback `host:port` for the broker's own data listener,
+/// used as the default RLMM metadata-client bootstrap when none is configured.
+/// A wildcard bind (`0.0.0.0` / `::`) is mapped to loopback so the in-process
+/// metadata client has a routable target.
+fn loopback_bootstrap(listen: std::net::SocketAddr) -> String {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    let ip = match listen.ip() {
+        IpAddr::V4(v4) if v4 == Ipv4Addr::UNSPECIFIED => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v6) if v6 == Ipv6Addr::UNSPECIFIED => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        other => other,
+    };
+    std::net::SocketAddr::new(ip, listen.port()).to_string()
+}
+
+/// Back off after a failed RLMM bootstrap attempt. Sleeps for the current
+/// backoff (advancing it toward the cap), or returns `false` if shutdown
+/// fired during the sleep so the caller can abort the bootstrap.
+async fn rlmm_bootstrap_backoff(
+    backoff: &mut std::time::Duration,
+    shutdown: &CancellationToken,
+) -> bool {
+    tokio::select! {
+        () = shutdown.cancelled() => {
+            tracing::debug!("topic-backed RLMM bootstrap cancelled during backoff");
+            false
+        }
+        () = tokio::time::sleep(*backoff) => {
+            *backoff = next_rlmm_backoff(*backoff, RLMM_BOOTSTRAP_BACKOFF_MAX);
+            true
+        }
+    }
+}
+
 /// Construct the topic-backed
 /// [`crabka_remote_storage::RemoteLogMetadataManager`] against the
-/// broker's loopback listener and swap it into `swap`. On failure
-/// logs and returns; the broker stays on the in-memory placeholder.
+/// broker's loopback listener and swap it into `swap`. Retries with
+/// bounded backoff until success or shutdown; the broker stays on the
+/// fail-closed [`crabka_remote_storage_topic::NotReadyRlmm`] placeholder
+/// while retrying.
 async fn bootstrap_topic_rlmm(
     swap: Arc<crabka_remote_storage_topic::SwappableRlmm>,
     cfg: KafkaSwapKickoff,
@@ -2493,32 +2565,50 @@ async fn bootstrap_topic_rlmm(
         client_id: format!("crabka-rlmm-broker-{}", cfg.broker_id),
         security: cfg.cfg.security.map(|b| *b),
     };
-    let log = match crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg).await {
-        Ok(log) => log,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "topic-backed RLMM failed to start; staying on in-memory placeholder"
-            );
-            return;
-        }
-    };
-    let manager = match crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager::start(
-        log,
-        runtime,
-        cfg.cfg.snapshot_dir.clone(),
-        cfg.cfg.snapshot_interval,
-    )
-    .await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                "topic-backed RLMM manager start failed; staying on in-memory placeholder"
-            );
-            return;
-        }
+
+    // Retry the topic-backed bootstrap with bounded backoff until it succeeds
+    // or the broker shuts down. Until then the SwappableRlmm stays on the
+    // fail-closed NotReadyRlmm placeholder.
+    let mut backoff = std::time::Duration::from_millis(250);
+    let manager = loop {
+        metrics.tiered_storage_rlmm_bootstrap_attempts.inc();
+        // KafkaMetadataEventLog::start and TopicBasedRemoteLogMetadataManager::start
+        // return different error types, so we handle them with separate match arms.
+        let log = match crabka_remote_storage_topic::KafkaMetadataEventLog::start(log_cfg.clone())
+            .await
+        {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
+                    "topic-backed RLMM log start failed; retrying");
+                if !rlmm_bootstrap_backoff(&mut backoff, &shutdown).await {
+                    return;
+                }
+                continue;
+            }
+        };
+        let manager = match crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager::start(
+            log.clone(),
+            runtime.clone(),
+            cfg.cfg.snapshot_dir.clone(),
+            cfg.cfg.snapshot_interval,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
+                    "topic-backed RLMM manager start failed; retrying");
+                if !rlmm_bootstrap_backoff(&mut backoff, &shutdown).await {
+                    return;
+                }
+                continue;
+            }
+        };
+        // `log` is an `Arc`; `manager` holds its own clone. Drop the local
+        // binding here — we don't need a separate handle to the log.
+        drop(log);
+        break manager;
     };
     // Keep the concrete handle so the reconciler can call
     // `reconcile_assignment`; the swap facade only needs the trait object.
@@ -2753,6 +2843,19 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn loopback_bootstrap_maps_wildcard_to_loopback() {
+        use std::net::SocketAddr;
+        assert!(
+            loopback_bootstrap("0.0.0.0:9092".parse::<SocketAddr>().unwrap()) == "127.0.0.1:9092"
+        );
+        assert!(
+            loopback_bootstrap("192.168.1.5:9094".parse::<SocketAddr>().unwrap())
+                == "192.168.1.5:9094"
+        );
+        assert!(loopback_bootstrap("[::]:9092".parse::<SocketAddr>().unwrap()) == "[::1]:9092");
+    }
+
+    #[test]
     fn needed_metadata_partitions_covers_led_and_followed() {
         use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
         use crabka_remote_storage::TopicIdPartition;
@@ -2806,6 +2909,15 @@ mod tests {
         let handle = Broker::start(config).await.unwrap();
         assert!(handle.listen_addr().port() != 0);
         handle.shutdown().await;
+    }
+
+    #[test]
+    fn rlmm_backoff_doubles_then_caps() {
+        use std::time::Duration;
+        let max = Duration::from_secs(10);
+        assert!(next_rlmm_backoff(Duration::from_millis(250), max) == Duration::from_millis(500));
+        assert!(next_rlmm_backoff(Duration::from_secs(8), max) == max); // 16s capped to 10s
+        assert!(next_rlmm_backoff(max, max) == max);
     }
 
     #[tokio::test]

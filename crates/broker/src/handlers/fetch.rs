@@ -1137,9 +1137,22 @@ async fn try_remote_read(broker: &Broker, p: &mut PendingRead, part: &Partition)
         p.topic_name.clone(),
         p.partition_index,
     );
-    let leader_epoch = part
+    let current_leader_epoch = part
         .current_leader_epoch
         .load(std::sync::atomic::Ordering::Acquire);
+    // Resolve the leader epoch that *owned* the requested fetch offset from
+    // the local leader-epoch checkpoint (Kafka's `epochForOffset`).  The
+    // checkpoint is only appended-to / truncated-from-end (never pruned from
+    // the start on local eviction), so tiered offsets that are no longer
+    // stored locally still resolve to their copy-time epoch.  Fall back to
+    // the current leader epoch when the checkpoint has no entries (empty /
+    // fresh log) so behavior is at least as good as before.
+    let leader_epoch = {
+        let log = part.log.lock().expect("log mutex poisoned");
+        log.epoch_checkpoint()
+            .epoch_for_offset(p.fetch_offset)
+            .unwrap_or(current_leader_epoch)
+    };
     let max_bytes = usize::try_from(p.max_bytes.max(0)).unwrap_or(0);
 
     match reader

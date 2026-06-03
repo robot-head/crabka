@@ -111,12 +111,23 @@ coordinator — `__consumer_offsets` persistence, a rack-aware `UniformAssignor`
 the pluggable server-side assignor surface, and `subscribed_topic_regex` are all
 in tree — but live classic↔next-gen group migration is not yet wired (the
 conversion predicates exist and are unit-tested; the triggers are not). Tiered
-storage (KIP-405) is partial: the `crabka-remote-storage-topic` (KIP-405
-production RLMM) crate is in tree but not yet wired into the broker. The
-broker-side Streams rebalance protocol (KIP-1071) is implemented and serves real
-JVM Streams-group admin clients, but the Kafka Streams *client* library itself —
-along with a Kafka Connect / MirrorMaker equivalent — is not. ZooKeeper mode
-and ZK→KRaft migration are deliberately out of scope — Crabka is KRaft-only.
+storage (KIP-405) is fully wired: the topic-backed `RemoteLogMetadataManager`
+(durable `__remote_log_metadata` internal topic) is the default RLMM whenever
+tiered storage is enabled; in-memory metadata is an explicit opt-out for
+in-process tests only. Copy/read/retention, metadata-topic (RLMM) snapshots, dynamic per-broker
+metadata-partition assignment, and TLS/SASL on the metadata client are all in
+tree. JVM interoperability is validated via a single-broker restart-durability
+test (MinIO/S3) and an in-process multi-broker failover test that proves a
+survivor broker can serve remote reads from metadata it consumed off
+`__remote_log_metadata` after leader failover. Deliberate non-goal: the
+`__remote_log_metadata` record format is not byte-compatible with the JVM's
+`RemoteLogMetadataSerde`, so a mixed JVM+Crabka tiered cluster sharing the
+internal topic is unsupported — real clusters run a single RLMM implementation,
+making this a non-issue in practice. The broker-side Streams rebalance protocol
+(KIP-1071) is implemented and serves real JVM Streams-group admin clients, but
+the Kafka Streams *client* library itself — along with a Kafka Connect /
+MirrorMaker equivalent — is not. ZooKeeper mode and ZK→KRaft migration are
+deliberately out of scope — Crabka is KRaft-only.
 
 ## Architecture
 
@@ -189,7 +200,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Multiple log directories (JBOD) + `DescribeLogDirs` (KIP-113) | ✅ |
 | Intra-broker log-dir reassignment (`AlterReplicaLogDirs`, KIP-113) | ✅ |
 | Message format v0/v1 down-conversion | ✅ |
-| Tiered storage (KIP-405) | ⚠️ |
+| Tiered storage (KIP-405) | ✅ |
 
 ### Producer
 
@@ -411,7 +422,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-204](https://cwiki.apache.org/confluence/display/KAFKA/KIP-204) | `DeleteRecords` via the Admin client | ✅ |
 | [KIP-112](https://cwiki.apache.org/confluence/display/KAFKA/KIP-112) | Handle disk failure for JBOD | ⚠️ |
 | [KIP-113](https://cwiki.apache.org/confluence/display/KAFKA/KIP-113) | Replica movement between log directories (JBOD) | ✅ |
-| [KIP-405](https://cwiki.apache.org/confluence/display/KAFKA/KIP-405) | Kafka tiered storage | ⚠️ |
+| [KIP-405](https://cwiki.apache.org/confluence/display/KAFKA/KIP-405) | Kafka tiered storage | ✅ |
 
 ### Replication & availability
 

@@ -5138,6 +5138,56 @@ introspection metadata).
   validation remains pending the CI multi-broker environment (the single-broker
   `transaction.version` integration tests pass).
 
+## Slice — Tiered storage: topic-backed RLMM promoted, hardened & validated (KIP-405) (2026-06-02)
+
+- **`RlmmKind` enum replaces `Option<KafkaRlmmConfig>`.** `RlmmKind::TopicBacked(KafkaRlmmConfig)`
+  is the DEFAULT whenever tiered storage is enabled; `RlmmKind::InMemory` is an
+  explicit opt-out for in-process tests only. The durable `__remote_log_metadata`
+  topic-backed manager is no longer gated behind a config field — it is the
+  production path.
+- **Fail-closed bootstrap.** `SwappableRlmm` boots on a `NotReadyRlmm` stub
+  (every method returns a retryable `RemoteStorageError::NotReady`, which the
+  fetch / `ListOffsets` handlers already treat as retryable) and retries the
+  topic-backed manager start with bounded backoff until success or broker shutdown.
+  Nothing is tiered with non-durable metadata; remote reads block until the real
+  manager swaps in. New `tiered_storage_rlmm_bootstrap_attempts` Prometheus counter.
+- **Auto-derived bootstrap address.** The RLMM metadata client's plaintext
+  bootstrap address is now derived from the broker's own loopback listener,
+  so a default plaintext broker works without an explicit config entry.
+- **Operator wiring.** The Kubernetes operator renders `RlmmKind::TopicBacked` by
+  default when tiered storage is enabled on a `Kafka` CR; `MetadataManagerType`
+  default flipped to `Topic`. An explicit `type: InMemory` in the CR opts out.
+- **JVM restart-durability validation** (`tiered_storage_topic_rlmm_survives_restart`,
+  MinIO/S3): a single-broker restart proves `__remote_log_metadata` metadata
+  + snapshot durability — remote segments remain accessible after the broker
+  restarts cold.
+- **In-process multi-broker metadata-sharing validation**
+  (`tiered_storage_multi_broker.rs::tiered_storage_metadata_sharing_via_survivor`):
+  a survivor broker serves a remote read from metadata it consumed off
+  `__remote_log_metadata` after the partition leader fails over. This test caught
+  and fixed a real remote-read bug: the segment lookup used the current leader
+  epoch instead of the copy-time epoch after failover; fixed with an
+  epoch-fallback scan in `remote_reader.rs`. The JVM multi-broker variant is
+  `#[ignore]`d for macOS CI (advertised-address resolution blocks in Docker on macOS).
+- **Deliberate non-goal.** The `__remote_log_metadata` event codec is NOT
+  byte-compatible with the JVM's `RemoteLogMetadataSerde`. A mixed JVM+Crabka
+  tiered cluster sharing the internal topic is unsupported. Real clusters run
+  a single RLMM implementation, making this a non-issue in practice.
+- **Kafka-faithful epoch resolution landed.** `LeaderEpochCheckpoint::epoch_for_offset`
+  now drives remote-read epoch resolution: `try_remote_read` resolves the epoch
+  that *owned* the fetch offset from the local leader-epoch checkpoint (retained
+  across local-retention eviction — not pruned from the start) and passes that
+  owning epoch into the epoch-indexed RLMM lookup (primary path). The RLMM
+  indexes a segment under every epoch in its `segment_leader_epochs` map, so the
+  primary path reliably hits after a clean failover without any scan. The old
+  ignore-epoch fallback scan is demoted to a lineage-aware defensive net: when
+  the primary misses it prefers candidates whose `segment_leader_epochs` contains
+  the owning epoch, falling back to `max_by_key(start_offset)` only as a last
+  resort. This closes the wrong-segment-under-log-divergence hazard.
+- **README + STATUS.** `Tiered storage (KIP-405)` rows flipped ⚠️ → ✅ in the
+  feature matrix and the KIP table; stale "not yet wired into the broker" prose
+  replaced with an accurate description of the promoted topic-backed RLMM.
+
 ## Slice — KIP-320 log-truncation detection (complete) (2026-06-02)
 
 - **Leader side**: `FetchResponse` now returns `diverging_epoch` (the last
