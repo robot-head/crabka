@@ -179,12 +179,13 @@ fn map_error(
 > {
     // Kafka error codes for the STREAMS_INVALID_TOPOLOGY family (KIP-1071).
     // These are not yet in crates/broker/src/codes.rs (the broker coordinator
-    // doesn't emit them yet), but they are valid response codes per the
-    // StreamsGroupHeartbeatResponse schema. Values from the Apache Kafka
-    // official error table (KIP-1071).
-    const STREAMS_INVALID_TOPOLOGY: i16 = 136;
-    const STREAMS_INVALID_TOPOLOGY_EPOCH: i16 = 137;
-    const STREAMS_TOPOLOGY_FENCED: i16 = 138;
+    // surfaces topology problems via the response Status list, not a top-level
+    // error code), but they are valid response codes per the
+    // StreamsGroupHeartbeatResponse schema. Values verified against the Apache
+    // Kafka `Errors` enum (clients/.../protocol/Errors.java, trunk/4.x).
+    const STREAMS_INVALID_TOPOLOGY: i16 = 130;
+    const STREAMS_INVALID_TOPOLOGY_EPOCH: i16 = 131;
+    const STREAMS_TOPOLOGY_FENCED: i16 = 132;
     // Verified against crates/broker/src/codes.rs:
     const GROUP_AUTHORIZATION_FAILED: i16 = 30; // codes::GROUP_AUTHORIZATION_FAILED
     const TOPIC_AUTHORIZATION_FAILED: i16 = 29; // codes::TOPIC_AUTHORIZATION_FAILED
