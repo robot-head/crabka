@@ -1094,6 +1094,7 @@ pub(crate) fn snapshot_seed(state: &super::consumer_state::GroupState) -> super:
             subscribed_topic_regex: m.subscribed_topic_regex.clone(),
             server_assignor: m.server_assignor.clone(),
             rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis()).unwrap_or(60_000),
+            classic: None, // TODO(kip-848 Task 6): populate from MemberState.classic facade for lossless downgrade
         };
         members.insert(mid.clone(), mm);
 
@@ -1182,6 +1183,7 @@ fn snapshot_pending_after_change(
                     server_assignor: m.server_assignor.clone(),
                     rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
                         .unwrap_or(60_000),
+                    classic: None, // TODO(kip-848 Task 6): populate from MemberState.classic facade for lossless downgrade
                 }),
             ));
             pending.current_per_member.push((
@@ -1556,6 +1558,7 @@ mod tests {
                     subscribed_topic_regex: None,
                     server_assignor: None,
                     rebalance_timeout_ms: 60_000,
+                    classic: None,
                 }),
             )],
             target_metadata: Some(TargetAssignmentMetadataValue {

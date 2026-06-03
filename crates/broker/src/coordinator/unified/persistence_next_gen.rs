@@ -119,6 +119,17 @@ impl GroupMetadataValue {
     }
 }
 
+/// Classic-protocol sub-state for a member hosted inside an upgraded consumer
+/// group (KIP-848 migration). Mirrors Kafka's
+/// `ConsumerGroupMemberMetadataValue.ClassicMemberMetadata`; lets a downgrade
+/// restore the classic member losslessly after a coordinator failover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassicMemberMetadata {
+    pub session_timeout_ms: i32,
+    pub supported_protocols: Vec<(String, Bytes)>,
+    pub last_synced_assignment: Bytes,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberMetadataValue {
     pub instance_id: Option<String>,
@@ -132,6 +143,9 @@ pub struct MemberMetadataValue {
     pub subscribed_topic_regex: Option<String>,
     pub server_assignor: Option<String>,
     pub rebalance_timeout_ms: i32,
+    /// `Some` iff this is a hosted classic member; `None` for a native
+    /// consumer-protocol member.
+    pub classic: Option<ClassicMemberMetadata>,
 }
 
 impl MemberMetadataValue {
@@ -151,6 +165,20 @@ impl MemberMetadataValue {
         put_nullable_string(&mut buf, self.subscribed_topic_regex.as_deref());
         put_nullable_string(&mut buf, self.server_assignor.as_deref());
         buf.put_i32(self.rebalance_timeout_ms);
+        match &self.classic {
+            None => buf.put_i8(0),
+            Some(c) => {
+                buf.put_i8(1);
+                buf.put_i32(c.session_timeout_ms);
+                let pn = i32::try_from(c.supported_protocols.len()).expect("fits");
+                buf.put_i32(pn);
+                for (name, meta) in &c.supported_protocols {
+                    put_string(&mut buf, name);
+                    put_bytes(&mut buf, meta);
+                }
+                put_bytes(&mut buf, &c.last_synced_assignment);
+            }
+        }
         buf.freeze()
     }
     pub fn decode(mut buf: &[u8]) -> Result<Self, BrokerError> {
@@ -168,6 +196,32 @@ impl MemberMetadataValue {
         let subscribed_topic_regex = get_nullable_string(&mut buf)?;
         let server_assignor = get_nullable_string(&mut buf)?;
         let rebalance_timeout_ms = get_i32(&mut buf)?;
+        let classic = {
+            if buf.remaining() < 1 {
+                return Err(BrokerError::Protocol(ProtocolError::InvalidValue(
+                    "missing classic-presence byte",
+                )));
+            }
+            if buf.get_i8() == 0 {
+                None
+            } else {
+                let session_timeout_ms = get_i32(&mut buf)?;
+                let pn = get_i32(&mut buf)?;
+                let pcap = usize::try_from(pn.max(0)).expect("non-negative");
+                let mut supported_protocols = Vec::with_capacity(pcap);
+                for _ in 0..pn.max(0) {
+                    let name = get_string(&mut buf)?;
+                    let meta = get_bytes(&mut buf)?;
+                    supported_protocols.push((name, meta));
+                }
+                let last_synced_assignment = get_bytes(&mut buf)?;
+                Some(ClassicMemberMetadata {
+                    session_timeout_ms,
+                    supported_protocols,
+                    last_synced_assignment,
+                })
+            }
+        };
         Ok(Self {
             instance_id,
             rack_id,
@@ -177,6 +231,7 @@ impl MemberMetadataValue {
             subscribed_topic_regex,
             server_assignor,
             rebalance_timeout_ms,
+            classic,
         })
     }
 }
@@ -387,6 +442,7 @@ mod tests {
             subscribed_topic_regex: None,
             server_assignor: Some("uniform".into()),
             rebalance_timeout_ms: 60_000,
+            classic: None,
         };
         assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
@@ -405,6 +461,7 @@ mod tests {
             subscribed_topic_regex: Some("^orders-.*".into()),
             server_assignor: Some("uniform".into()),
             rebalance_timeout_ms: 60_000,
+            classic: None,
         };
         assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
@@ -441,6 +498,32 @@ mod tests {
             partitions_pending_revocation: vec![],
         };
         assert!(CurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
+    }
+
+    #[test]
+    fn member_metadata_round_trips_classic_block() {
+        use bytes::Bytes;
+        let v = MemberMetadataValue {
+            instance_id: Some("inst-a".into()),
+            rack_id: None,
+            client_id: "c".into(),
+            client_host: "/127.0.0.1".into(),
+            subscribed_topic_names: vec!["t1".into(), "t2".into()],
+            subscribed_topic_regex: None,
+            server_assignor: Some("uniform".into()),
+            rebalance_timeout_ms: 60_000,
+            classic: Some(ClassicMemberMetadata {
+                session_timeout_ms: 30_000,
+                supported_protocols: vec![("range".into(), Bytes::from_static(b"meta"))],
+                last_synced_assignment: Bytes::from_static(b"asn"),
+            }),
+        };
+        let decoded = MemberMetadataValue::decode(&v.encode()).unwrap();
+        assert!(decoded == v);
+
+        let mut native = v.clone();
+        native.classic = None;
+        assert!(MemberMetadataValue::decode(&native.encode()).unwrap() == native);
     }
 
     #[test]
