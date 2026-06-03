@@ -54,5 +54,5 @@ pub use membership::{
     StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus, TaskAssignment,
     TopicPartition,
 };
-pub use processor::{BytesSerde, I64Serde, Serde, SerdeError, StringSerde};
+pub use processor::{BytesSerde, I64Serde, Record, RecordContext, Serde, SerdeError, StringSerde};
 pub use topology::{BuiltTopology, Topology, TopologyError};
