@@ -5208,3 +5208,48 @@ introspection metadata).
   scenarios are authored and `#[ignore]`d, to be run on the Linux/CI acceptance
   harness.
 - README KIP-320 row flipped to ✅.
+
+## Slice — KIP-447 producer scalability for EOS (2026-06-03)
+
+- **Goal.** Promote the KIP-447 row in the README KIP table from ⚠️ to ✅.
+  KIP-447 lets a single transactional producer fence zombies across all of a
+  consumer group's input partitions by validating the consumer group's own
+  generation / member epoch at `TxnOffsetCommit`, instead of requiring one
+  producer per input partition.
+- **What was missing.** The broker already had the fencing machinery
+  (`classic_ops::validate_commit`, the next-gen `OffsetValidate` actor
+  message), but the producer's `send_offsets_to_transaction(offsets, group_id)`
+  sent `TxnOffsetCommitRequest` with `generation_id = -1` / empty `member_id` —
+  so the fencing was dead code. The consumer also exposed no single
+  `group_metadata()` accessor.
+- **Client wiring.**
+  - `crabka-client-consumer` gained a public `ConsumerGroupMetadata`
+    `{ group_id, generation_id, member_id, group_instance_id }` (mirrors the
+    JVM type) plus `Consumer::group_metadata()`. `group_instance_id` is always
+    `None` — the consumer has no static-membership support yet.
+  - `Producer::send_offsets_to_transaction` now takes
+    `&ConsumerGroupMetadata` (breaking change; greenfield) and forwards the
+    generation / member / instance into `TxnOffsetCommitRequest`. The type is
+    re-exported from the producer crate.
+- **Broker.** Extracted the classic-vs-next-gen routing from
+  `offset_commit::validate` into a shared
+  `coordinator::unified::actor::validate_group_commit`, and made
+  `txn_offset_commit` call it — so transactional offset fencing is "consistent
+  with normal offset fencing" (KIP-447's words). This:
+  - fixes the previously-missing unknown-member case
+    (`UNKNOWN_MEMBER_ID` when a bare `member_id` isn't in the group),
+  - adds KIP-848 next-gen member-epoch fencing (`STALE_MEMBER_EPOCH` /
+    `FENCED_MEMBER_EPOCH`), clearing the `TODO(KIP-1319 v4+)`,
+  - drops the old `generation_id >= 0` gate (the shared helper no-ops for the
+    simple-consumer shape, so a metadata-less producer is unaffected).
+- **Tests.** `crates/broker/tests/transactions.rs`:
+  - `send_offsets_to_transaction_atomic_with_records` now threads real
+    `consumer.group_metadata()`.
+  - `txn_offset_commit_fences_classic_generation_and_member` — stale
+    generation → `ILLEGAL_GENERATION`, unknown member → `UNKNOWN_MEMBER_ID`,
+    matching metadata → accepted.
+  - `txn_offset_commit_fences_next_gen_member_epoch` — stale member epoch →
+    `STALE_MEMBER_EPOCH`, current epoch → accepted.
+- **Out of scope.** Consumer-side static membership (`group.instance.id`)
+  configuration — the broker still validates the instance-id case for protocol
+  completeness, but the consumer client always reports `None`.
