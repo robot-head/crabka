@@ -11,7 +11,10 @@ use futures_util::future::BoxFuture;
 
 use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord};
 use crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest;
-use crabka_protocol::owned::assign_replicas_to_dirs_response::AssignReplicasToDirsResponse;
+use crabka_protocol::owned::assign_replicas_to_dirs_response::{
+    AssignReplicasToDirsResponse, DirectoryData as RespDirData, PartitionData as RespPartData,
+    TopicData as RespTopicData,
+};
 use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
@@ -45,7 +48,15 @@ pub(crate) fn handle(
             );
         }
 
-        let broker_slot_id = u64::try_from(req.broker_id).unwrap_or(u64::MAX);
+        let Ok(broker_slot_id) = u64::try_from(req.broker_id) else {
+            return encode_resp(
+                version,
+                &AssignReplicasToDirsResponse {
+                    error_code: codes::NONE,
+                    ..Default::default()
+                },
+            );
+        };
         let image = controller.current_image();
         let mut changes: Vec<MetadataRecord> = Vec::new();
 
@@ -71,10 +82,36 @@ pub(crate) fn handle(
             return Err(BrokerError::Replication(format!("submit_change: {e}")));
         }
 
+        let directories = req
+            .directories
+            .iter()
+            .map(|dir| RespDirData {
+                id: dir.id,
+                topics: dir
+                    .topics
+                    .iter()
+                    .map(|t| RespTopicData {
+                        topic_id: t.topic_id,
+                        partitions: t
+                            .partitions
+                            .iter()
+                            .map(|p| RespPartData {
+                                partition_index: p.partition_index,
+                                error_code: codes::NONE,
+                                ..Default::default()
+                            })
+                            .collect(),
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            })
+            .collect();
         encode_resp(
             version,
             &AssignReplicasToDirsResponse {
                 error_code: codes::NONE,
+                directories,
                 ..Default::default()
             },
         )
