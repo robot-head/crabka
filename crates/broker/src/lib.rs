@@ -121,6 +121,7 @@
 #![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
 
 pub mod api_catalog;
+pub(crate) mod assign_dirs;
 pub mod authorizer;
 pub(crate) mod auto_join;
 pub mod bootstrap;

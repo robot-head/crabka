@@ -1605,6 +1605,7 @@ impl Broker {
             throttle_state.clone(),
             log_dir_status.clone(),
             metrics.clone(),
+            log_dir_ids.clone(),
         );
         let supervisor_handle = supervisor.spawn();
 

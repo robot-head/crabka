@@ -21,6 +21,7 @@ use dashmap::DashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
+use uuid::Uuid;
 
 use crabka_log::{Log, LogConfig};
 use crabka_metadata::MetadataImage;
@@ -172,6 +173,13 @@ pub(crate) struct ReplicatorSupervisor {
     /// clones this so it can increment `replication_bytes_in` after a
     /// successful follower-side append.
     metrics: crate::metrics::BrokerMetrics,
+    /// KIP-858: stable UUID per configured log.dir. Used by the reconcile
+    /// loop to build `AssignReplicasToDirs` reports.
+    log_dir_ids: crate::log_dir_id::LogDirIds,
+    /// KIP-858: tracks the last-reported dir UUID per (topic, partition) so
+    /// we only send `AssignReplicasToDirs` on first materialization or after
+    /// a KIP-113 log-dir swap.
+    reported_dirs: dashmap::DashMap<(String, i32), uuid::Uuid>,
 }
 
 impl ReplicatorSupervisor {
@@ -192,6 +200,7 @@ impl ReplicatorSupervisor {
         throttle_state: Arc<ThrottleState>,
         log_dir_status: crate::log_dir_status::LogDirRegistry,
         metrics: crate::metrics::BrokerMetrics,
+        log_dir_ids: crate::log_dir_id::LogDirIds,
     ) -> Self {
         Self {
             node_id,
@@ -211,6 +220,8 @@ impl ReplicatorSupervisor {
             throttle_state,
             log_dir_status,
             metrics,
+            log_dir_ids,
+            reported_dirs: dashmap::DashMap::new(),
         }
     }
 
@@ -367,6 +378,85 @@ impl ReplicatorSupervisor {
         //     __share_group_state partitions (KIP-932). Same shape as txn.
         if let Some(coord) = &self.share_coordinator {
             coord.refresh_leader_partitions(image).await;
+        }
+
+        // 4. KIP-858: report any (topic, partition) whose owning log-dir UUID
+        //    has changed since the last successful report (first materialization
+        //    or after a KIP-113 dir swap). Only sends if there is at least one
+        //    change; on error the tracker is NOT updated so we retry next tick.
+        self.report_dir_assignments(&local_set, image).await;
+    }
+
+    /// Collect changed `(topic_id, partition, dir_uuid)` assignments from
+    /// `local_set` and send `AssignReplicasToDirs` to the controller leader
+    /// when at least one assignment has changed since the last successful send.
+    async fn report_dir_assignments(
+        &self,
+        local_set: &std::collections::HashSet<(String, i32)>,
+        image: &MetadataImage,
+    ) {
+        let mut changed: Vec<(Uuid, i32, Uuid)> = Vec::new();
+
+        for (topic, partition) in local_set {
+            // Resolve dir UUID for this (topic, partition).
+            let Some(part) = self.partitions.get(topic, *partition) else {
+                continue;
+            };
+            let dir = part.log_dir.load();
+            let Some(dir_uuid) = self.log_dir_ids.id_for(&dir) else {
+                continue;
+            };
+
+            // Resolve topic_id.
+            let Some(topic_rec) = image.topic(topic) else {
+                continue;
+            };
+            let topic_id = topic_rec.topic_id;
+
+            let key = (topic.clone(), *partition);
+            let already_reported = self.reported_dirs.get(&key).is_some_and(|v| *v == dir_uuid);
+            if !already_reported {
+                changed.push((topic_id, *partition, dir_uuid));
+            }
+        }
+
+        if changed.is_empty() {
+            return;
+        }
+
+        let broker_id = i32::try_from(self.node_id).unwrap_or(-1);
+        let req = crate::assign_dirs::build_request(broker_id, &changed);
+
+        match crate::assign_dirs::send_assignments(&self.controller, &self.client_id, req).await {
+            Ok(()) => {
+                // Update the tracker for each successfully reported assignment.
+                for (topic, partition) in local_set {
+                    let Some(part) = self.partitions.get(topic, *partition) else {
+                        continue;
+                    };
+                    let dir = part.log_dir.load();
+                    let Some(dir_uuid) = self.log_dir_ids.id_for(&dir) else {
+                        continue;
+                    };
+                    // Only update entries that were in the changed set so we
+                    // don't accidentally mark unreported partitions as done.
+                    let Some(topic_rec) = image.topic(topic) else {
+                        continue;
+                    };
+                    let topic_id = topic_rec.topic_id;
+                    if changed.contains(&(topic_id, *partition, dir_uuid)) {
+                        self.reported_dirs
+                            .insert((topic.clone(), *partition), dir_uuid);
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "assign_replicas_to_dirs report failed; will retry next reconcile"
+                );
+                // Do NOT update the tracker — the next reconcile will retry.
+            }
         }
     }
 
