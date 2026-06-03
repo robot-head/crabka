@@ -1636,6 +1636,8 @@ impl Broker {
                 inter_broker_listener_name: config.inter_broker_listener_name.clone(),
                 want_shutdown: want_shutdown_rx,
                 should_shutdown: should_shutdown_tx.clone(),
+                log_dir_status: log_dir_status.clone(),
+                log_dir_ids: log_dir_ids.clone(),
             },
         ));
 

@@ -33,6 +33,11 @@ pub(crate) struct Config {
     /// `should_shut_down=true`. The caller of `controlled_shutdown`
     /// awaits this flag.
     pub should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Per-log-dir health registry; offline dirs are reported to the
+    /// controller as `offline_log_dirs` UUIDs each heartbeat (KIP-858).
+    pub log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// Stable per-log-dir UUIDs, to translate offline dir paths → ids.
+    pub log_dir_ids: crate::log_dir_id::LogDirIds,
 }
 
 pub(crate) async fn run(mut cfg: Config) {
@@ -85,6 +90,13 @@ pub(crate) async fn run(mut cfg: Config) {
             continue;
         };
         let want_shut_down = *cfg.want_shutdown.borrow_and_update();
+        let offline_log_dirs: Vec<crabka_protocol::primitives::uuid::Uuid> = cfg
+            .log_dir_status
+            .offline()
+            .into_iter()
+            .filter_map(|(path, _reason)| cfg.log_dir_ids.id_for(&path))
+            .map(|u| crabka_protocol::primitives::uuid::Uuid(*u.as_bytes()))
+            .collect();
         let resp = client
             .send(BrokerHeartbeatRequest {
                 broker_id: cfg.broker_id,
@@ -92,6 +104,7 @@ pub(crate) async fn run(mut cfg: Config) {
                 current_metadata_offset: 0,
                 want_fence: false,
                 want_shut_down,
+                offline_log_dirs,
                 ..Default::default()
             })
             .await;
