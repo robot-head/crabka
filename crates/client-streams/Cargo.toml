@@ -16,6 +16,7 @@ default = []
 [dependencies]
 crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
 crabka-client-core = { version = "0.2", path = "../client-core" }
+async-trait = { workspace = true }
 bon = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }

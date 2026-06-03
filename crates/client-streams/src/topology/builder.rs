@@ -192,4 +192,54 @@ mod tests {
         let topo = Topology::new();
         check!(topo.build("app").is_err());
     }
+
+    #[test]
+    fn build_with_processor_store_and_repartition() {
+        let mut t = Topology::new();
+        t.add_repartition_topic("rp");
+        t.add_source("src", ["in"]);
+        t.add_processor("proc", ["src"]);
+        t.add_state_store("store", ["proc"]);
+        t.add_sink("rsink", "rp", ["proc"]);
+        t.add_source("rsrc", ["rp"]);
+        t.add_sink("out", "out-topic", ["rsrc"]);
+        let built = t.build("my-app").unwrap();
+        check!(built.application_id() == "my-app");
+        let wire = built.to_wire();
+        // repartition chain produces at least 2 subtopologies
+        check!(wire.subtopologies.len() >= 2);
+        // subtopology containing the state store has a changelog topic named my-app-store-changelog
+        let has_changelog = wire.subtopologies.iter().any(|s| {
+            s.state_changelog_topics
+                .iter()
+                .any(|c| c.name == "my-app-store-changelog")
+        });
+        check!(has_changelog);
+    }
+
+    #[test]
+    fn application_id_accessor() {
+        let mut t = Topology::new();
+        t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", ["src"]);
+        let built = t.build("my-streams-app").unwrap();
+        check!(built.application_id() == "my-streams-app");
+    }
+
+    #[test]
+    fn source_topics_for_unknown_id_returns_empty() {
+        let mut t = Topology::new();
+        t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", ["src"]);
+        let built = t.build("app").unwrap();
+        check!(built.source_topics_for("99").is_empty());
+    }
+
+    #[test]
+    fn duplicate_node_name_propagates_error() {
+        let mut t = Topology::new();
+        t.add_source("src", ["in"]);
+        t.add_source("src", ["other"]); // duplicate
+        check!(t.build("app").is_err());
+    }
 }

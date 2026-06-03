@@ -1263,6 +1263,7 @@ name = "crabka-client-streams"
 version = "0.2.0"
 dependencies = [
  "assert2",
+ "async-trait",
  "bon",
  "crabka-broker",
  "crabka-client-core",
