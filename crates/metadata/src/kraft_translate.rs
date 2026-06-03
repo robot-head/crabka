@@ -907,6 +907,7 @@ fn register_broker_from_kraft(
         .collect::<Result<Vec<_>, TranslateError>>()?;
     Ok(BrokerRegistrationRecord {
         node_id: b.broker_id as u64,
+        broker_epoch: 0,
         host,
         port,
         rack: b.rack.clone(),
@@ -1099,6 +1100,7 @@ mod tests {
     fn register_broker_no_endpoints_round_trips() {
         let rec = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 7,
+            broker_epoch: 0,
             host: "192.168.1.10".into(),
             port: 9092,
             rack: Some("us-east-1a".into()),
@@ -1111,6 +1113,7 @@ mod tests {
     fn register_broker_with_endpoints_round_trips() {
         let rec = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 1,
+            broker_epoch: 0,
             host: "h".into(),
             port: 9092,
             rack: None,

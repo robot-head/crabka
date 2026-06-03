@@ -953,6 +953,7 @@ mod tests {
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
                 node_id: 1,
+                broker_epoch: 0,
                 host: "h1".into(),
                 port: 9092,
                 rack: Some("r1".into()),
@@ -967,6 +968,7 @@ mod tests {
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
                 node_id: 2,
+                broker_epoch: 0,
                 host: "h2".into(),
                 port: 9092,
                 rack: None,
@@ -1422,6 +1424,7 @@ mod tests {
         let mut m = img();
         let b = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 1,
+            broker_epoch: 0,
             host: "h".into(),
             port: 9092,
             rack: None,
