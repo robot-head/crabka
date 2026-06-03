@@ -42,8 +42,9 @@
 //!   top-level host/port). The top-level pair is encoded as a synthetic
 //!   leading `end_points` entry (name `""`, `security_protocol` PLAINTEXT)
 //!   and split back out on decode; the real listeners follow. All the
-//!   other KIP-631 extras (`incarnation_id`, `broker_epoch`, `features`,
-//!   `fenced`, …) are defaulted on encode and dropped on decode.
+//!   other KIP-631 extras (`incarnation_id`, `features`, `fenced`, …) are
+//!   defaulted on encode and dropped on decode. `broker_epoch` IS carried
+//!   (KIP-903 ISR fencing).
 //! - `DelegationToken`: KIP-631's record has no `hmac` field. The HMAC is
 //!   hex-encoded into the otherwise-unused `requester` slot so it
 //!   round-trips; `KafkaPrincipal`s map through their `Type:Name` string
@@ -685,6 +686,7 @@ fn register_broker_to_kraft(
         })?,
         rack: b.rack.clone(),
         end_points,
+        broker_epoch: b.broker_epoch,
         ..Default::default()
     })
 }
@@ -907,6 +909,7 @@ fn register_broker_from_kraft(
         .collect::<Result<Vec<_>, TranslateError>>()?;
     Ok(BrokerRegistrationRecord {
         node_id: b.broker_id as u64,
+        broker_epoch: b.broker_epoch,
         host,
         port,
         rack: b.rack.clone(),
@@ -1097,20 +1100,34 @@ mod tests {
 
     #[test]
     fn register_broker_no_endpoints_round_trips() {
+        let image = img();
         let rec = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 7,
+            broker_epoch: 42,
             host: "192.168.1.10".into(),
             port: 9092,
             rack: Some("us-east-1a".into()),
             endpoints: vec![],
         });
-        round_trip(&rec, &img());
+        let k = to_kraft(&rec, &image).unwrap();
+        let decoded = from_kraft(&k, &image).unwrap();
+        let MetadataRecord::V1BrokerRegistration(out) = &decoded else {
+            panic!("expected V1BrokerRegistration, got {decoded:?}");
+        };
+        assert!(
+            out.broker_epoch == 42,
+            "broker_epoch lost on round-trip: {}",
+            out.broker_epoch
+        );
+        assert!(decoded == rec);
     }
 
     #[test]
     fn register_broker_with_endpoints_round_trips() {
+        let image = img();
         let rec = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 1,
+            broker_epoch: 7,
             host: "h".into(),
             port: 9092,
             rack: None,
@@ -1129,7 +1146,17 @@ mod tests {
                 },
             ],
         });
-        round_trip(&rec, &img());
+        let k = to_kraft(&rec, &image).unwrap();
+        let decoded = from_kraft(&k, &image).unwrap();
+        let MetadataRecord::V1BrokerRegistration(out) = &decoded else {
+            panic!("expected V1BrokerRegistration, got {decoded:?}");
+        };
+        assert!(
+            out.broker_epoch == 7,
+            "broker_epoch lost on round-trip: {}",
+            out.broker_epoch
+        );
+        assert!(decoded == rec);
     }
 
     #[test]

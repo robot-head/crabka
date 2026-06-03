@@ -284,6 +284,7 @@ mod tests {
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
                 node_id: 1,
+                broker_epoch: 0,
                 host: "broker-1".into(),
                 port: 9092,
                 rack: Some("rack-a".into()),

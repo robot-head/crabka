@@ -389,7 +389,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-482](https://cwiki.apache.org/confluence/display/KAFKA/KIP-482) | Optional tagged fields (flexible versions) | ✅ |
 | [KIP-511](https://cwiki.apache.org/confluence/display/KAFKA/KIP-511) | Collect & expose client name and version | ✅ |
 | [KIP-559](https://cwiki.apache.org/confluence/display/KAFKA/KIP-559) | Make the protocol friendlier with L7 proxies | ✅ |
-| [KIP-903](https://cwiki.apache.org/confluence/display/KAFKA/KIP-903) | Fence replicas with stale broker epoch from the ISR | ⚠️ |
+| [KIP-903](https://cwiki.apache.org/confluence/display/KAFKA/KIP-903) | Fence replicas with stale broker epoch from the ISR | ✅ |
 
 ### Producer — idempotence, transactions & EOS
 
@@ -451,7 +451,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-584](https://cwiki.apache.org/confluence/display/KAFKA/KIP-584) | Versioning scheme for features (`metadata.version`, `group.version`, `transaction.version`) | ✅ |
 | [KIP-778](https://cwiki.apache.org/confluence/display/KAFKA/KIP-778) | KRaft-to-KRaft upgrades | ⚠️ |
 | [KIP-853](https://cwiki.apache.org/confluence/display/KAFKA/KIP-853) | KRaft controller membership changes (dynamic voters) | ✅ |
-| [KIP-1022](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1022) | Formatting and updating features | ⚠️ |
+| [KIP-1022](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1022) | Formatting and updating features | ✅ |
 | [KIP-866](https://cwiki.apache.org/confluence/display/KAFKA/KIP-866) | ZooKeeper-to-KRaft migration | ⛔ |
 
 ### Admin, configs & topics

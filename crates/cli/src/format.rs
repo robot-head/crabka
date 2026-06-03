@@ -17,6 +17,7 @@
 //!   as length-prefixed `serde_wincode<SerdeCompat<MetadataRecord>>`
 //!   payloads, so the broker can stream them without touching JSON.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use clap::Args;
@@ -41,6 +42,7 @@ const EXIT_OK: i32 = 0;
 const EXIT_LOW_ITERATIONS: i32 = 2;
 const EXIT_DIRTY_LOG_DIR: i32 = 3;
 const EXIT_BOOTSTRAP_FAIL: i32 = 4;
+const EXIT_INVALID_FEATURE: i32 = 5;
 
 /// SCRAM iteration floor — matches Kafka's recommended minimum and the
 /// `AlterUserScramCredentials` handler's pre-check.
@@ -58,6 +60,12 @@ pub struct FormatArgs {
     /// Defaults to the broker's maximum supported level when omitted.
     #[arg(long)]
     release_version: Option<String>,
+    /// Set an individual feature's finalized level at format time (KIP-1022),
+    /// e.g. `--feature transaction.version=2`. May be repeated. Combines with
+    /// `--release-version` (which sets the base release) for every feature
+    /// except `metadata.version`, where the two conflict.
+    #[arg(long = "feature", value_parser = parse_feature_spec)]
+    feature: Vec<(String, i16)>,
     /// Seed a SCRAM credential. May be repeated.
     /// Format: `SCRAM-SHA-256=[name=<u>,password=<p>,iterations=<n>]`
     /// or `SCRAM-SHA-512=[name=<u>,password=<p>,iterations=<n>]`
@@ -105,6 +113,97 @@ fn resolve_release_level(s: &str) -> Result<i16, String> {
         ));
     }
     Ok(level)
+}
+
+/// Parse one `--feature NAME=LEVEL` spec into `(name, level)`.
+fn parse_feature_spec(s: &str) -> Result<(String, i16), String> {
+    let (name, level) = s
+        .split_once('=')
+        .ok_or("--feature must be NAME=LEVEL, e.g. transaction.version=2")?;
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("feature name must not be empty".into());
+    }
+    let level: i16 = level
+        .trim()
+        .parse()
+        .map_err(|e| format!("feature level: {e}"))?;
+    Ok((name.to_string(), level))
+}
+
+/// Resolve `crabka format`'s KIP-1022 feature flags into the bootstrap
+/// `metadata.version` level and the per-feature override map, applying the
+/// validation `kafka-storage format` performs:
+///
+/// - every `--feature` names a registered feature, finalized in its supported
+///   range (else reject);
+/// - `--feature metadata.version=X` conflicts with `--release-version`;
+/// - `bootstrap_mv` = `--feature metadata.version` if set, else
+///   `--release-version`, else the newest supported level (latest stable);
+/// - the fully-resolved feature set satisfies every KIP-1022 dependency.
+fn resolve_format_features(
+    release_version: Option<&str>,
+    features: &[(String, i16)],
+) -> Result<(i16, BTreeMap<String, i16>), String> {
+    use crabka_metadata::metadata_version::{METADATA_VERSION_FEATURE, METADATA_VERSION_MAX};
+
+    let mut overrides: BTreeMap<String, i16> = BTreeMap::new();
+    let mut feature_mv: Option<i16> = None;
+
+    for (name, level) in features {
+        let Some(feat) = crabka_metadata::feature(name) else {
+            let mut known: Vec<&str> = crabka_metadata::feature_registry()
+                .iter()
+                .map(|f| f.name())
+                .collect();
+            known.sort_unstable();
+            return Err(format!(
+                "Unsupported feature: {name}. Supported features are: {}",
+                known.join(", ")
+            ));
+        };
+        let (min, max) = feat.supported_range();
+        if *level < min || *level > max {
+            return Err(format!(
+                "feature {name}={level} is outside the supported range {min}..={max}"
+            ));
+        }
+        if name == METADATA_VERSION_FEATURE {
+            if release_version.is_some() {
+                return Err(
+                    "Use --release-version instead of --feature metadata.version=X to avoid ambiguity.".into(),
+                );
+            }
+            feature_mv = Some(*level);
+        }
+        if overrides.insert(name.clone(), *level).is_some() {
+            return Err(format!("feature {name} specified more than once"));
+        }
+    }
+
+    let bootstrap_mv = if let Some(mv) = feature_mv {
+        mv
+    } else if let Some(rv) = release_version {
+        resolve_release_level(rv)?
+    } else {
+        METADATA_VERSION_MAX
+    };
+
+    // KIP-1022 dependency validation over the fully-resolved feature set
+    // (every registered feature at its override-or-default level).
+    let resolved: BTreeMap<String, i16> = crabka_metadata::feature_registry()
+        .iter()
+        .map(|f| {
+            let level = overrides
+                .get(f.name())
+                .copied()
+                .unwrap_or_else(|| f.default_level(bootstrap_mv));
+            (f.name().to_string(), level)
+        })
+        .collect();
+    crabka_metadata::validate_feature_dependencies(&resolved)?;
+
+    Ok((bootstrap_mv, overrides))
 }
 
 fn parse_scram_spec(s: &str) -> Result<ScramSpec, String> {
@@ -378,26 +477,25 @@ pub async fn run(args: FormatArgs) -> i32 {
         }));
     }
 
-    // KIP-778 bootstrap: every formatted cluster finalizes a real
-    // metadata.version so the image never sits at MetadataVersion.UNKNOWN.
-    let release = args
-        .release_version
-        .as_deref()
-        .map(resolve_release_level)
-        .transpose();
-    let release_level = match release {
-        Ok(Some(level)) => level,
-        Ok(None) => crabka_metadata::metadata_version::METADATA_VERSION_MAX,
-        Err(e) => {
-            eprintln!("crabka format: {e}");
-            return EXIT_BOOTSTRAP_FAIL;
-        }
-    };
-    // KIP-584 / KIP-1022 bootstrap: finalize every registered feature at its
-    // per-release default, derived from the bootstrap metadata.version. A 4.0
-    // format thus seeds metadata.version, group.version, etc. at their 4.0
-    // defaults so a fresh cluster engages each feature with no manual step.
-    records.extend(crabka_metadata::bootstrap_feature_records(release_level));
+    // KIP-584 / KIP-778 / KIP-1022 bootstrap: finalize each registered feature
+    // at its `--feature` override, else its per-release default for the
+    // resolved bootstrap metadata.version (`--feature metadata.version` >
+    // `--release-version` > latest stable). A 4.0 format thus seeds
+    // metadata.version, group.version, etc. at their 4.0 defaults so a fresh
+    // cluster engages each feature with no manual step; a level-0 feature is
+    // omitted (absent = disabled), matching `kafka-storage format`.
+    let (bootstrap_mv, feature_overrides) =
+        match resolve_format_features(args.release_version.as_deref(), &args.feature) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("crabka format: {e}");
+                return EXIT_INVALID_FEATURE;
+            }
+        };
+    records.extend(crabka_metadata::bootstrap_feature_records_with_overrides(
+        bootstrap_mv,
+        &feature_overrides,
+    ));
 
     // Build the seed records. Each `--add-scram` is hashed *here* (CLI
     // side) using `hash_scram_password_with_salt` from `crabka-security`
@@ -543,23 +641,34 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_seeds_every_registered_feature_at_release_default() {
+    fn bootstrap_seeds_every_nonzero_feature_at_release_default() {
         let bootstrap_mv = crabka_metadata::metadata_version::from_version_string("4.0")
             .unwrap()
             .feature_level();
         // Exercises the exact helper `run()` uses, so it tracks the registry
-        // as features are added in later tasks.
+        // as features are added in later tasks. Features whose release default
+        // is 0 are omitted (KIP-1022: level 0 = absent = disabled), matching
+        // `kafka-storage format`.
         let records = crabka_metadata::bootstrap_feature_records(bootstrap_mv);
         for feat in crabka_metadata::feature_registry() {
             let found = records.iter().find_map(|r| match r {
                 MetadataRecord::V1FeatureLevel(f) if f.name == feat.name() => Some(f.level),
                 _ => None,
             });
-            assert!(
-                found == Some(feat.default_level(bootstrap_mv)),
-                "feature {} not seeded at its release default",
-                feat.name()
-            );
+            let expected = feat.default_level(bootstrap_mv);
+            if expected > 0 {
+                assert!(
+                    found == Some(expected),
+                    "feature {} not seeded at its release default",
+                    feat.name()
+                );
+            } else {
+                assert!(
+                    found.is_none(),
+                    "feature {} defaults to 0 and must not be seeded",
+                    feat.name()
+                );
+            }
         }
     }
 
@@ -572,6 +681,94 @@ mod tests {
             resolve_release_level("4.0").unwrap()
                 == crabka_metadata::metadata_version::METADATA_VERSION_MAX
         );
+    }
+
+    #[test]
+    fn parse_feature_spec_happy_path() {
+        assert!(parse_feature_spec("group.version=1").unwrap() == ("group.version".to_string(), 1));
+        assert!(
+            parse_feature_spec("metadata.version=20").unwrap()
+                == ("metadata.version".to_string(), 20)
+        );
+    }
+
+    #[test]
+    fn parse_feature_spec_error_branches() {
+        for bad in [
+            "noequals",          // missing '='
+            "group.version=abc", // non-integer level
+            "group.version=",    // empty level
+            "=1",                // empty name
+        ] {
+            assert!(
+                parse_feature_spec(bad).is_err(),
+                "expected error for {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_features_defaults_bootstrap_mv_to_max() {
+        // No --release-version, no metadata.version override → bootstrap at MAX;
+        // an explicit non-metadata feature becomes an override.
+        let (mv, ov) =
+            resolve_format_features(None, &[("group.version".into(), 1)]).expect("resolve");
+        assert!(mv == crabka_metadata::metadata_version::METADATA_VERSION_MAX);
+        assert!(ov.get("group.version") == Some(&1));
+    }
+
+    #[test]
+    fn resolve_features_metadata_version_feature_sets_bootstrap_mv() {
+        let (mv, ov) =
+            resolve_format_features(None, &[("metadata.version".into(), 20)]).expect("resolve");
+        assert!(mv == 20);
+        assert!(ov.get("metadata.version") == Some(&20));
+    }
+
+    #[test]
+    fn resolve_features_release_version_sets_bootstrap_mv() {
+        let (mv, ov) = resolve_format_features(Some("4.0-IV0"), &[]).expect("resolve");
+        assert!(mv == 22);
+        assert!(ov.is_empty());
+    }
+
+    #[test]
+    fn resolve_features_release_and_feature_combine() {
+        // --release-version sets the base; a non-metadata --feature overrides it.
+        let (mv, ov) =
+            resolve_format_features(Some("4.0-IV0"), &[("transaction.version".into(), 2)])
+                .expect("resolve");
+        assert!(mv == 22);
+        assert!(ov.get("transaction.version") == Some(&2));
+    }
+
+    #[test]
+    fn resolve_features_rejects_release_plus_metadata_version_feature() {
+        // Ambiguity: both --release-version and --feature metadata.version set MV.
+        let err = resolve_format_features(Some("4.0-IV0"), &[("metadata.version".into(), 24)])
+            .unwrap_err();
+        assert!(err.contains("metadata.version"), "{err}");
+    }
+
+    #[test]
+    fn resolve_features_rejects_unknown_feature() {
+        let err = resolve_format_features(None, &[("bogus.version".into(), 1)]).unwrap_err();
+        assert!(err.contains("Unsupported feature"), "{err}");
+        assert!(err.contains("bogus.version"), "{err}");
+    }
+
+    #[test]
+    fn resolve_features_rejects_out_of_range_level() {
+        // group.version supports 0..=1.
+        assert!(resolve_format_features(None, &[("group.version".into(), 5)]).is_err());
+        // metadata.version supports 7..=25.
+        assert!(resolve_format_features(None, &[("metadata.version".into(), 99)]).is_err());
+        assert!(resolve_format_features(None, &[("metadata.version".into(), 1)]).is_err());
+    }
+
+    #[test]
+    fn resolve_features_rejects_bad_release_string() {
+        assert!(resolve_format_features(Some("2.8"), &[]).is_err());
     }
 
     #[test]
