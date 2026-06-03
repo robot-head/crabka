@@ -24,6 +24,11 @@
 //!    produce as alice; the tight alice-specific limit fires, not the default.
 //! 5. `non_super_user_denied` — alice (no ACLs) calls AlterClientQuotas;
 //!    must receive CLUSTER_AUTHORIZATION_FAILED (31) on every entry.
+//! 6. `request_percentage_throttles_produce` — Set a tiny `request_percentage`
+//!    (KIP-124) for alice with NO byte-rate quota; produce a small payload;
+//!    assert throttle_time_ms > 0. Proves the request-quota throttle is
+//!    communicated in the response (KIP-219 throttle-then-respond) and not
+//!    just silently muted.
 //!
 //! Test 4 uses the Option B approach: user-specific overrides user-default.
 //! The (user, client-id) tuple precedence is covered by unit tests in
@@ -731,6 +736,96 @@ async fn producer_byte_rate_throttles_produce() {
     assert!(
         resp.throttle_time_ms > 0,
         "expected throttle_time_ms > 0, got {}",
+        resp.throttle_time_ms
+    );
+
+    handle.shutdown().await;
+}
+
+/// Test 6: Set a tiny `(user=alice) request_percentage` and NO byte-rate quota;
+/// alice produces a small payload; assert `throttle_time_ms > 0`.
+///
+/// This is the KIP-124 request quota (server-side CPU-time throttle), which
+/// KIP-219 requires the broker to communicate via `throttle_time_ms` while
+/// muting the channel — *not* silently delay. `request_percentage=0.001`
+/// gives the bucket a ~10µs/sec budget, far below any real produce handler's
+/// processing time, so even a single small produce trips the quota and the
+/// response must carry a non-zero throttle time. No `producer_byte_rate` is
+/// set, so the throttle can only come from the request quota.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn request_percentage_throttles_produce() {
+    let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
+        "admin",
+        &[("admin", "admin-secret"), ("alice", "alice-secret")],
+    )
+    .await;
+
+    seed_compat_shim_disable_acl(&handle).await;
+    create_topic_as_admin(addr, "throttle-request", 1, 1).await;
+    wait_partition_exists(&handle, "throttle-request", 0).await;
+    seed_alice_write_acl(&handle, "throttle-request").await;
+
+    // Set a tiny request_percentage for alice (no byte-rate quota).
+    let alter_resp = drive_alter_client_quotas_sasl(
+        addr,
+        "admin",
+        "admin-secret",
+        vec![(
+            vec![("user".into(), Some("alice".into()))],
+            vec![("request_percentage".into(), 0.001, false)],
+        )],
+        false,
+    )
+    .await;
+    assert!(alter_resp[0].1 == 0, "alter quota must succeed");
+
+    // Wait for the quota to appear in the image before producing.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let img = handle.controller_image_for_test();
+        let key: crabka_metadata::EntityKey = vec![("user".into(), Some("alice".into()))];
+        if let Some(cfgs) = img.client_quotas().get(&key)
+            && cfgs.get("request_percentage") == Some(&0.001)
+        {
+            break;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "request_percentage quota not visible in image within 5s"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // Alice produces a single small record. Retry past TOPIC_AUTHORIZATION_FAILED
+    // (29) while the alice Write ACL propagates to the handler's image snapshot.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let resp = loop {
+        let r = drive_produce_sasl(addr, "alice", b"alice-secret", "throttle-request", 16, 1).await;
+        let ec = r
+            .responses
+            .first()
+            .and_then(|t| t.partition_responses.first())
+            .map(|p| p.error_code)
+            .unwrap_or(-1);
+        if ec != 29 {
+            break r;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "ACL still not applied after 15s; error_code=29"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+
+    let part = &resp.responses[0].partition_responses[0];
+    assert!(
+        part.error_code == 0,
+        "produce must succeed, error_code={}",
+        part.error_code
+    );
+    assert!(
+        resp.throttle_time_ms > 0,
+        "expected request-quota throttle_time_ms > 0, got {}",
         resp.throttle_time_ms
     );
 
