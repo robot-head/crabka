@@ -207,3 +207,54 @@ fn map_error(
         other => Err(StreamsClientError::Server(other)),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::map_error;
+    use crate::error::StreamsClientError;
+    use assert2::check;
+    use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
+
+    fn resp(code: i16) -> StreamsGroupHeartbeatResponse {
+        StreamsGroupHeartbeatResponse {
+            error_code: code,
+            error_message: Some("detail".into()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ok_code_passes_through() {
+        check!(map_error(resp(0)).is_ok());
+    }
+
+    #[test]
+    fn invalid_topology_family_maps() {
+        for code in [130i16, 131, 132] {
+            check!(matches!(
+                map_error(resp(code)),
+                Err(StreamsClientError::InvalidTopology { code: c, .. }) if c == code
+            ));
+        }
+    }
+
+    #[test]
+    fn auth_not_found_and_unknown_codes_map() {
+        check!(matches!(
+            map_error(resp(30)),
+            Err(StreamsClientError::Authorization(30))
+        ));
+        check!(matches!(
+            map_error(resp(29)),
+            Err(StreamsClientError::Authorization(29))
+        ));
+        check!(matches!(
+            map_error(resp(69)),
+            Err(StreamsClientError::GroupIdNotFound)
+        ));
+        check!(matches!(
+            map_error(resp(99)),
+            Err(StreamsClientError::Server(99))
+        ));
+    }
+}
