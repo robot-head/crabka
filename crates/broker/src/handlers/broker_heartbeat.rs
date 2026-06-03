@@ -30,6 +30,8 @@ pub(crate) fn handle(
     let liveness = broker.liveness.clone();
     let controller = broker.controller.clone();
     let node_id = broker.config.node_id;
+    let metrics = broker.metrics.clone();
+    let recovery = broker.unclean_recovery.clone();
     // Check leadership: this broker is the controller leader iff the
     // watch channel reports a leader id equal to our own node_id.
     let is_leader = controller
@@ -74,6 +76,44 @@ pub(crate) fn handle(
         } else {
             false
         };
+
+        // KIP-112: a broker that reports offline log dirs is still alive, so
+        // the liveness `alive→dead` failover never fires. Map the reported
+        // offline dir UUIDs to the reporting broker's affected partitions and
+        // fail them over (elect from surviving alive ISR, drop the offline
+        // replica). Only the controller leader reaches here (NOT_CONTROLLER
+        // early-return above), and it's idempotent across repeated heartbeats.
+        if !req.offline_log_dirs.is_empty() {
+            let offline: std::collections::HashSet<uuid::Uuid> = req
+                .offline_log_dirs
+                .iter()
+                .map(|u| uuid::Uuid::from_bytes(u.0))
+                .collect();
+            let image = controller.current_image();
+            let plan = crate::leader_election::compute_offline_dir_failover_changes(
+                &image,
+                broker_id_u64,
+                &offline,
+                &liveness,
+                &metrics,
+            )
+            .await;
+            if !plan.changes.is_empty()
+                && let Err(e) = controller.submit_change(plan.changes).await
+            {
+                tracing::warn!(error = %e, "offline-dir failover submit_change failed");
+            }
+            for (topic, partition, strategy) in plan.recoveries {
+                recovery
+                    .enqueue(crate::unclean_recovery::RecoveryJob {
+                        topic,
+                        partition,
+                        strategy,
+                        reply: None,
+                    })
+                    .await;
+            }
+        }
 
         let resp = BrokerHeartbeatResponse {
             throttle_time_ms: 0,
