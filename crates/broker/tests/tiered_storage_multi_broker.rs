@@ -34,7 +34,7 @@
 //! 4. Produce 160 records via broker 1; wait until several segments land
 //!    in the shared remote dir (leader ran the copy task and published
 //!    `CopySegment*` events to `__remote_log_metadata`).
-//! 5. Wait 8s for broker 2's RLMM consumer to consume the CopySegment events.
+//! 5. Wait 8s for broker 2's RLMM consumer to consume the `CopySegment` events.
 //! 6. Shut down broker 1 (the partition leader).  The surviving quorum (2/3)
 //!    commits a new partition leader record; broker 2 wins the election.
 //! 7. Consume ALL records from broker 2 at offset 0.  These can only come
