@@ -1058,6 +1058,126 @@ mod tests {
         );
     }
 
+    /// PROBLEM A under LOG COMPACTION (the resurrection trap): a downgraded
+    /// group whose batch tombstoned the k3 `GroupMetadata` but NOT the
+    /// group-level k6 `TargetAssignmentMetadata` would, after compaction GCs the
+    /// tombstoned k3, leave a surviving k6 write behind. `__consumer_offsets` is
+    /// compacted by default, so replay then sees the post-compaction residue:
+    /// just the surviving k6 write plus the fresh classic k2 — NO k3, NO k3
+    /// tombstone. Because `replay_target_assignment_metadata` does
+    /// `seeds.entry(..).or_default()`, that lone k6 re-creates a next-gen seed,
+    /// `finalize` classifies the group next-gen, and the classic k2 is dropped —
+    /// resurrecting the group as an empty next-gen consumer. The fix tombstones
+    /// k6 in the downgrade batch so compaction retains the k6 TOMBSTONE (last
+    /// value per key) instead of a stale write; this test pins the corrected
+    /// post-compaction shape and asserts the group replays CLASSIC.
+    #[tokio::test]
+    async fn compacted_downgrade_residue_replays_as_classic() {
+        use crate::coordinator::unified::GroupType;
+        use crate::coordinator::unified::persistence_next_gen as ng;
+
+        let coord = bare_coordinator();
+
+        // Post-compaction record stream. Compaction keeps only the LAST value
+        // per key, and the k3 + its tombstone both GC away (both gone), leaving:
+        let (k2_key, k2_val) = classic_group_record("g", "m1");
+        let stream: Vec<(bytes::Bytes, Option<bytes::Bytes>)> = vec![
+            // The k6 TOMBSTONE the fix emits in the downgrade batch survives
+            // compaction as the last value for the group-level k6 key. Replaying
+            // a tombstone must NOT create a next-gen seed.
+            (
+                ng::encode_key(&ng::NextGenKey::TargetAssignmentMetadata {
+                    group_id: "g".into(),
+                }),
+                None,
+            ),
+            // The fresh classic k2 written by the downgrade.
+            (k2_key, Some(k2_val)),
+        ];
+
+        let batch = RecordBatch::default();
+        let mut acc = Replayed::default();
+        for (k, v) in stream {
+            let key = persistence::parse_key(&k).unwrap();
+            match v {
+                Some(value) => apply_record(&coord, &mut acc, key, &value, &batch).unwrap(),
+                None => apply_tombstone(&coord, key),
+            }
+        }
+        finalize(&coord, acc);
+
+        // The group must replay CLASSIC, not resurrect as next-gen.
+        assert!(coord.group_type("g") != Some(GroupType::NextGen));
+        let snap = coord
+            .describe_group("g")
+            .await
+            .expect("classic group present");
+        assert!(snap.members.iter().any(|m| m.member_id == "m1"));
+        assert!(
+            coord.find("g").is_some_and(
+                |h| h.kind == crate::coordinator::unified::actor::GroupKindTag::Classic
+            )
+        );
+    }
+
+    /// Counterpoint to `compacted_downgrade_residue_replays_as_classic`: WITHOUT
+    /// the k6 tombstone, a surviving k6 WRITE re-creates a next-gen seed and the
+    /// group wrongly resurrects as next-gen (the bug being fixed). This pins the
+    /// hazard so a regression that drops the k6 tombstone is caught.
+    #[tokio::test]
+    async fn surviving_k6_write_resurrects_as_next_gen_without_fix() {
+        use crate::coordinator::unified::persistence_next_gen as ng;
+
+        let coord = bare_coordinator();
+        let (k2_key, k2_val) = classic_group_record("g", "m1");
+        let stream: Vec<(bytes::Bytes, Option<bytes::Bytes>)> = vec![
+            // A surviving k6 WRITE (what compaction would retain if the
+            // downgrade had NOT tombstoned k6).
+            (
+                ng::encode_key(&ng::NextGenKey::TargetAssignmentMetadata {
+                    group_id: "g".into(),
+                }),
+                Some(
+                    ng::TargetAssignmentMetadataValue {
+                        assignment_epoch: 1,
+                    }
+                    .encode(),
+                ),
+            ),
+            (k2_key, Some(k2_val)),
+        ];
+
+        let batch = RecordBatch::default();
+        let mut acc = Replayed::default();
+        for (k, v) in stream {
+            let key = persistence::parse_key(&k).unwrap();
+            match v {
+                Some(value) => apply_record(&coord, &mut acc, key, &value, &batch).unwrap(),
+                None => apply_tombstone(&coord, key),
+            }
+        }
+
+        // The lone k6 write re-created a next-gen seed via the
+        // `seeds.entry(..).or_default()` in `replay_target_assignment_metadata`
+        // — the exact hazard the k6 tombstone prevents. `finalize` derives its
+        // next-gen id set from `coordinator.seeds`, so this stray seed is what
+        // makes it suppress the classic k2 reconstruction.
+        assert!(coord.seeds.contains_key("g"));
+
+        finalize(&coord, acc);
+
+        // Resurrection: `finalize` spawned a CONSUMER (next-gen) actor for "g"
+        // off that stray seed instead of the classic actor the k2 should have
+        // produced. (Asserting the spawned actor's kind, set synchronously at
+        // spawn, avoids the async `group_types` mark the actor records only as
+        // it processes its seed.)
+        assert!(
+            coord.find("g").is_some_and(
+                |h| h.kind == crate::coordinator::unified::actor::GroupKindTag::Consumer
+            )
+        );
+    }
+
     /// Existing upgrade-only replay (k3 live, no later tombstone) must still
     /// yield a CONSUMER (next-gen) group. Guards the PROBLEM A fix against an
     /// over-eager seed removal.

@@ -115,6 +115,53 @@ pub mod fake {
                 })
             })
         }
+
+        /// `true` iff some appended record tombstones the next-gen k3
+        /// `GroupMetadata` record for `group_id` — a key whose leading `i16`
+        /// version is `3` (next-gen `GroupMetadata`) with a null value. Used to
+        /// assert the downgrade flip atomically removed the next-gen group
+        /// record. `parse_key` dispatches version 3 to the next-gen family.
+        pub async fn has_next_gen_group_metadata_tombstone(&self, group_id: &str) -> bool {
+            use crate::coordinator::unified::persistence::{Key, parse_key};
+            use crate::coordinator::unified::persistence_next_gen::NextGenKey;
+            self.appended.lock().await.iter().any(|batch| {
+                batch.records.iter().any(|rec| {
+                    rec.value.is_none()
+                        && rec.key.as_ref().is_some_and(|k| {
+                            matches!(
+                                parse_key(k),
+                                Ok(Key::NextGen(NextGenKey::GroupMetadata { group_id: ref gid }))
+                                    if gid == group_id
+                            )
+                        })
+                })
+            })
+        }
+
+        /// `true` iff some appended record tombstones the group-level next-gen
+        /// k6 `TargetAssignmentMetadata` record for `group_id` — a key whose
+        /// leading `i16` version is `6` with a null value. Used to assert the
+        /// downgrade flip also drops the group-level target metadata, which
+        /// would otherwise survive log compaction and resurrect the group as
+        /// next-gen on replay. `parse_key` dispatches version 6 to the next-gen
+        /// family.
+        pub async fn has_next_gen_target_metadata_tombstone(&self, group_id: &str) -> bool {
+            use crate::coordinator::unified::persistence::{Key, parse_key};
+            use crate::coordinator::unified::persistence_next_gen::NextGenKey;
+            self.appended.lock().await.iter().any(|batch| {
+                batch.records.iter().any(|rec| {
+                    rec.value.is_none()
+                        && rec.key.as_ref().is_some_and(|k| {
+                            matches!(
+                                parse_key(k),
+                                Ok(Key::NextGen(NextGenKey::TargetAssignmentMetadata {
+                                    group_id: ref gid
+                                })) if gid == group_id
+                            )
+                        })
+                })
+            })
+        }
     }
 }
 

@@ -149,7 +149,12 @@ pub(crate) fn convert_consumer_to_classic(
             .classic
             .as_ref()
             .expect("downgrade precondition: all members are hosted classic members");
-        let seed = target_to_consumer_assignment(&m.assigned_partitions, image);
+        // Seed from the server-computed TARGET, not `assigned_partitions`: a
+        // hosted classic member's `assigned_partitions` only fills in as a
+        // NATIVE consumer acks epochs over heartbeats, which a hosted classic
+        // member never does. Its real partitions live in `target.per_member`,
+        // so reading the target keeps them across the downgrade.
+        let seed = member_target_assignment(state, mid, image);
         let mut cm = ClassicMember::new(
             mid.clone(),
             m.client_id.clone(),
@@ -177,6 +182,35 @@ pub(crate) fn convert_consumer_to_classic(
     // install_assignments overrides the consumer group's epoch.
     classic.generation_id = state.group_epoch.max(0);
     classic
+}
+
+/// The atomic record batch for a downgrade: tombstone the consumer group's
+/// group-level next-gen k3 `GroupMetadata` and k6 `TargetAssignmentMetadata`,
+/// every member's k5/k7/k8, and write the classic k2 `GroupMetadata` for the
+/// re-expressed classic group. All in one batch so the flip is all-or-nothing
+/// (and bootstrap replay sees a clean next-gen-drop → classic-write sequence;
+/// log order wins).
+///
+/// The k6 tombstone is load-bearing under log compaction: `__consumer_offsets`
+/// is compacted, so without it a surviving post-upgrade k6 write (group-level,
+/// never per-member-tombstoned) would outlive the GC'd k3 and re-create a
+/// next-gen seed on replay, resurrecting the downgraded group as next-gen.
+pub(crate) fn downgrade_pending_records(
+    consumer: &ConsumerState,
+    classic: &ClassicState,
+) -> super::actor::PendingRecords {
+    let mut pending = super::actor::PendingRecords {
+        next_gen_group_metadata_tombstone: true,
+        next_gen_target_metadata_tombstone: true,
+        classic_group_metadata: Some(super::actor::classic_group_metadata_record(classic)),
+        ..Default::default()
+    };
+    for mid in consumer.members.keys() {
+        pending.member_metadata.push((mid.clone(), None));
+        pending.target_per_member.push((mid.clone(), None));
+        pending.current_per_member.push((mid.clone(), None));
+    }
+    pending
 }
 
 /// Translate a member's server-side target (topic-ID → partitions) into a
@@ -598,7 +632,11 @@ mod tests {
             member_epoch: 7,
             previous_member_epoch: 6,
             assignment_state: MemberAssignmentState::Stable,
-            assigned_partitions: [(t1, vec![0, 1])].into(),
+            // A hosted classic member never acks epochs, so its
+            // `assigned_partitions` stays EMPTY — its real partitions live in
+            // the group's target (set below). The downgrade must seed from the
+            // target, not from this empty map.
+            assigned_partitions: std::collections::HashMap::new(),
             partitions_pending_revocation: std::collections::HashMap::new(),
             last_seen: Instant::now(),
             classic: Some(ClassicMemberFacade {
@@ -610,6 +648,13 @@ mod tests {
             }),
         };
         state.add_or_update_member(m);
+        // The member's real partitions are in the server target, not in
+        // `assigned_partitions`.
+        state.target.epoch = 7;
+        state
+            .target
+            .per_member
+            .insert("m1".into(), [(t1, vec![0, 1])].into());
 
         let classic = convert_consumer_to_classic(&state, &image);
         assert!(classic.group_id == "g");

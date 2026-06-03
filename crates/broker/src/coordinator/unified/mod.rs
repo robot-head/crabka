@@ -199,6 +199,17 @@ impl GroupCoordinator {
             .or_insert(GroupType::Classic);
     }
 
+    /// After an in-place downgrade (KIP-848), drop the consumer seed so a
+    /// respawn does not re-hydrate the group as next-gen, and record it as
+    /// classic. Unlike [`mark_classic`] (first-mark-wins via `or_insert`), this
+    /// FORCES the type to `Classic` — a downgrade must override any prior
+    /// `NextGen` lock the group carried while it was a consumer group.
+    pub fn mark_classic_after_downgrade(&self, group_id: &str) {
+        self.seeds.remove(group_id);
+        self.seeds_cache.remove(group_id);
+        self.group_types.insert(group_id.into(), GroupType::Classic);
+    }
+
     pub fn mark_next_gen(&self, group_id: &str) {
         self.group_types
             .entry(group_id.into())

@@ -365,6 +365,19 @@ async fn actor_loop(
                                 break;
                             }
                         }
+                        // KIP-848 DOWNGRADE: only a leave can remove the last native
+                        // consumer member, but we re-check after every heartbeat;
+                        // maybe_downgrade is a cheap no-op while any native member
+                        // remains. The reply for this RPC is already sent above.
+                        if let Err(e) = maybe_downgrade(
+                            &mut group, &config, &*metadata, &*offsets_log, &coordinator,
+                        ).await {
+                            tracing::warn!(
+                                group_id = %group.group_id, error = %e,
+                                "next-gen actor exiting after downgrade log-write failure",
+                            );
+                            break;
+                        }
                     }
                     GroupActorMessage::OffsetValidate { member_id, member_epoch, reply } => {
                         let result = match group.as_consumer().and_then(|s| s.members.get(&member_id)) {
@@ -547,6 +560,18 @@ async fn actor_loop(
                     {
                         break;
                     }
+                    // KIP-848 DOWNGRADE: an eviction may have removed the last
+                    // native consumer member, leaving only hosted classic
+                    // members → flip back to classic in place.
+                    if let Err(e) = maybe_downgrade(
+                        &mut group, &config, &*metadata, &*offsets_log, &coordinator,
+                    ).await {
+                        tracing::warn!(
+                            group_id = %gid, error = %e,
+                            "next-gen actor exiting after tick downgrade log-write failure",
+                        );
+                        break;
+                    }
                 } else if let Some(state) = group.as_classic_mut() {
                     let dropped = state.expire_dead_members(Instant::now());
                     if !dropped.is_empty() {
@@ -701,6 +726,46 @@ async fn handle_session_tick(
         return Err(e);
     }
     Ok(())
+}
+
+/// KIP-848 DOWNGRADE trigger. After a membership change on a consumer-kind
+/// group, flip it back to classic in place when no NATIVE consumer member
+/// remains, there ARE hosted classic members, and policy allows it. The flip
+/// is one atomic batch: tombstone the next-gen k3 + k6 (both group-level) +
+/// every member's k5/k7/k8, and write the classic k2 `GroupMetadata`. Returns `Ok(true)` if a flip
+/// happened, `Ok(false)` if the conditions weren't met, `Err` on a log-write
+/// failure (the caller exits the actor loop).
+async fn maybe_downgrade(
+    group: &mut Group,
+    config: &NextGenConfig,
+    metadata: &dyn MetadataProvider,
+    offsets_log: &dyn OffsetsLog,
+    coordinator: &super::GroupCoordinator,
+) -> Result<bool, crate::error::BrokerError> {
+    let Some(state) = group.as_consumer() else {
+        return Ok(false);
+    };
+    if !config.migration_policy.allows_downgrade() {
+        return Ok(false);
+    }
+    if state.members.is_empty() {
+        // Fully empty: normal cleanup (a tombstoned next-gen group), not a
+        // downgrade — there are no hosted classic members to re-express.
+        return Ok(false);
+    }
+    if state.members.values().any(|m| m.classic.is_none()) {
+        // A native consumer member is still present: the group stays next-gen.
+        return Ok(false);
+    }
+    let image = metadata.snapshot();
+    let classic = migration::convert_consumer_to_classic(state, &image);
+    let pending = migration::downgrade_pending_records(state, &classic);
+    let group_id = group.group_id.clone();
+    let batch = pending.into_batch(&group_id, chrono_now_ms());
+    offsets_log.append(batch).await?;
+    coordinator.mark_classic_after_downgrade(&group_id);
+    *group.kind_mut() = GroupKind::Classic(classic);
+    Ok(true)
 }
 
 fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
@@ -1187,6 +1252,13 @@ pub(crate) struct PendingRecords {
     /// When set, the batch also tombstones the classic k2 `GroupMetadata` record
     /// for this group (used by an upgrade flip).
     pub classic_group_metadata_tombstone: bool,
+    /// Tombstone the next-gen k3 `GroupMetadata` (downgrade flip).
+    pub next_gen_group_metadata_tombstone: bool,
+    /// Tombstone the next-gen k6 `TargetAssignmentMetadata` (downgrade flip).
+    pub next_gen_target_metadata_tombstone: bool,
+    /// Write the classic k2 `GroupMetadata` value (downgrade flip).
+    pub classic_group_metadata:
+        Option<crate::coordinator::unified::persistence::GroupMetadataValue>,
 }
 
 impl PendingRecords {
@@ -1197,6 +1269,9 @@ impl PendingRecords {
             && self.target_per_member.is_empty()
             && self.current_per_member.is_empty()
             && !self.classic_group_metadata_tombstone
+            && !self.next_gen_group_metadata_tombstone
+            && !self.next_gen_target_metadata_tombstone
+            && self.classic_group_metadata.is_none()
     }
 
     pub fn into_batch(self, group_id: &str, now_ms: i64) -> RecordBatch {
@@ -1263,6 +1338,32 @@ impl PendingRecords {
                     },
                 ),
                 None,
+            );
+        }
+        if self.next_gen_group_metadata_tombstone {
+            push(
+                encode_key(&NextGenKey::GroupMetadata {
+                    group_id: group_id.into(),
+                }),
+                None,
+            );
+        }
+        if self.next_gen_target_metadata_tombstone {
+            push(
+                encode_key(&NextGenKey::TargetAssignmentMetadata {
+                    group_id: group_id.into(),
+                }),
+                None,
+            );
+        }
+        if let Some(v) = self.classic_group_metadata {
+            push(
+                crate::coordinator::unified::persistence::encode_key(
+                    &crate::coordinator::unified::persistence::Key::GroupMetadata {
+                        group_id: group_id.into(),
+                    },
+                ),
+                Some(v.encode_value()),
             );
         }
 
@@ -1462,6 +1563,44 @@ pub(crate) fn full_pending_records(state: &super::consumer_state::GroupState) ->
     snapshot_pending_after_change(state, &all_member_ids)
 }
 
+/// Build a wire-faithful classic k2 `GroupMetadataValue` from a downgraded
+/// [`super::classic_state::Group`]. Every classic member is persisted with its
+/// `subscription` (the selected `protocol_metadata`) and `assignment` (the seed
+/// the downgrade computed from the next-gen target), so bootstrap replay
+/// reconstructs the classic group with its members and their assignments intact
+/// (see `apply_group_metadata` in `coordinator::bootstrap`). Used by the
+/// downgrade flip.
+pub(crate) fn classic_group_metadata_record(
+    state: &super::classic_state::Group,
+) -> crate::coordinator::unified::persistence::GroupMetadataValue {
+    use crate::coordinator::unified::persistence::{GroupMetadataValue, MemberMetadata};
+    let members = state
+        .members
+        .values()
+        .map(|m| MemberMetadata {
+            member_id: m.member_id.clone(),
+            group_instance_id: m.group_instance_id.clone(),
+            client_id: m.client_id.clone(),
+            client_host: m.host.clone(),
+            rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis()).unwrap_or(60_000),
+            session_timeout_ms: i32::try_from(m.session_timeout.as_millis()).unwrap_or(30_000),
+            subscription: m.protocol_metadata.clone(),
+            assignment: m.assignment.clone().unwrap_or_default(),
+        })
+        .collect();
+    GroupMetadataValue {
+        protocol_type: state
+            .protocol_type
+            .clone()
+            .unwrap_or_else(|| "consumer".into()),
+        generation: state.generation_id,
+        protocol_name: state.protocol_name.clone(),
+        leader: state.leader_id.clone(),
+        current_state_timestamp_ms: chrono_now_ms(),
+        members,
+    }
+}
+
 async fn flush_pending(
     state: &super::consumer_state::GroupState,
     pending: PendingRecords,
@@ -1526,6 +1665,23 @@ mod tests {
         topic: &str,
         partitions: i32,
     ) -> (Arc<GroupCoordinator>, Arc<InMemoryOffsetsLog>) {
+        make_coordinator_with_topic_policy(
+            topic,
+            partitions,
+            crate::coordinator::unified::config::ConsumerGroupMigrationPolicy::default(),
+        )
+    }
+
+    /// As [`make_coordinator_with_topic`], but with an explicit migration
+    /// policy. The hosted-classic 64d-F tests pin `Upgrade` so the native
+    /// member's leave in `seed_and_upgrade` does NOT trigger a downgrade back
+    /// to classic (which would strand them on the wrong RPC path); the
+    /// downgrade trigger itself is exercised with `Bidirectional`/`Downgrade`.
+    fn make_coordinator_with_topic_policy(
+        topic: &str,
+        partitions: i32,
+        policy: crate::coordinator::unified::config::ConsumerGroupMigrationPolicy,
+    ) -> (Arc<GroupCoordinator>, Arc<InMemoryOffsetsLog>) {
         let topic_id = Uuid([7; 16]);
         let input = ReconcileInput {
             topic_id_by_name: [(topic.to_string(), topic_id)].into(),
@@ -1535,7 +1691,10 @@ mod tests {
         let metadata: Arc<dyn MetadataProvider> = Arc::new(StaticMetadata { input });
         let log = Arc::new(InMemoryOffsetsLog::default());
         let coord = Arc::new(GroupCoordinator::new(
-            NextGenConfig::default(),
+            NextGenConfig {
+                migration_policy: policy,
+                ..NextGenConfig::default()
+            },
             crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             metadata,
             log.clone(),
@@ -2451,7 +2610,14 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hosted_classic_member_syncs_translated_assignment() {
-        let (coord, _log) = make_coordinator_with_topic("t", 2);
+        // `Upgrade` policy: the native member's leave in `seed_and_upgrade`
+        // must NOT downgrade the group back to classic — this test exercises
+        // serving a hosted classic member from the consumer-kind reconciler.
+        let (coord, _log) = make_coordinator_with_topic_policy(
+            "t",
+            2,
+            crate::coordinator::unified::config::ConsumerGroupMigrationPolicy::Upgrade,
+        );
         let handle = seed_and_upgrade(&coord, "t").await;
 
         // 1. Heartbeat: the upgrade gave m-classic a target that differs from
@@ -2501,7 +2667,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn new_classic_member_joins_upgraded_group_and_gets_assignment() {
-        let (coord, _log) = make_coordinator_with_topic("t", 2);
+        // `Upgrade` policy: keep the group consumer-kind after the native
+        // member leaves in `seed_and_upgrade` (see the note above).
+        let (coord, _log) = make_coordinator_with_topic_policy(
+            "t",
+            2,
+            crate::coordinator::unified::config::ConsumerGroupMigrationPolicy::Upgrade,
+        );
         let handle = seed_and_upgrade(&coord, "t").await;
 
         // First bring m-classic fully in sync so it holds a stable assignment.
@@ -2553,5 +2725,127 @@ mod tests {
             union == vec![0, 1],
             "the union of partitions must be {{0, 1}}"
         );
+    }
+
+    /// KIP-848 DOWNGRADE trigger: a consumer group that hosts a classic member
+    /// must flip back to classic in place when the LAST native consumer member
+    /// leaves (default `Bidirectional` policy). The flip tombstones the
+    /// next-gen k3 `GroupMetadata`, writes a classic k2, and re-expresses the
+    /// hosted classic member as a classic member.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn last_consumer_member_leaving_downgrades_to_classic() {
+        use super::super::classic_state::{Group as ClassicState, Member};
+        use super::super::group::{Group, GroupKind};
+
+        // Default policy is Bidirectional → downgrade is allowed.
+        let (coord, log) = make_coordinator_with_topic("t", 2);
+
+        // Seed a classic group with one classic member subscribed to "t".
+        let mut cs = ClassicState::new("g");
+        cs.protocol_type = Some("consumer".into());
+        cs.generation_id = 1;
+        cs.add_member(Member::new(
+            "m-classic",
+            "client",
+            "127.0.0.1",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_mins(1),
+            vec![("range".into(), subscription_blob(&["t"]))],
+        ));
+        let group = Box::new(Group {
+            group_id: "g".into(),
+            kind: GroupKind::Classic(cs),
+            committed_offsets: HashMap::new(),
+        });
+        coord.seed_classic("g", group);
+        let handle = coord.find("g").expect("seeded classic actor");
+
+        // A native consumer heartbeat upgrades the group in place; it now hosts
+        // the classic member AND the native consumer member.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let resp = rx.await.unwrap();
+        assert!(resp.error_code == codes::NONE);
+        let native_id = resp.member_id.expect("native member id");
+
+        // The native consumer member leaves (member_epoch == -1). It was the
+        // only native member, so the group downgrades back to classic.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: native_id,
+                    member_epoch: -1,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().error_code == codes::NONE);
+
+        // The group is now classic again. `describe_group` only returns
+        // classic groups; it must surface "g" with the hosted classic member
+        // re-expressed as a classic member.
+        let snap = coord
+            .describe_group("g")
+            .await
+            .expect("group downgraded to classic");
+        // Only the hosted classic member remains; the departed native member
+        // is gone.
+        assert!(
+            snap.members.len() == 1,
+            "exactly the hosted classic member must remain after downgrade"
+        );
+        assert!(
+            snap.members.iter().any(|m| m.member_id == "m-classic"),
+            "the hosted classic member must survive the downgrade"
+        );
+
+        // The downgrade batch tombstoned the next-gen k3 GroupMetadata record.
+        assert!(log.has_next_gen_group_metadata_tombstone("g").await);
+        // ...and the group-level k6 TargetAssignmentMetadata record, which would
+        // otherwise survive log compaction and resurrect the group as next-gen.
+        assert!(log.has_next_gen_target_metadata_tombstone("g").await);
+        // ...and wrote a classic k2 GroupMetadata (non-tombstone) for "g".
+        assert!(log_has_classic_group_metadata_write(&log, "g").await);
+    }
+
+    /// `true` iff some appended record WRITES (non-null value) a classic k2
+    /// `GroupMetadata` for `group_id`.
+    async fn log_has_classic_group_metadata_write(
+        log: &InMemoryOffsetsLog,
+        group_id: &str,
+    ) -> bool {
+        use crate::coordinator::unified::persistence::{Key, parse_key};
+        log.batches().await.iter().any(|batch| {
+            batch.records.iter().any(|rec| {
+                rec.value.is_some()
+                    && rec.key.as_ref().is_some_and(|k| {
+                        matches!(
+                            parse_key(k),
+                            Ok(Key::GroupMetadata { group_id: ref gid }) if gid == group_id
+                        )
+                    })
+            })
+        })
     }
 }
