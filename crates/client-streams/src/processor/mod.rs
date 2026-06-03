@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod erased;
+pub(crate) mod node;
 pub mod record;
 pub mod serde;
 

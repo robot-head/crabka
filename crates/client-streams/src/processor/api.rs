@@ -10,8 +10,8 @@ use super::record::{Record, RecordContext};
 /// A stateless record processor. One instance is created per task via
 /// [`ProcessorSupplier::get`]. Mirrors `org.apache.kafka.streams.processor.api.Processor`.
 pub trait Processor<KIn, VIn, KOut, VOut>: Send + 'static {
-    fn init(&mut self, _ctx: &mut ProcessorContext<KOut, VOut>) {}
-    fn process(&mut self, ctx: &mut ProcessorContext<KOut, VOut>, record: Record<KIn, VIn>);
+    fn init(&mut self, _ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {}
+    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, KOut, VOut>, record: Record<KIn, VIn>);
     fn close(&mut self) {}
 }
 
@@ -32,18 +32,24 @@ where
 
 /// Handed to [`Processor::process`]. `forward` boxes the record and queues it
 /// for each child node (the driver drains the queue).
-pub struct ProcessorContext<'a, KOut, VOut> {
-    dispatch: &'a mut Dispatch<'a>,
+///
+/// Two lifetimes: `'ctx` is the borrow of the `Dispatch` reference itself;
+/// `'d` is the lifetime of the data inside `Dispatch` (buffers, slices, etc.).
+/// Keeping them separate avoids lifetime-invariance issues when constructing a
+/// `ProcessorContext` from a `&mut Dispatch<'d>` with an independently-scoped
+/// outer borrow `'ctx`.
+pub struct ProcessorContext<'ctx, 'd, KOut, VOut> {
+    dispatch: &'ctx mut Dispatch<'d>,
     _pd: PhantomData<fn(KOut, VOut)>,
 }
 
-impl<'a, KOut, VOut> ProcessorContext<'a, KOut, VOut>
+impl<'ctx, 'd, KOut, VOut> ProcessorContext<'ctx, 'd, KOut, VOut>
 where
     KOut: Any + Send + Clone,
     VOut: Any + Send + Clone,
 {
     #[allow(dead_code)] // used by future tasks + tests
-    pub(crate) fn new(dispatch: &'a mut Dispatch<'a>) -> Self {
+    pub(crate) fn new(dispatch: &'ctx mut Dispatch<'d>) -> Self {
         Self {
             dispatch,
             _pd: PhantomData,
@@ -61,8 +67,10 @@ where
             return; // no children — drop the record
         };
         for &child in rest {
-            let key: Option<Box<dyn Any + Send>> =
-                record.key.clone().map(|k| Box::new(k) as Box<dyn Any + Send>);
+            let key: Option<Box<dyn Any + Send>> = record
+                .key
+                .clone()
+                .map(|k| Box::new(k) as Box<dyn Any + Send>);
             let value: Box<dyn Any + Send> = Box::new(record.value.clone());
             self.dispatch
                 .buffer
@@ -96,7 +104,7 @@ mod tests {
     impl Processor<String, String, String, String> for Upper {
         fn process(
             &mut self,
-            ctx: &mut ProcessorContext<String, String>,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
         ) {
             ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
@@ -120,7 +128,7 @@ mod tests {
             output: &mut output,
             record_ctx: &rc,
         };
-        let mut ctx = ProcessorContext::<String, String>::new(&mut dispatch);
+        let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         Upper.process(&mut ctx, Record::new(Some("k".into()), "hi".into(), 5));
         check!(buffer.len() == 2);
         let (child, rec) = buffer.pop_front().unwrap();
