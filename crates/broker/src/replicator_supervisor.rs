@@ -430,6 +430,9 @@ impl ReplicatorSupervisor {
         //    has changed since the last successful report (first materialization
         //    or after a KIP-113 dir swap). Only sends if there is at least one
         //    change; on error the tracker is NOT updated so we retry next tick.
+        //    The report submits a non-clobbering V1PartitionDirAssignment delta
+        //    (merges one replica's `directories` slot), so it can no longer
+        //    revert a concurrent reassignment.
         self.report_dir_assignments(&local_set, image).await;
     }
 

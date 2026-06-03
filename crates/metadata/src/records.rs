@@ -40,6 +40,23 @@ pub struct PartitionRecord {
     pub directories: Vec<Uuid>,
 }
 
+/// KIP-858 directory-assignment delta. A broker reports which log-dir UUID
+/// hosts its replica of `(topic, partition)`. Applied as a DELTA: sets ONLY
+/// the reporting replica's slot in `PartitionRecord.directories`, never
+/// touching leader/isr/replicas/adding/removing — so it cannot clobber a
+/// concurrent reassignment or ISR change. On the `KRaft` log it rides a
+/// Crabka-private carrier (via `to_kraft`) so it decodes back to this same
+/// delta and applies as a one-slot merge — never a full-record replace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartitionDirAssignmentRecord {
+    pub topic: String,
+    pub partition: i32,
+    /// The reporting broker (must be a replica of the partition).
+    pub replica: NodeId,
+    /// The log-directory UUID hosting this broker's replica.
+    pub directory: Uuid,
+}
+
 /// A single named listener endpoint advertised by a broker. Stored as a
 /// list on [`BrokerRegistrationRecord::endpoints`] so KRaft-style metadata
 /// can advertise per-listener `host:port`/protocol triples to clients on
@@ -250,6 +267,10 @@ pub enum MetadataRecord {
     /// Snapshot-only: pins the finalized-features epoch on reconstruction.
     /// Never submitted via the controller; see [`FeaturesEpochRecord`].
     V1FeaturesEpoch(FeaturesEpochRecord),
+    /// KIP-858 directory-assignment delta (see [`PartitionDirAssignmentRecord`]).
+    /// Applied as a merge into one replica's `directories` slot; on the `KRaft`
+    /// log it rides a Crabka-private carrier so it stays a delta end-to-end.
+    V1PartitionDirAssignment(PartitionDirAssignmentRecord),
 }
 
 #[cfg(test)]
@@ -302,6 +323,17 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::nil()],
+        });
+        assert!(round_trip(&r) == r);
+    }
+
+    #[test]
+    fn partition_dir_assignment_round_trip() {
+        let r = MetadataRecord::V1PartitionDirAssignment(PartitionDirAssignmentRecord {
+            topic: "t".into(),
+            partition: 2,
+            replica: 3,
+            directory: Uuid::from_u128(0xAB),
         });
         assert!(round_trip(&r) == r);
     }

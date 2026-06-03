@@ -632,6 +632,19 @@ fn to_kraft_iter(
         MetadataRecord::V1FeaturesEpoch(_) => {
             vec![wincode_carrier(rec, PRIVATE_FEATURES_EPOCH_KEY)?]
         }
+        // KIP-858 directory-assignment delta. `PartitionChangeRecord` is not
+        // modeled in Crabka. It must stay a DELTA end-to-end: the apply path
+        // re-decodes committed KRaft values (`from_kraft_value`) and applies
+        // the decoded record, so materializing this into a full
+        // `PartitionRecord` here would decode back as a full-replace
+        // `V1Partition` and clobber any reassignment / ISR change committed
+        // between this record's encode and its apply. Instead it rides a
+        // Crabka-private `Unknown` carrier (like `V1ClientMetricsConfig` /
+        // `V1FeaturesEpoch`), so it decodes back to `V1PartitionDirAssignment`
+        // and applies as a one-slot merge — genuinely order-independent.
+        MetadataRecord::V1PartitionDirAssignment(_) => {
+            vec![wincode_carrier(rec, PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY)?]
+        }
         // ----- no KIP-631 metadata counterpart -----
         MetadataRecord::V1Voters(_) => {
             return Err(TranslateError::NoCounterpart("V1Voters"));
@@ -649,6 +662,9 @@ fn to_kraft_iter(
 /// round-trip carriers.
 const PRIVATE_CLIENT_METRICS_KEY: u32 = 1000;
 const PRIVATE_FEATURES_EPOCH_KEY: u32 = 1001;
+/// KIP-858 directory-assignment delta carried verbatim so it stays a
+/// one-slot merge on apply (never a full-`PartitionRecord` replace).
+const PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY: u32 = 1002;
 
 /// Wrap a wincode-serialized `MetadataRecord` in an `Unknown` KIP-631 envelope
 /// under a Crabka-private apiKey, so it round-trips byte-faithfully through the
@@ -873,7 +889,9 @@ pub fn from_kraft(
         // Crabka-private carriers (see `wincode_carrier`): decode the verbatim
         // wincode body back to the original record.
         KraftMetadataRecord::Unknown { api_key, body, .. }
-            if *api_key == PRIVATE_CLIENT_METRICS_KEY || *api_key == PRIVATE_FEATURES_EPOCH_KEY =>
+            if *api_key == PRIVATE_CLIENT_METRICS_KEY
+                || *api_key == PRIVATE_FEATURES_EPOCH_KEY
+                || *api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY =>
         {
             <serde_wincode::SerdeCompat<MetadataRecord>>::deserialize(body)
                 .map_err(|e| TranslateError::Decode(e.to_string()))
@@ -1087,7 +1105,7 @@ mod tests {
     use crate::acl::AclEntryFilter;
     use crate::records::{
         ClientMetricsConfigRecord, DeleteDelegationTokenRecord, FeaturesEpochRecord,
-        KRaftVersionRecord, VotersRecord,
+        KRaftVersionRecord, PartitionDirAssignmentRecord, VotersRecord,
     };
     use assert2::assert;
 
@@ -1396,6 +1414,28 @@ mod tests {
             k,
             crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
                 if api_key == PRIVATE_FEATURES_EPOCH_KEY
+        ));
+        round_trip(&rec, &img());
+    }
+
+    #[test]
+    fn partition_dir_assignment_round_trips_via_private_carrier() {
+        // KIP-858 dir-assignment delta must STAY a delta through the KRaft log:
+        // it rides a Crabka-private `Unknown` carrier so it decodes back to
+        // `V1PartitionDirAssignment` and applies as a one-slot merge, rather
+        // than materializing to a full `PartitionRecord` that would clobber a
+        // concurrent reassignment on apply.
+        let rec = MetadataRecord::V1PartitionDirAssignment(PartitionDirAssignmentRecord {
+            topic: "t".into(),
+            partition: 0,
+            replica: 2,
+            directory: uuid::Uuid::from_u128(0xAB),
+        });
+        let k = to_kraft(&rec, &img()).unwrap();
+        assert!(matches!(
+            k,
+            crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
+                if api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY
         ));
         round_trip(&rec, &img());
     }

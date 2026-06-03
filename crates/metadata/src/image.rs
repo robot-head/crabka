@@ -598,6 +598,20 @@ impl MetadataImage {
             MetadataRecord::V1FeaturesEpoch(rec) => {
                 self.features_epoch = rec.epoch;
             }
+            // KIP-858 directory-assignment delta: merge ONLY the reporting
+            // replica's `directories` slot. Never touches leader/isr/replicas/
+            // adding/removing, so a concurrent reassignment or ISR change is
+            // preserved regardless of commit order.
+            MetadataRecord::V1PartitionDirAssignment(r) => {
+                if let Some(pr) = self.partitions.get_mut(&(r.topic.clone(), r.partition))
+                    && let Some(slot) = pr.replicas.iter().position(|n| *n == r.replica)
+                {
+                    if pr.directories.len() < pr.replicas.len() {
+                        pr.directories.resize(pr.replicas.len(), uuid::Uuid::nil());
+                    }
+                    pr.directories[slot] = r.directory;
+                }
+            }
         }
     }
 
@@ -859,7 +873,12 @@ impl MetadataImage {
             // Snapshot-only epoch carrier: only ever produced by `to_records`
             // and replayed on snapshot install, never submitted as a change.
             // Validated permissively for match-exhaustiveness.
-            | MetadataRecord::V1FeaturesEpoch(_) => Ok(()),
+            | MetadataRecord::V1FeaturesEpoch(_)
+            // KIP-858 directory-assignment delta: a merge into one replica's
+            // `directories` slot. The handler already resolved topic/partition/
+            // replica against the image; apply is an idempotent slot upsert
+            // (a no-op if the partition or replica is unknown).
+            | MetadataRecord::V1PartitionDirAssignment(_) => Ok(()),
         }
     }
 }
@@ -1309,6 +1328,42 @@ mod tests {
         let mut m = img();
         m.apply(&topic("t", 3));
         assert!(m.topic("t").is_some());
+    }
+
+    #[test]
+    fn apply_dir_assignment_merges_one_slot_without_clobbering_reassignment() {
+        // Regression guard for the KIP-858 dir-assignment clobber: a directory
+        // report applied as a delta must set only the reporting replica's slot
+        // and leave a concurrent reassignment's `adding_replicas` intact.
+        let mut m = img();
+        m.apply(&topic("t", 1));
+        m.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 2],
+            leader_epoch: 0,
+            adding_replicas: vec![3],
+            removing_replicas: vec![],
+            directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil(), uuid::Uuid::nil()],
+        }));
+        let dir = uuid::Uuid::from_u128(0xABCD);
+        m.apply(&MetadataRecord::V1PartitionDirAssignment(
+            crate::records::PartitionDirAssignmentRecord {
+                topic: "t".into(),
+                partition: 0,
+                replica: 2,
+                directory: dir,
+            },
+        ));
+        let pr = m.partition("t", 0).unwrap();
+        // Slot 1 (replica 2) set; slots 0 and 2 untouched.
+        assert!(pr.directories == vec![uuid::Uuid::nil(), dir, uuid::Uuid::nil()]);
+        // The delta did NOT clobber the in-flight reassignment.
+        assert!(pr.adding_replicas == vec![3]);
+        assert!(pr.replicas == vec![1, 2, 3]);
+        assert!(pr.isr == vec![1, 2]);
     }
 
     #[test]

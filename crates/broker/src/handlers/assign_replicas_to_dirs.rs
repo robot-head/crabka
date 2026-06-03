@@ -9,7 +9,7 @@
 use bytes::{Bytes, BytesMut};
 use futures_util::future::BoxFuture;
 
-use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord};
+use crabka_metadata::{MetadataImage, MetadataRecord, PartitionDirAssignmentRecord};
 use crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest;
 use crabka_protocol::owned::assign_replicas_to_dirs_response::{
     AssignReplicasToDirsResponse, DirectoryData as RespDirData, PartitionData as RespPartData,
@@ -135,10 +135,17 @@ pub(crate) fn build_echo_response(
     }
 }
 
-/// Pure: compute the (0 or 1) `PartitionRecord` change that records
+/// Pure: compute the (0 or 1) directory-assignment delta that records
 /// `broker_id`'s replica of `(topic_id, partition)` living on `dir_uuid`.
 /// Empty when the topic/partition is unknown, the broker isn't a replica,
 /// or the slot already holds `dir_uuid` (idempotent — avoids churn).
+///
+/// Emits a [`MetadataRecord::V1PartitionDirAssignment`] DELTA rather than a
+/// full `V1Partition`: on apply it merges ONLY the one replica's slot in
+/// `directories`, never touching leader/isr/replicas/adding/removing. A full
+/// read-modify-write here, built from a slightly-stale image read, would race
+/// a concurrent `AlterPartitionReassignments` and revert `adding_replicas`;
+/// the delta is order-independent (KIP-858).
 fn assignment_changes(
     image: &MetadataImage,
     broker_id: u64,
@@ -159,25 +166,18 @@ fn assignment_changes(
     let Some(slot) = pr.replicas.iter().position(|n| *n == broker_id) else {
         return Vec::new();
     };
-    let mut directories = pr.directories.clone();
-    if directories.len() < pr.replicas.len() {
-        directories.resize(pr.replicas.len(), uuid::Uuid::nil());
-    }
-    if directories[slot] == dir_uuid {
+    // Idempotent: skip if the slot already holds this dir (avoids churn).
+    if pr.directories.get(slot) == Some(&dir_uuid) {
         return Vec::new();
     }
-    directories[slot] = dir_uuid;
-    vec![MetadataRecord::V1Partition(PartitionRecord {
-        topic: topic_name,
-        partition: pr.partition,
-        leader: pr.leader,
-        replicas: pr.replicas.clone(),
-        isr: pr.isr.clone(),
-        leader_epoch: pr.leader_epoch,
-        adding_replicas: pr.adding_replicas.clone(),
-        removing_replicas: pr.removing_replicas.clone(),
-        directories,
-    })]
+    vec![MetadataRecord::V1PartitionDirAssignment(
+        PartitionDirAssignmentRecord {
+            topic: topic_name,
+            partition,
+            replica: broker_id,
+            directory: dir_uuid,
+        },
+    )]
 }
 
 fn encode_resp(version: i16, resp: &AssignReplicasToDirsResponse) -> Result<Bytes, BrokerError> {
@@ -219,10 +219,13 @@ mod tests {
         }));
         let dir = uuid::Uuid::from_u128(0xAA);
         let changes = assignment_changes(&image, 2, topic_id, 0, dir);
-        let MetadataRecord::V1Partition(pr) = &changes[0] else {
-            panic!("expected V1Partition")
+        let MetadataRecord::V1PartitionDirAssignment(r) = &changes[0] else {
+            panic!("expected V1PartitionDirAssignment")
         };
-        assert!(pr.directories == vec![uuid::Uuid::nil(), dir]);
+        assert!(r.topic == "t");
+        assert!(r.partition == 0);
+        assert!(r.replica == 2);
+        assert!(r.directory == dir);
     }
 
     #[test]
@@ -333,11 +336,15 @@ mod tests {
             "expected one change, got {}",
             changes.len()
         );
-        let MetadataRecord::V1Partition(pr) = &changes[0] else {
-            panic!("expected V1Partition");
+        let MetadataRecord::V1PartitionDirAssignment(r) = &changes[0] else {
+            panic!("expected V1PartitionDirAssignment");
         };
-        // Slot 1 (broker 2) must be set to dir_uuid; slot 0 (broker 1) unchanged.
-        assert!(pr.directories == vec![uuid::Uuid::nil(), dir_uuid]);
+        // The delta names broker 2's replica of (t, 0) on dir_uuid; on apply it
+        // merges only slot 1, leaving slot 0 (broker 1) untouched.
+        assert!(r.topic == "t");
+        assert!(r.partition == 0);
+        assert!(r.replica == 2);
+        assert!(r.directory == dir_uuid);
     }
 
     #[test]
