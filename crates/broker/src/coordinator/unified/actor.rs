@@ -265,10 +265,30 @@ pub struct DescribeMember {
     pub is_classic: bool,
 }
 
+/// Encoded `GroupKindTag` for the `live_kind` atomic.
+const LIVE_KIND_CLASSIC: u8 = 0;
+const LIVE_KIND_CONSUMER: u8 = 1;
+
+fn encode_live_kind(kind: GroupKindTag) -> u8 {
+    match kind {
+        GroupKindTag::Classic => LIVE_KIND_CLASSIC,
+        GroupKindTag::Consumer => LIVE_KIND_CONSUMER,
+    }
+}
+
 #[derive(Debug)]
 pub struct GroupActorHandle {
     pub tx: mpsc::Sender<GroupActorMessage>,
+    /// Spawn-time protocol hint. Fixed for the actor's lifetime. Prefer
+    /// [`GroupActorHandle::live_kind`] for any routing/visibility decision that
+    /// depends on the group's CURRENT protocol — a KIP-848 live migration can
+    /// flip the group's kind in place after spawn, leaving this stale.
     pub kind: GroupKindTag,
+    /// LIVE protocol the actor's `Group` currently speaks. The actor stores the
+    /// new kind here on every in-place flip (upgrade classic→consumer, downgrade
+    /// consumer→classic), so a handler reading it sees the group's current
+    /// protocol rather than the spawn-time `kind`.
+    live_kind: Arc<std::sync::atomic::AtomicU8>,
     _task: JoinHandle<()>,
 }
 
@@ -282,6 +302,7 @@ impl GroupActorHandle {
         coordinator: Arc<super::GroupCoordinator>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(64);
+        let live_kind = Arc::new(std::sync::atomic::AtomicU8::new(encode_live_kind(kind)));
         let task = tokio::spawn(actor_loop(
             group_id,
             kind,
@@ -290,11 +311,26 @@ impl GroupActorHandle {
             offsets_log,
             coordinator,
             rx,
+            live_kind.clone(),
         ));
         Self {
             tx,
             kind,
+            live_kind,
             _task: task,
+        }
+    }
+
+    /// The protocol the actor's `Group` currently speaks. Reflects in-place
+    /// KIP-848 migration flips, unlike the spawn-time [`kind`](Self::kind).
+    /// `Relaxed` is sufficient: the handle and actor coordinate through the
+    /// mailbox/registry, so a momentarily-stale read at worst routes one RPC to
+    /// the actor, which then answers against its live `group.kind`.
+    #[must_use]
+    pub fn live_kind(&self) -> GroupKindTag {
+        match self.live_kind.load(std::sync::atomic::Ordering::Relaxed) {
+            LIVE_KIND_CONSUMER => GroupKindTag::Consumer,
+            _ => GroupKindTag::Classic,
         }
     }
 }
@@ -313,6 +349,7 @@ struct ParkedWaiters {
 }
 
 #[allow(clippy::too_many_lines)] // one match arm per message variant; splitting hurts readability
+#[allow(clippy::too_many_arguments)] // per-actor wiring (config/metadata/log/coordinator/live_kind)
 async fn actor_loop(
     group_id: String,
     kind: GroupKindTag,
@@ -321,11 +358,23 @@ async fn actor_loop(
     offsets_log: Arc<dyn OffsetsLog>,
     coordinator: Arc<super::GroupCoordinator>,
     mut rx: mpsc::Receiver<GroupActorMessage>,
+    live_kind: Arc<std::sync::atomic::AtomicU8>,
 ) {
     let mut group = match kind {
         GroupKindTag::Classic => Group::new_classic(group_id),
         GroupKindTag::Consumer => Group::new_consumer(group_id),
     };
+    // Defensive: align the handle's live-kind atomic with the actual `group`
+    // kind at startup (equals the spawn `kind`). Every in-place flip below
+    // restores this invariant via `store`.
+    live_kind.store(
+        encode_live_kind(if group.is_classic() {
+            GroupKindTag::Classic
+        } else {
+            GroupKindTag::Consumer
+        }),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     let mut parked = ParkedWaiters::default();
     // A single 1-second session-expiry tick, kind-agnostic. The tick arm
     // dispatches on the live `group.kind`, so the cadence must not depend on
@@ -375,6 +424,10 @@ async fn actor_loop(
                                     break;
                                 }
                                 *group.kind_mut() = GroupKind::Consumer(new_state);
+                                live_kind.store(
+                                    LIVE_KIND_CONSUMER,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
                             } else {
                                 // TODO(kip-848): confirm against apache/kafka:4.0.0 — an
                                 // un-upgradable/disallowed classic group appears to surface as
@@ -416,6 +469,7 @@ async fn actor_loop(
                         // remains. The reply for this RPC is already sent above.
                         if let Err(e) = maybe_downgrade(
                             &mut group, &config, &*metadata, &*offsets_log, &coordinator,
+                            &live_kind,
                         ).await {
                             tracing::warn!(
                                 group_id = %group.group_id, error = %e,
@@ -595,6 +649,14 @@ async fn actor_loop(
                     }
                     GroupActorMessage::ClassicSeed(seeded) => {
                         group = *seeded;
+                        live_kind.store(
+                            encode_live_kind(if group.is_classic() {
+                                GroupKindTag::Classic
+                            } else {
+                                GroupKindTag::Consumer
+                            }),
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
                     }
                     GroupActorMessage::Shutdown(reply) => {
                         let _ = reply.send(());
@@ -603,6 +665,8 @@ async fn actor_loop(
                     #[cfg(test)]
                     GroupActorMessage::TestForceConsumerKind => {
                         group = Group::new_consumer(group.group_id.clone());
+                        live_kind
+                            .store(LIVE_KIND_CONSUMER, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -623,6 +687,7 @@ async fn actor_loop(
                     // members → flip back to classic in place.
                     if let Err(e) = maybe_downgrade(
                         &mut group, &config, &*metadata, &*offsets_log, &coordinator,
+                        &live_kind,
                     ).await {
                         tracing::warn!(
                             group_id = %gid, error = %e,
@@ -793,12 +858,15 @@ async fn handle_session_tick(
 /// every member's k5/k7/k8, and write the classic k2 `GroupMetadata`. Returns `Ok(true)` if a flip
 /// happened, `Ok(false)` if the conditions weren't met, `Err` on a log-write
 /// failure (the caller exits the actor loop).
+///
+// TODO(kip-848): confirm exact downgrade trigger boundary against apache/kafka:4.0.0
 async fn maybe_downgrade(
     group: &mut Group,
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
     offsets_log: &dyn OffsetsLog,
     coordinator: &super::GroupCoordinator,
+    live_kind: &std::sync::atomic::AtomicU8,
 ) -> Result<bool, crate::error::BrokerError> {
     let Some(state) = group.as_consumer() else {
         return Ok(false);
@@ -813,6 +881,13 @@ async fn maybe_downgrade(
     }
     if state.members.values().any(|m| m.classic.is_none()) {
         // A native consumer member is still present: the group stays next-gen.
+        return Ok(false);
+    }
+    // Spec fidelity: a server-managed consumer group is always re-expressible as
+    // a classic group (members become classic members; the server target
+    // becomes the seed assignment). Documents the predicate the downgrade rests
+    // on; always `true` today.
+    if !migration::consumer_is_convertible() {
         return Ok(false);
     }
 
@@ -843,6 +918,7 @@ async fn maybe_downgrade(
     offsets_log.append(batch).await?;
     coordinator.mark_classic_after_downgrade(&group_id);
     *group.kind_mut() = GroupKind::Classic(classic);
+    live_kind.store(LIVE_KIND_CLASSIC, std::sync::atomic::Ordering::Relaxed);
     Ok(true)
 }
 
@@ -3283,6 +3359,118 @@ mod tests {
         assert!(
             after_downgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(99),
             "committed offset must survive the downgrade too"
+        );
+    }
+
+    /// Regression for the stale-`handle.kind` defect (KIP-848 live migration):
+    /// a group SPAWNED as a consumer group (its first RPC was a native
+    /// `ConsumerGroupHeartbeat`, so `handle.kind == Consumer`) that later hosts a
+    /// classic member and then DOWNGRADES in place when the last native member
+    /// leaves. The handle's spawn-time `kind` stays `Consumer` and is now stale;
+    /// `handle.live_kind()` must report the LIVE `Classic`.
+    ///
+    /// The defect: `offset_commit::validate` pre-dispatched on `handle.kind`, so
+    /// a downgraded classic member's offset commit was routed to the next-gen
+    /// `OffsetValidate` path and rejected with `UNKNOWN_MEMBER_ID` (the group is
+    /// no longer consumer-kind, so `group.as_consumer()` is `None`). With the fix
+    /// it dispatches on `live_kind()` → the classic `ClassicValidateCommit`
+    /// path, which finds the re-expressed classic member and accepts the commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn spawned_consumer_group_downgrade_allows_classic_offset_commit() {
+        use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
+        let (coord, _log) =
+            make_coordinator_with_topic_policy("t", 2, ConsumerGroupMigrationPolicy::Bidirectional);
+
+        // SPAWN the actor as a consumer group: the first RPC is a native
+        // ConsumerGroupHeartbeat, so the handle's spawn-time `kind == Consumer`.
+        let handle = coord.get_or_create_consumer("g");
+        assert!(
+            handle.kind == GroupKindTag::Consumer,
+            "the group must be spawned consumer-kind"
+        );
+        assert!(handle.live_kind() == GroupKindTag::Consumer);
+
+        let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
+        assert!(up.error_code == codes::NONE);
+        let native = up.member_id.expect("native member id");
+
+        // A CLASSIC member joins the (consumer-kind) group as a hosted member.
+        let join = classic_join(&handle, "m-classic", "t").await;
+        assert!(join.error_code == codes::NONE);
+
+        // The native consumer member leaves (member_epoch -1). It was the only
+        // native member and a hosted classic member remains → DOWNGRADE in
+        // place. The group is now live-Classic but the handle was spawned
+        // Consumer. `maybe_downgrade` runs inside the Heartbeat handler AFTER
+        // the reply is sent, so we must round-trip one more message (the
+        // `classic_inspect` below) to be sure the in-place flip has completed
+        // before reading `live_kind()`.
+        let leave = consumer_heartbeat(&handle, &native, -1, None).await;
+        assert!(leave.error_code == codes::NONE);
+
+        // The hosted classic member was re-expressed as a classic member. Read
+        // the restored classic generation it must commit against. This
+        // `ClassicInspect` round-trip is also the barrier that guarantees the
+        // downgrade completed (only a classic-kind group answers it; the actor
+        // processes it strictly after the leave's `maybe_downgrade`).
+        let view = classic_inspect(&handle).await;
+
+        // The handle's spawn-time `kind` is stale; the LIVE kind is now Classic.
+        assert!(
+            handle.kind == GroupKindTag::Consumer,
+            "spawn-time kind unchanged"
+        );
+        assert!(
+            handle.live_kind() == GroupKindTag::Classic,
+            "live_kind must reflect the in-place downgrade to classic"
+        );
+
+        assert!(
+            view.members.iter().any(|m| m.member_id == "m-classic"),
+            "the hosted classic member must survive the downgrade"
+        );
+        let generation = view.generation_id;
+
+        // Prove the fix at the routing boundary `offset_commit::validate` uses.
+        //
+        // (a) The CORRECT (live-kind Classic) path — `ClassicValidateCommit` —
+        //     accepts the downgraded classic member's commit: None (no error).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicValidateCommit {
+                member_id: "m-classic".into(),
+                group_instance_id: None,
+                generation_id: generation,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let classic_result = rx.await.unwrap();
+        assert!(
+            classic_result.is_none(),
+            "the classic validate-commit path must accept the downgraded member (got {classic_result:?})"
+        );
+
+        // (b) The STALE (spawn-kind Consumer) path — `OffsetValidate` — rejects
+        //     the same member with UNKNOWN_MEMBER_ID, because the live group is
+        //     no longer consumer-kind. This is exactly the rejection the bug
+        //     surfaced; dispatching on `live_kind()` avoids it.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::OffsetValidate {
+                member_id: "m-classic".into(),
+                member_epoch: generation,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let stale_result = rx.await.unwrap();
+        assert!(
+            stale_result == Err(codes::UNKNOWN_MEMBER_ID),
+            "the stale next-gen path rejects the downgraded classic member — \
+             dispatching on live_kind is what makes the commit succeed (got {stale_result:?})"
         );
     }
 }

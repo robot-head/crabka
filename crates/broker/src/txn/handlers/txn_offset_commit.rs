@@ -122,7 +122,9 @@ pub(crate) async fn handle(
     //    classic group's current generation_id.
     //    TODO(KIP-1319 v4+): implement per-member epoch tracking and
     //    surface STALE_MEMBER_EPOCH (113) when supplied epoch < current.
-    if version >= 3 && req.generation_id >= 0 && handle.kind == GroupKindTag::Classic {
+    // LIVE kind, not the spawn-time hint: a KIP-848 migration can flip the
+    // group's protocol in place after spawn.
+    if version >= 3 && req.generation_id >= 0 && handle.live_kind() == GroupKindTag::Classic {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if handle
             .tx

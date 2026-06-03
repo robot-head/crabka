@@ -92,7 +92,10 @@ pub(crate) async fn handle(
     // *consumer-protocol* classic group with live members still subscribes to
     // the topic; Empty/Dead groups, non-`"consumer"` protocol_type groups, and
     // next-gen consumer groups skip the guard.
-    let subscribed_topics: HashSet<String> = if group_handle.kind == GroupKindTag::Classic {
+    // LIVE kind, not the spawn-time hint: a KIP-848 migration can flip the
+    // group's protocol in place after spawn (a downgraded group is now classic
+    // and its `ClassicInspect` view is the one that matters).
+    let subscribed_topics: HashSet<String> = if group_handle.live_kind() == GroupKindTag::Classic {
         let (tx, rx) = oneshot::channel();
         if group_handle
             .tx

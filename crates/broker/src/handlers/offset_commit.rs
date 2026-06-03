@@ -280,7 +280,11 @@ fn now_ms() -> i64 {
 /// Validate the commit against the group's membership/epoch through its actor.
 /// Returns `Some(error_code)` if the request should be rejected.
 async fn validate(handle: &Arc<GroupActorHandle>, req: &OffsetCommitRequest) -> Option<i16> {
-    match handle.kind {
+    // Dispatch on the group's LIVE kind: a KIP-848 live migration may have
+    // flipped the actor's kind in place after spawn (e.g. a group spawned
+    // Consumer that downgraded to Classic when its last native member left),
+    // leaving the spawn-time `handle.kind` stale.
+    match handle.live_kind() {
         GroupKindTag::Consumer => {
             // Next-gen: validate member_epoch via the per-group actor.
             let (tx, rx) = oneshot::channel();

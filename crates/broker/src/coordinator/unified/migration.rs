@@ -4,8 +4,7 @@
 //! consume — the [`super::config::ConsumerGroupMigrationPolicy`] and the
 //! convertibility predicate — without performing any live conversion yet. The
 //! predicates are unit-tested here and wired into the conversion triggers in
-//! D/E, so they are dead in the lib build until then.
-#![allow(dead_code)]
+//! D/E.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;

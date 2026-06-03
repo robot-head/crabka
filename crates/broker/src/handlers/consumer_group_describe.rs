@@ -55,9 +55,11 @@ pub(crate) fn handle(
                 continue;
             }
             // Only next-gen (consumer) groups are described here; a classic
-            // group (or an unknown id) is GROUP_ID_NOT_FOUND.
+            // group (or an unknown id) is GROUP_ID_NOT_FOUND. Gate on the LIVE
+            // kind so an UPGRADED group (spawned classic, now consumer in place
+            // via KIP-848) is reachable — the spawn-time `h.kind` would be stale.
             let handle = coordinator.find(group_id);
-            let Some(handle) = handle.filter(|h| h.kind == GroupKindTag::Consumer) else {
+            let Some(handle) = handle.filter(|h| h.live_kind() == GroupKindTag::Consumer) else {
                 row.error_code = codes::GROUP_ID_NOT_FOUND;
                 described.push(row);
                 continue;
