@@ -11,6 +11,7 @@ use tokio::sync::{Mutex, Notify, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crabka_client_consumer::ConsumerGroupMetadata;
 use crabka_client_core::Client;
 use crabka_client_core::security::ClientSecurity;
 use crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest;
@@ -376,14 +377,16 @@ impl Producer {
         Ok(format!("{}:{}", resp.host, resp.port))
     }
 
-    /// Enroll a consumer group's offsets in the current transaction.
+    /// Enroll a consumer group's offsets in the current transaction, fencing
+    /// zombie producers via the supplied [`ConsumerGroupMetadata`] (KIP-447).
     ///
     /// Performs two broker round-trips:
     ///
     /// 1. `AddOffsetsToTxn` → transaction coordinator (registers the group
     ///    offset commit as part of the ongoing transaction).
     /// 2. `TxnOffsetCommit` → group coordinator (commits the actual offsets
-    ///    transactionally).
+    ///    transactionally, carrying `group_meta`'s generation/member/instance
+    ///    so the coordinator can fence stale producers).
     ///
     /// # Errors
     ///
@@ -398,7 +401,7 @@ impl Producer {
     pub async fn send_offsets_to_transaction(
         &self,
         offsets: impl IntoIterator<Item = ((String, i32), i64)>,
-        group_id: &str,
+        group_meta: &ConsumerGroupMetadata,
     ) -> Result<(), ProducerError> {
         let tid = self
             .transactional_id
@@ -424,7 +427,7 @@ impl Producer {
                 transactional_id: tid.clone(),
                 producer_id: pid,
                 producer_epoch: epoch,
-                group_id: group_id.to_owned(),
+                group_id: group_meta.group_id.clone(),
                 ..Default::default()
             })
             .await?;
@@ -433,7 +436,7 @@ impl Producer {
         }
 
         // 2. FindCoordinator(group_id, key_type=0 GROUP) for the group coordinator.
-        let group_addr = self.find_group_coordinator(group_id).await?;
+        let group_addr = self.find_group_coordinator(&group_meta.group_id).await?;
         let group_client = Client::builder()
             .bootstrap(group_addr)
             .client_id(self.client_id.clone())
@@ -441,13 +444,19 @@ impl Producer {
             .build()
             .await?;
 
-        // 3. TxnOffsetCommit → group coordinator.
+        // 3. TxnOffsetCommit → group coordinator, carrying the consumer group
+        //    metadata (generation id / member id / instance id) so the
+        //    coordinator can fence zombie producers via the group's own state
+        //    rather than requiring one producer per input partition (KIP-447).
         let r2 = group_client
             .send(TxnOffsetCommitRequest {
                 transactional_id: tid,
                 producer_id: pid,
                 producer_epoch: epoch,
-                group_id: group_id.to_owned(),
+                group_id: group_meta.group_id.clone(),
+                generation_id: group_meta.generation_id,
+                member_id: group_meta.member_id.clone(),
+                group_instance_id: group_meta.group_instance_id.clone(),
                 topics: build_topics_payload(&offsets_vec),
                 ..Default::default()
             })

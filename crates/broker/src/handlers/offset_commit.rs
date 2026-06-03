@@ -22,7 +22,9 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
 use crate::coordinator::persistence::OffsetCommitValue;
-use crate::coordinator::unified::actor::{GroupActorHandle, GroupActorMessage, GroupKindTag};
+use crate::coordinator::unified::actor::{
+    GroupActorHandle, GroupActorMessage, validate_group_commit,
+};
 use crate::coordinator::unified::classic_state::OffsetEntry;
 use crate::error::BrokerError;
 use crate::partition::{ProduceJob, WriterMessage};
@@ -276,48 +278,16 @@ fn now_ms() -> i64 {
 }
 
 /// Validate the commit against the group's membership/epoch through its actor.
-/// Returns `Some(error_code)` if the request should be rejected.
+/// Returns `Some(error_code)` if the request should be rejected. Thin wrapper
+/// over the shared [`validate_group_commit`] (also used by `TxnOffsetCommit`).
 async fn validate(handle: &Arc<GroupActorHandle>, req: &OffsetCommitRequest) -> Option<i16> {
-    match handle.kind {
-        GroupKindTag::Consumer => {
-            // Next-gen: validate member_epoch via the per-group actor.
-            let (tx, rx) = oneshot::channel();
-            if handle
-                .tx
-                .send(GroupActorMessage::OffsetValidate {
-                    member_id: req.member_id.clone(),
-                    member_epoch: req.generation_id_or_member_epoch,
-                    reply: tx,
-                })
-                .await
-                .is_err()
-            {
-                return Some(codes::UNKNOWN_SERVER_ERROR);
-            }
-            match rx.await {
-                Ok(Ok(())) => None,
-                Ok(Err(code)) => Some(code),
-                Err(_) => Some(codes::UNKNOWN_SERVER_ERROR),
-            }
-        }
-        GroupKindTag::Classic => {
-            let (tx, rx) = oneshot::channel();
-            if handle
-                .tx
-                .send(GroupActorMessage::ClassicValidateCommit {
-                    member_id: req.member_id.clone(),
-                    group_instance_id: req.group_instance_id.clone(),
-                    generation_id: req.generation_id_or_member_epoch,
-                    reply: tx,
-                })
-                .await
-                .is_err()
-            {
-                return Some(codes::UNKNOWN_SERVER_ERROR);
-            }
-            rx.await.unwrap_or(Some(codes::UNKNOWN_SERVER_ERROR))
-        }
-    }
+    validate_group_commit(
+        handle,
+        &req.member_id,
+        req.generation_id_or_member_epoch,
+        req.group_instance_id.as_deref(),
+    )
+    .await
 }
 
 /// Append a single `RecordBatch` covering every (topic, partition) in `req`

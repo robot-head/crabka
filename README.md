@@ -397,7 +397,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 |-----|-------|:------:|
 | [KIP-98](https://cwiki.apache.org/confluence/display/KAFKA/KIP-98) | Exactly-once delivery & transactional messaging | ✅ |
 | [KIP-360](https://cwiki.apache.org/confluence/display/KAFKA/KIP-360) | Improve reliability of idempotent / transactional producer | ✅ |
-| [KIP-447](https://cwiki.apache.org/confluence/display/KAFKA/KIP-447) | Producer scalability for exactly-once semantics | ⚠️ |
+| [KIP-447](https://cwiki.apache.org/confluence/display/KAFKA/KIP-447) | Producer scalability for exactly-once semantics | ✅ |
 | [KIP-480](https://cwiki.apache.org/confluence/display/KAFKA/KIP-480) | Sticky partitioner | ✅ |
 | [KIP-679](https://cwiki.apache.org/confluence/display/KAFKA/KIP-679) | Strongest delivery guarantee (idempotence) by default | ✅ |
 | [KIP-794](https://cwiki.apache.org/confluence/display/KAFKA/KIP-794) | Strictly uniform sticky partitioner | ✅ |

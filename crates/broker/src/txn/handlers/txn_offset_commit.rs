@@ -7,7 +7,10 @@
 //!
 //! Versions 0–2: non-flexible (no `generation_id`/`member_id` fields).
 //! Versions 3–5: flexible (tagged fields; adds `generation_id`, `member_id`,
-//!               `group_instance_id`).
+//!               `group_instance_id`). On v3+ the consumer-group metadata is
+//!               validated via the shared `validate_group_commit` (KIP-447:
+//!               fencing "consistent with normal offset fencing") — classic
+//!               generation or KIP-848 next-gen member epoch.
 //!
 //! ## ACL preamble
 //!
@@ -34,7 +37,7 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
 use crate::coordinator::persistence::OffsetCommitValue;
-use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
+use crate::coordinator::unified::actor::validate_group_commit;
 use crate::error::BrokerError;
 use crate::txn::util::now_millis;
 
@@ -112,45 +115,27 @@ pub(crate) async fn handle(
             .get_or_create_classic(&req.group_id)
     });
 
-    // 2. KIP-1319 stale-member-epoch check (api_version >= 3 adds
-    //    generation_id/member_id). The coordinator does not yet expose a
-    //    `member_epoch()` accessor, so we emit ILLEGAL_GENERATION only when the
-    //    request carries a non-default generation_id that differs from the
-    //    classic group's current generation_id.
-    //    TODO(KIP-1319 v4+): implement per-member epoch tracking and
-    //    surface STALE_MEMBER_EPOCH (113) when supplied epoch < current.
+    // 2. KIP-447 / KIP-1319 fencing — identical to a regular OffsetCommit
+    //    (KIP-447: "consistent with normal offset fencing"). For a classic
+    //    group this checks member id + group.instance.id + generation
+    //    (ILLEGAL_GENERATION / UNKNOWN_MEMBER_ID / FENCED_INSTANCE_ID); for a
+    //    KIP-848 next-gen group the `generation_id` field carries the member
+    //    epoch and we return STALE_MEMBER_EPOCH / FENCED_MEMBER_EPOCH /
+    //    UNKNOWN_MEMBER_ID. A producer that supplies no metadata (empty
+    //    member_id, generation_id = -1) is a simple consumer and is not fenced.
+    //    The fields only exist on v3+, so older requests carry the
+    //    simple-consumer defaults and no-op.
     if version >= 3
-        && req.generation_id >= 0
         && let Some(h) = &handle
-        && h.kind == GroupKindTag::Classic
+        && let Some(code) = validate_group_commit(
+            h,
+            &req.member_id,
+            req.generation_id,
+            req.group_instance_id.as_deref(),
+        )
+        .await
     {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if h.tx
-            .send(GroupActorMessage::ClassicInspect { reply: tx })
-            .await
-            .is_ok()
-            && let Ok(view) = rx.await
-        {
-            // KIP-345 fence: instance id (if present) must resolve to the
-            // request's member id when both are set.
-            if let Some(iid) = req.group_instance_id.as_deref() {
-                match view
-                    .members
-                    .iter()
-                    .find(|m| m.group_instance_id.as_deref() == Some(iid))
-                {
-                    None => return encode_err_all(version, &req, codes::UNKNOWN_MEMBER_ID),
-                    Some(m) => {
-                        if !req.member_id.is_empty() && m.member_id != req.member_id {
-                            return encode_err_all(version, &req, codes::FENCED_INSTANCE_ID);
-                        }
-                    }
-                }
-            }
-            if view.generation_id >= 0 && req.generation_id != view.generation_id {
-                return encode_err_all(version, &req, codes::ILLEGAL_GENERATION);
-            }
-        }
+        return encode_err_all(version, &req, code);
     }
 
     // 3. Append a transactional RecordBatch to __consumer_offsets.
