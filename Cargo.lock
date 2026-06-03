@@ -1259,6 +1259,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-client-streams"
+version = "0.2.0"
+dependencies = [
+ "assert2",
+ "bon",
+ "bytes",
+ "crabka-broker",
+ "crabka-client-core",
+ "crabka-protocol",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "crabka-compression"
 version = "0.2.0"
 dependencies = [
