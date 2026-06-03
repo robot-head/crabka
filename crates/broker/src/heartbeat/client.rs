@@ -141,6 +141,7 @@ pub(crate) async fn run(mut cfg: Config) {
             tracing::error!("all log dirs offline — initiating broker self-shutdown (KIP-112)");
             let _ = cfg.should_shutdown.send(true);
             cfg.supervisor_shutdown.cancel();
+            // Returning stops heartbeats; if shutdown drags, the controller's session timeout fences this broker independently.
             return;
         }
     }

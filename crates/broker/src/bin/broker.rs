@@ -230,6 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         () = async {
             // Wait until the self-shutdown flag flips true.
             loop {
+                // Check first in case the flag was already set before we subscribed.
                 if *shutdown_rx.borrow_and_update() { break; }
                 if shutdown_rx.changed().await.is_err() { break; }
             }
