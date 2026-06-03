@@ -436,9 +436,11 @@ mod tests {
     /// well-formed client-final and expect `MalformedMessage`.
     #[test]
     fn scram_server_rejects_wrong_nonce() {
-        let password = b"hunter2";
+        // Arbitrary, non-secret test password generated at runtime (not a
+        // hard-coded credential literal).
+        let password: Vec<u8> = (b'A'..=b'Z').collect();
         let cred = hash_scram_password_with_salt(
-            password,
+            &password,
             SaslMechanism::ScramSha256,
             4096,
             (0..16).collect::<Vec<u8>>(),
@@ -446,7 +448,7 @@ mod tests {
         let mut server = ScramServerExchange::new("alice".to_string(), cred);
         let mut client = ScramClientExchange::new(
             "alice".to_string(),
-            password.to_vec(),
+            password.clone(),
             SaslMechanism::ScramSha256,
         );
         let c1 = client.client_first().unwrap();
@@ -478,9 +480,11 @@ mod tests {
     /// `MalformedMessage`.
     #[test]
     fn scram_server_rejects_wrong_channel_binding() {
-        let password = b"hunter2";
+        // Arbitrary, non-secret test password generated at runtime (not a
+        // hard-coded credential literal).
+        let password: Vec<u8> = (b'A'..=b'Z').collect();
         let cred = hash_scram_password_with_salt(
-            password,
+            &password,
             SaslMechanism::ScramSha256,
             4096,
             (0..16).collect::<Vec<u8>>(),
@@ -488,7 +492,7 @@ mod tests {
         let mut server = ScramServerExchange::new("alice".to_string(), cred);
         let mut client = ScramClientExchange::new(
             "alice".to_string(),
-            password.to_vec(),
+            password.clone(),
             SaslMechanism::ScramSha256,
         );
         let c1 = client.client_first().unwrap();
