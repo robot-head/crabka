@@ -379,7 +379,7 @@ Kafka client for ApiVersions.
 - 1 JVM acceptance test exercising `kafka-configs --alter/describe/delete` round-trip.
 - **Known limitation:** `client_id` is currently `""` in Produce/Fetch quota lookups because the HandlerTable signature does not thread it through. User-level + default quotas WORK; `(user, client-id)` tuple quotas do not fire on data-plane paths yet. Integration test 4 was swapped from `tuple_quota_wins_over_user_only` to `user_specific_overrides_user_default` to reflect this. The 8-priority lookup itself is fully verified by unit tests in `quota/lookup.rs`. Fix: thread `client_id` through handler signatures — deferred.
 - **Known limitation:** `kafka-configs --describe --entity-type users` calls `DescribeUserScramCredentials` (api_key 51) after fetching quotas. Crabka does not implement api_key 51 yet, so the JVM tool exits non-zero even though the quota stdout is correct. JVM acceptance test asserts on stdout substring instead of exit code. Follow-up: implement api_key 51.
-- **Known limitation:** `throttle_time_ms` in the response is only set for Produce + Fetch. Other handlers absorb the `request_percentage` delay silently. Closing this requires routing the throttle value through the handler trait — deferred.
+- **Known limitation (resolved for the data plane in slice 16d):** `request_percentage` on the long-tail fall-through APIs (group/offset/metadata) still mutes the channel silently — `throttle_time_ms` is set only for the data-plane (Produce/Fetch) and controller-mutation handlers. Closing it for the long tail requires surfacing the post-hoc request throttle into each response — deferred.
 - Out of scope: `ip` entity + KIP-612 connection_creation_rate (slice 16b), KIP-599 controller_mutation_rate (slice 16c).
 
 ## Slice 16b — IP quotas + KIP-612 (2026-05-15)
@@ -419,6 +419,15 @@ Kafka client for ApiVersions.
   - `client_id` not threaded through `HandlerTable` — `(user, client-id)` tuple quotas don't fire from these handlers; `(user)`-only quotas work. Closing requires the slice-16 cleanup work.
   - Per-entity bucket cache grows unbounded over broker's lifetime.
 - Out of scope: IP entity (KIP-599 doesn't apply to IP); other admin operations (ACL CRUD, IncrementalAlterConfigs, AlterPartitionReassignments — KIP-599 limits to topic/partition CRUD).
+
+## Slice 16d — KIP-219 request-quota combine on the data plane (2026-06-03)
+
+- Closes the slice-16 known limitation that `request_percentage` (KIP-124) throttling was *enforced* on Produce/Fetch (channel muted via `tokio::time::sleep`) but never *communicated* — those responses reported only the byte-rate `throttle_time_ms`, and a request that tripped both quotas was muted for the **sum** of the two delays (handler sleep + dispatch-loop sleep) instead of Kafka's **max**.
+- New helper `consume_request_quota` in `crates/broker/src/quota/request.rs` — lifts the request-percentage lookup + token-bucket consume + overage→delay (capped 1s) out of the inline dispatch-loop block. 4 unit tests (no-quota, zero-elapsed, under-budget, capped overage).
+- Produce + Fetch handlers now compute `delay = max(byte_rate_delay, request_delay)`, stamp it on `throttle_time_ms`, and mute the channel **once** before responding (KIP-219 throttle-then-respond). Each handler times its own processing via an entry-point `Instant`.
+- Dispatch loop (`network/dispatch.rs`) skips `request_percentage` for api_key 0/1 (they self-account, charged exactly once) and routes the remaining fall-through APIs through `consume_request_quota` — same mute-only behavior as before, no regression.
+- 1 broker integration test (`tests/client_quotas.rs::request_percentage_throttles_produce`): tiny `request_percentage=0.001` for alice, **no** byte-rate quota; a single small produce must return `throttle_time_ms > 0`, proving the request throttle is surfaced rather than silently muted.
+- **Remaining gap:** the long-tail fall-through APIs (group/offset/metadata) still mute silently — see the refined slice-16 limitation. Inter-broker follower fetches are no longer subject to `request_percentage` (they use the KIP-73 leader throttle and are not client-quota traffic).
 
 ## Slice 17a — DescribeUserScramCredentials (2026-05-15)
 

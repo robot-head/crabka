@@ -674,6 +674,7 @@ async fn serve_connection_stream<S>(
         // request_percentage throttling here. Admin RPCs are low-frequency operator
         // traffic; the exemption is documented in STATUS.md.
         let started = std::time::Instant::now();
+        let api_key = peek_api_key(&frame).ok();
         let response_bytes = match dispatch_one(&broker, &frame)
             .instrument(req_span.clone())
             .await
@@ -689,39 +690,27 @@ async fn serve_connection_stream<S>(
         #[allow(clippy::cast_possible_truncation)]
         let elapsed_micros = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
 
-        // Consume elapsed CPU time from the request_percentage bucket and
-        // sleep before writing the response (server-side throttle only;
-        // throttle_time_ms in the response is populated by Produce/Fetch
-        // handlers — not here).
-        if let Some(principal) = auth.principal() {
-            let principal_name = &principal.name;
+        // Consume elapsed handler time from the request_percentage bucket and
+        // mute the channel (sleep before writing the response). Produce (0) and
+        // Fetch (1) self-account inside their handlers so the request throttle
+        // can be combined as max(request, byte-rate) into a single
+        // throttle_time_ms + a single channel mute (KIP-219); they are skipped
+        // here to avoid double-charging. The remaining fall-through APIs carry
+        // no data/mutation quota to combine with, so the throttle is enforced
+        // (channel muted) but not yet surfaced in their throttle_time_ms.
+        let self_accounts = matches!(api_key, Some(0 | 1));
+        if !self_accounts && let Some(principal) = auth.principal() {
             let client_id_str = peek_client_id(&frame).unwrap_or("");
             let image = broker.controller.current_image();
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            if let Some((entity_key, rate_pct)) = crate::quota::lookup_quota_with_key(
+            let delay = crate::quota::consume_request_quota(
                 &image,
-                principal_name,
+                &broker.quota_buckets,
+                &principal.name,
                 client_id_str,
-                "request_percentage",
-            ) && rate_pct > 0.0
-            {
-                let rate_micros_per_sec = (rate_pct * 10_000.0) as u64;
-                if rate_micros_per_sec > 0 {
-                    let bucket = broker.quota_buckets.get_or_create(
-                        "request_percentage",
-                        &entity_key,
-                        rate_micros_per_sec,
-                    );
-                    let granted = bucket.try_consume(elapsed_micros);
-                    if granted < elapsed_micros {
-                        let overage_micros = elapsed_micros - granted;
-                        let delay_micros =
-                            overage_micros.saturating_mul(1_000_000) / rate_micros_per_sec;
-                        let delay = std::time::Duration::from_micros(delay_micros)
-                            .min(std::time::Duration::from_secs(1));
-                        tokio::time::sleep(delay).await;
-                    }
-                }
+                elapsed_micros,
+            );
+            if delay > std::time::Duration::ZERO {
+                tokio::time::sleep(delay).await;
             }
         }
 
