@@ -740,6 +740,18 @@ impl BrokerHandle {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Test-only: flip a configured log dir offline at runtime, simulating a
+    /// live fsync failure, without real EIO injection (unreliable
+    /// cross-platform). Drives the KIP-112 offline path.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn test_mark_log_dir_offline(&self, dir: &std::path::Path) -> bool {
+        self._broker
+            .log_dir_status
+            .mark_offline(dir, "test-injected storage failure")
+    }
+
     /// Rebuild the TLS server config from the cert/key paths
     /// in `BrokerConfig::tls_config` *right now*, bypassing the
     /// periodic mtime watcher. New TLS handshakes after this call see
