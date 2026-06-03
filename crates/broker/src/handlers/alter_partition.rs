@@ -292,6 +292,7 @@ mod tests {
             leader_epoch: 5,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         for &(id, ep) in epochs {
             image.apply(&reg(id, ep));
