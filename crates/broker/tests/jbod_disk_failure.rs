@@ -21,12 +21,20 @@ use std::time::{Duration, Instant};
 
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_protocol::owned::assign_replicas_to_dirs_request::{
+    AssignReplicasToDirsRequest, DirectoryData as ReqDirData, PartitionData as ReqPartData,
+    TopicData as ReqTopicData,
+};
+use crabka_protocol::owned::assign_replicas_to_dirs_response::AssignReplicasToDirsResponse;
+use crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest;
+use crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::create_topics_response::CreateTopicsResponse;
 use crabka_protocol::owned::produce_request::{
     PartitionProduceData, ProduceRequest, TopicProduceData,
 };
 use crabka_protocol::owned::produce_response::ProduceResponse;
+use crabka_protocol::primitives::uuid::Uuid as ProtocolUuid;
 use crabka_protocol::records::{Record, RecordBatch};
 use crabka_protocol::{Decode, Encode};
 use tempfile::TempDir;
@@ -278,5 +286,143 @@ async fn all_log_dirs_offline_triggers_self_shutdown() {
     // Shutdown should complete without hanging: the supervisor was already
     // cancelled by the self-shutdown path, and cancelling an already-
     // cancelled token is idempotent.
+    handle.shutdown().await;
+}
+
+/// KIP-112 / KIP-858: `AssignReplicasToDirs` (api_key=73) is accepted by the
+/// controller-leader broker, records the assignment, and echoes the request
+/// back with `error_code=0` on every partition.
+///
+/// This exercises the real async `handle` path: decode → leader gate →
+/// `collect_assignment_changes` → `submit_change` → `build_echo_response` →
+/// encode.
+#[tokio::test]
+async fn assign_replicas_to_dirs_reports_and_echoes() {
+    const TOPIC: &str = "kip112-assign";
+    const N: i32 = 2;
+    // Use a single-dir broker so the broker IS the controller leader.
+    let primary = tempfile::tempdir().unwrap();
+    let cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
+    let handle = Broker::start(cfg).await.expect("broker start");
+    let addr = handle.listen_addr();
+
+    create_topic(addr, TOPIC, N).await;
+    wait_all_partitions(&handle, TOPIC, N).await;
+
+    // Look up the topic UUID from the controller image so we can reference
+    // the partition correctly in the request.
+    let image = handle.controller_image_for_test();
+    let topic_uuid = image
+        .topics()
+        .find(|t| t.name == TOPIC)
+        .map(|t| t.topic_id)
+        .expect("topic must be in the image after wait_all_partitions");
+
+    // Choose an arbitrary dir UUID to assign partition 0 on broker 1.
+    let dir_uuid = uuid::Uuid::from_u128(0xCAFE_BABE);
+
+    const VERSION: i16 = 0; // AssignReplicasToDirs only has version 0
+    let req = AssignReplicasToDirsRequest {
+        broker_id: 1, // for_tests default broker_id
+        broker_epoch: -1,
+        directories: vec![ReqDirData {
+            id: ProtocolUuid(dir_uuid.into_bytes()),
+            topics: vec![ReqTopicData {
+                topic_id: ProtocolUuid(topic_uuid.into_bytes()),
+                partitions: vec![ReqPartData {
+                    partition_index: 0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let mut body = BytesMut::new();
+    req.encode(&mut body, VERSION).unwrap();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let resp_bytes = round_trip(&mut stream, 73, VERSION, &body).await.unwrap();
+
+    let mut cur: &[u8] = &resp_bytes;
+    let resp = AssignReplicasToDirsResponse::decode(&mut cur, VERSION).unwrap();
+
+    assert!(
+        resp.error_code == 0,
+        "AssignReplicasToDirs top-level error_code must be NONE (0), got {}",
+        resp.error_code
+    );
+    assert!(
+        !resp.directories.is_empty(),
+        "response must echo at least one directory"
+    );
+    assert!(
+        resp.directories[0].topics[0].partitions[0].error_code == 0,
+        "per-partition error_code must be NONE (0)"
+    );
+
+    handle.shutdown().await;
+}
+
+/// KIP-112: a `BrokerHeartbeat` (api_key=63) with `offline_log_dirs` set is
+/// accepted by the controller. For a single-broker cluster with no ISR peers
+/// the failover scan finds no alive ISR alternative → plan.changes is empty →
+/// `submit_change` is skipped → response `error_code=0`.
+///
+/// This exercises the heartbeat handler's offline-dir failover block end-to-end
+/// (the no-change path).
+#[tokio::test]
+async fn heartbeat_with_offline_log_dirs_is_accepted() {
+    use crabka_protocol::owned::broker_heartbeat_request::MAX_VERSION as HB_MAX_VERSION;
+
+    let primary = tempfile::tempdir().unwrap();
+    let cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
+    let handle = Broker::start(cfg).await.expect("broker start");
+    let addr = handle.listen_addr();
+
+    // Wait until the broker has registered itself and elected a raft leader
+    // (so the heartbeat handler reaches the leader branch, not NOT_CONTROLLER).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if handle.controller_leader_id().await.is_some() {
+            break;
+        }
+        assert!(Instant::now() <= deadline, "raft leader never elected");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Send a heartbeat with a made-up offline dir UUID. The broker is the
+    // only replica so alive_isr is empty → no change → no error.
+    let fake_offline_dir = uuid::Uuid::from_u128(0xDEAD_1234);
+    let req = BrokerHeartbeatRequest {
+        broker_id: 1, // for_tests default broker_id
+        broker_epoch: -1,
+        current_metadata_offset: 0,
+        want_fence: false,
+        want_shut_down: false,
+        offline_log_dirs: vec![ProtocolUuid(fake_offline_dir.into_bytes())],
+        cordoned_log_dirs: None,
+        ..Default::default()
+    };
+
+    let mut body = BytesMut::new();
+    req.encode(&mut body, HB_MAX_VERSION).unwrap();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let resp_bytes = round_trip(&mut stream, 63, HB_MAX_VERSION, &body)
+        .await
+        .unwrap();
+
+    let mut cur: &[u8] = &resp_bytes;
+    let resp = BrokerHeartbeatResponse::decode(&mut cur, HB_MAX_VERSION).unwrap();
+
+    assert!(
+        resp.error_code == 0,
+        "BrokerHeartbeat with offline_log_dirs must be accepted (error_code=0), got {}",
+        resp.error_code
+    );
+
     handle.shutdown().await;
 }

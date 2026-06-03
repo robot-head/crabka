@@ -1068,6 +1068,152 @@ mod tests {
         assert!(plan.changes.is_empty());
     }
 
+    // ── KIP-112: compute_offline_dir_failover_changes empty-ISR branches ──────
+
+    use super::compute_offline_dir_failover_changes;
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_balanced_strategy_defers_to_urm() {
+        // Broker 1 is leader, its replica is on the bad dir, and the only other
+        // ISR member (broker 2) is NOT alive — alive_isr is empty.
+        // Topic sets unclean.recovery.strategy=Balanced.
+        // Expect: recoveries gets the entry, changes is empty.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        set_topic_config(&mut img, "t", UNCLEAN_RECOVERY_STRATEGY, "Balanced");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // Only broker 3 alive but it's NOT in the ISR — alive_isr = empty.
+        l.record_heartbeat(3).await;
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = compute_offline_dir_failover_changes(
+            &img,
+            1,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(
+            plan.changes.is_empty(),
+            "Balanced strategy must not make an immediate change; got {:?}",
+            plan.changes
+        );
+        assert!(
+            plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Balanced)],
+            "Balanced strategy must enqueue a recovery job; got {:?}",
+            plan.recoveries
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_aggressive_strategy_defers_to_urm() {
+        // Same as above but with Aggressive strategy.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        set_topic_config(&mut img, "t", UNCLEAN_RECOVERY_STRATEGY, "Aggressive");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // broker 2 is not alive, broker 3 is alive but not in ISR.
+        l.record_heartbeat(3).await;
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = compute_offline_dir_failover_changes(
+            &img,
+            1,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(plan.changes.is_empty());
+        assert!(
+            plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Aggressive)],
+            "Aggressive strategy must enqueue a recovery job; got {:?}",
+            plan.recoveries
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_unclean_enabled_elects_out_of_isr_replica() {
+        // Broker 1 is leader on bad dir, broker 2 (the only ISR peer) is dead,
+        // broker 3 is alive and out-of-ISR.
+        // unclean.leader.election.enable=true → elect broker 3, singleton ISR,
+        // bump unclean_leader_elections_total.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // broker 3 alive, broker 2 dead (no heartbeat).
+        l.record_heartbeat(3).await;
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let plan = compute_offline_dir_failover_changes(&img, 1, &offline, &l, &metrics).await;
+        assert!(plan.recoveries.is_empty());
+        let pr = one_partition_change(&plan.changes);
+        assert!(
+            pr.leader == 3,
+            "must elect broker 3 (only alive out-of-ISR)"
+        );
+        assert!(pr.isr == vec![3], "unclean election installs singleton ISR");
+        assert!(pr.leader_epoch == 6, "epoch must bump");
+        assert!(
+            metrics.unclean_leader_elections_total.get() == 1,
+            "unclean counter must be bumped exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_no_unclean_leaves_partition_unavailable() {
+        // Broker 1 is leader on bad dir, broker 2 dead, broker 3 alive but
+        // not in ISR.  No recovery strategy, no unclean flag → no change.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        l.record_heartbeat(3).await; // only 3 alive, but not in ISR
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = compute_offline_dir_failover_changes(
+            &img,
+            1,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(
+            plan.changes.is_empty(),
+            "default-off must not emit any change; got {:?}",
+            plan.changes
+        );
+        assert!(plan.recoveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_unclean_enabled_no_alive_replica_stays_unavailable() {
+        // Broker 1 is leader on bad dir, ALL brokers are dead.
+        // unclean enabled but no alive replica → no change.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // No heartbeats — nobody alive.
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let plan = compute_offline_dir_failover_changes(&img, 1, &offline, &l, &metrics).await;
+        assert!(
+            plan.changes.is_empty(),
+            "no alive replica → no election; got {:?}",
+            plan.changes
+        );
+        assert!(plan.recoveries.is_empty());
+        assert!(
+            metrics.unclean_leader_elections_total.get() == 0,
+            "no election means no counter bump"
+        );
+    }
+
     // ── KIP-966: offset-aware recovery strategies defer to the URM ──────────
 
     #[tokio::test]
