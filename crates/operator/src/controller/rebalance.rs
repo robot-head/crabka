@@ -335,7 +335,9 @@ fn validate_endpoint(endpoint: &str) -> Result<(), InvalidEndpoint> {
 
     // Scheme.
     let Some((scheme, rest)) = endpoint.split_once("://") else {
-        return reject(format!("spec.endpoint {endpoint:?} is not an absolute http(s) URL"));
+        return reject(format!(
+            "spec.endpoint {endpoint:?} is not an absolute http(s) URL"
+        ));
     };
     if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
         return reject(format!(
@@ -344,10 +346,7 @@ fn validate_endpoint(endpoint: &str) -> Result<(), InvalidEndpoint> {
     }
 
     // Authority = everything up to the first '/', '?' or '#'.
-    let authority = rest
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or(rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     // Drop any userinfo ("user:pass@host").
     let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
 
@@ -372,7 +371,10 @@ fn validate_endpoint(endpoint: &str) -> Result<(), InvalidEndpoint> {
     }
 
     // Reject bare IPv4 literals (e.g. 169.254.169.254, 127.0.0.1, 10.x).
-    if host.split('.').all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())) {
+    if host
+        .split('.')
+        .all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()))
+    {
         return reject(format!(
             "spec.endpoint host {host:?} is an IP literal; only cluster-internal DNS names are allowed"
         ));
@@ -853,8 +855,7 @@ mod tests {
     #[test]
     fn resolve_endpoint_prefers_valid_spec() {
         let mut k = cr("x");
-        k.spec.endpoint =
-            Some("http://other-rebalancer.kafka.svc.cluster.local:9300".into());
+        k.spec.endpoint = Some("http://other-rebalancer.kafka.svc.cluster.local:9300".into());
         assert!(
             resolve_endpoint(&k, "kafka").unwrap().as_deref()
                 == Some("http://other-rebalancer.kafka.svc.cluster.local:9300")
