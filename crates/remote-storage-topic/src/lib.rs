@@ -35,10 +35,11 @@
 //!   `__remote_log_metadata` topic. Reads use manual per-partition
 //!   `Fetch` loops over `crabka_client_core` (no consumer group).
 //! - [`SwappableRlmm`] — the hot-swap facade the broker boots behind so
-//!   it can start on the in-memory placeholder and upgrade to the
+//!   it can start on the fail-closed `NotReadyRlmm` and upgrade to the
 //!   topic-backed manager once its listener is serving.
-//!   `Broker::start` selects the topic-backed manager via the
-//!   `[remote_storage.kafka_metadata]` config section.
+//!   `Broker::start` selects the topic-backed manager when the
+//!   `[remote_storage.kafka_metadata]` config section is present and
+//!   `in_memory` is not set to `true`.
 //!
 //! ## What this crate does NOT do (yet)
 //!

@@ -108,7 +108,7 @@ conversion predicates exist and are unit-tested; the triggers are not). Tiered
 storage (KIP-405) is fully wired: the topic-backed `RemoteLogMetadataManager`
 (durable `__remote_log_metadata` internal topic) is the default RLMM whenever
 tiered storage is enabled; in-memory metadata is an explicit opt-out for
-in-process tests only. Copy/read/retention, Raft snapshots, dynamic per-broker
+in-process tests only. Copy/read/retention, metadata-topic (RLMM) snapshots, dynamic per-broker
 metadata-partition assignment, and TLS/SASL on the metadata client are all in
 tree. JVM interoperability is validated via a single-broker restart-durability
 test (MinIO/S3) and an in-process multi-broker failover test that proves a

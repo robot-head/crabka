@@ -1,10 +1,10 @@
 //! Slice-48f broker integration: the topic-backed
 //! [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-//! (`manager = "topic"`) wired against a single broker's own loopback
-//! listener.
+//! (configured via `[remote_storage.kafka_metadata]`) wired against a
+//! single broker's own loopback listener.
 //!
-//! `Broker::start` boots on the in-memory placeholder behind a
-//! `SwappableRlmm`, then a fire-and-forget task dials the broker's own
+//! `Broker::start` boots on the fail-closed `NotReadyRlmm` behind a
+//! `SwappableRlmm`, then a retry-until-success task dials the broker's own
 //! advertised listener, provisions `__remote_log_metadata`, starts the
 //! `TopicBasedRemoteLogMetadataManager`, and swaps it in. These tests
 //! exercise that path end-to-end with the `Local` tiered-storage backend:

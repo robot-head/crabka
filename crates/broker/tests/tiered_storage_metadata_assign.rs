@@ -28,7 +28,7 @@ use tempfile::TempDir;
 
 /// Boot a bare loopback broker via the pinned-port pattern from
 /// `tiered_storage_topic_rlmm.rs::start_broker_with_topic_rlmm`, dropping
-/// the tiered-storage backend and the `remote_log_metadata_kafka`
+/// the tiered-storage backend and the `remote_log_metadata`
 /// bootstrap (this test wires `KafkaMetadataEventLog` by hand). Returns
 /// the handle plus the log tempdir (kept alive by the caller).
 async fn start_bare_broker() -> (BrokerHandle, TempDir) {

@@ -515,7 +515,7 @@ impl BrokerHandle {
     }
 
     /// Test-only: read the `tiered_storage_rlmm_topic_backed` gauge. `1`
-    /// once the slice-48f bootstrap has swapped the in-memory placeholder
+    /// once the bootstrap task has swapped the fail-closed `NotReadyRlmm`
     /// for the topic-backed [`crabka_remote_storage::RemoteLogMetadataManager`],
     /// `0` before the swap completes, or when `remote_log_metadata` is
     /// `RlmmKind::InMemory`.
@@ -2393,11 +2393,13 @@ impl Broker {
             listener_tasks.push(task);
         }
 
-        // Now that the listener accept loops are spawned,
-        // construct the topic-backed RLMM and swap it into the live
-        // `SwappableRlmm` facade. We deliberately fire-and-forget the
-        // build task: a connect failure here surfaces as a `warn!`
-        // and the broker keeps running on the in-memory placeholder.
+        // Now that the listener accept loops are spawned, launch the
+        // topic-backed RLMM bootstrap task.  The broker already serves
+        // behind the fail-closed `NotReadyRlmm` facade; the bootstrap
+        // task retries with backoff until the topic-backed manager
+        // starts or the broker shuts down.  Remote reads return a
+        // retryable `NotReady` error and the copy task skips tiering
+        // until the swap completes.
         if let Some(swap) = kafka_swap_target.as_ref()
             && let Some(kafka_cfg) = kafka_swap_kickoff.as_ref()
         {

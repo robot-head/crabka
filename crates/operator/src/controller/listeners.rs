@@ -3114,19 +3114,23 @@ pub fn render_broker_toml(
             }
         }
 
-        // KIP-405: `[remote_storage.kafka_metadata]` opts the broker pods into
-        // the topic-backed RLMM. This is the production default whenever tiered
-        // storage is enabled. Only an explicit `type: InMemory` opts out.
+        // KIP-405: `[remote_storage.kafka_metadata]` is ALWAYS emitted when
+        // tiered storage is enabled. When the CR has `type: InMemory` we emit
+        // `in_memory = true` so the broker selects the in-memory RLMM (the
+        // broker's default when the backend is present is topic-backed, so
+        // omitting the block would silently run topic-backed instead of InMemory).
         let is_in_memory = ts
             .metadata_manager
             .as_ref()
             .is_some_and(|mm| matches!(mm.kind, crate::crd::kafka::MetadataManagerType::InMemory));
-        if !is_in_memory {
+        let _ = writeln!(out, "[remote_storage.kafka_metadata]");
+        if is_in_memory {
+            let _ = writeln!(out, "in_memory = true");
+        } else {
             let topic = ts
                 .metadata_manager
                 .as_ref()
                 .and_then(|mm| mm.topic.as_ref());
-            let _ = writeln!(out, "[remote_storage.kafka_metadata]");
             if let Some(t) = topic {
                 let _ = writeln!(out, "bootstrap = \"{}\"", toml_escape(&t.bootstrap));
                 if let Some(np) = t.num_partitions {
@@ -3136,8 +3140,8 @@ pub fn render_broker_toml(
                     let _ = writeln!(out, "replication = {rf}");
                 }
             }
-            out.push('\n');
         }
+        out.push('\n');
     }
 
     // `[authorization]` block. Folds in the
@@ -3898,7 +3902,7 @@ mod toml_rendering_tests {
     }
 
     #[test]
-    fn render_broker_toml_omits_kafka_metadata_when_rlmm_inmemory() {
+    fn render_broker_toml_emits_in_memory_opt_out_when_rlmm_inmemory() {
         let mut addrs = std::collections::BTreeMap::new();
         addrs.insert(
             "PLAIN".into(),
@@ -3929,9 +3933,14 @@ mod toml_rendering_tests {
             Some(&ts),
             None,
         );
+        // The block must always be emitted so the broker knows to select InMemory.
         assert!(
-            !t.contains("[remote_storage.kafka_metadata]"),
-            "kafka_metadata block leaked for InMemory, got:\n{t}"
+            t.contains("[remote_storage.kafka_metadata]"),
+            "kafka_metadata block missing for InMemory, got:\n{t}"
+        );
+        assert!(
+            t.contains("in_memory = true"),
+            "in_memory = true missing for InMemory, got:\n{t}"
         );
     }
 
