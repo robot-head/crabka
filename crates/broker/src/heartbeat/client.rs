@@ -46,13 +46,30 @@ pub(crate) struct Config {
     pub supervisor_shutdown: tokio_util::sync::CancellationToken,
 }
 
+/// UUIDs of the currently-offline log dirs, for the heartbeat's `offline_log_dirs`.
+fn offline_dir_uuids(
+    status: &crate::log_dir_status::LogDirRegistry,
+    ids: &crate::log_dir_id::LogDirIds,
+) -> Vec<crabka_protocol::primitives::uuid::Uuid> {
+    status
+        .offline()
+        .into_iter()
+        .filter_map(|(path, _reason)| ids.id_for(&path))
+        .map(|u| crabka_protocol::primitives::uuid::Uuid(*u.as_bytes()))
+        .collect()
+}
+
+/// True when every configured log dir is offline (→ broker self-shutdown).
+fn all_dirs_offline(
+    all_log_dirs: &[std::path::PathBuf],
+    status: &crate::log_dir_status::LogDirRegistry,
+) -> bool {
+    !all_log_dirs.is_empty() && all_log_dirs.iter().all(|d| status.is_offline(d))
+}
+
 /// Returns `true` when every configured log dir is currently offline.
 fn all_log_dirs_offline(cfg: &Config) -> bool {
-    !cfg.all_log_dirs.is_empty()
-        && cfg
-            .all_log_dirs
-            .iter()
-            .all(|d| cfg.log_dir_status.is_offline(d))
+    all_dirs_offline(&cfg.all_log_dirs, &cfg.log_dir_status)
 }
 
 /// Trigger the KIP-112 self-shutdown: latch `should_shutdown` and cancel
@@ -123,13 +140,7 @@ pub(crate) async fn run(mut cfg: Config) {
             continue;
         };
         let want_shut_down = *cfg.want_shutdown.borrow_and_update();
-        let offline_log_dirs: Vec<crabka_protocol::primitives::uuid::Uuid> = cfg
-            .log_dir_status
-            .offline()
-            .into_iter()
-            .filter_map(|(path, _reason)| cfg.log_dir_ids.id_for(&path))
-            .map(|u| crabka_protocol::primitives::uuid::Uuid(*u.as_bytes()))
-            .collect();
+        let offline_log_dirs = offline_dir_uuids(&cfg.log_dir_status, &cfg.log_dir_ids);
         let resp = client
             .send(BrokerHeartbeatRequest {
                 broker_id: cfg.broker_id,
@@ -163,5 +174,53 @@ pub(crate) async fn run(mut cfg: Config) {
             // session timeout fences this broker independently.
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use tempfile::tempdir;
+
+    #[test]
+    fn offline_dir_uuids_maps_offline_paths() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let paths = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+        let ids = crate::log_dir_id::LogDirIds::resolve(&paths);
+        let status = crate::log_dir_status::LogDirRegistry::probe(&paths);
+
+        // Initially no dirs are offline.
+        assert!(offline_dir_uuids(&status, &ids).is_empty());
+
+        // Mark dir `a` as offline.
+        status.mark_offline(a.path(), "test");
+        let result = offline_dir_uuids(&status, &ids);
+        assert!(result.len() == 1);
+        let expected_id = ids.id_for(a.path()).unwrap();
+        assert!(result[0].0 == *expected_id.as_bytes());
+    }
+
+    #[test]
+    fn all_dirs_offline_true_only_when_every_dir_offline() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let paths = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+        let status = crate::log_dir_status::LogDirRegistry::probe(&paths);
+
+        // Empty all_log_dirs: always false.
+        assert!(!all_dirs_offline(&[], &status));
+
+        // No dirs offline yet.
+        assert!(!all_dirs_offline(&paths, &status));
+
+        // Only `a` offline: still false.
+        status.mark_offline(a.path(), "disk error");
+        assert!(!all_dirs_offline(&paths, &status));
+
+        // Both offline: true.
+        status.mark_offline(b.path(), "disk error");
+        assert!(all_dirs_offline(&paths, &status));
     }
 }
