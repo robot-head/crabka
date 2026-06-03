@@ -248,6 +248,16 @@ fn build_fetch_request(
                 .current_leader_epoch
                 .load(std::sync::atomic::Ordering::Acquire)
         });
+    // KIP-320: the leader epoch of our last appended record. Sent so the
+    // leader can detect divergence in-band and answer with `diverging_epoch`.
+    let last_fetched_epoch = cfg
+        .partitions
+        .get(&cfg.topic, cfg.partition)
+        .and_then(|entry| {
+            let log = entry.log.lock().expect("log mutex poisoned");
+            log.epoch_checkpoint().latest_epoch()
+        })
+        .unwrap_or(-1);
     // `replica_id` is the wire field on Fetch v0-14. KIP-903 (Kafka 3.5) moved
     // it into a tagged `replica_state` struct on v15+; the codegen serializes
     // whichever the negotiated version requires. Populate BOTH so the request
@@ -269,6 +279,7 @@ fn build_fetch_request(
                 partition: cfg.partition,
                 fetch_offset,
                 current_leader_epoch: leader_epoch,
+                last_fetched_epoch,
                 partition_max_bytes: partition_max_bytes_cap,
                 ..FetchPartition::default()
             }],
@@ -284,6 +295,7 @@ enum LoopAction {
     StopNotLeader,
 }
 
+#[allow(clippy::too_many_lines)] // KIP-320 in-band truncation + KIP-101 epoch fence add match arms
 async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
     // The replicator only ever requests one (topic, partition) per Fetch.
     // Match by either `topic` (v ≤ 12) or `topic_id` (v ≥ 13) so that
@@ -311,6 +323,32 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
 
     match part_resp.error_code {
         codes::NONE => {
+            // KIP-320: an in-band divergence signal. The leader served no
+            // records and told us the epoch/offset our log must truncate to.
+            // `EpochEndOffset` defaults to (epoch:-1, end_offset:-1); a
+            // populated `end_offset >= 0` means "truncate here".
+            if part_resp.diverging_epoch.end_offset >= 0 {
+                let end_offset = part_resp.diverging_epoch.end_offset;
+                if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) {
+                    match part.truncate_to(end_offset).await {
+                        Ok(()) => info!(
+                            topic = %cfg.topic,
+                            partition = cfg.partition,
+                            end_offset,
+                            "replicator: truncated to diverging_epoch (KIP-320 in-band)"
+                        ),
+                        Err(e) => warn!(
+                            topic = %cfg.topic,
+                            partition = cfg.partition,
+                            end_offset,
+                            error = %e,
+                            "replicator: truncate_to(diverging_epoch) failed"
+                        ),
+                    }
+                }
+                return LoopAction::Continue;
+            }
+
             let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) else {
                 warn!(topic = %cfg.topic, partition = cfg.partition,
                     "replicator: local partition vanished between fetches");

@@ -27,6 +27,16 @@ pub enum ConsumerError {
     #[error("coordinator unavailable")]
     CoordinatorUnavailable,
 
+    #[error(
+        "log truncation detected on {topic}-{partition}: fetch offset {fetch_offset} is past the leader's log; safe offset {safe_offset}"
+    )]
+    LogTruncation {
+        topic: String,
+        partition: i32,
+        fetch_offset: i64,
+        safe_offset: i64,
+    },
+
     #[error("broker error_code {0}")]
     Server(i16),
 }
@@ -46,5 +56,18 @@ mod tests {
     fn display_server_error_code() {
         let e = ConsumerError::Server(25);
         assert!(e.to_string().contains("25"));
+    }
+
+    #[test]
+    fn display_log_truncation() {
+        let e = ConsumerError::LogTruncation {
+            topic: "t".into(),
+            partition: 3,
+            fetch_offset: 100,
+            safe_offset: 42,
+        };
+        let s = e.to_string();
+        assert!(s.contains("truncation"));
+        assert!(s.contains("42"));
     }
 }

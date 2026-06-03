@@ -258,8 +258,8 @@ impl Partition {
 
     /// Truncate the log to `offset`, dropping all records at offsets
     /// `>= offset`. Used by the replicator's `OFFSET_OUT_OF_RANGE`
-    /// recovery path; currently always called with `offset == 0`
-    /// (truncate everything).
+    /// recovery path and the KIP-320 in-band `diverging_epoch` truncation
+    /// path (which passes the leader's epoch boundary, not just 0).
     pub async fn truncate_to(&self, offset: i64) -> Result<(), BrokerError> {
         let (ack_tx, ack_rx) = oneshot::channel();
         self.writer_tx

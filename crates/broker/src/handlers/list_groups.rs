@@ -1,12 +1,14 @@
-//! `ListGroups` (`api_key=16`). Returns every known group across all three
+//! `ListGroups` (`api_key=16`). Returns every known group across all four
 //! registries: classic groups from `GroupCoordinator::list_groups` (type
 //! `"classic"`), next-gen KIP-848 consumer groups from the unified
-//! coordinator's consumer registry (type `"consumer"`), and KIP-932 share
-//! groups from its share registry (type `"share"`). The optional
+//! coordinator's consumer registry (type `"consumer"`), KIP-932 share
+//! groups from its share registry (type `"share"`), and KIP-1071 streams
+//! groups from its streams registry (type `"streams"`). The optional
 //! `states_filter` (v4+) and `types_filter` (v5+, e.g. `["share"]` from
-//! `kafka-share-groups.sh --list` or `["consumer"]` from `kafka-consumer-groups
-//! .sh --list`) are both honored. A `group_id` is emitted at most once: the
-//! three registries are disjoint by `GroupType`, but we defensively dedup.
+//! `kafka-share-groups.sh --list`, `["streams"]` from `kafka-streams-groups.sh
+//! --list`, or `["consumer"]` from `kafka-consumer-groups.sh --list`) are both
+//! honored. A `group_id` is emitted at most once: the registries are disjoint
+//! by `GroupType`, but we defensively dedup.
 
 use std::collections::HashSet;
 
@@ -118,6 +120,22 @@ pub(crate) async fn handle(
             &authorized,
         );
     }
+    // ── KIP-1071 streams groups (group_type "streams") ──────────────────
+    // Surfaced so the JVM `kafka-streams-groups.sh --list` / `--describe`
+    // (AdminClient `listGroups(typesFilter=[Streams])`) can find them; the
+    // describe hop is gated behind a non-empty list on the JVM side.
+    if broker.config.streams_group.enable {
+        append_next_gen(
+            &mut groups,
+            &mut emitted,
+            "streams",
+            ng.streams_group_ids(),
+            &req,
+            states_active,
+            types_active,
+            &authorized,
+        );
+    }
 
     let resp = ListGroupsResponse {
         error_code: codes::NONE,
@@ -159,9 +177,9 @@ fn append_next_gen(
     {
         return;
     }
-    // Share groups carry an empty protocol_type (Kafka emits no consumer
-    // protocol for them); next-gen consumer groups use "consumer".
-    let protocol_type = if group_type == "share" {
+    // Share and streams groups carry an empty protocol_type (Kafka emits no
+    // consumer protocol for them); next-gen consumer groups use "consumer".
+    let protocol_type = if group_type == "share" || group_type == "streams" {
         String::new()
     } else {
         "consumer".into()

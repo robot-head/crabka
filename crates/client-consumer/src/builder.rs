@@ -12,6 +12,9 @@ pub enum AutoOffsetReset {
     /// Start from the log-end offset. Resolved lazily by `Consumer::poll`
     /// using `ListOffsets(timestamp=-1)`.
     Latest,
+    /// Do not reset automatically. On a missing offset or detected truncation,
+    /// `poll` returns `ConsumerError::LogTruncation` / surfaces the error.
+    None,
 }
 
 /// Controls which records are visible to this consumer.

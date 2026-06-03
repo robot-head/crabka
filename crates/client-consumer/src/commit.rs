@@ -1,5 +1,7 @@
 //! `Consumer::commit_sync` and `commit_async`.
 
+use std::collections::HashMap;
+
 use crabka_protocol::owned::offset_commit_request::OffsetCommitRequest;
 
 use crate::consumer::Consumer;
@@ -10,10 +12,19 @@ impl Consumer {
     /// Commit the current next-offsets for every assigned partition.
     /// Blocks until the broker acks.
     pub async fn commit_sync(&self) -> Result<(), ConsumerError> {
-        let offsets = self.next_offsets.lock().await.clone();
-        if offsets.is_empty() {
+        let raw_offsets = self.next_offsets.lock().await.clone();
+        if raw_offsets.is_empty() {
             return Ok(());
         }
+        let pos = self.positions.lock().await;
+        let offsets: HashMap<(String, i32), (i64, i32)> = raw_offsets
+            .into_iter()
+            .map(|(k, v)| {
+                let epoch = pos.get(&k).map_or(-1, |p| p.offset_epoch);
+                (k, (v, epoch))
+            })
+            .collect();
+        drop(pos);
         let topic_ids = self.topic_ids.lock().await.clone();
         let topics = build_commit_topics(offsets, &topic_ids);
 
@@ -48,12 +59,22 @@ impl Consumer {
         let generation = self.generation_id;
         let member_id = self.member_id.clone();
         let offsets = self.next_offsets.clone();
+        let positions = self.positions.clone();
         let topic_ids = self.topic_ids.clone();
         tokio::spawn(async move {
-            let snapshot = offsets.lock().await.clone();
-            if snapshot.is_empty() {
+            let raw_snapshot = offsets.lock().await.clone();
+            if raw_snapshot.is_empty() {
                 return;
             }
+            let pos = positions.lock().await;
+            let snapshot: HashMap<(String, i32), (i64, i32)> = raw_snapshot
+                .into_iter()
+                .map(|(k, v)| {
+                    let epoch = pos.get(&k).map_or(-1, |p| p.offset_epoch);
+                    (k, (v, epoch))
+                })
+                .collect();
+            drop(pos);
             let topic_ids = topic_ids.lock().await.clone();
             let topics = build_commit_topics(snapshot, &topic_ids);
             let res = client

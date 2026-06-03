@@ -1006,6 +1006,7 @@ mod tests {
             ShareGroupConfig::default(),
             metadata,
             log.clone(),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         ));
         (coord, log)
     }
@@ -1150,6 +1151,7 @@ mod tests {
             config.clone(),
             metadata.clone(),
             log.clone(),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         ));
 
         let mut state = ShareGroupState::new("g");

@@ -140,6 +140,11 @@ pub(crate) mod share_acknowledge;
 // KIP-932 ShareFetch (api_key 78). Intercepted inline in `network::dispatch`
 // for the per-topic Read ACL gate.
 pub(crate) mod share_fetch;
+// KIP-1071 StreamsGroupDescribe (api_key 89). Plain 4-arg handler mirroring
+// consumer_group_describe; per-group Describe ACL is a future slice.
+pub(crate) mod streams_group_describe;
+// KIP-1071 streams-group membership / rebalance protocol (api_key 88).
+pub(crate) mod streams_group_heartbeat;
 pub(crate) mod sync_group;
 // KIP-185 admin RPC to permanently drop a broker registration (api_key 64).
 pub(crate) mod unregister_broker;
@@ -262,6 +267,11 @@ pub(crate) fn build_table() -> HandlerTable {
     // KIP-932 ShareGroupHeartbeat (api_key 76). Plain 4-arg handler:
     // share-group membership needs no per-connection ACL context.
     t.register(76, share_group_heartbeat::handle);
+    // KIP-1071 StreamsGroupHeartbeat (88) / StreamsGroupDescribe (89). Plain
+    // 4-arg handlers; the streams protocol needs no per-connection ACL context
+    // yet (per-group Describe ACL is a future slice).
+    t.register(88, streams_group_heartbeat::handle);
+    t.register(89, streams_group_describe::handle);
     // KIP-932 share-state persister RPCs (api keys 83–87). Inter-broker
     // handlers, gated per-partition on local share-state leadership.
     t.register(83, crate::share_coordinator::handlers::initialize::handle);

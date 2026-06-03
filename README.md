@@ -90,6 +90,12 @@ What works today:
   `ShareAcknowledge` RPCs, the share-state coordinator and `__share_group_state`
   topic, the share-group admin offset APIs, and a native share consumer —
   validated against the JVM share-group client.
+- Streams rebalance protocol (KIP-1071): broker-side task assignment for Kafka
+  Streams groups — the `StreamsGroupHeartbeat` / `StreamsGroupDescribe` RPCs,
+  topology ingestion with internal repartition/changelog topic auto-creation,
+  active/standby/warmup task assignment via the highly-available assignor with
+  changelog catch-up, `__consumer_offsets` persistence, and the `streams.version`
+  feature gate. Live classic↔streams group migration is not yet wired.
 - TLS / mTLS, SASL (PLAIN, SCRAM-256/512, OAUTHBEARER with JWKS / signed-JWT
   and opaque-token introspection, GSSAPI/Kerberos), SASL re-authentication
   (KIP-368), delegation tokens (KIP-48 / KIP-373), ACL authorization, the OPA
@@ -117,8 +123,10 @@ survivor broker can serve remote reads from metadata it consumed off
 `__remote_log_metadata` record format is not byte-compatible with the JVM's
 `RemoteLogMetadataSerde`, so a mixed JVM+Crabka tiered cluster sharing the
 internal topic is unsupported — real clusters run a single RLMM implementation,
-making this a non-issue in practice. A Kafka Connect / Streams / MirrorMaker
-equivalent is not yet implemented. ZooKeeper mode and ZK→KRaft migration are
+making this a non-issue in practice. The broker-side Streams rebalance protocol
+(KIP-1071) is implemented and serves real JVM Streams-group admin clients, but
+the Kafka Streams *client* library itself — along with a Kafka Connect /
+MirrorMaker equivalent — is not. ZooKeeper mode and ZK→KRaft migration are
 deliberately out of scope — Crabka is KRaft-only.
 
 ## Architecture
@@ -220,6 +228,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | `OffsetDelete` admin API (KIP-496) | ✅ |
 | Next-gen consumer group protocol (KIP-848) | ⚠️ |
 | Share groups / queues (KIP-932) | ✅ |
+| Streams rebalance protocol (KIP-1071) | ⚠️ |
 
 ### Replication & durability
 
@@ -422,7 +431,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-73](https://cwiki.apache.org/confluence/display/KAFKA/KIP-73) | Replication quotas | ✅ |
 | [KIP-101](https://cwiki.apache.org/confluence/display/KAFKA/KIP-101) | Leader-epoch-based truncation | ✅ |
 | [KIP-279](https://cwiki.apache.org/confluence/display/KAFKA/KIP-279) | Fix leader/follower log divergence | ✅ |
-| [KIP-320](https://cwiki.apache.org/confluence/display/KAFKA/KIP-320) | Detect & handle log truncation (leader epoch in fetch) | ⚠️ |
+| [KIP-320](https://cwiki.apache.org/confluence/display/KAFKA/KIP-320) | Detect & handle log truncation (leader epoch in fetch) | ✅ |
 | [KIP-392](https://cwiki.apache.org/confluence/display/KAFKA/KIP-392) | Fetch from closest replica (rack-aware) | ✅ |
 | [KIP-455](https://cwiki.apache.org/confluence/display/KAFKA/KIP-455) | Replica reassignment admin API | ✅ |
 | [KIP-460](https://cwiki.apache.org/confluence/display/KAFKA/KIP-460) | Admin leader election (`ElectLeaders`) | ✅ |
@@ -502,7 +511,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 |-----|-------|:------:|
 | [KIP-714](https://cwiki.apache.org/confluence/display/KAFKA/KIP-714) | Client metrics & observability push | ✅ |
 | [KIP-932](https://cwiki.apache.org/confluence/display/KAFKA/KIP-932) | Queues for Kafka (share groups) | ✅ |
-| [KIP-1071](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1071) | Streams rebalance protocol | ❌ |
+| [KIP-1071](https://cwiki.apache.org/confluence/display/KAFKA/KIP-1071) | Streams rebalance protocol | ⚠️ |
 
 ## Published crates
 
