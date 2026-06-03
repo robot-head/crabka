@@ -183,6 +183,26 @@ fn handle_partition(
         );
     }
 
+    // KIP-903: fence ineligible replicas. A broker in the proposed ISR is
+    // ineligible if it is not currently registered, or if its stamped broker
+    // epoch is non-sentinel (-1) and disagrees with the controller's
+    // registration epoch. Any ineligible replica fails the whole partition.
+    for bstate in new_isr_with_epochs {
+        let node = u64::try_from(bstate.broker_id).unwrap_or(u64::MAX);
+        let registered = image.broker_epoch(node);
+        let ineligible = registered.is_none()
+            || (bstate.broker_epoch != -1 && registered != Some(bstate.broker_epoch));
+        if ineligible {
+            return error_part(
+                partition_index,
+                codes::INELIGIBLE_REPLICA,
+                leader_i32,
+                part_rec.leader_epoch,
+                &current_isr_i32,
+            );
+        }
+    }
+
     // Success: submit the ISR change.
     changes.push(MetadataRecord::V1Partition(PartitionRecord {
         topic: topic_name.to_string(),
@@ -230,4 +250,105 @@ fn encode_resp(version: i16, resp: &AlterPartitionResponse) -> Result<Bytes, Bro
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use crabka_metadata::{
+        BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
+    };
+    use crabka_protocol::owned::alter_partition_request::BrokerState;
+
+    fn reg(node_id: u64, epoch: i64) -> MetadataRecord {
+        MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+            node_id,
+            broker_epoch: epoch,
+            host: "h".into(),
+            port: 9092,
+            rack: None,
+            endpoints: vec![],
+        })
+    }
+
+    /// Image with topic "t" / partition 0, replicas [1,2,3], isr [1,2],
+    /// leader 1 @ leader_epoch 5. Brokers registered per `epochs`.
+    fn image_with(epochs: &[(u64, i64)]) -> MetadataImage {
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: uuid::Uuid::nil(),
+            partitions: 1,
+            replication_factor: 3,
+        }));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2, 3],
+            isr: vec![1, 2],
+            leader_epoch: 5,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+        }));
+        for &(id, ep) in epochs {
+            image.apply(&reg(id, ep));
+        }
+        image
+    }
+
+    fn bs(broker_id: i32, broker_epoch: i64) -> BrokerState {
+        BrokerState { broker_id, broker_epoch, ..Default::default() }
+    }
+
+    #[test]
+    fn matching_epochs_succeed() {
+        let image = image_with(&[(1, 10), (2, 20), (3, 30)]);
+        let mut changes = Vec::new();
+        let isr = vec![bs(1, 10), bs(2, 20), bs(3, 30)];
+        let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
+        assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
+        assert!(changes.len() == 1);
+    }
+
+    #[test]
+    fn stale_epoch_is_ineligible() {
+        let image = image_with(&[(1, 10), (2, 20), (3, 30)]);
+        let mut changes = Vec::new();
+        let isr = vec![bs(1, 10), bs(2, 20), bs(3, 29)]; // 29 != image 30
+        let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
+        assert!(resp.error_code == codes::INELIGIBLE_REPLICA, "got {}", resp.error_code);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn unregistered_replica_is_ineligible() {
+        let image = image_with(&[(1, 10), (2, 20)]); // broker 3 never registered
+        let mut changes = Vec::new();
+        let isr = vec![bs(1, 10), bs(2, 20), bs(3, -1)];
+        let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
+        assert!(resp.error_code == codes::INELIGIBLE_REPLICA, "got {}", resp.error_code);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn sentinel_epoch_skips_epoch_check() {
+        let image = image_with(&[(1, 10), (2, 20), (3, 30)]);
+        let mut changes = Vec::new();
+        let isr = vec![bs(1, -1), bs(2, -1), bs(3, -1)]; // -1 = don't check
+        let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
+        assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
+        assert!(changes.len() == 1);
+    }
+
+    #[test]
+    fn v2_no_epochs_path_unaffected() {
+        let image = image_with(&[(1, 10), (2, 20)]);
+        let mut changes = Vec::new();
+        // v2: new_isr populated, new_isr_with_epochs empty -> no epoch fencing.
+        let resp = handle_partition(&image, Some("t"), 0, 5, &[1, 2, 3], &[], &mut changes);
+        assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
+        assert!(changes.len() == 1);
+    }
 }
