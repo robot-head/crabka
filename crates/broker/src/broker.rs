@@ -773,6 +773,16 @@ impl BrokerHandle {
             .map_err(|e| BrokerError::Tls(e.to_string()))
     }
 
+    /// Subscribe to the self-shutdown signal. Flips `true` when the broker
+    /// decides to stop on its own — today: all log dirs went offline
+    /// (KIP-112). The embedding application should call
+    /// [`Self::shutdown`] (or `controlled_shutdown`) when this fires.
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn should_shutdown_rx(&self) -> tokio::sync::watch::Receiver<bool> {
+        self._broker.should_shutdown.subscribe()
+    }
+
     /// Request a graceful, controlled shutdown of this broker.
     ///
     /// Signals the heartbeat client to set `want_shut_down=true` on
@@ -1638,6 +1648,8 @@ impl Broker {
                 should_shutdown: should_shutdown_tx.clone(),
                 log_dir_status: log_dir_status.clone(),
                 log_dir_ids: log_dir_ids.clone(),
+                all_log_dirs: config.all_log_dirs(),
+                supervisor_shutdown: supervisor_shutdown.clone(),
             },
         ));
 

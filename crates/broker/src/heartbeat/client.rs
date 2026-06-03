@@ -38,6 +38,12 @@ pub(crate) struct Config {
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
     /// Stable per-log-dir UUIDs, to translate offline dir paths → ids.
     pub log_dir_ids: crate::log_dir_id::LogDirIds,
+    /// All configured log dirs; when every one is offline the broker
+    /// self-shuts-down (KIP-112).
+    pub all_log_dirs: Vec<std::path::PathBuf>,
+    /// Cancelled on all-dirs-offline to stop replication/materialization
+    /// against dead disks before teardown.
+    pub supervisor_shutdown: tokio_util::sync::CancellationToken,
 }
 
 pub(crate) async fn run(mut cfg: Config) {
@@ -118,6 +124,24 @@ pub(crate) async fn run(mut cfg: Config) {
                 }
             }
             Err(e) => warn!(error = %e, "heartbeat send failed"),
+        }
+
+        // KIP-112: if every configured log dir is offline, the broker can
+        // serve nothing. Signal a self-shutdown (the BrokerHandle owner —
+        // the broker binary or a test — reacts to `should_shutdown`) and
+        // stop the supervisor. We do this AFTER sending the heartbeat so the
+        // controller receives this broker's final `offline_log_dirs` report
+        // and fails its partitions over first.
+        if !cfg.all_log_dirs.is_empty()
+            && cfg
+                .all_log_dirs
+                .iter()
+                .all(|d| cfg.log_dir_status.is_offline(d))
+        {
+            tracing::error!("all log dirs offline — initiating broker self-shutdown (KIP-112)");
+            let _ = cfg.should_shutdown.send(true);
+            cfg.supervisor_shutdown.cancel();
+            return;
         }
     }
 }
