@@ -128,6 +128,14 @@ pub struct Broker {
     /// collector + OTLP forwarder. Shared so the push handler (Task 15)
     /// and the scrape path both touch the same instance.
     pub(crate) client_metrics: Arc<crate::client_metrics::ClientMetrics>,
+    /// Test-only counter of served `OffsetForLeaderEpoch` (`api_key` 23)
+    /// requests. Incremented once per decoded request by the handler.
+    /// Used by the KIP-320 proactive-validation integration test to prove
+    /// the consumer's validate pass actually issued an OFLE RPC (as opposed
+    /// to detecting truncation via the reactive in-band `diverging_epoch` /
+    /// `OFFSET_OUT_OF_RANGE` fetch paths, which issue no OFLE).
+    #[cfg(any(test, feature = "test-helpers"))]
+    pub(crate) offset_for_leader_epoch_requests: Arc<std::sync::atomic::AtomicU64>,
     handlers: HandlerTable,
 }
 
@@ -710,6 +718,21 @@ impl BrokerHandle {
             .current_image()
             .partition(topic, partition)
             .cloned()
+    }
+
+    /// Test-only: number of `OffsetForLeaderEpoch` (`api_key` 23) requests this
+    /// broker has served since startup. The KIP-320 proactive-validation
+    /// integration test reads this before and after a `Consumer::poll` to
+    /// prove the consumer's validate pass issued an OFLE RPC — distinguishing
+    /// the proactive path from the reactive in-band `diverging_epoch` /
+    /// `OFFSET_OUT_OF_RANGE` fetch paths, which issue no OFLE.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn offset_for_leader_epoch_count_for_test(&self) -> u64 {
+        self._broker
+            .offset_for_leader_epoch_requests
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Rebuild the TLS server config from the cert/key paths
@@ -2353,6 +2376,8 @@ impl Broker {
             remote_reader,
             log_dir_status,
             client_metrics,
+            #[cfg(any(test, feature = "test-helpers"))]
+            offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             handlers,
         });
 

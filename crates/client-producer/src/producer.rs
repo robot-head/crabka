@@ -95,6 +95,13 @@ pub struct Producer {
     #[allow(dead_code)]
     pub(crate) max_in_flight: usize,
     pub(crate) metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
+    /// Per-`(topic, partition)` leader-id cache used by the sender to route
+    /// each Produce to the broker that actually leads the partition. Populated
+    /// from `Metadata` alongside the partition count (see `partitions_for`); a
+    /// missing entry means "leader unknown → fall back to the bootstrap
+    /// connection". A leader id `< 0` is also treated as unknown. Shared with
+    /// the sender task via `Arc`.
+    pub(crate) partition_leaders: Arc<DashMap<(String, i32), i32>>,
     pub(crate) accumulators: Arc<DashMap<(String, i32), Arc<Mutex<Accumulator>>>>,
     #[allow(dead_code)]
     pub(crate) next_seq: Arc<DashMap<(String, i32), i32>>,
@@ -584,6 +591,14 @@ impl Producer {
     /// miss. Falls back to `1` if the broker reports an error or the
     /// topic is absent — production code can revisit retry
     /// policy here.
+    ///
+    /// On a cache miss this uses [`Client::refresh_metadata`] rather than a
+    /// bare `send(MetadataRequest)`: `refresh_metadata` also teaches the
+    /// client's `BrokerPool` each broker's `(id → addr)` mapping, which is what
+    /// lets the sender route a Produce to the partition *leader* via
+    /// `Client::broker(id)` instead of always hitting the bootstrap connection.
+    /// We then record each partition's `leader_id` in `partition_leaders` for
+    /// the sender to consult.
     async fn partitions_for(&self, topic: &str) -> i32 {
         {
             let m = self.metadata_cache.lock().await;
@@ -591,17 +606,10 @@ impl Producer {
                 return meta.num_partitions;
             }
         }
-        // Cache miss: fetch.
-        let req = crabka_protocol::owned::metadata_request::MetadataRequest {
-            topics: Some(vec![
-                crabka_protocol::owned::metadata_request::MetadataRequestTopic {
-                    name: Some(topic.to_string()),
-                    ..Default::default()
-                },
-            ]),
-            ..Default::default()
-        };
-        match self.client.send(req).await {
+        // Cache miss: refresh. `refresh_metadata` sends a (full-cluster)
+        // MetadataRequest, returns the response, AND refreshes the pool's
+        // broker address registry so per-leader routing can connect.
+        match self.client.refresh_metadata().await {
             Ok(resp) => {
                 let topic_meta = resp
                     .topics
@@ -613,6 +621,12 @@ impl Producer {
                 let (count, topic_id) = match topic_meta {
                     Some(t) if t.error_code == 0 => {
                         let count = i32::try_from(t.partitions.len()).unwrap_or(1).max(1);
+                        // Cache the per-partition leader id so the sender can
+                        // route each Produce to the partition leader.
+                        for part in &t.partitions {
+                            self.partition_leaders
+                                .insert((topic.to_string(), part.partition_index), part.leader_id);
+                        }
                         (count, t.topic_id)
                     }
                     _ => (1, crabka_protocol::primitives::uuid::Uuid::ZERO),

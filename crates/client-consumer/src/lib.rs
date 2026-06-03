@@ -56,7 +56,9 @@ mod coordinator;
 mod error;
 mod offset_wire;
 mod poll;
+mod position;
 mod share;
+mod validate;
 
 pub use assignor::Assignor;
 pub use builder::{AutoOffsetReset, IsolationLevel};

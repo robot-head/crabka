@@ -86,6 +86,7 @@ impl Producer {
         let shutdown = CancellationToken::new();
         let state = Arc::new(AtomicU8::new(0));
         let metadata_cache = Arc::new(Mutex::new(HashMap::new()));
+        let partition_leaders = Arc::new(DashMap::new());
         let accumulators = Arc::new(DashMap::new());
         let next_seq = Arc::new(DashMap::new());
         let partitioner = Arc::new(UniformStickyPartitioner::new());
@@ -106,6 +107,7 @@ impl Producer {
             retries,
             retry_backoff,
             metadata_cache: metadata_cache.clone(),
+            partition_leaders: partition_leaders.clone(),
             accumulators: accumulators.clone(),
             next_seq: next_seq.clone(),
             state: state.clone(),
@@ -133,6 +135,7 @@ impl Producer {
             retry_backoff,
             max_in_flight: max_in_flight_per_connection,
             metadata_cache,
+            partition_leaders,
             accumulators,
             next_seq,
             partitioner,

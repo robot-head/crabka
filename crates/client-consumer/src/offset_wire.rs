@@ -60,18 +60,23 @@ pub(crate) fn build_offset_fetch(
 }
 
 /// Flatten an `OffsetFetch` response into `(topic_name, partition,
-/// committed_offset)` triples. v8+ data lives in `groups`; v0-7 in `topics`.
-/// At v10 the per-topic name is empty, so resolve it from `topic_id` via
-/// `id_to_name`.
+/// committed_offset, committed_leader_epoch)` tuples. v8+ data lives in
+/// `groups`; v0-7 in `topics`. At v10 the per-topic name is empty, so
+/// resolve it from `topic_id` via `id_to_name`.
 pub(crate) fn parse_offset_fetch(
     resp: &OffsetFetchResponse,
     id_to_name: &HashMap<WireUuid, String>,
-) -> Vec<(String, i32, i64)> {
+) -> Vec<(String, i32, i64, i32)> {
     let mut out = Vec::new();
     if resp.groups.is_empty() {
         for t in &resp.topics {
             for p in &t.partitions {
-                out.push((t.name.clone(), p.partition_index, p.committed_offset));
+                out.push((
+                    t.name.clone(),
+                    p.partition_index,
+                    p.committed_offset,
+                    p.committed_leader_epoch,
+                ));
             }
         }
     } else {
@@ -83,7 +88,12 @@ pub(crate) fn parse_offset_fetch(
                     t.name.clone()
                 };
                 for p in &t.partitions {
-                    out.push((name.clone(), p.partition_index, p.committed_offset));
+                    out.push((
+                        name.clone(),
+                        p.partition_index,
+                        p.committed_offset,
+                        p.committed_leader_epoch,
+                    ));
                 }
             }
         }
@@ -93,14 +103,15 @@ pub(crate) fn parse_offset_fetch(
 
 /// Build the `topics` for an `OffsetCommit`, tagging each with its `topic_id`
 /// (required at v10, where the wire drops the topic name). The name is kept
-/// for v0-9.
+/// for v0-9. `offsets` maps `(topic, partition)` to
+/// `(committed_offset, committed_leader_epoch)`.
 pub(crate) fn build_commit_topics(
-    offsets: HashMap<(String, i32), i64>,
+    offsets: HashMap<(String, i32), (i64, i32)>,
     topic_ids: &HashMap<String, WireUuid>,
 ) -> Vec<OffsetCommitRequestTopic> {
-    let mut by_topic: HashMap<String, Vec<(i32, i64)>> = HashMap::new();
-    for ((t, p), off) in offsets {
-        by_topic.entry(t).or_default().push((p, off));
+    let mut by_topic: HashMap<String, Vec<(i32, i64, i32)>> = HashMap::new();
+    for ((t, p), (off, epoch)) in offsets {
+        by_topic.entry(t).or_default().push((p, off, epoch));
     }
     by_topic
         .into_iter()
@@ -109,10 +120,10 @@ pub(crate) fn build_commit_topics(
             name,
             partitions: parts
                 .into_iter()
-                .map(|(p, off)| OffsetCommitRequestPartition {
+                .map(|(p, off, epoch)| OffsetCommitRequestPartition {
                     partition_index: p,
                     committed_offset: off,
-                    committed_leader_epoch: -1,
+                    committed_leader_epoch: epoch,
                     committed_metadata: Some(String::new()),
                     ..Default::default()
                 })
@@ -190,7 +201,7 @@ mod tests {
             ..Default::default()
         };
         let out = parse_offset_fetch(&resp, &HashMap::new());
-        assert!(out == vec![("t".to_string(), 3, 42)]);
+        assert!(out == vec![("t".to_string(), 3, 42, -1)]);
     }
 
     #[test]
@@ -216,7 +227,7 @@ mod tests {
         let mut id_map = HashMap::new();
         id_map.insert(id(9), "named".to_string());
         let out = parse_offset_fetch(&resp, &id_map);
-        assert!(out == vec![("named".to_string(), 0, 5)]);
+        assert!(out == vec![("named".to_string(), 0, 5, -1)]);
     }
 
     #[test]
@@ -235,23 +246,24 @@ mod tests {
             ..Default::default()
         };
         let out = parse_offset_fetch(&resp, &HashMap::new());
-        assert!(out == vec![("legacy".to_string(), 1, 11)]);
+        assert!(out == vec![("legacy".to_string(), 1, 11, -1)]);
     }
 
     #[test]
     fn build_commit_topics_tags_topic_id() {
         let mut offsets = HashMap::new();
-        offsets.insert(("t".to_string(), 0), 100);
+        offsets.insert(("t".to_string(), 0), (100, 5));
         let mut ids = HashMap::new();
         ids.insert("t".to_string(), id(7));
         let topics = build_commit_topics(offsets, &ids);
         assert!(topics.len() == 1);
         assert!(topics[0].name == "t" && topics[0].topic_id == id(7));
         assert!(topics[0].partitions[0].committed_offset == 100);
+        assert!(topics[0].partitions[0].committed_leader_epoch == 5);
 
         // Missing id → ZERO default.
         let mut o2 = HashMap::new();
-        o2.insert(("u".to_string(), 0), 1);
+        o2.insert(("u".to_string(), 0), (1, -1));
         let t2 = build_commit_topics(o2, &HashMap::new());
         assert!(t2[0].topic_id == WireUuid::ZERO);
     }
