@@ -106,6 +106,17 @@ impl RemoteReader {
         // finished segment whose offset range covers `offset`.  This is O(n)
         // in the number of remote segments but only fires when the fast path
         // misses, which in steady state (no failover) never happens.
+        //
+        // Correctness relies on the invariant that finished remote segments do
+        // NOT have overlapping offset ranges: the copy task deduplicates by
+        // `base_offset`, so in a clean log there is exactly one
+        // `CopySegmentFinished` segment per offset range, and any such segment
+        // covering `offset` IS the segment.  `max_by_key(start_offset)` is
+        // therefore just a deterministic tie-break (it should never be needed),
+        // not a meaningful selection.  Under log divergence — i.e. an unclean
+        // leader election that produced overlapping remote ranges from different
+        // epoch lineages — this could pick a wrong-lineage segment; that case is
+        // tracked as a follow-up.
         let metadata = if let Some(m) = primary {
             m
         } else {
@@ -1226,5 +1237,41 @@ mod tests {
         );
 
         m.shutdown();
+    }
+
+    /// Segments are tiered under the leader epoch that was active at copy time.
+    /// After a failover the new leader epoch differs, so the epoch-indexed fast
+    /// path returns `None`.  The fallback scan in `fetch_batch` must still
+    /// resolve the segment from `list_remote_log_segments` and return the batch.
+    #[tokio::test]
+    async fn fallback_resolves_segment_across_leader_epoch_change() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let remote_dir = tempfile::tempdir().unwrap();
+
+        // `populated_reader` registers all segments under epoch 0 (the epoch
+        // present in the tierable-segment export, defaulted to 0 when the log
+        // was written without an explicit epoch).
+        let (reader, log) = populated_reader(log_dir.path(), remote_dir.path());
+
+        // Pick an offset inside the first sealed segment.
+        let exports = log.tierable_segments();
+        let target_offset = exports[0].base_offset;
+
+        // Query with epoch 1 — the RLMM epoch-indexed fast path returns None
+        // because the segment was indexed under epoch 0.  The fallback scan
+        // must find it via `list_remote_log_segments` and return the batch.
+        let got = reader
+            .fetch_batch(&tp(), 1, target_offset, 4096)
+            .await
+            .expect("ok")
+            .expect("fallback must resolve the segment despite epoch mismatch");
+
+        let last = got.base_offset + i64::from(got.last_offset_delta);
+        assert!(
+            got.base_offset <= target_offset && last >= target_offset,
+            "batch [{},{}] doesn't cover target {target_offset}",
+            got.base_offset,
+            last,
+        );
     }
 }
