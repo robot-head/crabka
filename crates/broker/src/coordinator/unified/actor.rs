@@ -1245,6 +1245,63 @@ async fn flush_pending(
     Ok(())
 }
 
+/// Validate an offset commit — regular or transactional — against the group's
+/// membership and generation (classic) or member epoch (KIP-848 next-gen),
+/// routing by group kind. Returns `Some(error_code)` if the commit must be
+/// rejected, `None` if it may proceed.
+///
+/// Shared by `OffsetCommit` and `TxnOffsetCommit` so the two paths fence
+/// identically — KIP-447 requires transactional offset fencing to be
+/// "consistent with normal offset fencing". For a simple consumer (empty
+/// `member_id`, no `group_instance_id`) the classic path no-ops, so a producer
+/// that supplies no group metadata is never fenced.
+pub(crate) async fn validate_group_commit(
+    handle: &GroupActorHandle,
+    member_id: &str,
+    generation_or_epoch: i32,
+    group_instance_id: Option<&str>,
+) -> Option<i16> {
+    match handle.kind {
+        GroupKindTag::Consumer => {
+            let (tx, rx) = oneshot::channel();
+            if handle
+                .tx
+                .send(GroupActorMessage::OffsetValidate {
+                    member_id: member_id.to_string(),
+                    member_epoch: generation_or_epoch,
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                return Some(codes::UNKNOWN_SERVER_ERROR);
+            }
+            match rx.await {
+                Ok(Ok(())) => None,
+                Ok(Err(code)) => Some(code),
+                Err(_) => Some(codes::UNKNOWN_SERVER_ERROR),
+            }
+        }
+        GroupKindTag::Classic => {
+            let (tx, rx) = oneshot::channel();
+            if handle
+                .tx
+                .send(GroupActorMessage::ClassicValidateCommit {
+                    member_id: member_id.to_string(),
+                    group_instance_id: group_instance_id.map(str::to_string),
+                    generation_id: generation_or_epoch,
+                    reply: tx,
+                })
+                .await
+                .is_err()
+            {
+                return Some(codes::UNKNOWN_SERVER_ERROR);
+            }
+            rx.await.unwrap_or(Some(codes::UNKNOWN_SERVER_ERROR))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
