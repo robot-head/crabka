@@ -5173,13 +5173,17 @@ introspection metadata).
   byte-compatible with the JVM's `RemoteLogMetadataSerde`. A mixed JVM+Crabka
   tiered cluster sharing the internal topic is unsupported. Real clusters run
   a single RLMM implementation, making this a non-issue in practice.
-- **Filed follow-up.** The epoch-fallback scan in `remote_reader.rs` is safe for
-  clean failover (the copy task dedupes by `base_offset`, so finished remote
-  segments don't overlap). A Kafka-faithful follow-up is tracked: derive the
-  leader epoch that owned the fetch offset from the local leader-epoch checkpoint
-  and keep the epoch-indexed RLMM lookup, which also closes a rare
-  wrong-segment edge under log divergence (unclean election with overlapping
-  remote ranges).
+- **Kafka-faithful epoch resolution landed.** `LeaderEpochCheckpoint::epoch_for_offset`
+  now drives remote-read epoch resolution: `try_remote_read` resolves the epoch
+  that *owned* the fetch offset from the local leader-epoch checkpoint (retained
+  across local-retention eviction — not pruned from the start) and passes that
+  owning epoch into the epoch-indexed RLMM lookup (primary path). The RLMM
+  indexes a segment under every epoch in its `segment_leader_epochs` map, so the
+  primary path reliably hits after a clean failover without any scan. The old
+  ignore-epoch fallback scan is demoted to a lineage-aware defensive net: when
+  the primary misses it prefers candidates whose `segment_leader_epochs` contains
+  the owning epoch, falling back to `max_by_key(start_offset)` only as a last
+  resort. This closes the wrong-segment-under-log-divergence hazard.
 - **README + STATUS.** `Tiered storage (KIP-405)` rows flipped ⚠️ → ✅ in the
   feature matrix and the KIP table; stale "not yet wired into the broker" prose
   replaced with an accurate description of the promoted topic-backed RLMM.

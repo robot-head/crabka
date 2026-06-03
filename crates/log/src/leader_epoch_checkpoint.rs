@@ -132,6 +132,27 @@ impl LeaderEpochCheckpoint {
             .unwrap_or(log_end_offset)
     }
 
+    /// Floor lookup: return the epoch of the entry whose `start_offset` is the
+    /// greatest value `<= offset`, i.e. the leader epoch that owned `offset`.
+    ///
+    /// Returns `None` when the checkpoint has no entries, or when `offset`
+    /// precedes the first entry's `start_offset` (the offset predates any
+    /// recorded epoch boundary).
+    ///
+    /// Since entries are stored in increasing `start_offset` order (by
+    /// construction: `append` always writes the epoch that is current, which
+    /// has a `start_offset` >= every prior entry), this is a single linear
+    /// scan from the back — equivalent to finding the last entry with
+    /// `start_offset <= offset`.
+    #[must_use]
+    pub fn epoch_for_offset(&self, offset: i64) -> Option<i32> {
+        self.entries
+            .iter()
+            .filter(|e| e.start_offset <= offset)
+            .max_by_key(|e| e.start_offset)
+            .map(|e| e.epoch)
+    }
+
     #[must_use]
     pub fn latest_epoch(&self) -> Option<i32> {
         self.entries.iter().map(|e| e.epoch).max()
@@ -242,5 +263,91 @@ mod tests {
         let c = LeaderEpochCheckpoint::open(path).unwrap();
         assert!(c.entries().is_empty());
         assert!(c.latest_epoch() == None);
+    }
+
+    // ── epoch_for_offset ──────────────────────────────────────────────────────
+
+    #[test]
+    fn epoch_for_offset_empty_returns_none() {
+        let (_d, path) = fresh();
+        let c = LeaderEpochCheckpoint::open(path).unwrap();
+        assert!(c.epoch_for_offset(0) == None, "empty checkpoint → None");
+        assert!(c.epoch_for_offset(100) == None, "empty checkpoint → None");
+    }
+
+    #[test]
+    fn epoch_for_offset_before_first_entry_returns_none() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        // Epoch 0 starts at offset 10 (first entry does not start at 0).
+        c.append(0, 10).unwrap();
+        c.append(1, 50).unwrap();
+        assert!(
+            c.epoch_for_offset(9) == None,
+            "offset before first entry's start_offset → None"
+        );
+    }
+
+    #[test]
+    fn epoch_for_offset_within_epoch_range() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(0, 0).unwrap();
+        c.append(1, 50).unwrap();
+        c.append(2, 100).unwrap();
+        // Offsets 0–49 belong to epoch 0.
+        assert!(c.epoch_for_offset(0) == Some(0), "start of epoch 0");
+        assert!(c.epoch_for_offset(25) == Some(0), "middle of epoch 0");
+        assert!(
+            c.epoch_for_offset(49) == Some(0),
+            "last offset before epoch 1"
+        );
+        // Offsets 50–99 belong to epoch 1.
+        assert!(c.epoch_for_offset(50) == Some(1), "start of epoch 1");
+        assert!(c.epoch_for_offset(75) == Some(1), "middle of epoch 1");
+        assert!(
+            c.epoch_for_offset(99) == Some(1),
+            "last offset before epoch 2"
+        );
+    }
+
+    #[test]
+    fn epoch_for_offset_at_epoch_boundary() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(0, 0).unwrap();
+        c.append(1, 50).unwrap();
+        // Offset exactly at epoch 1's start_offset → belongs to epoch 1.
+        assert!(
+            c.epoch_for_offset(50) == Some(1),
+            "boundary offset belongs to the epoch that starts there"
+        );
+    }
+
+    #[test]
+    fn epoch_for_offset_past_last_entry() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(0, 0).unwrap();
+        c.append(1, 50).unwrap();
+        // Any offset >= 50 that extends beyond the last known epoch → epoch 1
+        // (the current / latest epoch owns all subsequent offsets).
+        assert!(
+            c.epoch_for_offset(100) == Some(1),
+            "offset past last entry → last epoch"
+        );
+        assert!(
+            c.epoch_for_offset(999) == Some(1),
+            "far past last entry → last epoch"
+        );
+    }
+
+    #[test]
+    fn epoch_for_offset_single_entry_at_zero() {
+        let (_d, path) = fresh();
+        let mut c = LeaderEpochCheckpoint::open(path).unwrap();
+        c.append(0, 0).unwrap();
+        assert!(c.epoch_for_offset(0) == Some(0));
+        assert!(c.epoch_for_offset(1000) == Some(0));
     }
 }
