@@ -815,7 +815,27 @@ async fn maybe_downgrade(
         // A native consumer member is still present: the group stays next-gen.
         return Ok(false);
     }
+
     let image = metadata.snapshot();
+
+    // The departed native member's membership change shrank the group, but the
+    // server `target` was last computed while it was still present, so it does
+    // NOT yet cover its partitions. Re-reconcile over the SURVIVING members
+    // first — exactly the way the heartbeat path does (`run_reconcile`) — so
+    // the remaining classic members absorb the orphaned partitions before we
+    // freeze the target into the classic group's seed assignments. Without this
+    // the group would land `Stable` with a partition gap and never rebalance,
+    // violating the migration spec's "no partition gap" guarantee.
+    {
+        let state = group
+            .as_consumer_mut()
+            .expect("consumer-kind verified above");
+        state.dirty = true;
+        run_reconcile(state, config, metadata);
+    }
+
+    // Re-borrow immutably to read the freshly-reconciled target.
+    let state = group.as_consumer().expect("consumer-kind verified above");
     let classic = migration::convert_consumer_to_classic(state, &image);
     let pending = migration::downgrade_pending_records(state, &classic);
     let group_id = group.group_id.clone();
@@ -2972,5 +2992,297 @@ mod tests {
                     })
             })
         })
+    }
+
+    // ── KIP-848 Task 10: bidirectional migration integration suite ──────────
+    //
+    // These scenarios exercise the in-process classic↔next-gen migration end to
+    // end (upgrade, downgrade, the two together, and the kind-agnostic state
+    // that must survive a flip). They reuse the crate-internal harness above
+    // (`make_coordinator_with_topic[_policy]`, `subscription_blob`, the actor
+    // message arms) rather than a `tests/` integration file, which could not
+    // see this scaffolding.
+
+    /// Seed a classic consumer group "g" with a single classic member
+    /// `member_id` subscribed to `topic`, optionally carrying a KIP-345 static
+    /// `group_instance_id`. Mirrors the inline seeding the upgrade/downgrade
+    /// tests use, but parameterized so a static-identity test can attach an
+    /// instance id (which `seed_and_upgrade`'s fixed `m-classic` cannot).
+    fn seed_classic_member(
+        coord: &Arc<GroupCoordinator>,
+        member_id: &str,
+        topic: &str,
+        instance_id: Option<&str>,
+    ) -> Arc<GroupActorHandle> {
+        use super::super::classic_state::{Group as ClassicState, Member};
+        use super::super::group::{Group, GroupKind};
+
+        let mut cs = ClassicState::new("g");
+        cs.protocol_type = Some("consumer".into());
+        cs.generation_id = 1;
+        cs.add_member(
+            Member::new(
+                member_id,
+                "client",
+                "127.0.0.1",
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_mins(1),
+                vec![("range".into(), subscription_blob(&[topic]))],
+            )
+            .with_instance_id(instance_id.map(str::to_string)),
+        );
+        let group = Box::new(Group {
+            group_id: "g".into(),
+            kind: GroupKind::Classic(cs),
+            committed_offsets: HashMap::new(),
+        });
+        coord.seed_classic("g", group);
+        coord.find("g").expect("seeded classic actor")
+    }
+
+    /// Send a native consumer `Heartbeat` and return the response. A `member_id`
+    /// of `""`/epoch 0 is a first-join (which triggers an upgrade when the group
+    /// is a convertible classic group under an upgrade-allowing policy).
+    async fn consumer_heartbeat(
+        handle: &GroupActorHandle,
+        member_id: &str,
+        member_epoch: i32,
+        topic: Option<&str>,
+    ) -> ConsumerGroupHeartbeatResponse {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: member_id.into(),
+                    member_epoch,
+                    subscribed_topic_names: topic.map(|t| vec![t.into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    /// Read the live `ClassicInspect` view (only a classic-kind group replies).
+    async fn classic_inspect(handle: &GroupActorHandle) -> ClassicView {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicInspect { reply: tx })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    /// Round-trip the kind-agnostic committed-offset store.
+    async fn fetch_committed(
+        handle: &GroupActorHandle,
+    ) -> HashMap<(String, i32), super::super::classic_state::OffsetEntry> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::FetchCommitted { reply: tx })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    /// Scenario 1: a full upgrade→downgrade round trip under `Bidirectional`. A
+    /// classic member "m1" joins; a native consumer "c1" heartbeats → upgrade;
+    /// c1 leaves → downgrade. The group must end CLASSIC with "m1" still present
+    /// and still assigned (its partitions preserved across both flips).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upgrade_then_downgrade_round_trip() {
+        use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
+        let (coord, _log) =
+            make_coordinator_with_topic_policy("t", 2, ConsumerGroupMigrationPolicy::Bidirectional);
+        let handle = seed_classic_member(&coord, "m1", "t", None);
+
+        // A native consumer "c1" heartbeats → in-place UPGRADE; the group is now
+        // consumer-kind and hosts both m1 (classic facade) and c1.
+        let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
+        assert!(up.error_code == codes::NONE);
+        let c1 = up.member_id.expect("native member id");
+        let describe = {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            handle
+                .tx
+                .send(GroupActorMessage::Describe { reply: tx })
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        };
+        assert!(
+            describe.members.len() == 2,
+            "upgraded group hosts both m1 and c1"
+        );
+
+        // c1 leaves (member_epoch -1). It was the only native member → DOWNGRADE
+        // back to classic.
+        let leave = consumer_heartbeat(&handle, &c1, -1, None).await;
+        assert!(leave.error_code == codes::NONE);
+
+        // The group is classic again, with m1 restored and still assigned.
+        let snap = coord
+            .describe_group("g")
+            .await
+            .expect("group downgraded back to classic");
+        assert!(
+            snap.members.iter().any(|m| m.member_id == "m1"),
+            "m1 must survive the upgrade→downgrade round trip"
+        );
+        let m1 = snap
+            .members
+            .iter()
+            .find(|m| m.member_id == "m1")
+            .expect("m1 present");
+        // Decode the assignment blob and verify m1's partitions are preserved.
+        // `!is_empty()` is insufficient — the blob always has a 2-byte version
+        // prefix even if the partition list were empty.
+        //
+        // After upgrade, the range assignor splits {0,1} between m1 and c1;
+        // m1 is assigned partition [1] (range assignor gives the higher range
+        // to the lexicographically-later member when both subscribe to "t").
+        // On downgrade, c1 (the only native member) has departed, so the
+        // downgrade RE-RECONCILES over the surviving members BEFORE converting
+        // to classic. m1 is now the sole member subscribed to "t", so the range
+        // assignor gives it BOTH partitions — no partition is orphaned. Its
+        // seed assignment in the restored classic group is therefore [0, 1].
+        let assignment_bytes = bytes::Bytes::from(m1.assignment.clone());
+        let decoded = decode_assignment(&assignment_bytes);
+        let tp = decoded
+            .assigned_partitions
+            .iter()
+            .find(|tp| tp.topic == "t")
+            .expect("decoded assignment must contain topic t");
+        let mut parts = tp.partitions.clone();
+        parts.sort_unstable();
+        assert!(
+            parts == vec![0, 1],
+            "m1 (sole surviving member) must own BOTH partitions after the downgrade re-reconcile; got {parts:?}"
+        );
+    }
+
+    /// Scenario 2: KIP-345 static identity must survive both flips. A classic
+    /// member with `group.instance.id = "inst-a"` joins; upgrade; then downgrade.
+    /// The restored classic member must still carry `group_instance_id ==
+    /// Some("inst-a")` (read from the classic inspect view — `MemberSnapshot`
+    /// does not carry the instance id, but `ClassicMemberView` does).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn static_member_identity_survives_both_flips() {
+        use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
+        let (coord, _log) =
+            make_coordinator_with_topic_policy("t", 2, ConsumerGroupMigrationPolicy::Bidirectional);
+        let handle = seed_classic_member(&coord, "m1", "t", Some("inst-a"));
+
+        // Upgrade via a native consumer heartbeat, then downgrade by having that
+        // native member leave.
+        let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
+        assert!(up.error_code == codes::NONE);
+        let native = up.member_id.expect("native member id");
+        let leave = consumer_heartbeat(&handle, &native, -1, None).await;
+        assert!(leave.error_code == codes::NONE);
+
+        // The group is classic again; the restored member must still carry the
+        // static identity (convert_classic_to_consumer maps instance_id and
+        // convert_consumer_to_classic restores it).
+        let view = classic_inspect(&handle).await;
+        let m1 = view
+            .members
+            .iter()
+            .find(|m| m.member_id == "m1")
+            .expect("m1 restored as a classic member");
+        assert!(
+            m1.group_instance_id.as_deref() == Some("inst-a"),
+            "the static identity must survive both flips"
+        );
+    }
+
+    /// Scenario 3: under `Disabled` policy a classic group stays classic — a
+    /// native consumer heartbeat for the same group is REJECTED rather than
+    /// upgrading it. This reproduces today's hard classic/next-gen separation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn policy_disabled_keeps_group_classic() {
+        use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
+        let (coord, _log) =
+            make_coordinator_with_topic_policy("t", 2, ConsumerGroupMigrationPolicy::Disabled);
+        let handle = seed_classic_member(&coord, "m1", "t", None);
+
+        // A native consumer heartbeat must be rejected (no upgrade is allowed).
+        let resp = consumer_heartbeat(&handle, "", 0, Some("t")).await;
+        assert!(
+            resp.error_code != codes::NONE,
+            "Disabled policy must reject the upgrade heartbeat"
+        );
+        assert!(
+            resp.error_code == codes::GROUP_ID_NOT_FOUND,
+            "an un-upgradable classic group surfaces as GROUP_ID_NOT_FOUND"
+        );
+
+        // The group is untouched: still classic, still hosting m1.
+        let view = classic_inspect(&handle).await;
+        assert!(
+            view.members.iter().any(|m| m.member_id == "m1"),
+            "the group must remain classic with m1 intact"
+        );
+        assert!(handle.kind == GroupKindTag::Classic);
+    }
+
+    /// Scenario 4: committed offsets live on the kind-agnostic `Group` container
+    /// and must survive both flips untouched. Commit an offset for ("t", 0) on a
+    /// classic group, upgrade, assert it's still readable, downgrade, assert it's
+    /// STILL there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_offsets_survive_a_flip() {
+        use super::super::classic_state::OffsetEntry;
+        use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
+        let (coord, _log) =
+            make_coordinator_with_topic_policy("t", 2, ConsumerGroupMigrationPolicy::Bidirectional);
+        let handle = seed_classic_member(&coord, "m1", "t", None);
+
+        // Record a committed offset for ("t", 0) via the kind-agnostic path.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::UpdateCommitted {
+                entries: vec![(
+                    ("t".to_string(), 0),
+                    OffsetEntry {
+                        offset: 99,
+                        leader_epoch: 3,
+                        metadata: String::new(),
+                        commit_timestamp_ms: 0,
+                    },
+                )],
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap();
+
+        // Upgrade → the offset must still be readable.
+        let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
+        assert!(up.error_code == codes::NONE);
+        let native = up.member_id.expect("native member id");
+        let after_upgrade = fetch_committed(&handle).await;
+        assert!(
+            after_upgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(99),
+            "committed offset must survive the upgrade"
+        );
+
+        // Downgrade → the offset must STILL be there.
+        let leave = consumer_heartbeat(&handle, &native, -1, None).await;
+        assert!(leave.error_code == codes::NONE);
+        let after_downgrade = fetch_committed(&handle).await;
+        assert!(
+            after_downgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(99),
+            "committed offset must survive the downgrade too"
+        );
     }
 }
