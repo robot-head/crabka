@@ -94,11 +94,34 @@ impl RemoteReader {
         offset: i64,
         max_bytes: usize,
     ) -> Result<Option<RecordBatch>, RemoteStorageError> {
-        let Some(metadata) = self
+        // Primary lookup: epoch-indexed fast path (most common case — same
+        // leader epoch that tiered the segment is still leading).
+        let primary = self
             .rlmm
-            .remote_log_segment_metadata(tp, leader_epoch, offset)?
-        else {
-            return Ok(None);
+            .remote_log_segment_metadata(tp, leader_epoch, offset)?;
+
+        // Fallback: after a leader-epoch change (failover), segments were
+        // tiered under the *previous* leader's epoch and won't appear in the
+        // epoch-indexed fast path.  Scan `list_remote_log_segments` to find a
+        // finished segment whose offset range covers `offset`.  This is O(n)
+        // in the number of remote segments but only fires when the fast path
+        // misses, which in steady state (no failover) never happens.
+        let metadata = if let Some(m) = primary {
+            m
+        } else {
+            let candidates = self.rlmm.list_remote_log_segments(tp)?;
+            let Some(m) = candidates
+                .into_iter()
+                .filter(|m| {
+                    m.state() == RemoteLogSegmentState::CopySegmentFinished
+                        && m.start_offset() <= offset
+                        && offset <= m.end_offset()
+                })
+                .max_by_key(crabka_remote_storage::RemoteLogSegmentMetadata::start_offset)
+            else {
+                return Ok(None);
+            };
+            m
         };
         if metadata.state() != RemoteLogSegmentState::CopySegmentFinished {
             return Ok(None);

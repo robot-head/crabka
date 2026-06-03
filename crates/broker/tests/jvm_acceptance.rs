@@ -8981,8 +8981,17 @@ async fn start_two_brokers_with_minio_tier(
 ///
 /// See the `start_two_brokers_with_minio_tier` doc for the networking
 /// work-around used to route both RLMM clients through broker 1's loopback.
+///
+/// This test requires an environment where the advertised inter-broker address
+/// (`host.docker.internal`) is resolvable from the broker host processes
+/// (Linux CI with Docker bridge networking).  On macOS Docker Desktop,
+/// `host.docker.internal` is not resolvable from host processes, so
+/// inter-broker replication fails.  The same metadata-sharing claim is proven
+/// by the in-process `tiered_storage_metadata_sharing_via_survivor` test in
+/// `tests/tiered_storage_multi_broker.rs`, which uses `127.0.0.1` advertised
+/// addresses and runs under plain `cargo test` (no Docker required).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires Docker"]
+#[ignore = "requires Docker + host-resolvable advertised address (Linux CI); see in-process multi-broker test for the local proof"]
 async fn tiered_storage_topic_rlmm_multi_broker_metadata_sharing() {
     const TOPIC: &str = "crabka-tiered-multi-itest";
     const RECORDS: usize = 200;
