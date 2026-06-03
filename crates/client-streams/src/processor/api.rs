@@ -50,18 +50,31 @@ where
         }
     }
 
-    /// Forward a record to all child nodes.
-    pub fn forward(&mut self, record: &Record<KOut, VOut>) {
-        for &child in self.dispatch.children {
-            let key: Option<Box<dyn Any + Send>> = record
-                .key
-                .clone()
-                .map(|k| Box::new(k) as Box<dyn Any + Send>);
+    /// Forward a record to all child nodes. The record is cloned per child for
+    /// fan-out; the last child receives the original by move (so the common
+    /// single-child case performs zero clones). Mirrors the JVM
+    /// `ProcessorContext.forward(Record)`, which takes the record by value.
+    pub fn forward(&mut self, record: Record<KOut, VOut>) {
+        // Copy the child-slice reference out so we can mutably borrow `buffer`.
+        let children = self.dispatch.children;
+        let Some((&last, rest)) = children.split_last() else {
+            return; // no children — drop the record
+        };
+        for &child in rest {
+            let key: Option<Box<dyn Any + Send>> =
+                record.key.clone().map(|k| Box::new(k) as Box<dyn Any + Send>);
             let value: Box<dyn Any + Send> = Box::new(record.value.clone());
             self.dispatch
                 .buffer
                 .push_back((child, ErasedRecord::new(key, value, record.timestamp)));
         }
+        let ts = record.timestamp;
+        let key: Option<Box<dyn Any + Send>> =
+            record.key.map(|k| Box::new(k) as Box<dyn Any + Send>);
+        let value: Box<dyn Any + Send> = Box::new(record.value);
+        self.dispatch
+            .buffer
+            .push_back((last, ErasedRecord::new(key, value, ts)));
     }
 
     /// Metadata of the source record currently being processed.
@@ -86,7 +99,7 @@ mod tests {
             ctx: &mut ProcessorContext<String, String>,
             r: Record<String, String>,
         ) {
-            ctx.forward(&Record::new(r.key, r.value.to_uppercase(), r.timestamp));
+            ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
         }
     }
 
