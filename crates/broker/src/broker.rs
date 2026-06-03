@@ -124,6 +124,10 @@ pub struct Broker {
     /// [`crate::log_dir_status::LogDirRegistry::is_offline`] before
     /// touching the dir.
     pub(crate) log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// KIP-858: stable UUID per configured log.dir, minted + persisted at
+    /// startup. Shared with the heartbeat client (`offline_log_dirs` UUID list)
+    /// and the assignment reporter (`AssignReplicasToDirs` handler).
+    pub(crate) log_dir_ids: crate::log_dir_id::LogDirIds,
     /// KIP-714 client-metrics receiver: subscription manager + Prometheus
     /// collector + OTLP forwarder. Shared so the push handler (Task 15)
     /// and the scrape path both touch the same instance.
@@ -1432,6 +1436,11 @@ impl Broker {
         //    `KAFKA_STORAGE_ERROR` and JBOD placement skips it.
         let log_dir_status = crate::log_dir_status::LogDirRegistry::probe(&config.all_log_dirs());
 
+        // KIP-858: resolve a stable UUID per configured log.dir (minting +
+        // persisting for any extra JBOD dir that lacks one). Shared with the
+        // heartbeat client (offline_log_dirs) and the assignment reporter.
+        let log_dir_ids = crate::log_dir_id::LogDirIds::resolve(&config.all_log_dirs());
+
         // 4. Scan + recover partitions on disk. Partition state is still
         //    a local-disk concern; the metadata image is sourced from
         //    `controller.current_image()` whenever a handler needs it.
@@ -2402,6 +2411,7 @@ impl Broker {
             should_shutdown: should_shutdown_tx,
             remote_reader,
             log_dir_status,
+            log_dir_ids,
             client_metrics,
             #[cfg(any(test, feature = "test-helpers"))]
             offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),

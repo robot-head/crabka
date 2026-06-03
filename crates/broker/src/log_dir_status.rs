@@ -14,12 +14,16 @@
 //!    ([`crate::log_dir::place_partition_dir`]) is fed only the online
 //!    subset, so newly materialized partitions never land on an offline
 //!    dir.
-//! 3. Future runtime fsync-failure detection (deferred) will mutate the
-//!    registry to flip a dir online → offline mid-life.
+//! 3. Runtime write/fsync failures flip a dir online → offline mid-life:
+//!    `crate::partition_writer::flag_storage_failure` calls
+//!    [`LogDirRegistry::mark_offline`] on any `LogError::Io` from a
+//!    partition mutation, so a disk that dies under live traffic is
+//!    refused thereafter without restarting the broker.
 //!
-//! Only startup-time detection is wired up currently; the registry is
-//! shaped so the runtime path can be plugged in later (`mark_offline`
-//! is interior-mutable via `DashMap`).
+//! Both startup probing and runtime offline-flips are wired; the registry
+//! is shared (`DashMap`) so a flip is visible immediately to every handler,
+//! the heartbeat client (which reports offline dir UUIDs to the
+//! controller), and JBOD placement.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
