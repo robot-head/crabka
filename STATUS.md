@@ -5217,3 +5217,54 @@ introspection metadata).
   scenarios are authored and `#[ignore]`d, to be run on the Linux/CI acceptance
   harness.
 - README KIP-320 row flipped to ✅.
+
+## Slice — KIP-1022 finish: `crabka format --feature` + JVM `kafka-features` validation (2026-06-03)
+
+- **Goal.** Close the KIP-1022 ("Formatting and updating features") gap. The
+  *updating* half (the `UpdateFeatures` per-feature range/floor/KIP-1022-
+  dependency checks, v2 fail-fast, and `ApiVersions` advertisement) already
+  landed with the KIP-584 feature-framework slice; this slice adds the
+  *formatting* half — `crabka format --feature NAME=VERSION` — and validates the
+  whole feature surface against the real JVM `kafka-features` tool. Design:
+  `docs/superpowers/specs/2026-06-03-kip-1022-format-features-design.md`.
+- **Empirically-pinned format algorithm (apache/kafka:4.0.0).** Pinned by
+  formatting + `kafka-dump-log --cluster-metadata-decoder` on the resulting
+  `bootstrap.checkpoint`: `bootstrap_mv` = `--feature metadata.version=N` else
+  `--release-version` else latest stable (25); each feature = explicit override
+  else `default_level(bootstrap_mv)`; **only features with level > 0 get a
+  record** (level 0 = absent = disabled); `--feature` and `--release-version`
+  combine (release = base, `--feature` overrides individual features) *except*
+  `--release-version` + `--feature metadata.version` (rejected as ambiguous).
+- **`crabka format --feature` (`crates/cli/src/format.rs`).** New repeatable
+  `--feature NAME=VERSION` flag. `resolve_format_features` validates each spec
+  (unknown feature → "Unsupported feature: … Supported features are: …";
+  out-of-range level → reject; release + metadata.version feature → ambiguity
+  reject), resolves `bootstrap_mv`, and runs KIP-1022 dependency validation over
+  the fully-resolved set. New exit code `EXIT_INVALID_FEATURE = 5`.
+- **Override-aware seeding (`crates/metadata/src/feature.rs`).**
+  `bootstrap_feature_records_with_overrides(bootstrap_mv, overrides)` applies
+  per-feature overrides and **omits level-0 records** to match `kafka-storage
+  format`; the existing `bootstrap_feature_records` re-points at it (empty
+  overrides), so the broker's standalone self-bootstrap and `crabka format`
+  share one path and the broker no longer writes pointless level-0 tombstones
+  (the resulting `MetadataImage` is identical). New
+  `validate_feature_dependencies` enforces KIP-1022 deps at format time (a no-op
+  for today's all-empty-deps registry, but wired, mirroring the handler).
+- **JVM-validated (Docker, this session).** A new `jvm_features.rs`
+  (`#[ignore]`) drives `apache/kafka:4.0.0` `kafka-features` against an
+  in-process Crabka broker: `describe` lists all five advertised features at the
+  self-bootstrap defaults (metadata.version=4.0-IV3, group.version=1,
+  transaction.version=2, share/streams=0); `downgrade --feature
+  transaction.version=1` then `upgrade --feature transaction.version=2`
+  round-trip through `UpdateFeatures` (epoch advances 2→3→4). All green.
+- **Tests.** `crabka_metadata` feature unit tests (override resolution, level-0
+  omission, unlisted-follows-`bootstrap_mv`, dependency check); `format.rs` unit
+  tests (`--feature` parse + ambiguity/unknown/out-of-range rejection +
+  `bootstrap_mv` precedence); new `crates/broker/tests/format_features.rs`
+  (a standalone `crabka format --feature transaction.version=1 --feature
+  group.version=0` dir boots a broker that finalizes txn=1, omits group.version,
+  keeps metadata.version=25 — proving `--feature` survives boot rather than
+  being clobbered by self-bootstrap); `format_smoke.rs` record count 7→5
+  (share/streams level-0 omitted). Full affected-crate suites green;
+  `cargo clippy --all-targets` + `cargo fmt --all --check` clean.
+- README KIP-1022 row flipped to ✅.

@@ -35,12 +35,13 @@ fn format_with_add_scram_writes_credential_record() {
     assert!(!entries.is_empty(), "format must write something");
     let manifest = std::fs::read_to_string(dir.path().join("bootstrap.json"))
         .expect("bootstrap.json must exist");
-    // Format seeds KRaftVersion + every registered feature (metadata.version
-    // KIP-778 + group.version KIP-848 + transaction.version KIP-890 +
-    // share.version KIP-932 + streams.version KIP-1071) + SCRAM = 7 records.
+    // Format seeds KRaftVersion + every registered feature whose default at the
+    // latest release is > 0 (metadata.version=25 KIP-778 + group.version=1
+    // KIP-848 + transaction.version=2 KIP-890; share.version + streams.version
+    // default to 0 and are omitted per KIP-1022) + SCRAM = 5 records.
     assert!(
-        manifest.contains("\"record_count\": 7"),
-        "manifest must list KRaftVersion + metadata.version + group.version + transaction.version + share.version + streams.version + one SCRAM record, got: {manifest}",
+        manifest.contains("\"record_count\": 5"),
+        "manifest must list KRaftVersion + metadata.version + group.version + transaction.version + one SCRAM record, got: {manifest}",
     );
     assert!(
         manifest.contains("cluster_id"),
