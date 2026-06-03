@@ -1,30 +1,47 @@
-//! Membership types: stub placeholders for later implementation.
+//! Public value types surfaced by [`StreamsMembership`](super::StreamsMembership).
 
-/// A topic-partition pair.
-pub struct TopicPartition;
-
-/// A single task assignment (subtopology + partition).
-pub struct TaskAssignment;
-
-/// The full assignment for a member (active, standby, warmup tasks).
-pub struct StreamsAssignment;
-
-/// Current membership status of the streams client.
-pub enum StreamsStatus {
-    /// Connecting to or waiting for the group coordinator.
-    Joining,
-    /// Stable group membership with a valid assignment.
-    Stable,
-    /// The client is shutting down.
-    Closed,
+/// A concrete topic-partition a task consumes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TopicPartition {
+    pub topic: String,
+    pub partition: i32,
 }
 
-/// Events delivered to the application from the streams membership loop.
+/// One assigned task and the source topic-partitions it processes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskAssignment {
+    pub subtopology_id: String,
+    pub partitions: Vec<i32>,
+    pub source_topic_partitions: Vec<TopicPartition>,
+}
+
+/// The active/standby/warmup tasks assigned to this member.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamsAssignment {
+    pub active: Vec<TaskAssignment>,
+    pub standby: Vec<TaskAssignment>,
+    pub warmup: Vec<TaskAssignment>,
+}
+
+/// A non-ready status reported by the coordinator (KIP-1071 status codes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamsStatus {
+    StaleTopology(String),
+    MissingSourceTopics(String),
+    IncorrectlyPartitionedTopics(String),
+    MissingInternalTopics(String),
+    ShutdownApplication,
+    AssignmentDelayed(String),
+    Unknown(i8, String),
+}
+
+/// An event emitted by the membership heartbeat loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamsEvent {
-    /// A new assignment has been computed and is ready to use.
+    /// A new assignment was adopted.
     Assigned(StreamsAssignment),
-    /// The assignment has been revoked (rebalance in progress).
-    Revoked,
-    /// The membership loop has shut down.
-    Closed,
+    /// The group is not ready (e.g. missing source/internal topics).
+    NotReady(Vec<StreamsStatus>),
+    /// We were fenced and auto-rejoined; a fresh assignment will follow.
+    Fenced,
 }
