@@ -5036,9 +5036,10 @@ introspection metadata).
   `kraft.version` (KIP-853 unification) and ELR (KIP-966) are later slices. The
   full Docker `jvm_acceptance` re-baseline — which flips the README KIP-584 row
   to ✅ — is deferred to the `transaction.version` plan so all advertised
-  features are re-verified together. The README KIP-848 row stays ⚠️ pending
-  the unified-coordinator work (separate slice); this slice closed only the
-  feature-finalization/gating gap.
+  features are re-verified together. The README KIP-848 row was subsequently
+  flipped to ✅ once live bidirectional classic↔next-gen group migration was
+  wired and JVM-validated (see the KIP-848 live-migration slice below); this
+  slice closed only the feature-finalization/gating gap.
 - **Tests.** `crabka_metadata` feature/registry/bootstrap unit tests; broker
   `features`/`update_features` unit tests; generalized range-guard predicate
   test incl. the forward-compat ignore-unknown case; new
@@ -5208,3 +5209,29 @@ introspection metadata).
   scenarios are authored and `#[ignore]`d, to be run on the Linux/CI acceptance
   harness.
 - README KIP-320 row flipped to ✅.
+
+## Slice — KIP-848 live bidirectional classic↔next-gen group migration (complete) (2026-06-03)
+
+- **Goal.** Wire the live classic↔next-gen consumer-group migration paths that
+  were deferred in earlier KIP-848 slices; JVM-validate the full migration flow.
+- **In-place upgrade.** A classic group transitions to consumer-protocol on
+  the first `ConsumerGroupHeartbeat` from a native (kafka-clients 4.0) member;
+  the unified coordinator takes over and serves the group from that point.
+- **In-place downgrade.** A consumer-protocol group reverts to classic when the
+  last native consumer member leaves; classic members resume being served by the
+  classic rebalance path.
+- **Hosted classic members.** Classic members present during the transition are
+  served through the unified coordinator (their join/sync/heartbeat requests are
+  forwarded to the next-gen reconciler and the assignment is reflected back in
+  the classic wire shape).
+- **Policy gate.** The `group.consumer.migration.policy` broker config governs
+  allowed migration directions; the default is `bidirectional`.
+- **Atomic persistence + replay.** Migration state transitions are persisted to
+  `__consumer_offsets` atomically and replayed correctly on broker restart.
+- **JVM acceptance.** A real cp-kafka classic consumer and an
+  apache/kafka:4.0.0 consumer-protocol consumer run in the same group with a
+  coherent cross-protocol assignment — both consume all assigned partitions.
+- **README + STATUS.** `Next-gen consumer group protocol (KIP-848)` rows in
+  both the feature matrix and the KIP table flipped ⚠️ → ✅; the Notable-gaps
+  narrative updated to describe the completed migration; STATUS.md stale
+  "stays ⚠️" note updated.
