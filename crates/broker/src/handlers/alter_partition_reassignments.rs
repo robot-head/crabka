@@ -120,6 +120,7 @@ fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, (i16, St
         leader_epoch: pr.leader_epoch + epoch_bump,
         adding_replicas: vec![],
         removing_replicas: vec![],
+        directories: pr.directories.clone(),
     }))
 }
 
@@ -159,6 +160,7 @@ fn start_path(pr: &PartitionRecord, target: &[i32]) -> Option<PartitionRecord> {
         leader_epoch: pr.leader_epoch,
         adding_replicas: new,
         removing_replicas: old,
+        directories: pr.directories.clone(),
     })
 }
 
@@ -362,6 +364,7 @@ mod tests {
             leader_epoch: 5,
             adding_replicas: adding.to_vec(),
             removing_replicas: removing.to_vec(),
+            directories: vec![],
         }));
         img
     }

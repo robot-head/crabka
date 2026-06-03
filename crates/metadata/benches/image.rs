@@ -39,6 +39,7 @@ fn partition_record(topic: &str, p: i32) -> MetadataRecord {
         leader_epoch: 0,
         adding_replicas: vec![],
         removing_replicas: vec![],
+        directories: vec![],
     })
 }
 

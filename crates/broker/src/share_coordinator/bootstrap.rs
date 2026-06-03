@@ -62,6 +62,7 @@ pub(crate) async fn ensure_topic(
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
     }
 

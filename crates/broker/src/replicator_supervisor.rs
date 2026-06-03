@@ -441,6 +441,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }),
         ]);
         let d = desired_follower_set(2, &img);
@@ -466,6 +467,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }),
         ]);
         assert!(desired_follower_set(1, &img).is_empty());
@@ -489,6 +491,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }),
         ]);
         assert!(desired_follower_set(99, &img).is_empty());
@@ -535,6 +538,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }),
             MetadataRecord::V1Topic(TopicRecord {
                 name: "b".into(),
@@ -551,6 +555,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }),
             MetadataRecord::V1Partition(PartitionRecord {
                 topic: "b".into(),
@@ -561,6 +566,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }),
         ]);
         let d = desired_follower_set(2, &img);
@@ -597,6 +603,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         let mut overrides = BTreeMap::new();
         overrides.insert("retention.ms".to_string(), "60000".to_string());
@@ -655,6 +662,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
 
         let dir = tempdir().expect("tempdir");

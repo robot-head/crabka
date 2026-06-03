@@ -952,6 +952,7 @@ fn partition_from_kraft(
         leader_epoch: p.leader_epoch,
         adding_replicas: cast(&p.adding_replicas),
         removing_replicas: cast(&p.removing_replicas),
+        directories: vec![], // KRaft decode implemented in a later task (KIP-858)
     })
 }
 
@@ -1406,6 +1407,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         });
         image.apply(&part);
         for rec in [&topic, &part] {
@@ -1561,6 +1563,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
         }
         assert!(image.topic_partition_count("t") == 3);

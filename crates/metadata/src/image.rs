@@ -1017,6 +1017,7 @@ mod tests {
             leader_epoch: 4,
             adding_replicas: vec![2],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "orders".into(),
@@ -1027,6 +1028,7 @@ mod tests {
             leader_epoch: 7,
             adding_replicas: vec![],
             removing_replicas: vec![1],
+            directories: vec![],
         }));
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "doomed".into(),
@@ -1037,6 +1039,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
 
         // Topic config.
@@ -1312,6 +1315,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         m.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
@@ -1322,6 +1326,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         assert!(m.partitions_of("t").count() == 2);
         m.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
@@ -1354,6 +1359,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
         }
     }
@@ -1412,6 +1418,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         });
         let err = m.validate(&p).unwrap_err();
         assert!(matches!(err, MetadataError::UnknownTopic(_)));
@@ -1674,6 +1681,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
         }
         m.apply(&topic("u", 1));
@@ -1686,6 +1694,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         // 3 partitions for "t" + 1 for "u" = 4, one walk, no per-topic filter.
         assert!(m.all_partitions().count() == 4);
@@ -1713,6 +1722,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         assert!(img.reassignments_in_flight().count() == 0);
     }
@@ -1735,6 +1745,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![4],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
         assert!(rows.len() == 1);
@@ -1759,6 +1770,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![3],
+            directories: vec![],
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
         assert!(rows.len() == 1);
@@ -1784,6 +1796,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![4],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
         }
         assert!(img.reassignments_in_flight().count() == 2);

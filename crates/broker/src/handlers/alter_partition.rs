@@ -193,6 +193,7 @@ fn handle_partition(
         leader_epoch: part_rec.leader_epoch,
         adding_replicas: part_rec.adding_replicas.clone(),
         removing_replicas: part_rec.removing_replicas.clone(),
+        directories: part_rec.directories.clone(),
     }));
 
     RespPartitionData {

@@ -82,6 +82,7 @@ pub(crate) async fn compute_failover_changes(
                     leader_epoch: pr.leader_epoch + 1,
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
+                    directories: pr.directories.clone(),
                 }));
             } else {
                 // ISR is empty after dropping the dead broker. How we
@@ -128,6 +129,7 @@ pub(crate) async fn compute_failover_changes(
                                 leader_epoch: pr.leader_epoch + 1,
                                 adding_replicas: pr.adding_replicas.clone(),
                                 removing_replicas: pr.removing_replicas.clone(),
+                                directories: pr.directories.clone(),
                             }));
                         } else {
                             warn!(
@@ -154,6 +156,7 @@ pub(crate) async fn compute_failover_changes(
                 leader_epoch: pr.leader_epoch,
                 adding_replicas: pr.adding_replicas.clone(),
                 removing_replicas: pr.removing_replicas.clone(),
+                directories: pr.directories.clone(),
             }));
         }
     }
@@ -294,6 +297,7 @@ pub(crate) async fn select_replacement_leader_for_shutdown(
         leader_epoch: pr.leader_epoch + 1,
         adding_replicas: pr.adding_replicas.clone(),
         removing_replicas: pr.removing_replicas.clone(),
+        directories: pr.directories.clone(),
     })
 }
 
@@ -336,6 +340,7 @@ pub(crate) async fn select_new_leader_for_partition(
                 leader_epoch: pr.leader_epoch + 1,
                 adding_replicas: pr.adding_replicas.clone(),
                 removing_replicas: pr.removing_replicas.clone(),
+                directories: pr.directories.clone(),
             })
         }
         ElectionType::Unclean => {
@@ -358,6 +363,7 @@ pub(crate) async fn select_new_leader_for_partition(
                         leader_epoch: pr.leader_epoch + 1,
                         adding_replicas: pr.adding_replicas.clone(),
                         removing_replicas: pr.removing_replicas.clone(),
+                        directories: pr.directories.clone(),
                     });
                 }
             }
@@ -404,6 +410,7 @@ mod tests {
             leader_epoch: 5,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         img
     }

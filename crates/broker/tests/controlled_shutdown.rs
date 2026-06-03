@@ -156,6 +156,7 @@ async fn force_leadership_for_test(
             leader_epoch: pr.leader_epoch + 1,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         });
         leader_handle
             .submit_metadata_record_for_test(record)

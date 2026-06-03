@@ -118,6 +118,7 @@ pub async fn bootstrap(
                     leader_epoch: 0,
                     adding_replicas: vec![],
                     removing_replicas: vec![],
+                    directories: vec![],
                 }),
             ];
             match controller.submit_change(records).await {

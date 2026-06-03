@@ -281,6 +281,7 @@ impl UncleanRecoveryManager {
             leader_epoch: pr.leader_epoch + 1,
             adding_replicas: pr.adding_replicas.clone(),
             removing_replicas: pr.removing_replicas.clone(),
+            directories: pr.directories.clone(),
         };
         warn!(
             topic = %job.topic,
@@ -585,6 +586,7 @@ mod run_recovery_tests {
             leader_epoch: 5,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         img
     }
