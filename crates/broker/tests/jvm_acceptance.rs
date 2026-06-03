@@ -8793,3 +8793,317 @@ async fn jvm_legacy_010_snappy_round_trip() {
 
     broker.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Multi-broker tiered-storage RLMM metadata sharing test.
+//
+// Proves that the topic-backed RLMM propagates segment metadata from the
+// partition leader to a non-leader broker via `__remote_log_metadata` so that
+// after a leader crash the surviving broker can serve the remote read using
+// metadata it consumed from the topic — without having run the copy task itself.
+//
+// Network routing note for Mac + Docker Desktop
+// ─────────────────────────────────────────────
+// On Mac with Docker Desktop, `host.docker.internal` only resolves from
+// *inside* containers (it maps to the Docker gateway IP, typically
+// 192.168.65.254). From the host process itself, the name is unresolvable.
+//
+// The RLMM Kafka client runs in-process on the host and needs to connect to
+// the broker(s) hosting `__remote_log_metadata` partitions. If those brokers
+// advertise `host.docker.internal:PORT` in Metadata responses, the RLMM
+// client cannot reach them.
+//
+// Additionally, the Crabka producer does not yet implement leader-redirect
+// retry on NOT_LEADER_OR_FOLLOWER (error_code 19): when the target
+// `__remote_log_metadata` partition is led by a different broker, the produce
+// fails instead of transparently re-routing to the actual leader.
+//
+// Work-around used here: the `__remote_log_metadata` topic is created with
+// `num_partitions=1, replication=1`, hosted entirely on broker 1. Both
+// brokers' RLMM clients are bootstrapped explicitly to `127.0.0.1:9092`
+// (broker 1's loopback). This ensures:
+//   • Broker 1's RLMM producer always reaches partition 0's leader directly.
+//   • Broker 2's RLMM consumer reads partition 0 from broker 1 over loopback,
+//     consuming all metadata events produced there.
+// The discriminating property is preserved: broker 2 learns segment locations
+// exclusively from the topic (not from in-memory state or having run the copy
+// task itself), so the test still proves cross-broker durable metadata sharing.
+// ---------------------------------------------------------------------------
+
+/// Loopback address of broker 1's data listener. Both brokers' RLMM clients
+/// use this as their bootstrap so they reach the single `__remote_log_metadata`
+/// partition (hosted on broker 1) without needing `host.docker.internal`.
+const RLMM_BOOTSTRAP: &str = "127.0.0.1:9092";
+
+/// Boot a two-broker plaintext cluster with an S3 tiered-storage backend and a
+/// topic-backed RLMM.
+///
+/// Port assignment mirrors [`start_two_sasl_brokers`]:
+///   broker 1: data `0.0.0.0:9092` / `host.docker.internal:9092`, controller `0.0.0.0:9093`
+///   broker 2: data `0.0.0.0:9094` / `host.docker.internal:9094`, controller `0.0.0.0:9095`
+///
+/// Both brokers' RLMM clients bootstrap explicitly to `127.0.0.1:9092`
+/// (broker 1's loopback). See the module-level routing note above.
+///
+/// Accelerated heartbeat / replica-lag timers (200 ms / 2 s / 2 s) so leader
+/// failover is detected quickly inside the test.
+///
+/// Both brokers are spawned concurrently and joined — awaiting only broker 1
+/// first would deadlock because a majority-quorum leader election requires
+/// both voters to be up. See [`start_two_sasl_brokers`] for a detailed
+/// explanation.
+async fn start_two_brokers_with_minio_tier(
+    s3: crabka_remote_storage::S3Config,
+) -> (
+    crabka_broker::BrokerHandle,
+    crabka_broker::BrokerHandle,
+    tempfile::TempDir,
+    tempfile::TempDir,
+) {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("crabka_broker=debug,info")),
+        )
+        .with_test_writer()
+        .try_init();
+
+    let dir0 = tempfile::tempdir().expect("tempdir b0");
+    let dir1 = tempfile::tempdir().expect("tempdir b1");
+
+    let listen0: std::net::SocketAddr = LISTEN.parse().expect("static addr");
+    let listen1: std::net::SocketAddr = LISTEN_B1.parse().expect("static addr");
+    let ctrl0: std::net::SocketAddr = "0.0.0.0:9093".parse().expect("static addr");
+    let ctrl1: std::net::SocketAddr = "0.0.0.0:9095".parse().expect("static addr");
+    let voters = vec![(1_u64, ctrl0), (2_u64, ctrl1)];
+
+    // Both brokers point their RLMM client at broker 1's loopback so that
+    // (a) broker 1's producer reaches the __remote_log_metadata partition 0
+    //     leader directly without requiring host.docker.internal resolution,
+    // (b) broker 2's consumer can fetch partition 0 from broker 1 over loopback.
+    // `num_partitions=1` collapses all user-topic-partition metadata to a single
+    // metadata partition (partition 0 = hash(...) % 1), guaranteeing the RLMM
+    // producer always writes to the same partition that broker 2's consumer reads.
+    // `replication=1` keeps that partition exclusively on broker 1, so both
+    // RLMM clients reach it by going directly to 127.0.0.1:9092.
+    let rlmm_cfg = crabka_broker::KafkaRlmmConfig {
+        bootstrap: RLMM_BOOTSTRAP.to_string(),
+        num_partitions: 1,
+        replication: 1,
+        snapshot_interval: std::time::Duration::from_secs(2),
+        snapshot_dir: std::path::PathBuf::new(), // derived from log.dir
+        security: None,
+    };
+
+    let s3_b0 = s3.clone();
+    let s3_b1 = s3.clone();
+    let rlmm_b0 = rlmm_cfg.clone();
+    let rlmm_b1 = rlmm_cfg.clone();
+
+    let cfg0 = BrokerConfig {
+        broker_id: 1,
+        listen_addr: listen0,
+        advertised_listener: BOOTSTRAP.to_string(),
+        log_dir: dir0.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 1,
+        controller_listen_addr: ctrl0,
+        controller_quorum_voters: voters.clone(),
+        // Accelerated timers for fast failover — matches acks_all_survives_leader_crash.
+        heartbeat_interval_ms: 200,
+        heartbeat_timeout_ms: 2_000,
+        replica_lag_time_max_ms: 2_000,
+        controller_election_timeout: std::time::Duration::from_millis(500),
+        controller_heartbeat_interval: std::time::Duration::from_millis(100),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        remote_storage_backend: Some(crabka_broker::RemoteStorageBackend::S3(s3_b0)),
+        remote_log_manager_interval: std::time::Duration::from_secs(1),
+        remote_log_metadata: crabka_broker::RlmmKind::TopicBacked(rlmm_b0),
+        ..BrokerConfig::default()
+    };
+
+    let cfg1 = BrokerConfig {
+        broker_id: 2,
+        listen_addr: listen1,
+        advertised_listener: BOOTSTRAP_B1.to_string(),
+        log_dir: dir1.path().to_path_buf(),
+        log_config: LogConfig::default(),
+        node_id: 2,
+        controller_listen_addr: ctrl1,
+        controller_quorum_voters: voters.clone(),
+        heartbeat_interval_ms: 200,
+        heartbeat_timeout_ms: 2_000,
+        replica_lag_time_max_ms: 2_000,
+        controller_election_timeout: std::time::Duration::from_millis(500),
+        controller_heartbeat_interval: std::time::Duration::from_millis(100),
+        bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
+        remote_storage_backend: Some(crabka_broker::RemoteStorageBackend::S3(s3_b1)),
+        remote_log_manager_interval: std::time::Duration::from_secs(1),
+        remote_log_metadata: crabka_broker::RlmmKind::TopicBacked(rlmm_b1),
+        ..BrokerConfig::default()
+    };
+
+    // Static cold-boot (KIP-595): every voter is seeded with the full static
+    // `controller_quorum_voters` set in Bootstrap mode, so the quorum forms by
+    // electing among the concurrently-booting voters. `Broker::start` blocks
+    // until its controller sees a committed leader, and a leader needs a
+    // majority of the static set up and dialable — so awaiting broker 0 alone
+    // would deadlock. Spawn all starts concurrently and join them.
+    let h0 = tokio::spawn(async move { Broker::start(cfg0).await });
+    let h1 = tokio::spawn(async move { Broker::start(cfg1).await });
+    let broker0 = h0
+        .await
+        .expect("broker 0 spawn join")
+        .expect("start broker 0");
+    let broker1 = h1
+        .await
+        .expect("broker 1 spawn join")
+        .expect("start broker 1");
+
+    eprintln!(
+        "CRABKA[test] two-broker tiered: b0={LISTEN} adv={BOOTSTRAP} b1={LISTEN_B1} adv={BOOTSTRAP_B1} \
+         (MinIO S3 + topic-backed RLMM num_partitions=1 replication=1 bootstrap={RLMM_BOOTSTRAP})"
+    );
+    (broker0, broker1, dir0, dir1)
+}
+
+/// Multi-broker tiered-storage test: proves that `__remote_log_metadata`
+/// shares segment metadata from the partition leader to broker 2 via the
+/// topic-backed RLMM, so the *surviving* broker can serve a remote read using
+/// metadata it consumed from the topic — without having run the copy task itself.
+///
+/// Discriminating property: broker 2 (b2) never ran the copy task for the
+/// user-topic segments (only the leader copies). After the local log is evicted
+/// (`local.retention.bytes=1`), b2 can only serve offset-0 reads by fetching
+/// the segment from S3 using metadata it learned by consuming from
+/// `__remote_log_metadata`. An in-memory RLMM would leave b2 with no metadata
+/// and the consume would fail.
+///
+/// See the `start_two_brokers_with_minio_tier` doc for the networking
+/// work-around used to route both RLMM clients through broker 1's loopback.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker"]
+async fn tiered_storage_topic_rlmm_multi_broker_metadata_sharing() {
+    const TOPIC: &str = "crabka-tiered-multi-itest";
+    const RECORDS: usize = 200;
+
+    let _minio = MinioContainer::start();
+    minio_make_bucket(MINIO_BUCKET);
+
+    let s3 = crabka_remote_storage::S3Config {
+        bucket: MINIO_BUCKET.to_string(),
+        region: "us-east-1".to_string(),
+        prefix: None,
+        endpoint: Some(format!("http://127.0.0.1:{MINIO_PORT}")),
+        access_key_id: Some(MINIO_ACCESS_KEY.to_string()),
+        secret_access_key: Some(MINIO_SECRET_KEY.to_string()),
+        allow_http: true,
+        multipart_threshold: 4 * 1024,
+        multipart_chunk_size: 1024,
+    };
+
+    let (b1, b2, _d1, _d2) = start_two_brokers_with_minio_tier(s3).await;
+    nc_check_connectivity();
+
+    // Create a tiered topic with rf=2 so both brokers replicate the user
+    // partition. Inline instead of calling `create_tiered_topic` (which
+    // hard-codes rf=1 and waits on a single-broker config propagation path).
+    //
+    // Bootstrap against both brokers so the JVM tool can reach the cluster
+    // even if b1 hasn't won the controller election yet.
+    let bootstrap_both = format!("{BOOTSTRAP},{BOOTSTRAP_B1}");
+    docker_run_kafka_tool_with_image(
+        KAFKA_IMAGE_TIERED,
+        &[
+            "kafka-topics",
+            "--create",
+            "--if-not-exists",
+            "--topic",
+            TOPIC,
+            "--partitions",
+            "1",
+            "--replication-factor",
+            "2",
+            "--config",
+            "remote.storage.enable=true",
+            "--config",
+            "segment.bytes=2048",
+            "--config",
+            "local.retention.bytes=1",
+            "--config",
+            "retention.bytes=-1",
+            "--config",
+            "retention.ms=-1",
+            "--bootstrap-server",
+            &bootstrap_both,
+        ],
+    );
+
+    // Wait for the tiered-storage config to propagate to at least one broker's
+    // live partition replica (leader or follower). We only need one since
+    // config propagation goes via the controller to all replicas.
+    let cfg_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let b1_ok = b1.partition_log_config_for_test(TOPIC, 0).is_some_and(|c| {
+            c.remote_storage_enable && c.segment_bytes == 2048 && c.local_retention_bytes == Some(1)
+        });
+        let b2_ok = b2.partition_log_config_for_test(TOPIC, 0).is_some_and(|c| {
+            c.remote_storage_enable && c.segment_bytes == 2048 && c.local_retention_bytes == Some(1)
+        });
+        if b1_ok || b2_ok {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() <= cfg_deadline,
+            "tiered-storage topic config never propagated to either broker within 15s; \
+             b1={:?} b2={:?}",
+            b1.partition_log_config_for_test(TOPIC, 0),
+            b2.partition_log_config_for_test(TOPIC, 0),
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    eprintln!("CRABKA[test] tiered config propagated; producing {RECORDS} records");
+
+    // Produce records via broker 1's bootstrap. The cluster routes to the
+    // actual partition leader internally.
+    produce_records(TOPIC, RECORDS);
+    eprintln!("CRABKA[test] produced {RECORDS} records; waiting for MinIO segments");
+
+    // Wait for at least 2 sealed segments to land in MinIO (confirming the
+    // leader ran the copy task and local-retention eviction fired).
+    wait_for_minio_segments(MINIO_BUCKET, 2).await;
+    eprintln!("CRABKA[test] MinIO has >=2 segments; waiting for RLMM metadata propagation to b2");
+
+    // Give the topic-backed RLMM enough time to flush metadata records to
+    // `__remote_log_metadata` and for broker 2 (the survivor) to consume them.
+    // The RLMM reconciler ticks every 1s and the metadata topic rf=2.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+
+    // Kill broker 1: forces the user-partition leader election to move to b2.
+    // b2 must now serve the remote read entirely from metadata it consumed
+    // from __remote_log_metadata (it never ran the copy task itself).
+    eprintln!("CRABKA[test] shutting down broker 1 to force failover to broker 2");
+    b1.shutdown().await;
+
+    // Allow the survivor to (a) win the user-partition leader election and
+    // (b) have its RLMM reconciler settle on the now-led partition's metadata.
+    eprintln!("CRABKA[test] waiting for b2 to become leader and RLMM to settle (10s)");
+    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+    // Consume from offset 0 via the SURVIVING broker (b2, port 9094).
+    // Older offsets only exist in MinIO; b2 serves them via the RLMM metadata
+    // it consumed off __remote_log_metadata.
+    eprintln!("CRABKA[test] consuming from surviving broker 2 ({BOOTSTRAP_B1})");
+    let consumed = consume_records(TOPIC, RECORDS, 40_000, BOOTSTRAP_B1);
+    eprintln!("CRABKA[test] consumed {consumed} records from surviving broker 2");
+
+    assert!(
+        consumed >= RECORDS,
+        "expected >={RECORDS} records served from the remote tier by the surviving broker, \
+         got {consumed}. Broker 2 should have learned segment locations from \
+         __remote_log_metadata (rf=2) without having run the copy task itself."
+    );
+
+    b2.shutdown().await;
+    // `_minio`, `_d1`, `_d2` dropped here.
+}
