@@ -379,7 +379,7 @@ Kafka client for ApiVersions.
 - 1 JVM acceptance test exercising `kafka-configs --alter/describe/delete` round-trip.
 - **Known limitation:** `client_id` is currently `""` in Produce/Fetch quota lookups because the HandlerTable signature does not thread it through. User-level + default quotas WORK; `(user, client-id)` tuple quotas do not fire on data-plane paths yet. Integration test 4 was swapped from `tuple_quota_wins_over_user_only` to `user_specific_overrides_user_default` to reflect this. The 8-priority lookup itself is fully verified by unit tests in `quota/lookup.rs`. Fix: thread `client_id` through handler signatures — deferred.
 - **Known limitation:** `kafka-configs --describe --entity-type users` calls `DescribeUserScramCredentials` (api_key 51) after fetching quotas. Crabka does not implement api_key 51 yet, so the JVM tool exits non-zero even though the quota stdout is correct. JVM acceptance test asserts on stdout substring instead of exit code. Follow-up: implement api_key 51.
-- **Known limitation:** `throttle_time_ms` in the response is only set for Produce + Fetch. Other handlers absorb the `request_percentage` delay silently. Closing this requires routing the throttle value through the handler trait — deferred.
+- **Known limitation (resolved for the data plane in slice 16d):** `request_percentage` on the long-tail fall-through APIs (group/offset/metadata) still mutes the channel silently — `throttle_time_ms` is set only for the data-plane (Produce/Fetch) and controller-mutation handlers. Closing it for the long tail requires surfacing the post-hoc request throttle into each response — deferred.
 - Out of scope: `ip` entity + KIP-612 connection_creation_rate (slice 16b), KIP-599 controller_mutation_rate (slice 16c).
 
 ## Slice 16b — IP quotas + KIP-612 (2026-05-15)
@@ -419,6 +419,15 @@ Kafka client for ApiVersions.
   - `client_id` not threaded through `HandlerTable` — `(user, client-id)` tuple quotas don't fire from these handlers; `(user)`-only quotas work. Closing requires the slice-16 cleanup work.
   - Per-entity bucket cache grows unbounded over broker's lifetime.
 - Out of scope: IP entity (KIP-599 doesn't apply to IP); other admin operations (ACL CRUD, IncrementalAlterConfigs, AlterPartitionReassignments — KIP-599 limits to topic/partition CRUD).
+
+## Slice 16d — KIP-219 request-quota combine on the data plane (2026-06-03)
+
+- Closes the slice-16 known limitation that `request_percentage` (KIP-124) throttling was *enforced* on Produce/Fetch (channel muted via `tokio::time::sleep`) but never *communicated* — those responses reported only the byte-rate `throttle_time_ms`, and a request that tripped both quotas was muted for the **sum** of the two delays (handler sleep + dispatch-loop sleep) instead of Kafka's **max**.
+- New helper `consume_request_quota` in `crates/broker/src/quota/request.rs` — lifts the request-percentage lookup + token-bucket consume + overage→delay (capped 1s) out of the inline dispatch-loop block. 4 unit tests (no-quota, zero-elapsed, under-budget, capped overage).
+- Produce + Fetch handlers now compute `delay = max(byte_rate_delay, request_delay)`, stamp it on `throttle_time_ms`, and mute the channel **once** before responding (KIP-219 throttle-then-respond). Each handler times its own processing via an entry-point `Instant`.
+- Dispatch loop (`network/dispatch.rs`) skips `request_percentage` for api_key 0/1 (they self-account, charged exactly once) and routes the remaining fall-through APIs through `consume_request_quota` — same mute-only behavior as before, no regression.
+- 1 broker integration test (`tests/client_quotas.rs::request_percentage_throttles_produce`): tiny `request_percentage=0.001` for alice, **no** byte-rate quota; a single small produce must return `throttle_time_ms > 0`, proving the request throttle is surfaced rather than silently muted.
+- **Remaining gap:** the long-tail fall-through APIs (group/offset/metadata) still mute silently — see the refined slice-16 limitation. Inter-broker follower fetches are no longer subject to `request_percentage` (they use the KIP-73 leader throttle and are not client-quota traffic).
 
 ## Slice 17a — DescribeUserScramCredentials (2026-05-15)
 
@@ -5248,3 +5257,99 @@ introspection metadata).
   scenarios are authored and `#[ignore]`d, to be run on the Linux/CI acceptance
   harness.
 - README KIP-320 row flipped to ✅.
+
+## Slice — KIP-447 producer scalability for EOS (2026-06-03)
+
+- **Goal.** Promote the KIP-447 row in the README KIP table from ⚠️ to ✅.
+  KIP-447 lets a single transactional producer fence zombies across all of a
+  consumer group's input partitions by validating the consumer group's own
+  generation / member epoch at `TxnOffsetCommit`, instead of requiring one
+  producer per input partition.
+- **What was missing.** The broker already had the fencing machinery
+  (`classic_ops::validate_commit`, the next-gen `OffsetValidate` actor
+  message), but the producer's `send_offsets_to_transaction(offsets, group_id)`
+  sent `TxnOffsetCommitRequest` with `generation_id = -1` / empty `member_id` —
+  so the fencing was dead code. The consumer also exposed no single
+  `group_metadata()` accessor.
+- **Client wiring.**
+  - `crabka-client-consumer` gained a public `ConsumerGroupMetadata`
+    `{ group_id, generation_id, member_id, group_instance_id }` (mirrors the
+    JVM type) plus `Consumer::group_metadata()`. `group_instance_id` is always
+    `None` — the consumer has no static-membership support yet.
+  - `Producer::send_offsets_to_transaction` now takes
+    `&ConsumerGroupMetadata` (breaking change; greenfield) and forwards the
+    generation / member / instance into `TxnOffsetCommitRequest`. The type is
+    re-exported from the producer crate.
+- **Broker.** Extracted the classic-vs-next-gen routing from
+  `offset_commit::validate` into a shared
+  `coordinator::unified::actor::validate_group_commit`, and made
+  `txn_offset_commit` call it — so transactional offset fencing is "consistent
+  with normal offset fencing" (KIP-447's words). This:
+  - fixes the previously-missing unknown-member case
+    (`UNKNOWN_MEMBER_ID` when a bare `member_id` isn't in the group),
+  - adds KIP-848 next-gen member-epoch fencing (`STALE_MEMBER_EPOCH` /
+    `FENCED_MEMBER_EPOCH`), clearing the `TODO(KIP-1319 v4+)`,
+  - drops the old `generation_id >= 0` gate (the shared helper no-ops for the
+    simple-consumer shape, so a metadata-less producer is unaffected).
+- **Tests.** `crates/broker/tests/transactions.rs`:
+  - `send_offsets_to_transaction_atomic_with_records` now threads real
+    `consumer.group_metadata()`.
+  - `txn_offset_commit_fences_classic_generation_and_member` — stale
+    generation → `ILLEGAL_GENERATION`, unknown member → `UNKNOWN_MEMBER_ID`,
+    matching metadata → accepted.
+  - `txn_offset_commit_fences_next_gen_member_epoch` — stale member epoch →
+    `STALE_MEMBER_EPOCH`, current epoch → accepted.
+- **Out of scope.** Consumer-side static membership (`group.instance.id`)
+  configuration — the broker still validates the instance-id case for protocol
+  completeness, but the consumer client always reports `None`.
+
+## Slice — KIP-1022 finish: `crabka format --feature` + JVM `kafka-features` validation (2026-06-03)
+
+- **Goal.** Close the KIP-1022 ("Formatting and updating features") gap. The
+  *updating* half (the `UpdateFeatures` per-feature range/floor/KIP-1022-
+  dependency checks, v2 fail-fast, and `ApiVersions` advertisement) already
+  landed with the KIP-584 feature-framework slice; this slice adds the
+  *formatting* half — `crabka format --feature NAME=VERSION` — and validates the
+  whole feature surface against the real JVM `kafka-features` tool. Design:
+  `docs/superpowers/specs/2026-06-03-kip-1022-format-features-design.md`.
+- **Empirically-pinned format algorithm (apache/kafka:4.0.0).** Pinned by
+  formatting + `kafka-dump-log --cluster-metadata-decoder` on the resulting
+  `bootstrap.checkpoint`: `bootstrap_mv` = `--feature metadata.version=N` else
+  `--release-version` else latest stable (25); each feature = explicit override
+  else `default_level(bootstrap_mv)`; **only features with level > 0 get a
+  record** (level 0 = absent = disabled); `--feature` and `--release-version`
+  combine (release = base, `--feature` overrides individual features) *except*
+  `--release-version` + `--feature metadata.version` (rejected as ambiguous).
+- **`crabka format --feature` (`crates/cli/src/format.rs`).** New repeatable
+  `--feature NAME=VERSION` flag. `resolve_format_features` validates each spec
+  (unknown feature → "Unsupported feature: … Supported features are: …";
+  out-of-range level → reject; release + metadata.version feature → ambiguity
+  reject), resolves `bootstrap_mv`, and runs KIP-1022 dependency validation over
+  the fully-resolved set. New exit code `EXIT_INVALID_FEATURE = 5`.
+- **Override-aware seeding (`crates/metadata/src/feature.rs`).**
+  `bootstrap_feature_records_with_overrides(bootstrap_mv, overrides)` applies
+  per-feature overrides and **omits level-0 records** to match `kafka-storage
+  format`; the existing `bootstrap_feature_records` re-points at it (empty
+  overrides), so the broker's standalone self-bootstrap and `crabka format`
+  share one path and the broker no longer writes pointless level-0 tombstones
+  (the resulting `MetadataImage` is identical). New
+  `validate_feature_dependencies` enforces KIP-1022 deps at format time (a no-op
+  for today's all-empty-deps registry, but wired, mirroring the handler).
+- **JVM-validated (Docker, this session).** A new `jvm_features.rs`
+  (`#[ignore]`) drives `apache/kafka:4.0.0` `kafka-features` against an
+  in-process Crabka broker: `describe` lists all five advertised features at the
+  self-bootstrap defaults (metadata.version=4.0-IV3, group.version=1,
+  transaction.version=2, share/streams=0); `downgrade --feature
+  transaction.version=1` then `upgrade --feature transaction.version=2`
+  round-trip through `UpdateFeatures` (epoch advances 2→3→4). All green.
+- **Tests.** `crabka_metadata` feature unit tests (override resolution, level-0
+  omission, unlisted-follows-`bootstrap_mv`, dependency check); `format.rs` unit
+  tests (`--feature` parse + ambiguity/unknown/out-of-range rejection +
+  `bootstrap_mv` precedence); new `crates/broker/tests/format_features.rs`
+  (a standalone `crabka format --feature transaction.version=1 --feature
+  group.version=0` dir boots a broker that finalizes txn=1, omits group.version,
+  keeps metadata.version=25 — proving `--feature` survives boot rather than
+  being clobbered by self-bootstrap); `format_smoke.rs` record count 7→5
+  (share/streams level-0 omitted). Full affected-crate suites green;
+  `cargo clippy --all-targets` + `cargo fmt --all --check` clean.
+- README KIP-1022 row flipped to ✅.

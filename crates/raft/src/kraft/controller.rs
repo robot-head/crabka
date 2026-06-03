@@ -1016,9 +1016,29 @@ impl Engine {
         // an evolving scratch image, so config-diff / ACL-resolution in
         // `to_kraft_values` see in-batch prior records (a batch mixing
         // topic+partition is validated and encoded as a sequence).
+
+        // KIP-903: broker epoch = the offset this batch commits at. The i-th
+        // value blob lands at `assign_base + i`; a V1BrokerRegistration fans
+        // out to exactly one blob, so its offset delta equals the number of
+        // blobs already allocated. Single-writer leader: the current log end
+        // offset is the base `append` will return.
+        let assign_base = self.log.log_end_offset();
+
         let mut scratch = self.image.clone();
         let mut value_blobs: Vec<bytes::Bytes> = Vec::new();
         for r in &records {
+            // Stamp the registration epoch = its committed offset.
+            let stamped;
+            let r: &MetadataRecord = match r {
+                MetadataRecord::V1BrokerRegistration(b) => {
+                    let delta = i64::try_from(value_blobs.len()).unwrap_or(i64::MAX);
+                    let mut b = b.clone();
+                    b.broker_epoch = assign_base + delta;
+                    stamped = MetadataRecord::V1BrokerRegistration(b);
+                    &stamped
+                }
+                other => other,
+            };
             if let Err(e) = scratch.validate(r) {
                 let _ = reply.send(Err(RaftError::Metadata(e)));
                 return;
@@ -2466,6 +2486,42 @@ mod tests {
             "log not pruned: log_start_offset = {}",
             qs.log_start_offset
         );
+        ctrl.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn broker_registration_epoch_equals_commit_offset() {
+        use crabka_metadata::{BrokerRegistrationRecord, MetadataRecord};
+        let (ctrl, _dir) = build(1, &[1]);
+        ctrl.inject_event(Event::ElectionTimeout).await.unwrap();
+        await_leader(&ctrl, Some(1)).await;
+
+        let reg = |id: u64| {
+            vec![MetadataRecord::V1BrokerRegistration(
+                BrokerRegistrationRecord {
+                    node_id: id,
+                    broker_epoch: 0, // overwritten by the leader at append
+                    host: "h".into(),
+                    port: 9092,
+                    rack: None,
+                    endpoints: vec![],
+                },
+            )]
+        };
+
+        let base1 = ctrl.quorum_state().await.unwrap().log_end_offset;
+        ctrl.submit_change(reg(7))
+            .await
+            .expect("first registration");
+        let e1 = ctrl.current_image().broker_epoch(7);
+        assert!(e1 == Some(base1), "epoch {e1:?} != commit offset {base1}");
+
+        let base2 = ctrl.quorum_state().await.unwrap().log_end_offset;
+        ctrl.submit_change(reg(7)).await.expect("re-registration");
+        let e2 = ctrl.current_image().broker_epoch(7);
+        assert!(e2 == Some(base2), "re-reg epoch {e2:?} != offset {base2}");
+        assert!(base2 > base1 && e2 > e1, "epoch must strictly increase");
+
         ctrl.shutdown().await;
     }
 }

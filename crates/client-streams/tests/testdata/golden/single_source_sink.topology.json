@@ -1,0 +1,14 @@
+{
+  "epoch": 0,
+  "subtopologies": [
+    {
+      "subtopology_id": "0",
+      "source_topics": ["streams-input"],
+      "source_topic_regex": [],
+      "repartition_sink_topics": [],
+      "repartition_source_topics": [],
+      "state_changelog_topics": [],
+      "copartition_groups": []
+    }
+  ]
+}

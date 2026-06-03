@@ -6,6 +6,8 @@
 //! (rejecting RPCs below a level) lives in the broker handlers that read the
 //! finalized level from the image — not here.
 
+use std::collections::BTreeMap;
+
 use crate::MetadataImage;
 
 /// One versioned cluster feature (KIP-584).
@@ -213,19 +215,71 @@ pub fn feature(name: &str) -> Option<&'static dyn Feature> {
 /// at its per-release default, derived from `bootstrap_mv` (the bootstrap
 /// metadata.version level). Used by both `crabka format` and the broker's
 /// standalone self-bootstrap so a fresh cluster finalizes every feature's
-/// release default. A feature whose default is 0 still emits a record; apply
-/// treats level 0 as a tombstone (the feature stays absent = disabled).
+/// release default.
 #[must_use]
 pub fn bootstrap_feature_records(bootstrap_mv: i16) -> Vec<crate::MetadataRecord> {
+    bootstrap_feature_records_with_overrides(bootstrap_mv, &BTreeMap::new())
+}
+
+/// KIP-1022 `crabka format` seeding: one `V1FeatureLevel` record per registered
+/// feature, each at its explicit `--feature NAME=LEVEL` override if present in
+/// `overrides`, else its per-release default for `bootstrap_mv`.
+///
+/// Mirrors `kafka-storage format`: a feature whose resolved level is `0` is
+/// **omitted** (level 0 = absent = disabled — the default state), so the seeded
+/// record set matches what Kafka writes to its `bootstrap.checkpoint`.
+#[must_use]
+pub fn bootstrap_feature_records_with_overrides(
+    bootstrap_mv: i16,
+    overrides: &BTreeMap<String, i16>,
+) -> Vec<crate::MetadataRecord> {
     feature_registry()
         .iter()
-        .map(|f| {
-            crate::MetadataRecord::V1FeatureLevel(crate::FeatureLevelRecord {
-                name: f.name().to_string(),
-                level: f.default_level(bootstrap_mv),
+        .filter_map(|f| {
+            let level = overrides
+                .get(f.name())
+                .copied()
+                .unwrap_or_else(|| f.default_level(bootstrap_mv));
+            (level > 0).then(|| {
+                crate::MetadataRecord::V1FeatureLevel(crate::FeatureLevelRecord {
+                    name: f.name().to_string(),
+                    level,
+                })
             })
         })
         .collect()
+}
+
+/// KIP-1022 dependency validation for a fully-resolved feature→level map (as
+/// seeded by `crabka format`). For every finalized feature, each of its
+/// `dependencies(level)` must be present in `resolved` at `>=` the required
+/// level. Returns `Err` naming the first unmet dependency. A no-op for today's
+/// registry (no feature declares dependencies) but enforces the rule at format
+/// time, mirroring the `UpdateFeatures` handler.
+pub fn validate_feature_dependencies(resolved: &BTreeMap<String, i16>) -> Result<(), String> {
+    check_deps(resolved, |name, level| {
+        feature(name).map_or(&[][..], |f| f.dependencies(level))
+    })
+}
+
+/// Core of [`validate_feature_dependencies`], parameterized over the dependency
+/// source so the rejection logic is unit-testable without a dependency-bearing
+/// feature in the real registry.
+fn check_deps(
+    resolved: &BTreeMap<String, i16>,
+    deps_of: impl Fn(&str, i16) -> &'static [(&'static str, i16)],
+) -> Result<(), String> {
+    for (name, &level) in resolved {
+        for &(dep, min) in deps_of(name, level) {
+            let have = resolved.get(dep).copied().unwrap_or(0);
+            if have < min {
+                return Err(format!(
+                    "feature {name}={level} requires {dep}>={min}, but {dep} is finalized at {have}"
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// True if `level` is within the registered feature's supported range.
@@ -242,6 +296,7 @@ pub fn is_supported_level(name: &str, level: i16) -> bool {
 mod tests {
     use super::*;
     use assert2::assert;
+    use std::collections::BTreeMap;
 
     #[test]
     fn registry_contains_metadata_version() {
@@ -340,6 +395,96 @@ mod tests {
             .ivn()
                 == "4.0-IV2"
         );
+    }
+
+    fn levels_of(recs: &[crate::MetadataRecord]) -> BTreeMap<String, i16> {
+        recs.iter()
+            .filter_map(|r| match r {
+                crate::MetadataRecord::V1FeatureLevel(f) => Some((f.name.clone(), f.level)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bootstrap_omits_level_zero_features() {
+        // share.version / streams.version default to 0 at every release → no
+        // record emitted (level 0 = absent = disabled, like Kafka's format).
+        let levels = levels_of(&bootstrap_feature_records(25));
+        assert!(levels.get("metadata.version") == Some(&25));
+        assert!(levels.get("group.version") == Some(&1));
+        assert!(levels.get("transaction.version") == Some(&2));
+        assert!(!levels.contains_key("share.version"));
+        assert!(!levels.contains_key("streams.version"));
+    }
+
+    #[test]
+    fn bootstrap_with_overrides_applies_explicit_levels() {
+        // group.version overridden down to 0 → omitted; the rest follow mv=25.
+        let mut ov = BTreeMap::new();
+        ov.insert("group.version".to_string(), 0i16);
+        let levels = levels_of(&bootstrap_feature_records_with_overrides(25, &ov));
+        assert!(levels.get("metadata.version") == Some(&25));
+        assert!(levels.get("transaction.version") == Some(&2));
+        assert!(!levels.contains_key("group.version"));
+    }
+
+    #[test]
+    fn bootstrap_override_can_enable_an_opt_in_feature() {
+        // streams.version is 0 by default at any release; an explicit override
+        // turns it on and earns a record.
+        let mut ov = BTreeMap::new();
+        ov.insert("streams.version".to_string(), 1i16);
+        let levels = levels_of(&bootstrap_feature_records_with_overrides(25, &ov));
+        assert!(levels.get("streams.version") == Some(&1));
+    }
+
+    #[test]
+    fn bootstrap_unlisted_feature_follows_bootstrap_mv() {
+        // mv=23: at/above group GA (22) but below txn GA (24) → group=1,
+        // transaction omitted (default 0), metadata.version mirrors mv.
+        let levels = levels_of(&bootstrap_feature_records_with_overrides(
+            23,
+            &BTreeMap::new(),
+        ));
+        assert!(levels.get("metadata.version") == Some(&23));
+        assert!(levels.get("group.version") == Some(&1));
+        assert!(!levels.contains_key("transaction.version"));
+    }
+
+    #[test]
+    fn validate_dependencies_ok_for_real_registry() {
+        // The real registry declares no dependencies, so any resolved set passes.
+        let mut resolved = BTreeMap::new();
+        resolved.insert("metadata.version".to_string(), 25i16);
+        resolved.insert("group.version".to_string(), 1i16);
+        resolved.insert("transaction.version".to_string(), 2i16);
+        assert!(validate_feature_dependencies(&resolved).is_ok());
+    }
+
+    #[test]
+    fn check_deps_enforces_minimum_dependency_levels() {
+        // Synthetic dependency source: "b" at level 1 requires "a" >= 2.
+        fn deps_of(name: &str, level: i16) -> &'static [(&'static str, i16)] {
+            match (name, level) {
+                ("b", 1) => &[("a", 2)],
+                _ => &[],
+            }
+        }
+        let mut ok = BTreeMap::new();
+        ok.insert("a".to_string(), 2i16);
+        ok.insert("b".to_string(), 1i16);
+        assert!(check_deps(&ok, deps_of).is_ok());
+
+        let mut too_low = BTreeMap::new();
+        too_low.insert("a".to_string(), 1i16);
+        too_low.insert("b".to_string(), 1i16);
+        assert!(check_deps(&too_low, deps_of).is_err());
+
+        // dependency feature absent entirely (treated as level 0) → rejected.
+        let mut missing = BTreeMap::new();
+        missing.insert("b".to_string(), 1i16);
+        assert!(check_deps(&missing, deps_of).is_err());
     }
 
     #[test]

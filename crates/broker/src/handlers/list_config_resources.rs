@@ -177,6 +177,7 @@ mod tests {
             img.apply(&MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
                     node_id: id,
+                    broker_epoch: 0,
                     host: "127.0.0.1".into(),
                     port: 9092,
                     rack: None,

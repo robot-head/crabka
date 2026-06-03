@@ -25,6 +25,7 @@ use crate::builder::{
 };
 use crate::coordinator::{COORDINATOR_RETRY_TIMEOUT, CoordinatorState, with_coordinator_retry};
 use crate::error::ConsumerError;
+use crate::group_metadata::ConsumerGroupMetadata;
 
 /// Subscribe-style consumer handle. Construct via [`Consumer::builder`].
 #[allow(dead_code)] // `session_timeout` / `heartbeat_interval` / `generation_id`
@@ -411,6 +412,23 @@ impl Consumer {
     #[must_use]
     pub fn generation_id(&self) -> i32 {
         self.generation_id
+    }
+
+    /// KIP-447 group metadata to hand to a transactional producer's
+    /// `send_offsets_to_transaction`. The generation id is the value captured
+    /// at the most recent successful join (the field is not kept in sync as
+    /// the coordinator rejoins — see [`Self::generation_id`]); for a stable
+    /// single-member group this equals the coordinator's live generation.
+    /// `group_instance_id` is always `None` — the consumer has no
+    /// static-membership support yet.
+    #[must_use]
+    pub fn group_metadata(&self) -> ConsumerGroupMetadata {
+        ConsumerGroupMetadata {
+            group_id: self.group_id.clone(),
+            generation_id: self.generation_id,
+            member_id: self.member_id.clone(),
+            group_instance_id: None,
+        }
     }
 
     /// Topics this consumer subscribed to at build time.

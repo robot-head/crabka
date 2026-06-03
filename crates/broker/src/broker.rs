@@ -1381,6 +1381,7 @@ impl Broker {
                 let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
                     crabka_metadata::BrokerRegistrationRecord {
                         node_id: config.node_id,
+                        broker_epoch: 0,
                         host: config
                             .advertised_listener
                             .split(':')
