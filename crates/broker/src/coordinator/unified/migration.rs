@@ -220,6 +220,188 @@ pub(crate) fn target_to_consumer_assignment(
     out.freeze()
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Serving hosted classic members from the consumer-group reconciler (64d-F).
+//
+// A classic member hosted in an upgraded consumer group keeps speaking the
+// classic Heartbeat/JoinGroup/SyncGroup RPCs. We map those onto the next-gen
+// machinery: the member's server-side target (translated to a
+// `ConsumerProtocolAssignment` blob) is the assignment it should hold. The
+// "does this member owe a re-sync?" signal is whether that translated target
+// differs from `facade.last_synced_assignment` — purely derived from the
+// reconciler's output, so it needs no separate epoch bookkeeping.
+// ───────────────────────────────────────────────────────────────────────────
+
+use super::actor::{JoinResult, JoinResultMember, SyncResult};
+use crate::codes;
+
+/// Classic `Heartbeat` for a hosted member: refresh liveness and signal a
+/// re-sync while the member's current target differs from what it last synced.
+/// `REBALANCE_IN_PROGRESS` tells a classic client to re-`JoinGroup`/`SyncGroup`
+/// to pick up the changed assignment; `NONE` once it is in sync.
+pub(crate) fn serve_classic_heartbeat(
+    state: &mut ConsumerState,
+    member_id: &str,
+    image: &ReconcileInput,
+) -> i16 {
+    let Some(m) = state.members.get(member_id) else {
+        return codes::UNKNOWN_MEMBER_ID;
+    };
+    let current = member_target_assignment(state, member_id, image);
+    let owes = m
+        .classic
+        .as_ref()
+        .is_none_or(|c| c.last_synced_assignment != current);
+    if let Some(m) = state.members.get_mut(member_id) {
+        m.last_seen = Instant::now();
+    }
+    if owes {
+        codes::REBALANCE_IN_PROGRESS
+    } else {
+        codes::NONE
+    }
+}
+
+/// Translate a member's server-side TARGET (the source of truth for what it
+/// should own, mirroring the native heartbeat response) into a
+/// `ConsumerProtocolAssignment` blob. In the next-gen model a member's
+/// `assigned_partitions` only fills in as the client acks the target; a hosted
+/// classic member has no such ack loop, so the target is what it must sync.
+fn member_target_assignment(
+    state: &ConsumerState,
+    member_id: &str,
+    image: &ReconcileInput,
+) -> Bytes {
+    let target = state
+        .target
+        .per_member
+        .get(member_id)
+        .cloned()
+        .unwrap_or_default();
+    target_to_consumer_assignment(&target, image)
+}
+
+/// Classic `SyncGroup` for a hosted member: return its current target
+/// translated to a `ConsumerProtocolAssignment` blob and record it as
+/// `last_synced_assignment` so subsequent heartbeats report `NONE`.
+pub(crate) fn serve_classic_sync(
+    state: &mut ConsumerState,
+    member_id: &str,
+    image: &ReconcileInput,
+) -> SyncResult {
+    if !state.members.contains_key(member_id) {
+        return SyncResult {
+            error_code: codes::UNKNOWN_MEMBER_ID,
+            ..Default::default()
+        };
+    }
+    let blob = member_target_assignment(state, member_id, image);
+    if let Some(m) = state.members.get_mut(member_id)
+        && let Some(c) = m.classic.as_mut()
+    {
+        c.last_synced_assignment = blob.clone();
+        c.awaiting_sync = false;
+    }
+    SyncResult {
+        error_code: codes::NONE,
+        assignment: blob,
+        protocol_type: Some("consumer".into()),
+        protocol_name: None,
+    }
+}
+
+/// Upsert a hosted classic member from a classic `JoinGroup` into the consumer
+/// group. A rejoin of an existing member refreshes its facade/subscription and
+/// preserves its `assigned_partitions` / `last_synced_assignment`; a brand-new
+/// member is added with a fresh facade (`awaiting_sync = true`).
+///
+/// `add_or_update_member` marks the group dirty iff the subscription is new or
+/// changed, so the caller can reconcile + persist only when needed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn upsert_classic_member(
+    state: &mut ConsumerState,
+    member_id: &str,
+    subscription_topics: HashSet<String>,
+    protocols: Vec<(String, Bytes)>,
+    client_id: String,
+    client_host: String,
+    session_timeout: std::time::Duration,
+    rebalance_timeout: std::time::Duration,
+    instance_id: Option<String>,
+) {
+    // Preserve a rejoining member's existing assignment + last-synced blob so a
+    // rejoin with an unchanged subscription is a pure no-op (no spurious revoke
+    // and no re-sync signal). A new member starts fresh, awaiting its first sync.
+    let existing = state.members.get(member_id);
+    let assigned_partitions = existing
+        .map(|m| m.assigned_partitions.clone())
+        .unwrap_or_default();
+    let partitions_pending_revocation = existing
+        .map(|m| m.partitions_pending_revocation.clone())
+        .unwrap_or_default();
+    let last_synced_assignment = existing
+        .and_then(|m| m.classic.as_ref())
+        .map(|c| c.last_synced_assignment.clone())
+        .unwrap_or_default();
+    let member_epoch = existing.map_or(state.group_epoch, |m| m.member_epoch);
+    let previous_member_epoch = existing.map_or(0, |m| m.previous_member_epoch);
+    let assignment_state = existing.map_or(MemberAssignmentState::Stable, |m| m.assignment_state);
+
+    let facade = ClassicMemberFacade {
+        generation_id: state.group_epoch,
+        supported_protocols: protocols,
+        session_timeout,
+        last_synced_assignment,
+        awaiting_sync: existing.is_none(),
+    };
+    state.add_or_update_member(MemberState {
+        member_id: member_id.to_string(),
+        instance_id,
+        rack_id: None,
+        client_id,
+        client_host,
+        subscribed_topic_names: subscription_topics,
+        subscribed_topic_regex: None,
+        compiled_regex: None,
+        server_assignor: None,
+        rebalance_timeout,
+        member_epoch,
+        previous_member_epoch,
+        assignment_state,
+        assigned_partitions,
+        partitions_pending_revocation,
+        last_seen: Instant::now(),
+        classic: Some(facade),
+    });
+}
+
+/// Build the `JoinGroup` result for a hosted classic member. The group is
+/// server-assigned, so the member is its own leader of a single-member view at
+/// `generation = group_epoch`; the real assignment arrives on the next
+/// `SyncGroup`.
+pub(crate) fn build_hosted_classic_join_result(
+    state: &ConsumerState,
+    member_id: &str,
+    protocol_name: Option<String>,
+) -> JoinResult {
+    JoinResult {
+        error_code: codes::NONE,
+        generation_id: state.group_epoch,
+        protocol_type: Some("consumer".into()),
+        protocol_name,
+        leader: member_id.to_string(),
+        member_id: member_id.to_string(),
+        members: vec![JoinResultMember {
+            member_id: member_id.to_string(),
+            group_instance_id: state
+                .members
+                .get(member_id)
+                .and_then(|m| m.instance_id.clone()),
+            metadata: Bytes::new(),
+        }],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

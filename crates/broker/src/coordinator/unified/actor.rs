@@ -383,33 +383,62 @@ async fn actor_loop(
 
                     // ── classic ──
                     GroupActorMessage::ClassicJoin { req, client_host, reply } => {
-                        let Some(state) = group.as_classic_mut() else {
+                        if let Some(state) = group.as_classic_mut() {
+                            match classic_ops::handle_join(state, &req, &client_host) {
+                                classic_ops::JoinAction::Immediate(result) => {
+                                    let _ = reply.send(result);
+                                }
+                                classic_ops::JoinAction::Park => {
+                                    parked.joiners.insert(req.member_id, reply);
+                                }
+                                classic_ops::JoinAction::CompleteNow => {
+                                    parked.joiners.insert(req.member_id, reply);
+                                    complete_classic_rebalance(state, &mut parked.joiners);
+                                }
+                            }
+                        } else if group.as_consumer().is_some() {
+                            // KIP-848 live migration: a classic member joins (or
+                            // rejoins) an upgraded consumer group. Upsert it into the
+                            // next-gen state; if its subscription is new/changed the
+                            // group is dirty → reconcile + persist the membership
+                            // change via the SAME path handle_heartbeat's first-join
+                            // uses (run_reconcile → advance_member_epoch →
+                            // snapshot_pending_after_change → flush_pending). Then
+                            // hand back a server-assigned single-member JoinGroup
+                            // result; the real assignment arrives on the next Sync.
+                            if classic_join_hosted(
+                                &mut group, &config, &*metadata, &*offsets_log,
+                                &coordinator, &req, &client_host, reply, chrono_now_ms(),
+                            )
+                            .await
+                            .is_err()
+                            {
+                                break;
+                            }
+                        } else {
                             let _ = reply.send(JoinResult {
                                 error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
                                 member_id: req.member_id,
                                 ..JoinResult::default()
                             });
-                            continue;
-                        };
-                        match classic_ops::handle_join(state, &req, &client_host) {
-                            classic_ops::JoinAction::Immediate(result) => {
-                                let _ = reply.send(result);
-                            }
-                            classic_ops::JoinAction::Park => {
-                                parked.joiners.insert(req.member_id, reply);
-                            }
-                            classic_ops::JoinAction::CompleteNow => {
-                                parked.joiners.insert(req.member_id, reply);
-                                complete_classic_rebalance(state, &mut parked.joiners);
-                            }
                         }
                     }
                     GroupActorMessage::ClassicSync { req, reply } => {
                         let Some(state) = group.as_classic_mut() else {
-                            let _ = reply.send(SyncResult {
-                                error_code: codes::UNKNOWN_MEMBER_ID,
-                                ..SyncResult::default()
-                            });
+                            // KIP-848 live migration: serve a hosted classic member's
+                            // SyncGroup off the reconciler's target, translated to a
+                            // ConsumerProtocolAssignment blob.
+                            if let Some(state) = group.as_consumer_mut() {
+                                let result = migration::serve_classic_sync(
+                                    state, &req.member_id, &metadata.snapshot(),
+                                );
+                                let _ = reply.send(result);
+                            } else {
+                                let _ = reply.send(SyncResult {
+                                    error_code: codes::UNKNOWN_MEMBER_ID,
+                                    ..SyncResult::default()
+                                });
+                            }
                             continue;
                         };
                         match classic_ops::handle_sync(state, &req) {
@@ -426,10 +455,21 @@ async fn actor_loop(
                         }
                     }
                     GroupActorMessage::ClassicHeartbeat { req, reply } => {
-                        let code = group
-                            .as_classic_mut()
-                            .map_or(codes::UNKNOWN_MEMBER_ID, |s| classic_ops::handle_heartbeat(s, &req));
-                        let _ = reply.send(code);
+                        if let Some(state) = group.as_classic_mut() {
+                            let code = classic_ops::handle_heartbeat(state, &req);
+                            let _ = reply.send(code);
+                        } else if let Some(state) = group.as_consumer_mut() {
+                            // KIP-848 live migration: a classic member hosted in an
+                            // upgraded consumer group is served off the reconciler's
+                            // target. `REBALANCE_IN_PROGRESS` while its target differs
+                            // from what it last synced, else `NONE`.
+                            let code = migration::serve_classic_heartbeat(
+                                state, &req.member_id, &metadata.snapshot(),
+                            );
+                            let _ = reply.send(code);
+                        } else {
+                            let _ = reply.send(codes::UNKNOWN_MEMBER_ID);
+                        }
                     }
                     GroupActorMessage::ClassicLeave { req, version, reply } => {
                         if let Some(state) = group.as_classic_mut() {
@@ -724,6 +764,88 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
         }
     }
     state.dirty = false;
+}
+
+/// KIP-848 live migration: serve a classic `JoinGroup` for a member hosted in
+/// an upgraded consumer group. Upserts the member into the next-gen state and,
+/// if its subscription is new or changed (the group went dirty), reconciles and
+/// persists the membership change exactly the way `handle_heartbeat`'s
+/// first-join path does — `run_reconcile` → `advance_member_epoch` →
+/// `snapshot_pending_after_change` → `flush_pending`. Replies on `reply` with a
+/// server-assigned single-member `JoinResult`; the assignment is delivered on
+/// the member's next `SyncGroup`. Returns `Err` only on a log-write failure (so
+/// the actor exits), after replying with the same failure code the heartbeat
+/// path uses.
+#[allow(clippy::too_many_arguments)]
+async fn classic_join_hosted(
+    group: &mut Group,
+    config: &NextGenConfig,
+    metadata: &dyn MetadataProvider,
+    offsets_log: &dyn OffsetsLog,
+    coordinator: &super::GroupCoordinator,
+    req: &JoinGroupRequest,
+    client_host: &str,
+    reply: oneshot::Sender<JoinResult>,
+    now_ms: i64,
+) -> Result<(), crate::error::BrokerError> {
+    // Decode the subscription from the first protocol whose metadata is a valid
+    // `ConsumerProtocolSubscription` (mirrors `convert_classic_to_consumer`,
+    // which derives topics from a member's selected protocol metadata). The
+    // matching protocol's name is echoed back as the result's `protocol_name`.
+    let decoded = req.protocols.iter().find_map(|p| {
+        migration::decode_consumer_subscription(&p.metadata).map(|sub| (p.name.clone(), sub.topics))
+    });
+    let (protocol_name, topics) = match decoded {
+        Some((name, topics)) => (Some(name), topics.into_iter().collect()),
+        None => (
+            req.protocols.first().map(|p| p.name.clone()),
+            std::collections::HashSet::new(),
+        ),
+    };
+    let protocols: Vec<(String, Bytes)> = req
+        .protocols
+        .iter()
+        .map(|p| (p.name.clone(), p.metadata.clone()))
+        .collect();
+    let session_timeout =
+        Duration::from_millis(u64::try_from(req.session_timeout_ms.max(0)).unwrap_or(30_000));
+    let rebalance_timeout =
+        Duration::from_millis(u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(60_000));
+
+    let state = group
+        .as_consumer_mut()
+        .expect("caller verified consumer kind");
+    migration::upsert_classic_member(
+        state,
+        &req.member_id,
+        topics,
+        protocols,
+        String::new(), // client_id is header-level only (matches classic_ops::handle_join)
+        client_host.to_string(),
+        session_timeout,
+        rebalance_timeout,
+        req.group_instance_id.clone(),
+    );
+    if state.dirty {
+        run_reconcile(state, config, metadata);
+        state.advance_member_epoch(&req.member_id);
+        let pending = snapshot_pending_after_change(state, std::slice::from_ref(&req.member_id));
+        if let Err(e) = flush_pending(state, pending, offsets_log, coordinator, now_ms).await {
+            tracing::warn!(
+                group_id = %state.group_id, error = %e,
+                "next-gen actor exiting after hosted classic-join log-write failure",
+            );
+            let _ = reply.send(JoinResult {
+                error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
+                member_id: req.member_id.clone(),
+                ..JoinResult::default()
+            });
+            return Err(e);
+        }
+    }
+    let result = migration::build_hosted_classic_join_result(state, &req.member_id, protocol_name);
+    let _ = reply.send(result);
+    Ok(())
 }
 
 async fn handle_heartbeat(
@@ -2084,26 +2206,8 @@ mod tests {
     /// classic k2 `GroupMetadata` and writing the full next-gen record set.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consumer_heartbeat_upgrades_a_classic_group() {
-        use bytes::{BufMut, BytesMut};
-
         use super::super::classic_state::{Group as ClassicState, Member};
         use super::super::group::{Group, GroupKind};
-        use crabka_protocol::Encode;
-        use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
-
-        // A real classic consumer client's JoinGroup protocol metadata: a
-        // `ConsumerProtocolSubscription` with the leading version-negotiation
-        // prefix. `classic_is_convertible` must decode this for the upgrade.
-        fn subscription_blob(topics: &[&str]) -> bytes::Bytes {
-            let sub = ConsumerProtocolSubscription {
-                topics: topics.iter().map(|s| (*s).to_string()).collect(),
-                ..Default::default()
-            };
-            let mut out = BytesMut::new();
-            out.put_i16(0);
-            sub.encode(&mut out, 0).unwrap();
-            out.freeze()
-        }
 
         let (coord, log) = make_coordinator_with_topic("t", 2);
 
@@ -2172,5 +2276,282 @@ mod tests {
 
         // The upgrade batch tombstoned the classic k2 GroupMetadata record.
         assert!(log.has_classic_group_metadata_tombstone("g").await);
+    }
+
+    // ── KIP-848 64d-F: serving hosted classic members off the reconciler ─────
+
+    /// A real classic consumer client's `JoinGroup` protocol metadata: a
+    /// `ConsumerProtocolSubscription` with the leading version-negotiation
+    /// prefix.
+    fn subscription_blob(topics: &[&str]) -> Bytes {
+        use bytes::{BufMut, BytesMut};
+        use crabka_protocol::Encode;
+        use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
+        let sub = ConsumerProtocolSubscription {
+            topics: topics.iter().map(|s| (*s).to_string()).collect(),
+            ..Default::default()
+        };
+        let mut out = BytesMut::new();
+        out.put_i16(0);
+        sub.encode(&mut out, 0).unwrap();
+        out.freeze()
+    }
+
+    /// Decode a `SyncGroup` assignment blob (version prefix + body) back into a
+    /// `ConsumerProtocolAssignment`.
+    fn decode_assignment(
+        blob: &Bytes,
+    ) -> crabka_protocol::owned::consumer_protocol_assignment::ConsumerProtocolAssignment {
+        use bytes::Buf;
+        use crabka_protocol::Decode;
+        use crabka_protocol::owned::consumer_protocol_assignment::ConsumerProtocolAssignment;
+        let mut cur = &blob[..];
+        let version = cur.get_i16();
+        ConsumerProtocolAssignment::decode(&mut cur, version).expect("assignment decodes")
+    }
+
+    /// Seed a classic consumer group with member `m-classic` subscribed to
+    /// `topic`, then upgrade it in place via a native consumer heartbeat. After
+    /// this returns, the group is consumer-kind and `m-classic` has a target.
+    async fn seed_and_upgrade(coord: &Arc<GroupCoordinator>, topic: &str) -> Arc<GroupActorHandle> {
+        use super::super::classic_state::{Group as ClassicState, Member};
+        use super::super::group::{Group, GroupKind};
+
+        let mut cs = ClassicState::new("g");
+        cs.protocol_type = Some("consumer".into());
+        cs.generation_id = 1;
+        cs.add_member(Member::new(
+            "m-classic",
+            "client",
+            "127.0.0.1",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_mins(1),
+            vec![("range".into(), subscription_blob(&[topic]))],
+        ));
+        let group = Box::new(Group {
+            group_id: "g".into(),
+            kind: GroupKind::Classic(cs),
+            committed_offsets: HashMap::new(),
+        });
+        coord.seed_classic("g", group);
+        let handle = coord.find("g").expect("seeded classic actor");
+
+        // Native consumer heartbeat triggers the in-place upgrade and the
+        // reconcile that gives m-classic a target.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec![topic.into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let resp = rx.await.unwrap();
+        assert!(resp.error_code == codes::NONE);
+
+        // The native heartbeat minted a transient consumer member to drive the
+        // upgrade. Have it leave so the group hosts only the classic member(s)
+        // under test — otherwise it would claim a share of the partitions.
+        let native_id = resp.member_id.expect("native member id");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: native_id,
+                    member_epoch: -1,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        assert!(rx.await.unwrap().error_code == codes::NONE);
+        handle
+    }
+
+    async fn classic_join(handle: &GroupActorHandle, member_id: &str, topic: &str) -> JoinResult {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicJoin {
+                req: JoinGroupRequest {
+                    group_id: "g".into(),
+                    member_id: member_id.into(),
+                    protocol_type: "consumer".into(),
+                    protocols: vec![
+                        crabka_protocol::owned::join_group_request::JoinGroupRequestProtocol {
+                            name: "range".into(),
+                            metadata: subscription_blob(&[topic]),
+                            ..Default::default()
+                        },
+                    ],
+                    session_timeout_ms: 30_000,
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: "127.0.0.1".into(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    async fn classic_sync(
+        handle: &GroupActorHandle,
+        member_id: &str,
+        generation: i32,
+    ) -> SyncResult {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicSync {
+                req: SyncGroupRequest {
+                    group_id: "g".into(),
+                    member_id: member_id.into(),
+                    generation_id: generation,
+                    ..Default::default()
+                },
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    async fn classic_heartbeat(handle: &GroupActorHandle, member_id: &str) -> i16 {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicHeartbeat {
+                req: HeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: member_id.into(),
+                    generation_id: 0,
+                    ..Default::default()
+                },
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hosted_classic_member_syncs_translated_assignment() {
+        let (coord, _log) = make_coordinator_with_topic("t", 2);
+        let handle = seed_and_upgrade(&coord, "t").await;
+
+        // 1. Heartbeat: the upgrade gave m-classic a target that differs from
+        //    its (empty) last-synced assignment → it owes a re-sync.
+        assert!(
+            classic_heartbeat(&handle, "m-classic").await == codes::REBALANCE_IN_PROGRESS,
+            "post-upgrade heartbeat must signal a re-sync"
+        );
+
+        // 2. JoinGroup (rejoin of the existing member, unchanged subscription):
+        //    success, server-assigned single-member view at group_epoch, self leader.
+        let join = classic_join(&handle, "m-classic", "t").await;
+        assert!(join.error_code == codes::NONE);
+        assert!(join.leader == "m-classic");
+        assert!(join.member_id == "m-classic");
+        // Generation equals the group epoch (read it back from Describe).
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Describe { reply: tx })
+            .await
+            .unwrap();
+        let describe = rx.await.unwrap();
+        assert!(join.generation_id == describe.group_epoch);
+
+        // 3. SyncGroup: returns the translated target assignment for "t".
+        let sync = classic_sync(&handle, "m-classic", join.generation_id).await;
+        assert!(sync.error_code == codes::NONE);
+        assert!(sync.protocol_type.as_deref() == Some("consumer"));
+        let asn = decode_assignment(&sync.assignment);
+        let t_assign = asn
+            .assigned_partitions
+            .iter()
+            .find(|tp| tp.topic == "t")
+            .expect("assignment contains topic t");
+        assert!(
+            !t_assign.partitions.is_empty(),
+            "m-classic must own partitions of t"
+        );
+
+        // 4. Heartbeat again: now in sync → NONE.
+        assert!(
+            classic_heartbeat(&handle, "m-classic").await == codes::NONE,
+            "after sync the member is in sync → NONE"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn new_classic_member_joins_upgraded_group_and_gets_assignment() {
+        let (coord, _log) = make_coordinator_with_topic("t", 2);
+        let handle = seed_and_upgrade(&coord, "t").await;
+
+        // First bring m-classic fully in sync so it holds a stable assignment.
+        let join_c = classic_join(&handle, "m-classic", "t").await;
+        let _ = classic_sync(&handle, "m-classic", join_c.generation_id).await;
+
+        // A brand-new classic member m2 joins the already-upgraded group.
+        let join2 = classic_join(&handle, "m2", "t").await;
+        assert!(join2.error_code == codes::NONE);
+        assert!(join2.leader == "m2");
+
+        // Both members re-sync at the (new) group epoch to pick up the
+        // rebalanced two-way split.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Describe { reply: tx })
+            .await
+            .unwrap();
+        let epoch = rx.await.unwrap().group_epoch;
+        let sync_c = classic_sync(&handle, "m-classic", epoch).await;
+        let sync2 = classic_sync(&handle, "m2", epoch).await;
+        assert!(sync_c.error_code == codes::NONE);
+        assert!(sync2.error_code == codes::NONE);
+
+        // Collect each member's partitions of "t".
+        let parts = |s: &SyncResult| -> Vec<i32> {
+            decode_assignment(&s.assignment)
+                .assigned_partitions
+                .iter()
+                .find(|tp| tp.topic == "t")
+                .map(|tp| tp.partitions.clone())
+                .unwrap_or_default()
+        };
+        let p_c = parts(&sync_c);
+        let p_2 = parts(&sync2);
+        assert!(!p_2.is_empty(), "the new member must receive an assignment");
+
+        // Disjoint, and together cover {0, 1}.
+        let set_c: std::collections::HashSet<i32> = p_c.iter().copied().collect();
+        let set_2: std::collections::HashSet<i32> = p_2.iter().copied().collect();
+        assert!(
+            set_c.is_disjoint(&set_2),
+            "the two members must hold disjoint partitions"
+        );
+        let mut union: Vec<i32> = set_c.union(&set_2).copied().collect();
+        union.sort_unstable();
+        assert!(
+            union == vec![0, 1],
+            "the union of partitions must be {{0, 1}}"
+        );
     }
 }
