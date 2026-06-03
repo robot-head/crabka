@@ -1,0 +1,31 @@
+[package]
+name = "crabka-client-streams"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "KIP-1071 Kafka Streams rebalance-protocol client for Apache Kafka in Rust"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+
+[dependencies]
+crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.2", path = "../client-core" }
+bon = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = { workspace = true, features = ["rt"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+crabka-broker = { version = "0.2", path = "../broker", features = ["test-helpers"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
