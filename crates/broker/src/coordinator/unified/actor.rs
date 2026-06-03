@@ -111,6 +111,11 @@ pub enum GroupActorMessage {
     /// Replace this (classic) actor's whole `Group` with replayed state.
     ClassicSeed(Box<Group>),
     Shutdown(oneshot::Sender<()>),
+
+    /// Test-only: flip the live `Group` to a fresh empty consumer group in
+    /// place, exercising the tick's dispatch on the live `group.kind`.
+    #[cfg(test)]
+    TestForceConsumerKind,
 }
 
 /// Structured `JoinGroup` result handed back to the handler, which encodes it
@@ -276,13 +281,13 @@ async fn actor_loop(
         GroupKindTag::Consumer => Group::new_consumer(group_id),
     };
     let mut parked = ParkedWaiters::default();
-    // Classic groups poll once a second for session expiry (matching the old
-    // `GroupManager` ticker); consumer groups tick on the heartbeat interval.
-    let tick_period = match kind {
-        GroupKindTag::Classic => Duration::from_secs(1),
-        GroupKindTag::Consumer => config.heartbeat_interval,
-    };
-    let mut tick = tokio::time::interval(tick_period);
+    // A single 1-second session-expiry tick, kind-agnostic. The tick arm
+    // dispatches on the live `group.kind`, so the cadence must not depend on
+    // the spawn-time kind (which a later task may flip in place). Expiry is a
+    // `last_seen`-vs-`session_timeout` comparison, so ticking once a second
+    // (rather than on the heartbeat interval for consumer groups) only changes
+    // how often we check, never the outcome.
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let deadline = classic_deadline(&group);
@@ -440,30 +445,32 @@ async fn actor_loop(
                         let _ = reply.send(());
                         break;
                     }
+                    #[cfg(test)]
+                    GroupActorMessage::TestForceConsumerKind => {
+                        group = Group::new_consumer(group.group_id.clone());
+                    }
                 }
             }
             _ = tick.tick() => {
-                match kind {
-                    GroupKindTag::Consumer => {
-                        let state = group.as_consumer_mut().expect("consumer kind");
-                        if handle_session_tick(state, &config, &*metadata, &*offsets_log, &coordinator)
-                            .await
-                            .is_err()
-                        {
-                            break;
-                        }
+                // Dispatch on the LIVE `group.kind`: a later task may flip the
+                // kind in place, so the captured spawn-time `kind` is no longer
+                // a reliable discriminator here.
+                let gid = group.group_id.clone();
+                if let Some(state) = group.as_consumer_mut() {
+                    if handle_session_tick(state, &config, &*metadata, &*offsets_log, &coordinator)
+                        .await
+                        .is_err()
+                    {
+                        break;
                     }
-                    GroupKindTag::Classic => {
-                        let gid = group.group_id.clone();
-                        let state = group.as_classic_mut().expect("classic kind");
-                        let dropped = state.expire_dead_members(Instant::now());
-                        if !dropped.is_empty() {
-                            tracing::info!(
-                                group = %gid, dropped = ?dropped,
-                                "expired members; waking joiners",
-                            );
-                            maybe_complete_classic(state, &mut parked.joiners);
-                        }
+                } else if let Some(state) = group.as_classic_mut() {
+                    let dropped = state.expire_dead_members(Instant::now());
+                    if !dropped.is_empty() {
+                        tracing::info!(
+                            group = %gid, dropped = ?dropped,
+                            "expired members; waking joiners",
+                        );
+                        maybe_complete_classic(state, &mut parked.joiners);
                     }
                 }
             }
@@ -1944,5 +1951,22 @@ mod tests {
         let k_classic = coord.get_or_create_classic("k");
         let k_consumer = coord.get_or_create_consumer("k");
         assert!(Arc::ptr_eq(&k_classic, &k_consumer));
+    }
+
+    /// KIP-848 live migration: the tick must dispatch on the LIVE `group.kind`,
+    /// not the captured spawn-time kind. Spawn a classic actor, flip it to a
+    /// consumer group in place, and let a tick fire — the actor must keep
+    /// running rather than panic on a kind-mismatched `expect(...)`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn actor_tick_does_not_panic_after_in_place_flip() {
+        let (coord, _log) = make_coordinator();
+        let handle = coord.get_or_create_group("g", GroupKindTag::Classic);
+        handle
+            .tx
+            .send(GroupActorMessage::TestForceConsumerKind)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert!(!handle.tx.is_closed());
     }
 }
