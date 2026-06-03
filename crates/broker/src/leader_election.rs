@@ -182,7 +182,7 @@ pub(crate) async fn compute_failover_changes(
 pub(crate) async fn compute_offline_dir_failover_changes(
     image: &MetadataImage,
     broker: NodeId,
-    offline_uuids: &std::collections::BTreeSet<uuid::Uuid>,
+    offline_uuids: &std::collections::HashSet<uuid::Uuid>,
     liveness: &ControllerLivenessState,
     metrics: &crate::metrics::BrokerMetrics,
 ) -> FailoverPlan {
@@ -222,13 +222,10 @@ pub(crate) async fn compute_offline_dir_failover_changes(
             } else {
                 // ISR is empty after dropping the broker. Apply the same
                 // recovery policy as compute_failover_changes.
-                match resolve_recovery_strategy(image, &pr.topic) {
+                let strategy = resolve_recovery_strategy(image, &pr.topic);
+                match strategy {
                     RecoveryStrategy::Balanced | RecoveryStrategy::Aggressive => {
-                        recoveries.push((
-                            pr.topic.clone(),
-                            pr.partition,
-                            resolve_recovery_strategy(image, &pr.topic),
-                        ));
+                        recoveries.push((pr.topic.clone(), pr.partition, strategy));
                     }
                     RecoveryStrategy::None if unclean_election_enabled(image, &pr.topic) => {
                         let mut elected: Option<NodeId> = None;
@@ -255,6 +252,11 @@ pub(crate) async fn compute_offline_dir_failover_changes(
                                 removing_replicas: pr.removing_replicas.clone(),
                                 directories: pr.directories.clone(),
                             }));
+                        } else {
+                            warn!(
+                                topic = %pr.topic, partition = pr.partition,
+                                "offline-dir unclean leader election enabled but no alive replica; partition unavailable"
+                            );
                         }
                     }
                     RecoveryStrategy::None => {
@@ -979,7 +981,7 @@ mod tests {
         for n in [1u64, 2, 3] {
             l.record_heartbeat(n).await;
         }
-        let offline: std::collections::BTreeSet<uuid::Uuid> = [bad].into_iter().collect();
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = super::compute_offline_dir_failover_changes(
             &img,
             1,
@@ -1005,7 +1007,7 @@ mod tests {
         for n in [1u64, 2, 3] {
             l.record_heartbeat(n).await;
         }
-        let offline: std::collections::BTreeSet<uuid::Uuid> = [bad].into_iter().collect();
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = super::compute_offline_dir_failover_changes(
             &img,
             1,
@@ -1026,7 +1028,7 @@ mod tests {
         for n in [1u64, 2, 3] {
             l.record_heartbeat(n).await;
         }
-        let offline: std::collections::BTreeSet<uuid::Uuid> = [bad].into_iter().collect();
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = super::compute_offline_dir_failover_changes(
             &img,
             2,
@@ -1054,7 +1056,7 @@ mod tests {
         for n in [1u64, 2, 3] {
             l.record_heartbeat(n).await;
         }
-        let offline: std::collections::BTreeSet<uuid::Uuid> = [bad].into_iter().collect();
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = super::compute_offline_dir_failover_changes(
             &img,
             1,
