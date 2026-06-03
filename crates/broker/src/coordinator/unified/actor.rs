@@ -32,7 +32,8 @@ use super::classic_ops;
 use super::classic_state::{Group as ClassicState, GroupState as ClassicGroupState, OffsetEntry};
 use super::config::NextGenConfig;
 use super::consumer_state::{GroupState, MemberState};
-use super::group::Group;
+use super::group::{Group, GroupKind};
+use super::migration;
 use super::offsets_log::OffsetsLog;
 use super::persistence_next_gen::MemberAssignmentState;
 use super::reconciler::{self, ReconcileInput};
@@ -297,6 +298,49 @@ async fn actor_loop(
                 match msg {
                     // ── next-gen ──
                     GroupActorMessage::Heartbeat { request, client_host, reply } => {
+                        // KIP-848 live migration: a `ConsumerGroupHeartbeat` for a
+                        // classic group triggers an in-place UPGRADE to a next-gen
+                        // consumer group hosting the existing classic members,
+                        // provided the policy allows it and every classic member's
+                        // subscription survives translation. The upgrade batch is
+                        // atomic (k2 tombstone + full next-gen record set); the
+                        // reconcile + per-member target write happens on the
+                        // `handle_heartbeat` call below (the joining consumer's
+                        // first-join reconciles ALL members, classic facades
+                        // included, since the converted state is dirty).
+                        if group.is_classic() {
+                            let convertible = group
+                                .as_classic()
+                                .is_some_and(migration::classic_is_convertible);
+                            if config.migration_policy.allows_upgrade() && convertible {
+                                let classic = group.as_classic().expect("classic kind");
+                                let new_state = migration::convert_classic_to_consumer(classic);
+                                let pending = migration::upgrade_pending_records(&new_state);
+                                if flush_pending(
+                                    &new_state, pending, &*offsets_log, &coordinator,
+                                    chrono_now_ms(),
+                                )
+                                .await
+                                .is_err()
+                                {
+                                    let _ = reply.send(ConsumerGroupHeartbeatResponse {
+                                        error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
+                                        ..Default::default()
+                                    });
+                                    break;
+                                }
+                                *group.kind_mut() = GroupKind::Consumer(new_state);
+                            } else {
+                                // TODO(kip-848): confirm against apache/kafka:4.0.0 — an
+                                // un-upgradable/disallowed classic group appears to surface as
+                                // GROUP_ID_NOT_FOUND to a ConsumerGroupHeartbeat.
+                                let _ = reply.send(ConsumerGroupHeartbeatResponse {
+                                    error_code: codes::GROUP_ID_NOT_FOUND,
+                                    ..Default::default()
+                                });
+                                continue;
+                            }
+                        }
                         let Some(state) = group.as_consumer_mut() else {
                             let _ = reply.send(ConsumerGroupHeartbeatResponse {
                                 error_code: codes::GROUP_ID_NOT_FOUND,
@@ -1018,6 +1062,9 @@ pub(crate) struct PendingRecords {
     pub target_metadata: Option<TargetAssignmentMetadataValue>,
     pub target_per_member: Vec<(String, Option<TargetAssignmentMemberValue>)>,
     pub current_per_member: Vec<(String, Option<CurrentMemberAssignmentValue>)>,
+    /// When set, the batch also tombstones the classic k2 `GroupMetadata` record
+    /// for this group (used by an upgrade flip).
+    pub classic_group_metadata_tombstone: bool,
 }
 
 impl PendingRecords {
@@ -1027,6 +1074,7 @@ impl PendingRecords {
             && self.target_metadata.is_none()
             && self.target_per_member.is_empty()
             && self.current_per_member.is_empty()
+            && !self.classic_group_metadata_tombstone
     }
 
     pub fn into_batch(self, group_id: &str, now_ms: i64) -> RecordBatch {
@@ -1085,6 +1133,16 @@ impl PendingRecords {
                 v.map(|x| x.encode()),
             );
         }
+        if self.classic_group_metadata_tombstone {
+            push(
+                crate::coordinator::unified::persistence::encode_key(
+                    &crate::coordinator::unified::persistence::Key::GroupMetadata {
+                        group_id: group_id.into(),
+                    },
+                ),
+                None,
+            );
+        }
 
         let last_delta = i32::try_from(records.len().saturating_sub(1)).unwrap_or(0);
         RecordBatch {
@@ -1097,6 +1155,22 @@ impl PendingRecords {
 }
 
 /// Snapshot a `GroupState` into a `GroupSeed` suitable for restoring a
+/// Map a member's in-memory classic facade (if any) into the persisted k5
+/// `ClassicMemberMetadata` sub-block. Single source of truth for both the cache
+/// snapshot (`snapshot_seed`) and the log-write path (`snapshot_pending_after_change`)
+/// so the two cannot drift.
+fn classic_member_metadata(
+    m: &super::consumer_state::MemberState,
+) -> Option<super::persistence_next_gen::ClassicMemberMetadata> {
+    m.classic
+        .as_ref()
+        .map(|f| super::persistence_next_gen::ClassicMemberMetadata {
+            session_timeout_ms: i32::try_from(f.session_timeout.as_millis()).unwrap_or(30_000),
+            supported_protocols: f.supported_protocols.clone(),
+            last_synced_assignment: f.last_synced_assignment.clone(),
+        })
+}
+
 /// freshly-respawned actor. Mirrors what bootstrap replay would produce.
 ///
 // PERF: this deep-clones EVERY member's subscriptions/assignments into a
@@ -1122,7 +1196,7 @@ pub(crate) fn snapshot_seed(state: &super::consumer_state::GroupState) -> super:
             subscribed_topic_regex: m.subscribed_topic_regex.clone(),
             server_assignor: m.server_assignor.clone(),
             rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis()).unwrap_or(60_000),
-            classic: None, // TODO(kip-848 Task 6): populate from MemberState.classic facade for lossless downgrade
+            classic: classic_member_metadata(m),
         };
         members.insert(mid.clone(), mm);
 
@@ -1211,7 +1285,7 @@ fn snapshot_pending_after_change(
                     server_assignor: m.server_assignor.clone(),
                     rebalance_timeout_ms: i32::try_from(m.rebalance_timeout.as_millis())
                         .unwrap_or(60_000),
-                    classic: None, // TODO(kip-848 Task 6): populate from MemberState.classic facade for lossless downgrade
+                    classic: classic_member_metadata(m),
                 }),
             ));
             pending.current_per_member.push((
@@ -1255,6 +1329,15 @@ fn snapshot_pending_after_change(
         }
     }
     pending
+}
+
+/// Build a `PendingRecords` set describing the WHOLE consumer group: the group
+/// epoch, the target epoch (if non-zero), and every member's k5 member-metadata
+/// (facade included), k8 current-assignment, and k7 target (if present). Used by
+/// the upgrade flip to atomically write the full converted group in one batch.
+pub(crate) fn full_pending_records(state: &super::consumer_state::GroupState) -> PendingRecords {
+    let all_member_ids: Vec<String> = state.members.keys().cloned().collect();
+    snapshot_pending_after_change(state, &all_member_ids)
 }
 
 async fn flush_pending(
@@ -1308,6 +1391,31 @@ mod tests {
             NextGenConfig::default(),
             crate::coordinator::unified::share::config::ShareGroupConfig::default(),
             empty_metadata(),
+            log.clone(),
+            crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
+        ));
+        (coord, log)
+    }
+
+    /// A coordinator whose metadata image holds one topic `t` with `partitions`
+    /// partitions, so the reconciler can resolve a `t` subscription to real
+    /// topic-id/partitions and compute a target assignment.
+    fn make_coordinator_with_topic(
+        topic: &str,
+        partitions: i32,
+    ) -> (Arc<GroupCoordinator>, Arc<InMemoryOffsetsLog>) {
+        let topic_id = Uuid([7; 16]);
+        let input = ReconcileInput {
+            topic_id_by_name: [(topic.to_string(), topic_id)].into(),
+            partitions_per_topic: [(topic_id, partitions)].into(),
+            ..Default::default()
+        };
+        let metadata: Arc<dyn MetadataProvider> = Arc::new(StaticMetadata { input });
+        let log = Arc::new(InMemoryOffsetsLog::default());
+        let coord = Arc::new(GroupCoordinator::new(
+            NextGenConfig::default(),
+            crate::coordinator::unified::share::config::ShareGroupConfig::default(),
+            metadata,
             log.clone(),
             crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         ));
@@ -1968,5 +2076,101 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
         assert!(!handle.tx.is_closed());
+    }
+
+    /// KIP-848 upgrade trigger: a `ConsumerGroupHeartbeat` for a *classic* group
+    /// (default `bidirectional` policy) converts it in place to a next-gen
+    /// consumer group hosting the classic member, atomically tombstoning the
+    /// classic k2 `GroupMetadata` and writing the full next-gen record set.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn consumer_heartbeat_upgrades_a_classic_group() {
+        use bytes::{BufMut, BytesMut};
+
+        use super::super::classic_state::{Group as ClassicState, Member};
+        use super::super::group::{Group, GroupKind};
+        use crabka_protocol::Encode;
+        use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubscription;
+
+        // A real classic consumer client's JoinGroup protocol metadata: a
+        // `ConsumerProtocolSubscription` with the leading version-negotiation
+        // prefix. `classic_is_convertible` must decode this for the upgrade.
+        fn subscription_blob(topics: &[&str]) -> bytes::Bytes {
+            let sub = ConsumerProtocolSubscription {
+                topics: topics.iter().map(|s| (*s).to_string()).collect(),
+                ..Default::default()
+            };
+            let mut out = BytesMut::new();
+            out.put_i16(0);
+            sub.encode(&mut out, 0).unwrap();
+            out.freeze()
+        }
+
+        let (coord, log) = make_coordinator_with_topic("t", 2);
+
+        // Seed a classic group with one classic consumer member subscribed to
+        // "t". Seeding (vs a JoinGroup round-trip) keeps the test deterministic
+        // and timing-free; `classic_is_convertible` only inspects protocol_type
+        // and each member's protocol_metadata, both set here.
+        let mut cs = ClassicState::new("g");
+        cs.protocol_type = Some("consumer".into());
+        cs.generation_id = 1;
+        cs.add_member(Member::new(
+            "m-classic",
+            "client",
+            "127.0.0.1",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_mins(1),
+            vec![("range".into(), subscription_blob(&["t"]))],
+        ));
+        let group = Box::new(Group {
+            group_id: "g".into(),
+            kind: GroupKind::Classic(cs),
+            committed_offsets: HashMap::new(),
+        });
+        coord.seed_classic("g", group);
+        let handle = coord.find("g").expect("seeded classic actor");
+
+        // A native consumer-protocol heartbeat for the same group → upgrade.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Heartbeat {
+                request: ConsumerGroupHeartbeatRequest {
+                    group_id: "g".into(),
+                    member_id: String::new(),
+                    member_epoch: 0,
+                    subscribed_topic_names: Some(vec!["t".into()]),
+                    rebalance_timeout_ms: 60_000,
+                    ..Default::default()
+                },
+                client_host: String::new(),
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        let resp = rx.await.unwrap();
+        assert!(resp.error_code == codes::NONE);
+
+        // Describe now reports 2 members: the hosted classic member and the new
+        // native consumer member.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::Describe { reply: tx })
+            .await
+            .unwrap();
+        let describe = rx.await.unwrap();
+        assert!(describe.members.len() == 2);
+        assert!(
+            describe.members.iter().any(|m| m.is_classic),
+            "the hosted classic member must survive the upgrade"
+        );
+        assert!(
+            describe.members.iter().any(|m| !m.is_classic),
+            "the new native consumer member must be present"
+        );
+
+        // The upgrade batch tombstoned the classic k2 GroupMetadata record.
+        assert!(log.has_classic_group_metadata_tombstone("g").await);
     }
 }

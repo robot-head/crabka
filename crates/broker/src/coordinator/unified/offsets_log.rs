@@ -96,6 +96,25 @@ pub mod fake {
         pub async fn batches(&self) -> Vec<RecordBatch> {
             self.appended.lock().await.clone()
         }
+
+        /// `true` iff some appended record tombstones the classic k2
+        /// `GroupMetadata` record for `group_id` — a key whose leading `i16`
+        /// version is `2` (classic `GroupMetadata`) with a null value. Used to
+        /// assert the upgrade flip atomically removed the classic group record.
+        pub async fn has_classic_group_metadata_tombstone(&self, group_id: &str) -> bool {
+            use crate::coordinator::unified::persistence::{Key, parse_key};
+            self.appended.lock().await.iter().any(|batch| {
+                batch.records.iter().any(|rec| {
+                    rec.value.is_none()
+                        && rec.key.as_ref().is_some_and(|k| {
+                            matches!(
+                                parse_key(k),
+                                Ok(Key::GroupMetadata { group_id: ref gid }) if gid == group_id
+                            )
+                        })
+                })
+            })
+        }
     }
 }
 

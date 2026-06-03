@@ -120,6 +120,15 @@ pub(crate) fn convert_classic_to_consumer(classic: &ClassicState) -> ConsumerSta
     state
 }
 
+/// The atomic record batch for an upgrade: tombstone the classic k2
+/// `GroupMetadata` and write the full next-gen record set for the converted
+/// group. The two go into one batch so the flip is all-or-nothing.
+pub(crate) fn upgrade_pending_records(state: &ConsumerState) -> super::actor::PendingRecords {
+    let mut pending = super::actor::full_pending_records(state);
+    pending.classic_group_metadata_tombstone = true;
+    pending
+}
+
 /// Convert a consumer group back into a classic group (KIP-848 downgrade, 64d-E).
 /// Every member is re-expressed as a classic [`ClassicMember`] restored from its
 /// [`ClassicMemberFacade`]; its assignment seed is the server-computed target
