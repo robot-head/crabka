@@ -15,7 +15,7 @@
 //!    helper (compiled in-container with the cp-kafka JDK's `javac`) drives the
 //!    official `org.apache.kafka.clients.consumer.KafkaConsumer` against Crabka.
 //!    The consumer's offset/position-validation pass issues a real
-//!    `OffsetForLeaderEpoch` (api_key 23) under the hood (KIP-320) and consumes
+//!    `OffsetForLeaderEpoch` (`api_key` 23) under the hood (KIP-320) and consumes
 //!    at Fetch v12+, so the JVM `Fetcher` decodes Crabka's tagged
 //!    `diverging_epoch` / `current_leader` fields. A clean drain across both
 //!    epochs (no deserialization / truncation fault) plus the observed
@@ -25,7 +25,7 @@
 //!
 //! 2. [`kip320_jvm_follower_truncates_from_crabka_leader`] — induced divergence.
 //!    A mixed JVM+Crabka cluster (one `apache/kafka:4.0.0` broker + a Crabka
-//!    broker, sharing a Crabka-led KRaft metadata quorum per the Slice-6
+//!    broker, sharing a Crabka-led `KRaft` metadata quorum per the Slice-6
 //!    mixed-quorum work in `jvm_static_quorum_spike.rs`). We force a real
 //!    divergent suffix: produce a committed prefix, take the partition offline
 //!    via a forged `PartitionRecord` (dead phantom leader, which also parks the
@@ -46,7 +46,7 @@
 //! Same as the rest of the JVM harness: Crabka brokers bind `0.0.0.0:<port>`
 //! on the host and advertise `host.docker.internal:<port>`; the cp-kafka /
 //! apache-kafka tool containers get `--add-host=host.docker.internal:
-//! host-gateway`. Controller (KRaft metadata-quorum) traffic uses host
+//! host-gateway`. Controller (`KRaft` metadata-quorum) traffic uses host
 //! loopback between the Crabka voters and the JVM voter's published port. We
 //! deliberately do NOT use `--network host` (it silently fails to share the
 //! host loopback on hosted ubuntu runners — see the `jvm_acceptance.rs`
@@ -86,7 +86,7 @@ const KAFKA_IMAGE: &str = "confluentinc/cp-kafka:6.1.1";
 /// `current_leader` decode), and it ships a JDK with `javac`. Used to compile
 /// and run the wire-conformance Java helper.
 const KAFKA_IMAGE_MODERN: &str = "confluentinc/cp-kafka:7.5.0";
-/// apache/kafka:4.0.0 is the KRaft-native broker used as the JVM member of the
+/// apache/kafka:4.0.0 is the `KRaft`-native broker used as the JVM member of the
 /// mixed metadata quorum (same image as `jvm_static_quorum_spike.rs`).
 const KAFKA_IMAGE_KRAFT: &str = "apache/kafka:4.0.0";
 
@@ -156,7 +156,7 @@ async fn start_host_broker_on(client_port: u16, controller_port: u16) -> (Broker
 }
 
 /// The small Java helper that proves the official JVM client decodes Crabka's
-/// `OffsetForLeaderEpoch` (api_key 23) + Fetch v12+ responses byte-exactly.
+/// `OffsetForLeaderEpoch` (`api_key` 23) + Fetch v12+ responses byte-exactly.
 ///
 /// It builds an official `org.apache.kafka.clients.consumer.KafkaConsumer`,
 /// assigns the partition, and drains both leader epochs. The JVM `Fetcher`'s
@@ -425,7 +425,7 @@ fn produce_lines_via_jvm(bootstrap: &str, topic: &str, lines: &[String]) {
 
 /// A running mixed cluster: two Crabka brokers (ids 1, 2) that hold the
 /// metadata-quorum majority, plus one JVM broker (id 3) joined over the real
-/// KRaft wire. `jvm_container` is the docker container name (already started).
+/// `KRaft` wire. `jvm_container` is the docker container name (already started).
 struct MixedCluster {
     crabka: Vec<(BrokerHandle, TempDir)>,
     jvm_container: String,
@@ -438,7 +438,7 @@ struct MixedCluster {
 impl MixedCluster {
     /// Block (bounded) until the Crabka leader's broker view includes `n`
     /// registered brokers — i.e., the JVM data-plane broker (id 3) has finished
-    /// its KRaft join and registered. `CreateTopics(RF=3)` rejects with
+    /// its `KRaft` join and registered. `CreateTopics(RF=3)` rejects with
     /// `InvalidReplicationFactorException` if it runs before the JVM broker
     /// registers, so every mixed-cluster scenario must gate on this first.
     /// Returns `true` if the view converged, `false` on timeout (the JVM broker
@@ -473,7 +473,7 @@ impl MixedCluster {
 }
 
 /// Build a Crabka broker config that is BOTH a controller voter (in the shared
-/// static KRaft quorum) and a data-plane broker. Mirrors
+/// static `KRaft` quorum) and a data-plane broker. Mirrors
 /// `jvm_static_quorum_spike.rs::crabka_controller_config` plus a bound data
 /// listener.
 fn crabka_mixed_config(
@@ -505,7 +505,7 @@ fn crabka_mixed_config(
 }
 
 /// Stand up two Crabka brokers (the metadata-quorum majority + data plane) and
-/// one apache/kafka:4.0.0 broker joined to the same static KRaft quorum.
+/// one apache/kafka:4.0.0 broker joined to the same static `KRaft` quorum.
 /// Returns once the Crabka voters have elected a shared leader; the JVM broker
 /// is started detached and the caller polls for it to register.
 async fn start_mixed_cluster(container: &str) -> MixedCluster {
