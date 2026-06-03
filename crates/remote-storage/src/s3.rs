@@ -81,7 +81,7 @@ impl std::fmt::Debug for S3RemoteStorage {
 /// credential chain (env vars, instance profile, …) supplies credentials.
 /// When both fields are `None`, `object_store` falls back to the
 /// environment-variable chain.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct S3Config {
     /// S3 bucket name.
     pub bucket: String,
@@ -114,6 +114,25 @@ pub struct S3Config {
     /// minimum) except for the last part; smaller values are accepted by
     /// `MinIO` and convenient in tests.
     pub multipart_chunk_size: usize,
+}
+
+impl std::fmt::Debug for S3Config {
+    /// Redacts the credential fields so a stray `{:?}` / tracing call never
+    /// leaks them. Mirrors the hand-written `Debug` on [`S3RemoteStorage`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |opt: &Option<String>| opt.as_ref().map(|_| "***");
+        f.debug_struct("S3Config")
+            .field("bucket", &self.bucket)
+            .field("prefix", &self.prefix)
+            .field("region", &self.region)
+            .field("endpoint", &self.endpoint)
+            .field("access_key_id", &redact(&self.access_key_id))
+            .field("secret_access_key", &redact(&self.secret_access_key))
+            .field("allow_http", &self.allow_http)
+            .field("multipart_threshold", &self.multipart_threshold)
+            .field("multipart_chunk_size", &self.multipart_chunk_size)
+            .finish()
+    }
 }
 
 impl Default for S3Config {
@@ -427,6 +446,24 @@ mod tests {
 
     fn rsm(prefix: Option<&str>) -> S3RemoteStorage {
         S3RemoteStorage::with_store(Arc::new(InMemory::new()), prefix.map(str::to_string))
+    }
+
+    #[test]
+    fn s3_config_debug_redacts_credentials() {
+        let cfg = S3Config {
+            bucket: "logs".to_string(),
+            region: "us-east-1".to_string(),
+            access_key_id: Some("AKIAEXAMPLEKEYID".to_string()),
+            secret_access_key: Some("super-secret-key-value".to_string()),
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("super-secret-key-value"));
+        assert!(!dbg.contains("AKIAEXAMPLEKEYID"));
+        assert!(dbg.contains("***"));
+        // Non-secret fields are still printed.
+        assert!(dbg.contains("logs"));
+        assert!(dbg.contains("us-east-1"));
     }
 
     fn sample_metadata(id: u128) -> RemoteLogSegmentMetadata {

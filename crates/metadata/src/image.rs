@@ -288,6 +288,9 @@ impl MetadataImage {
 
     /// Iterate every ACL that could possibly match `(rt, rn)`:
     /// - all literal entries at `(rt, rn)`
+    /// - all literal entries at `(rt, "*")` — the `WILDCARD_RESOURCE`, which
+    ///   matches every resource of that type (see Kafka's `AclAuthorizer` /
+    ///   `StandardAuthorizer`; this is what `kafka-acls --topic '*'` produces)
     /// - all prefixed entries whose `resource_name` is a prefix of `rn`
     pub fn matching_acls<'a>(
         &'a self,
@@ -299,13 +302,21 @@ impl MetadataImage {
             .get(&(rt, rn.to_string()))
             .into_iter()
             .flatten();
+        // Literal "*" is the WILDCARD_RESOURCE and matches every resource of
+        // this type. Skip it when `rn` is already "*" to avoid duplicating the
+        // entries already produced by `literal_iter`.
+        let wildcard_iter = (rn != "*")
+            .then(|| self.acls_literal.get(&(rt, "*".to_string())))
+            .into_iter()
+            .flatten()
+            .flatten();
         let prefixed_iter = self
             .acls_prefixed
             .get(&rt)
             .into_iter()
             .flatten()
             .filter(move |e| rn.starts_with(&e.resource_name));
-        literal_iter.chain(prefixed_iter)
+        literal_iter.chain(wildcard_iter).chain(prefixed_iter)
     }
 
     /// All ACL entries (literal + prefixed across all resource types).
@@ -1630,6 +1641,58 @@ mod tests {
         let hits_team: Vec<_> = m.matching_acls(ResourceType::Topic, "team-x").collect();
         assert!(hits_foo.len() == 1);
         assert!(hits_team.len() == 1);
+    }
+
+    fn topic_wildcard_allow() -> AclEntry {
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "*".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Allow,
+        }
+    }
+
+    fn topic_wildcard_deny() -> AclEntry {
+        AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "*".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:alice".into(),
+            host: "*".into(),
+            operation: AclOperation::Read,
+            permission_type: PermissionType::Deny,
+        }
+    }
+
+    #[test]
+    fn matching_acls_literal_wildcard_allow_matches_arbitrary_topic() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_wildcard_allow()));
+        // An arbitrarily-named topic the grant never mentions by name.
+        let hits: Vec<_> = m
+            .matching_acls(ResourceType::Topic, "some-random-topic")
+            .collect();
+        assert!(hits.len() == 1);
+        assert!(hits[0].resource_name == "*");
+        assert!(hits[0].permission_type == PermissionType::Allow);
+        // Requesting "*" itself must not double-count the wildcard entry.
+        let star: Vec<_> = m.matching_acls(ResourceType::Topic, "*").collect();
+        assert!(star.len() == 1);
+    }
+
+    #[test]
+    fn matching_acls_literal_wildcard_deny_matches_arbitrary_topic() {
+        let mut m = img();
+        m.apply(&MetadataRecord::V1AccessControlEntry(topic_wildcard_deny()));
+        let hits: Vec<_> = m
+            .matching_acls(ResourceType::Topic, "another-random-topic")
+            .collect();
+        assert!(hits.len() == 1);
+        assert!(hits[0].resource_name == "*");
+        assert!(hits[0].permission_type == PermissionType::Deny);
     }
 
     #[test]

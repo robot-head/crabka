@@ -23,7 +23,7 @@ use shared::fake_rebalancer::{FakeRebalancerClient, FakeResp, RebalCall, fake_pr
 use shared::{MockRule, build_ctx, fake_rebalance_body, json_response};
 
 const NS: &str = "kafka";
-const ENDPOINT: &str = "http://r:9300";
+const ENDPOINT: &str = "http://r-rebalancer.kafka.svc.cluster.local:9300";
 
 fn rebalance(name: &str) -> KafkaRebalance {
     let mut kr = KafkaRebalance::new(

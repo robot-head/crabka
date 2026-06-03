@@ -304,23 +304,122 @@ pub fn read_command(obj: &KafkaRebalance) -> Option<RebalanceCommand> {
         .and_then(|v| RebalanceCommand::parse(v))
 }
 
-/// Resolve the rebalancer Connect base URL: `spec.endpoint` wins; else
-/// derive `http://<cluster>-rebalancer.<ns>.svc.cluster.local:9300` from
-/// the `crabka.io/cluster` label. Returns `None` when neither is present.
-#[must_use]
-pub fn resolve_endpoint(obj: &KafkaRebalance, namespace: &str) -> Option<String> {
-    if let Some(ep) = obj.spec.endpoint.as_ref().filter(|s| !s.is_empty()) {
-        return Some(ep.clone());
+/// Cluster-internal DNS suffixes a rebalancer endpoint host may end with.
+/// Anything else is rejected to prevent the operator from being pointed at
+/// arbitrary in-cluster addresses (the K8s API, cloud metadata, internal
+/// admin endpoints) via a user-supplied `spec.endpoint` — a blind SSRF
+/// using the operator's network position (finding L-5).
+const CLUSTER_INTERNAL_SUFFIXES: [&str; 3] = [".svc", ".svc.cluster.local", ".cluster.local"];
+
+/// Reason why a user-supplied `spec.endpoint` was rejected. Surfaces into
+/// the CR status as a terminal `NotReady` condition.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidEndpoint {
+    pub message: String,
+}
+
+/// Validate a user-supplied `spec.endpoint` before it is used to build a
+/// request URL. The operator issues authenticated-by-network POSTs to this
+/// base URL, so an unrestricted value is a server-side request forgery
+/// (SSRF) vector. We require:
+///
+/// - scheme `http` or `https`;
+/// - a hostname (not an IP literal) ending in a cluster-internal DNS suffix
+///   (`.svc`, `.svc.cluster.local`, `.cluster.local`).
+///
+/// `reqwest`/`url` is not a dependency here, so we parse conservatively by
+/// hand: split off the scheme, strip any userinfo, then isolate the host
+/// from the `host[:port]` authority (handling bracketed IPv6 literals).
+fn validate_endpoint(endpoint: &str) -> Result<(), InvalidEndpoint> {
+    let reject = |msg: String| Err(InvalidEndpoint { message: msg });
+
+    // Scheme.
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        return reject(format!("spec.endpoint {endpoint:?} is not an absolute http(s) URL"));
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return reject(format!(
+            "spec.endpoint scheme {scheme:?} is not allowed; only http/https are permitted"
+        ));
     }
-    let cluster = obj
+
+    // Authority = everything up to the first '/', '?' or '#'.
+    let authority = rest
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest);
+    // Drop any userinfo ("user:pass@host").
+    let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+
+    // Isolate the host from "host[:port]". Bracketed IPv6 ("[::1]:9300") is
+    // an IP literal and therefore rejected outright below.
+    let host = if let Some(stripped) = host_port.strip_prefix('[') {
+        // [ipv6]:port — anything bracketed is an IPv6 literal.
+        let inner = stripped.split(']').next().unwrap_or(stripped);
+        return reject(format!(
+            "spec.endpoint host {inner:?} is an IP literal; only cluster-internal DNS names are allowed"
+        ));
+    } else {
+        // host:port — split on the last ':' only if what follows is a port.
+        match host_port.rsplit_once(':') {
+            Some((h, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => h,
+            _ => host_port,
+        }
+    };
+
+    if host.is_empty() {
+        return reject(format!("spec.endpoint {endpoint:?} has no host"));
+    }
+
+    // Reject bare IPv4 literals (e.g. 169.254.169.254, 127.0.0.1, 10.x).
+    if host.split('.').all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())) {
+        return reject(format!(
+            "spec.endpoint host {host:?} is an IP literal; only cluster-internal DNS names are allowed"
+        ));
+    }
+
+    let host_lc = host.to_ascii_lowercase();
+    if CLUSTER_INTERNAL_SUFFIXES
+        .iter()
+        .any(|suffix| host_lc.ends_with(suffix))
+    {
+        Ok(())
+    } else {
+        reject(format!(
+            "spec.endpoint host {host:?} is not cluster-internal; it must end in one of {CLUSTER_INTERNAL_SUFFIXES:?}"
+        ))
+    }
+}
+
+/// Resolve the rebalancer Connect base URL: `spec.endpoint` wins (after
+/// SSRF validation); else derive
+/// `http://<cluster>-rebalancer.<ns>.svc.cluster.local:9300` from the
+/// `crabka.io/cluster` label.
+///
+/// Returns `Ok(None)` when neither a (valid) `spec.endpoint` nor a cluster
+/// label is present, and `Err(InvalidEndpoint)` when a user-supplied
+/// `spec.endpoint` fails validation. The derived (default) endpoint is
+/// always trusted and never validated.
+pub fn resolve_endpoint(
+    obj: &KafkaRebalance,
+    namespace: &str,
+) -> Result<Option<String>, InvalidEndpoint> {
+    if let Some(ep) = obj.spec.endpoint.as_ref().filter(|s| !s.is_empty()) {
+        validate_endpoint(ep)?;
+        return Ok(Some(ep.clone()));
+    }
+    let Some(cluster) = obj
         .meta()
         .labels
         .as_ref()
         .and_then(|l| l.get("crabka.io/cluster"))
-        .filter(|s| !s.is_empty())?;
-    Some(format!(
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(format!(
         "http://{cluster}-rebalancer.{namespace}.svc.cluster.local:{REBALANCER_PORT}"
-    ))
+    )))
 }
 
 /// Run the controller forever.
@@ -351,22 +450,41 @@ pub async fn reconcile(
     let name = obj.name_any();
     let api: Api<KafkaRebalance> = Api::namespaced(ctx.client.clone(), &ns);
 
-    // 1. Resolve the rebalancer endpoint.
-    let Some(endpoint) = resolve_endpoint(&obj, &ns) else {
-        write_status(
-            &api,
-            &name,
-            &obj,
-            &Outcome::transient(
-                RebalanceState::NotReady,
-                "MissingEndpoint",
-                "spec.endpoint is unset and no crabka.io/cluster label is present to derive it"
-                    .into(),
-                IDLE_INTERVAL,
-            ),
-        )
-        .await?;
-        return Ok(Action::requeue(IDLE_INTERVAL));
+    // 1. Resolve (and validate) the rebalancer endpoint.
+    let endpoint = match resolve_endpoint(&obj, &ns) {
+        Ok(Some(endpoint)) => endpoint,
+        Ok(None) => {
+            write_status(
+                &api,
+                &name,
+                &obj,
+                &Outcome::transient(
+                    RebalanceState::NotReady,
+                    "MissingEndpoint",
+                    "spec.endpoint is unset and no crabka.io/cluster label is present to derive it"
+                        .into(),
+                    IDLE_INTERVAL,
+                ),
+            )
+            .await?;
+            return Ok(Action::requeue(IDLE_INTERVAL));
+        }
+        Err(invalid) => {
+            tracing::warn!(error = %invalid.message, "rejecting spec.endpoint (SSRF guard)");
+            write_status(
+                &api,
+                &name,
+                &obj,
+                &Outcome::transient(
+                    RebalanceState::NotReady,
+                    "InvalidEndpoint",
+                    invalid.message,
+                    IDLE_INTERVAL,
+                ),
+            )
+            .await?;
+            return Ok(Action::requeue(IDLE_INTERVAL));
+        }
     };
 
     // 2. Decide what to do.
@@ -733,10 +851,14 @@ mod tests {
     // ----- resolve_endpoint -------------------------------------------
 
     #[test]
-    fn resolve_endpoint_prefers_spec() {
+    fn resolve_endpoint_prefers_valid_spec() {
         let mut k = cr("x");
-        k.spec.endpoint = Some("http://explicit:9300".into());
-        assert!(resolve_endpoint(&k, "kafka").as_deref() == Some("http://explicit:9300"));
+        k.spec.endpoint =
+            Some("http://other-rebalancer.kafka.svc.cluster.local:9300".into());
+        assert!(
+            resolve_endpoint(&k, "kafka").unwrap().as_deref()
+                == Some("http://other-rebalancer.kafka.svc.cluster.local:9300")
+        );
     }
 
     #[test]
@@ -748,13 +870,80 @@ mod tests {
                 .collect(),
         );
         assert!(
-            resolve_endpoint(&k, "kafka").as_deref()
+            resolve_endpoint(&k, "kafka").unwrap().as_deref()
                 == Some("http://demo-rebalancer.kafka.svc.cluster.local:9300")
         );
     }
 
     #[test]
     fn resolve_endpoint_none_without_spec_or_label() {
-        assert!(resolve_endpoint(&cr("x"), "kafka") == None);
+        assert!(resolve_endpoint(&cr("x"), "kafka").unwrap() == None);
+    }
+
+    // ----- spec.endpoint SSRF validation (finding L-5) -----------------
+
+    fn resolve_with_endpoint(ep: &str) -> Result<Option<String>, InvalidEndpoint> {
+        let mut k = cr("x");
+        k.spec.endpoint = Some(ep.into());
+        resolve_endpoint(&k, "kafka")
+    }
+
+    #[test]
+    fn endpoint_accepts_cluster_internal_hosts() {
+        for ep in [
+            "http://demo-rebalancer.kafka.svc.cluster.local:9300",
+            "https://demo-rebalancer.kafka.svc.cluster.local:9300",
+            "http://demo-rebalancer.kafka.svc:9300",
+            "http://demo-rebalancer.kafka.svc.cluster.local",
+            "HTTP://Demo-Rebalancer.Kafka.SVC.Cluster.Local:9300",
+        ] {
+            assert!(validate_endpoint(ep).is_ok(), "should accept {ep:?}");
+        }
+    }
+
+    #[test]
+    fn endpoint_rejects_cloud_metadata_ip() {
+        let err = resolve_with_endpoint("http://169.254.169.254/latest/meta-data/").unwrap_err();
+        assert!(err.message.contains("IP literal"), "{}", err.message);
+    }
+
+    #[test]
+    fn endpoint_rejects_loopback_ip() {
+        let err = resolve_with_endpoint("http://127.0.0.1:9300").unwrap_err();
+        assert!(err.message.contains("IP literal"), "{}", err.message);
+    }
+
+    #[test]
+    fn endpoint_rejects_ipv6_literal() {
+        let err = resolve_with_endpoint("http://[::1]:9300").unwrap_err();
+        assert!(err.message.contains("IP literal"), "{}", err.message);
+    }
+
+    #[test]
+    fn endpoint_rejects_external_host() {
+        let err = resolve_with_endpoint("http://attacker.example.com/").unwrap_err();
+        assert!(err.message.contains("cluster-internal"), "{}", err.message);
+    }
+
+    #[test]
+    fn endpoint_rejects_bare_internal_name() {
+        // A short name with no cluster suffix (e.g. the K8s API "kubernetes")
+        // must not slip through.
+        let err = resolve_with_endpoint("http://kubernetes:443").unwrap_err();
+        assert!(err.message.contains("cluster-internal"), "{}", err.message);
+    }
+
+    #[test]
+    fn endpoint_rejects_disallowed_scheme() {
+        let err = resolve_with_endpoint("file:///etc/passwd").unwrap_err();
+        assert!(err.message.contains("scheme") || err.message.contains("http(s)"));
+    }
+
+    #[test]
+    fn endpoint_rejects_userinfo_smuggling() {
+        // "host" in userinfo must not be mistaken for the real host.
+        let err =
+            resolve_with_endpoint("http://demo.svc.cluster.local@169.254.169.254/").unwrap_err();
+        assert!(err.message.contains("IP literal"), "{}", err.message);
     }
 }
