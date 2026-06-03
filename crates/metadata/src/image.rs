@@ -2221,14 +2221,16 @@ mod tests {
     #[test]
     fn broker_epoch_reads_back_registered_epoch() {
         let mut image = MetadataImage::new(Uuid::nil());
-        image.apply(&MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-            node_id: 5,
-            broker_epoch: 99,
-            host: "h".into(),
-            port: 9092,
-            rack: None,
-            endpoints: vec![],
-        }));
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 5,
+                broker_epoch: 99,
+                host: "h".into(),
+                port: 9092,
+                rack: None,
+                endpoints: vec![],
+            },
+        ));
         assert!(image.broker_epoch(5) == Some(99));
         assert!(image.broker_epoch(404) == None);
     }

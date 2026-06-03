@@ -2496,18 +2496,22 @@ mod tests {
         await_leader(&ctrl, Some(1)).await;
 
         let reg = |id: u64| {
-            vec![MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
-                node_id: id,
-                broker_epoch: 0, // overwritten by the leader at append
-                host: "h".into(),
-                port: 9092,
-                rack: None,
-                endpoints: vec![],
-            })]
+            vec![MetadataRecord::V1BrokerRegistration(
+                BrokerRegistrationRecord {
+                    node_id: id,
+                    broker_epoch: 0, // overwritten by the leader at append
+                    host: "h".into(),
+                    port: 9092,
+                    rack: None,
+                    endpoints: vec![],
+                },
+            )]
         };
 
         let base1 = ctrl.quorum_state().await.unwrap().log_end_offset;
-        ctrl.submit_change(reg(7)).await.expect("first registration");
+        ctrl.submit_change(reg(7))
+            .await
+            .expect("first registration");
         let e1 = ctrl.current_image().broker_epoch(7);
         assert!(e1 == Some(base1), "epoch {e1:?} != commit offset {base1}");
 

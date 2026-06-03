@@ -273,7 +273,7 @@ mod tests {
     }
 
     /// Image with topic "t" / partition 0, replicas [1,2,3], isr [1,2],
-    /// leader 1 @ leader_epoch 5. Brokers registered per `epochs`.
+    /// leader 1 @ `leader_epoch` 5. Brokers registered per `epochs`.
     fn image_with(epochs: &[(u64, i64)]) -> MetadataImage {
         let mut image = MetadataImage::new(uuid::Uuid::nil());
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
@@ -299,7 +299,11 @@ mod tests {
     }
 
     fn bs(broker_id: i32, broker_epoch: i64) -> BrokerState {
-        BrokerState { broker_id, broker_epoch, ..Default::default() }
+        BrokerState {
+            broker_id,
+            broker_epoch,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -318,7 +322,11 @@ mod tests {
         let mut changes = Vec::new();
         let isr = vec![bs(1, 10), bs(2, 20), bs(3, 29)]; // 29 != image 30
         let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
-        assert!(resp.error_code == codes::INELIGIBLE_REPLICA, "got {}", resp.error_code);
+        assert!(
+            resp.error_code == codes::INELIGIBLE_REPLICA,
+            "got {}",
+            resp.error_code
+        );
         assert!(changes.is_empty());
     }
 
@@ -328,7 +336,11 @@ mod tests {
         let mut changes = Vec::new();
         let isr = vec![bs(1, 10), bs(2, 20), bs(3, -1)];
         let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
-        assert!(resp.error_code == codes::INELIGIBLE_REPLICA, "got {}", resp.error_code);
+        assert!(
+            resp.error_code == codes::INELIGIBLE_REPLICA,
+            "got {}",
+            resp.error_code
+        );
         assert!(changes.is_empty());
     }
 

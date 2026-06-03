@@ -1114,7 +1114,11 @@ mod tests {
         let MetadataRecord::V1BrokerRegistration(out) = &decoded else {
             panic!("expected V1BrokerRegistration, got {decoded:?}");
         };
-        assert!(out.broker_epoch == 42, "broker_epoch lost on round-trip: {}", out.broker_epoch);
+        assert!(
+            out.broker_epoch == 42,
+            "broker_epoch lost on round-trip: {}",
+            out.broker_epoch
+        );
         assert!(decoded == rec);
     }
 
@@ -1147,7 +1151,11 @@ mod tests {
         let MetadataRecord::V1BrokerRegistration(out) = &decoded else {
             panic!("expected V1BrokerRegistration, got {decoded:?}");
         };
-        assert!(out.broker_epoch == 7, "broker_epoch lost on round-trip: {}", out.broker_epoch);
+        assert!(
+            out.broker_epoch == 7,
+            "broker_epoch lost on round-trip: {}",
+            out.broker_epoch
+        );
         assert!(decoded == rec);
     }
 
