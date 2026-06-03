@@ -5188,6 +5188,46 @@ introspection metadata).
   feature matrix and the KIP table; stale "not yet wired into the broker" prose
   replaced with an accurate description of the promoted topic-backed RLMM.
 
+## Slice — KIP-112: handle disk failure for JBOD (controller-side failover + self-shutdown) (2026-06-03)
+
+- **Already in place before this slice:** runtime write/fsync failures flip a log dir offline
+  mid-life (`partition_writer::flag_storage_failure` → `LogDirRegistry::mark_offline`);
+  produce/fetch/DescribeLogDirs return `KAFKA_STORAGE_ERROR` for offline dirs; JBOD placement
+  skips them. The stale `log_dir_status.rs` module doc claiming runtime detection was "deferred"
+  was corrected.
+- **Per-log-dir UUIDs** (`log_dir_id.rs`): each configured `log.dir` carries a stable
+  `directory_id` in its `meta.properties.json`; new JBOD dirs get one minted and persisted on
+  first boot.
+- **`PartitionRecord.directories`** (KIP-858): per-replica owning-dir UUID added to the metadata
+  record (parallel to `replicas`); round-trips through the KRaft raft log and snapshot.
+  `kraft_translate` now emits `PartitionRecord` at apiVersion **1** (was 0) to carry
+  `directories`; all other records remain v0.
+- **`AssignReplicasToDirs`** (api key 73): controller handler records each broker's
+  replica→dir-UUID assignment into `PartitionRecord.directories`; the replicator supervisor
+  reports assignments (change-tracked) after materializing partitions.
+- **Heartbeat `offline_log_dirs`**: the broker reports offline dir UUIDs on every
+  `BrokerHeartbeat`.
+- **Controller-side failover** (`leader_election::compute_offline_dir_failover_changes`, wired
+  into the `BrokerHeartbeat` handler): when a still-alive broker reports offline dirs, the
+  controller leader maps the dir UUIDs to exactly the affected partitions and elects a new leader
+  from the surviving alive ISR (reusing the clean / KIP-841 unclean / KIP-966 recovery policy),
+  dropping the offline replica from ISR. Idempotent across repeated heartbeats.
+- **All-log-dirs-offline self-shutdown** (KIP-112): when every configured dir is offline the
+  heartbeat client latches `should_shutdown` and cancels the supervisor; the broker binary tears
+  down on that signal. The check runs at the top of each heartbeat tick so it fires even when the
+  controller is unreachable.
+- **Tests:** `crates/broker/tests/jbod_disk_failure.rs` (runtime offline-flip →
+  `KAFKA_STORAGE_ERROR`; all-dirs-offline → self-shutdown), plus unit tests for
+  `compute_offline_dir_failover_changes`, the `AssignReplicasToDirs` handler, `LogDirIds`, the
+  KRaft directories round-trip, and the supervisor change-detection.
+- **Boundaries:** broker self-registration is metadata-record-based, so registration `log_dirs`
+  reporting is N/A (out of scope). Live multi-broker failover E2E is deferred to Linux CI; the
+  controller failover logic is covered by in-process unit tests. `PartitionRecord` apiVersion
+  moved v0→v1 (JVM-faithful; KIP-858 emits v1).
+- Design + plan docs:
+  `docs/superpowers/specs/2026-06-03-crabka-kip-112-jbod-disk-failure-design.md`,
+  `docs/superpowers/plans/2026-06-03-crabka-kip-112-jbod-disk-failure.md`.
+
 ## Slice — KIP-320 log-truncation detection (complete) (2026-06-02)
 
 - **Leader side**: `FetchResponse` now returns `diverging_epoch` (the last
