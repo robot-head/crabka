@@ -83,7 +83,13 @@ pub(crate) fn handle(
         // fail them over (elect from surviving alive ISR, drop the offline
         // replica). Only the controller leader reaches here (NOT_CONTROLLER
         // early-return above), and it's idempotent across repeated heartbeats.
-        if !req.offline_log_dirs.is_empty() {
+        //
+        // Validate the reporting broker id independently of `broker_id_u64`
+        // (which falls back to 0 for the liveness path): failing over the
+        // wrong broker on a malformed negative id would be harmful.
+        if !req.offline_log_dirs.is_empty()
+            && let Ok(reporting_broker) = u64::try_from(req.broker_id)
+        {
             let offline: std::collections::HashSet<uuid::Uuid> = req
                 .offline_log_dirs
                 .iter()
@@ -92,7 +98,7 @@ pub(crate) fn handle(
             let image = controller.current_image();
             let plan = crate::leader_election::compute_offline_dir_failover_changes(
                 &image,
-                broker_id_u64,
+                reporting_broker,
                 &offline,
                 &liveness,
                 &metrics,
@@ -103,6 +109,7 @@ pub(crate) fn handle(
             {
                 tracing::warn!(error = %e, "offline-dir failover submit_change failed");
             }
+            // Fire-and-forget: enqueue logs internally if the recovery manager is gone.
             for (topic, partition, strategy) in plan.recoveries {
                 recovery
                     .enqueue(crate::unclean_recovery::RecoveryJob {
