@@ -16,6 +16,7 @@ default = []
 [dependencies]
 crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
 crabka-client-core = { version = "0.2", path = "../client-core" }
+crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
 crabka-compression = { version = "0.2", path = "../compression" }
 bon = { workspace = true }
 bytes = { workspace = true }
