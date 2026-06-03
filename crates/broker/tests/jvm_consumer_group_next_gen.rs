@@ -77,6 +77,51 @@ fn create_topic(name: &str, partitions: i32) {
     );
 }
 
+/// Spawn a console-consumer container on a blocking thread and return a handle
+/// resolving to its stdout. Used to run two overlapping consumers in the same
+/// group: the caller awaits both handles, so the containers run concurrently
+/// rather than back-to-back. `--add-host` mirrors `docker_run` so the
+/// container can reach the host-process broker via `host.docker.internal`.
+fn spawn_consumer(image: &'static str, script: String) -> tokio::task::JoinHandle<String> {
+    tokio::task::spawn_blocking(move || {
+        let out = std::process::Command::new("docker")
+            .arg("run")
+            .arg("--rm")
+            .arg("--add-host=host.docker.internal:host-gateway")
+            .arg(image)
+            .arg("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("docker run");
+        eprintln!(
+            "CRABKA[test] consumer {image} status={} stderr={}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr),
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    })
+}
+
+/// Extract the set of partition numbers from console-consumer stdout produced
+/// with `--property print.partition=true`. The `DefaultMessageFormatter`
+/// emits one `Partition:<n>` token per record line (e.g. `Partition:2\t<value>`
+/// when no key is printed); we tolerate any surrounding columns and just pull
+/// the integer following each `Partition:` marker.
+fn parse_partitions(stdout: &str) -> std::collections::BTreeSet<i32> {
+    let mut set = std::collections::BTreeSet::new();
+    for line in stdout.lines() {
+        for token in line.split(['\t', ' ']) {
+            if let Some(rest) = token.strip_prefix("Partition:")
+                && let Ok(n) = rest.trim().parse::<i32>()
+            {
+                set.insert(n);
+            }
+        }
+    }
+    set
+}
+
 /// Run a docker container and return its output without asserting success.
 /// Consumer commands often exit non-zero on timeout even when they consumed
 /// messages, so callers are responsible for checking what matters.
@@ -253,4 +298,110 @@ async fn jvm_kip848_coexists_with_classic() {
     );
     let ns = String::from_utf8_lossy(&next_gen.stdout);
     assert!(ns.contains('p') && ns.contains('q'));
+}
+
+/// Live classic ↔ next-gen migration within a *single* consumer group.
+///
+/// A classic (cp-kafka 7.4.0) member forms the group first; while it is still
+/// polling, a next-gen (apache/kafka 4.0.0, `group.protocol=consumer`) member
+/// joins the SAME group. Crabka's unified coordinator runs the default
+/// `Bidirectional` migration policy with the `consumer` rebalance protocol
+/// enabled (see `NextGenConfig::default`; `start_host_broker` does not override
+/// it), so the group upgrades in place. The assertion is that both members
+/// consume a non-empty, *disjoint* set of partitions whose union covers the
+/// whole topic — i.e. a coherent assignment spanning both protocols rather
+/// than a split-brain double-assignment.
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+#[ignore = "requires Docker"]
+async fn jvm_kip848_classic_and_consumer_in_one_group_migrate() {
+    let (broker, _dir) = start_host_broker().await;
+    create_topic("mig", 4);
+
+    // Produce 8 records, 2 per partition, deterministically. Kafka's default
+    // partitioner is murmur2(key) % numPartitions, so keyed records land on a
+    // fixed partition regardless of batching (unlike RoundRobinPartitioner,
+    // which advances per-batch and can leave partitions empty). For 4
+    // partitions the keys below map: "0"->0, "4"->1, "5"->2, "1"->3.
+    let produced = docker_run(
+        KAFKA_IMAGE_CLASSIC,
+        &[
+            "bash",
+            "-c",
+            &format!(
+                "printf '0:a\\n4:b\\n5:c\\n1:d\\n0:e\\n4:f\\n5:g\\n1:h\\n' | \
+                 kafka-console-producer --bootstrap-server {BOOTSTRAP} --topic mig \
+                 --property parse.key=true --property key.separator=: \
+                 --producer-property max.block.ms=15000"
+            ),
+        ],
+    );
+    assert!(produced.status.success(), "producer failed: {produced:?}");
+
+    let group = "g-migrate";
+
+    // Classic member (cp-kafka): joins first and stays in the group long enough
+    // to overlap the next-gen member. Prints the partition for each record.
+    let classic = spawn_consumer(
+        KAFKA_IMAGE_CLASSIC,
+        format!(
+            "kafka-console-consumer --bootstrap-server {BOOTSTRAP} --topic mig --group {group} \
+             --from-beginning --property print.partition=true --timeout-ms 30000 --max-messages 8" // 8 = total records produced; using the total rather than per-member
+                                                                                                   // expectation (4) avoids a false-negative when the assignor produces a
+                                                                                                   // 3/1 split: the member owning 3 partitions needs 6 records but would
+                                                                                                   // stop at 4. With --max-messages 8 each consumer drains everything
+                                                                                                   // assigned to it and exits on --timeout-ms once records run dry.
+        ),
+    );
+
+    // Let the classic member form/own the group before the next-gen joins.
+    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+
+    // Next-gen member (apache/kafka, group.protocol=consumer): joins the SAME
+    // group, triggering an in-place upgrade under the Bidirectional policy.
+    let nextgen = spawn_consumer(
+        KAFKA_IMAGE_NEXT_GEN,
+        format!(
+            "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic mig \
+             --group {group} --consumer-property group.protocol=consumer --from-beginning \
+             --property print.partition=true --timeout-ms 30000 --max-messages 8" // 8 = total records; see comment on classic consumer above.
+        ),
+    );
+
+    let classic_out = classic.await.unwrap();
+    let nextgen_out = nextgen.await.unwrap();
+    eprintln!("CRABKA[test] classic stdout:\n{classic_out}");
+    eprintln!("CRABKA[test] nextgen stdout:\n{nextgen_out}");
+
+    let cp = parse_partitions(&classic_out);
+    let np = parse_partitions(&nextgen_out);
+    assert!(
+        !cp.is_empty() && !np.is_empty(),
+        "both members consumed: classic={cp:?} nextgen={np:?}"
+    );
+    assert!(
+        cp.is_disjoint(&np),
+        "no partition overlap across protocols: classic={cp:?} nextgen={np:?}"
+    );
+    let union: std::collections::BTreeSet<i32> = cp.union(&np).copied().collect();
+    let all: std::collections::BTreeSet<i32> = (0..4).collect();
+    assert!(union == all, "union covers all partitions: {union:?}");
+
+    // The migrating group must describe coherently to the JVM admin tooling.
+    let describe = docker_run(
+        KAFKA_IMAGE_NEXT_GEN,
+        &[
+            "bash",
+            "-c",
+            &format!(
+                "/opt/kafka/bin/kafka-consumer-groups.sh --bootstrap-server {BOOTSTRAP} --describe --group {group}"
+            ),
+        ],
+    );
+    assert!(
+        String::from_utf8_lossy(&describe.stdout).contains("mig"),
+        "describe mentions topic mig: {}",
+        String::from_utf8_lossy(&describe.stdout),
+    );
+
+    drop(broker);
 }
