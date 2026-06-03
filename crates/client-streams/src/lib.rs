@@ -46,6 +46,7 @@
 
 mod error;
 pub mod membership;
+pub mod processor;
 pub mod topology;
 
 pub use error::StreamsClientError;
@@ -53,4 +54,5 @@ pub use membership::{
     StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus, TaskAssignment,
     TopicPartition,
 };
+pub use processor::{BytesSerde, I64Serde, Serde, SerdeError, StringSerde};
 pub use topology::{BuiltTopology, Topology, TopologyError};

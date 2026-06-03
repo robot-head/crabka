@@ -1265,6 +1265,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "bon",
+ "bytes",
  "crabka-broker",
  "crabka-client-core",
  "crabka-protocol",

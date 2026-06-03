@@ -18,6 +18,7 @@ crabka-protocol = { version = "0.2", path = "../protocol", default-features = fa
 crabka-client-core = { version = "0.2", path = "../client-core" }
 async-trait = { workspace = true }
 bon = { workspace = true }
+bytes = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
