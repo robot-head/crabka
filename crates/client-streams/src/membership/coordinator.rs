@@ -39,6 +39,9 @@ pub(crate) struct CoordinatorState {
     pub owned_active: Arc<Mutex<Vec<RespTaskIds>>>,
     pub heartbeat_interval: Duration,
     pub events: mpsc::UnboundedSender<StreamsEvent>,
+    /// The last assignment emitted, to suppress duplicate `Assigned` events
+    /// (the broker re-sends `active_tasks: Some(...)` every heartbeat).
+    pub last_assignment: tokio::sync::Mutex<StreamsAssignment>,
 }
 
 enum Outcome {
@@ -66,6 +69,7 @@ pub(crate) async fn run(state: CoordinatorState, shutdown: CancellationToken) {
                 Outcome::Rejoin => {
                     *state.member_epoch.lock().await = 0;
                     state.owned_active.lock().await.clear();
+                    *state.last_assignment.lock().await = StreamsAssignment::default();
                     rejoining = true;
                     let _ = state.events.send(StreamsEvent::Fenced);
                 }
@@ -139,8 +143,9 @@ async fn heartbeat_once(state: &CoordinatorState, rejoining: bool) -> Outcome {
     }
 }
 
-/// Emit `NotReady` (status present) and/or `Assigned` (tasks present), and update
-/// the owned-active set for the next echo.
+/// Emit `NotReady` (status present) and/or `Assigned` (tasks present and
+/// changed since last emission), and update the owned-active set for the next
+/// echo.
 async fn emit_response(
     state: &CoordinatorState,
     r: &crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
@@ -151,16 +156,32 @@ async fn emit_response(
         let mapped = statuses.iter().map(map_status).collect();
         let _ = state.events.send(StreamsEvent::NotReady(mapped));
     }
-    if r.active_tasks.is_some() {
-        if let Some(tasks) = &r.active_tasks {
-            *state.owned_active.lock().await = tasks.clone();
-        }
-        let assignment = StreamsAssignment {
-            active: resolve(r.active_tasks.as_ref(), &state.topology),
-            standby: resolve(r.standby_tasks.as_ref(), &state.topology),
-            warmup: resolve(r.warmup_tasks.as_ref(), &state.topology),
-        };
-        let _ = state.events.send(StreamsEvent::Assigned(assignment));
+    if let Some(tasks) = &r.active_tasks {
+        *state.owned_active.lock().await = tasks.clone();
+    }
+    let mut last = state.last_assignment.lock().await;
+    if let Some(ev) = assignment_event(r, &state.topology, &mut last) {
+        let _ = state.events.send(ev);
+    }
+}
+
+/// Build the assignment from a heartbeat response and decide whether it
+/// changed since `last`. Returns the event to emit, or `None` if unchanged.
+fn assignment_event(
+    r: &crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
+    topology: &BuiltTopology,
+    last: &mut StreamsAssignment,
+) -> Option<StreamsEvent> {
+    let assignment = StreamsAssignment {
+        active: resolve(r.active_tasks.as_ref(), topology),
+        standby: resolve(r.standby_tasks.as_ref(), topology),
+        warmup: resolve(r.warmup_tasks.as_ref(), topology),
+    };
+    if assignment == *last {
+        None
+    } else {
+        *last = assignment.clone();
+        Some(StreamsEvent::Assigned(assignment))
     }
 }
 
@@ -169,5 +190,62 @@ fn resp_to_req(t: &RespTaskIds) -> ReqTaskIds {
         subtopology_id: t.subtopology_id.clone(),
         partitions: t.partitions.clone(),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::topology::Topology;
+    use assert2::check;
+    use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds;
+    use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
+
+    fn built() -> BuiltTopology {
+        let mut t = Topology::new();
+        t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", ["src"]);
+        t.build("app").unwrap()
+    }
+
+    fn resp(active: Vec<i32>) -> StreamsGroupHeartbeatResponse {
+        StreamsGroupHeartbeatResponse {
+            active_tasks: Some(vec![TaskIds {
+                subtopology_id: "0".into(),
+                partitions: active,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn identical_assignment_is_not_re_emitted() {
+        let topo = built();
+        let mut last = StreamsAssignment::default();
+        let r = resp(vec![0, 1]);
+        // First time: changed → Some(Assigned)
+        check!(assignment_event(&r, &topo, &mut last).is_some());
+        // Second identical response: unchanged → None
+        check!(assignment_event(&r, &topo, &mut last).is_none());
+    }
+
+    #[test]
+    fn empty_assignment_is_not_emitted_from_default() {
+        let topo = built();
+        let mut last = StreamsAssignment::default();
+        let empty = StreamsGroupHeartbeatResponse {
+            active_tasks: Some(vec![]),
+            ..Default::default()
+        };
+        check!(assignment_event(&empty, &topo, &mut last).is_none());
+    }
+
+    #[test]
+    fn changed_assignment_is_re_emitted() {
+        let topo = built();
+        let mut last = StreamsAssignment::default();
+        check!(assignment_event(&resp(vec![0]), &topo, &mut last).is_some());
+        check!(assignment_event(&resp(vec![0, 1]), &topo, &mut last).is_some());
     }
 }

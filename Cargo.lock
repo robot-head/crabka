@@ -1264,7 +1264,6 @@ version = "0.2.0"
 dependencies = [
  "assert2",
  "bon",
- "bytes",
  "crabka-broker",
  "crabka-client-core",
  "crabka-protocol",

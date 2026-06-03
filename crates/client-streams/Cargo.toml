@@ -17,7 +17,6 @@ default = []
 crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
 crabka-client-core = { version = "0.2", path = "../client-core" }
 bon = { workspace = true }
-bytes = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }

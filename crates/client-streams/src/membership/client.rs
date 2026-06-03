@@ -101,12 +101,13 @@ impl StreamsMembership {
             ));
         }
         let owned_active = Arc::new(Mutex::new(join.active_tasks.clone().unwrap_or_default()));
-        if join.active_tasks.is_some() {
-            let _ = events_tx.send(StreamsEvent::Assigned(StreamsAssignment {
-                active: resolve(join.active_tasks.as_ref(), &topology),
-                standby: resolve(join.standby_tasks.as_ref(), &topology),
-                warmup: resolve(join.warmup_tasks.as_ref(), &topology),
-            }));
+        let initial = StreamsAssignment {
+            active: resolve(join.active_tasks.as_ref(), &topology),
+            standby: resolve(join.standby_tasks.as_ref(), &topology),
+            warmup: resolve(join.warmup_tasks.as_ref(), &topology),
+        };
+        if initial != StreamsAssignment::default() {
+            let _ = events_tx.send(StreamsEvent::Assigned(initial.clone()));
         }
 
         let coordinator_client = Client::builder()
@@ -128,6 +129,7 @@ impl StreamsMembership {
             owned_active,
             heartbeat_interval: hb_interval,
             events: events_tx,
+            last_assignment: tokio::sync::Mutex::new(initial),
         };
         let hb_handle = tokio::spawn(coordinator::run(state, shutdown.clone()));
 
