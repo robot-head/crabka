@@ -9,7 +9,6 @@ use crabka_protocol::owned::streams_group_heartbeat_request::{
 use super::grouping::GroupTopics;
 
 /// Build the wire `Topology` (epoch 0, sorted subtopologies + topic arrays).
-#[allow(dead_code)]
 pub(crate) fn to_wire(groups: &[GroupTopics], application_id: &str) -> Topology {
     let mut subtopologies: Vec<Subtopology> = groups
         .iter()

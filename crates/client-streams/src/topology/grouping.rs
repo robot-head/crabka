@@ -8,7 +8,6 @@ use std::collections::HashMap;
 use super::node::{NodeKind, NodeRegistry};
 
 /// One subtopology's resolved topic sets, keyed by its decimal-string id.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GroupTopics {
     pub id: String,
@@ -50,7 +49,6 @@ impl QuickUnion {
 }
 
 /// Group the registry's nodes into subtopologies with JVM-matching ids.
-#[allow(dead_code)]
 pub(crate) fn group_nodes(reg: &NodeRegistry) -> Vec<GroupTopics> {
     let n = reg.nodes.len();
     let mut uf = QuickUnion::new(n);

@@ -7,7 +7,6 @@ use std::collections::{HashMap, HashSet};
 use super::builder::TopologyError;
 
 /// What a node is and which topics/predecessors it touches.
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) enum NodeKind {
     Source {
@@ -22,7 +21,6 @@ pub(crate) enum NodeKind {
     },
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct Node {
     pub name: String,
@@ -30,7 +28,6 @@ pub(crate) struct Node {
 }
 
 /// The full node graph, recorded in insertion order.
-#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub(crate) struct NodeRegistry {
     pub nodes: Vec<Node>,
@@ -41,7 +38,6 @@ pub(crate) struct NodeRegistry {
     pub repartition_topics: HashSet<String>,
 }
 
-#[allow(dead_code)]
 impl NodeRegistry {
     fn insert(&mut self, node: Node) -> Result<(), TopologyError> {
         if self.index.contains_key(&node.name) {
@@ -85,14 +81,12 @@ impl NodeRegistry {
         })
     }
 
-    #[allow(dead_code)]
     pub fn add_store(&mut self, name: &str, processors: Vec<String>) {
         self.stores.push((name.to_string(), processors));
     }
 
     /// Validate that every referenced predecessor exists. Call after all nodes
     /// are added, before grouping.
-    #[allow(dead_code)]
     pub fn validate_predecessors(&self) -> Result<(), TopologyError> {
         for node in &self.nodes {
             let preds = match &node.kind {
