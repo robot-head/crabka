@@ -113,8 +113,14 @@ async fn kafka_features_describe_and_round_trip() {
     let desc = kafka_features(&["describe"]);
     assert!(desc.status.success(), "describe failed");
     let out = String::from_utf8_lossy(&desc.stdout);
-    assert!(out.contains("metadata.version"), "describe missing metadata.version:\n{out}");
-    assert!(out.contains("group.version"), "describe missing group.version:\n{out}");
+    assert!(
+        out.contains("metadata.version"),
+        "describe missing metadata.version:\n{out}"
+    );
+    assert!(
+        out.contains("group.version"),
+        "describe missing group.version:\n{out}"
+    );
     assert!(
         out.contains("transaction.version"),
         "describe missing transaction.version:\n{out}"

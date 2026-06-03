@@ -443,7 +443,10 @@ mod tests {
     fn bootstrap_unlisted_feature_follows_bootstrap_mv() {
         // mv=23: at/above group GA (22) but below txn GA (24) → group=1,
         // transaction omitted (default 0), metadata.version mirrors mv.
-        let levels = levels_of(&bootstrap_feature_records_with_overrides(23, &BTreeMap::new()));
+        let levels = levels_of(&bootstrap_feature_records_with_overrides(
+            23,
+            &BTreeMap::new(),
+        ));
         assert!(levels.get("metadata.version") == Some(&23));
         assert!(levels.get("group.version") == Some(&1));
         assert!(!levels.contains_key("transaction.version"));

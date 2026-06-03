@@ -700,7 +700,10 @@ mod tests {
             "group.version=",    // empty level
             "=1",                // empty name
         ] {
-            assert!(parse_feature_spec(bad).is_err(), "expected error for {bad:?}");
+            assert!(
+                parse_feature_spec(bad).is_err(),
+                "expected error for {bad:?}"
+            );
         }
     }
 
