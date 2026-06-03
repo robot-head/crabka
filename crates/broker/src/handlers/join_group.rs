@@ -15,7 +15,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::unified::actor::GroupActorMessage;
+use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
 
 pub(crate) async fn handle(
@@ -51,22 +51,14 @@ pub(crate) async fn handle(
         }
     }
 
-    // The group's actor is the per-group type lock: a classic actor is created
-    // here; if a next-gen consumer actor already owns the id, reject (the group
-    // is not a classic group), mirroring the old `group_types` separation.
-    let Some(handle) = broker
+    // Route to the one actor for this id, spawning a classic-kind actor if the
+    // id is brand-new. Both RPC families reach the same actor; if a next-gen
+    // consumer actor already owns the id, the actor's `ClassicJoin` arm replies
+    // `INCONSISTENT_GROUP_PROTOCOL` — that is where the per-group kind lock now
+    // lives.
+    let handle = broker
         .group_coordinator
-        .get_or_create_classic(&req.group_id)
-    else {
-        return encode(
-            version,
-            &JoinGroupResponse {
-                error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
-                member_id: req.member_id,
-                ..Default::default()
-            },
-        );
-    };
+        .get_or_create_group(&req.group_id, GroupKindTag::Classic);
 
     let (tx, rx) = oneshot::channel();
     if handle

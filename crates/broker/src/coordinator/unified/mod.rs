@@ -245,34 +245,33 @@ impl GroupCoordinator {
             .map(|e| e.value().clone())
     }
 
-    /// Get the existing actor for `group_id`, or spawn one of `kind`.
+    /// Get the one actor for `group_id`, spawning it with `initial_kind` if
+    /// absent.
     ///
-    /// Returns `None` if a *live* actor of the **other** protocol already owns
-    /// the id — this enforces the per-group type lock (formerly the
-    /// `group_types` map + `mark_*`): the first protocol to create the actor
-    /// wins, and the second is rejected by its handler, exactly as before.
+    /// The kind argument only decides the spawn kind for a brand-new group.
+    /// Both families route to one actor; the actor rejects the family it does
+    /// not currently serve. (A later slice lets the actor flip kind in place,
+    /// so a group is no longer pinned to its spawn kind.) Keeps the dead-actor
+    /// (closed tx) respawn and the consumer re-hydrate-from-seed paths.
     #[must_use]
-    pub fn get_or_create(
+    pub fn get_or_create_group(
         self: &Arc<Self>,
         group_id: &str,
-        kind: GroupKindTag,
-    ) -> Option<Arc<GroupActorHandle>> {
+        initial_kind: GroupKindTag,
+    ) -> Arc<GroupActorHandle> {
         if let Some(h) = self.groups.get(group_id) {
             // Dead-actor detection: if the mpsc sender is closed, the actor
             // has exited (typically after a log-write failure). Drop the
             // entry and fall through to spawn a fresh actor.
             if !h.value().tx.is_closed() {
-                if h.value().kind != kind {
-                    return None;
-                }
-                return Some(h.value().clone());
+                return h.value().clone();
             }
             drop(h);
             self.groups.remove(group_id);
         }
         let h = Arc::new(GroupActorHandle::spawn(
             group_id.into(),
-            kind,
+            initial_kind,
             self.config.clone(),
             self.metadata.clone(),
             self.offsets_log.clone(),
@@ -284,37 +283,29 @@ impl GroupCoordinator {
             .or_insert(h)
             .value()
             .clone();
-        if inserted.kind != kind {
-            // Lost a spawn race against the other protocol.
-            return None;
-        }
         // Re-hydrate a respawned consumer actor from its last-known-good state.
-        if kind == GroupKindTag::Consumer
+        if initial_kind == GroupKindTag::Consumer
             && let Some(seed) = self.cached_seed(group_id)
         {
             let _ = inserted.tx.try_send(GroupActorMessage::Seed(seed));
         }
-        Some(inserted)
+        inserted
     }
 
-    /// Get-or-create a classic-protocol actor. `None` if a consumer group
-    /// already owns the id.
+    /// Get-or-create a classic-protocol actor. Spawns a classic actor for a
+    /// brand-new id; for an existing id returns the one actor regardless of its
+    /// kind (the actor serves or rejects per its live kind).
     #[must_use]
-    pub fn get_or_create_classic(
-        self: &Arc<Self>,
-        group_id: &str,
-    ) -> Option<Arc<GroupActorHandle>> {
-        self.get_or_create(group_id, GroupKindTag::Classic)
+    pub fn get_or_create_classic(self: &Arc<Self>, group_id: &str) -> Arc<GroupActorHandle> {
+        self.get_or_create_group(group_id, GroupKindTag::Classic)
     }
 
-    /// Get-or-create a next-gen consumer-protocol actor. `None` if a classic
-    /// group already owns the id.
+    /// Get-or-create a next-gen consumer-protocol actor. Spawns a consumer actor
+    /// for a brand-new id; for an existing id returns the one actor regardless
+    /// of its kind (the actor serves or rejects per its live kind).
     #[must_use]
-    pub fn get_or_create_consumer(
-        self: &Arc<Self>,
-        group_id: &str,
-    ) -> Option<Arc<GroupActorHandle>> {
-        self.get_or_create(group_id, GroupKindTag::Consumer)
+    pub fn get_or_create_consumer(self: &Arc<Self>, group_id: &str) -> Arc<GroupActorHandle> {
+        self.get_or_create_group(group_id, GroupKindTag::Consumer)
     }
 
     #[must_use]
@@ -423,9 +414,8 @@ impl GroupCoordinator {
 
     /// Spawn a classic actor seeded with a fully-replayed `Group` (bootstrap).
     pub fn seed_classic(self: &Arc<Self>, group_id: &str, group: Box<Group>) {
-        if let Some(handle) = self.get_or_create_classic(group_id) {
-            let _ = handle.tx.try_send(GroupActorMessage::ClassicSeed(group));
-        }
+        let handle = self.get_or_create_classic(group_id);
+        let _ = handle.tx.try_send(GroupActorMessage::ClassicSeed(group));
     }
 
     /// Snapshot every **classic** group. Consumer groups are intentionally not
@@ -880,9 +870,8 @@ impl GroupCoordinator {
     pub fn finalize_bootstrap(self: &Arc<Self>) {
         let group_ids: Vec<String> = self.seeds.iter().map(|e| e.key().clone()).collect();
         for gid in group_ids {
-            if let Some((_, seed)) = self.seeds.remove(&gid)
-                && let Some(handle) = self.get_or_create_consumer(&gid)
-            {
+            if let Some((_, seed)) = self.seeds.remove(&gid) {
+                let handle = self.get_or_create_consumer(&gid);
                 let _ = handle.tx.try_send(actor::GroupActorMessage::Seed(seed));
             }
         }
@@ -1053,6 +1042,18 @@ mod tests {
         // First mark wins: a later mark_classic must not override.
         coord.mark_classic("sg");
         assert!(coord.group_type("sg") == Some(GroupType::Share));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_or_create_group_returns_the_one_actor_regardless_of_kind() {
+        // KIP-848 64d live migration: BOTH RPC families route to the one actor.
+        // The kind argument only decides the spawn kind for a brand-new group;
+        // a later request of the other kind returns the SAME actor (the kind
+        // lock now lives in the actor's message arms, not in this registry).
+        let coord = make_coord();
+        let a = coord.get_or_create_group("g", GroupKindTag::Classic);
+        let b = coord.get_or_create_group("g", GroupKindTag::Consumer);
+        assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

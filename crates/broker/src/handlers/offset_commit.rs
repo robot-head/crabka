@@ -103,14 +103,16 @@ pub(crate) async fn handle(
     let now_ms = now_ms();
     // Find the group's actor (a classic actor is created for an unknown id —
     // e.g. a "simple" consumer committing offsets without joining a group).
-    let Some(handle) = broker.group_coordinator.find(&req.group_id).or_else(|| {
-        broker
-            .group_coordinator
-            .get_or_create_classic(&req.group_id)
-    }) else {
-        let resp = build_response_all(&req, codes::UNKNOWN_SERVER_ERROR);
-        return finalize(version, resp, unknown_id_topics.clone());
-    };
+    // Offsets are protocol-agnostic, so an existing actor of either kind serves
+    // the commit the same way.
+    let handle = broker
+        .group_coordinator
+        .find(&req.group_id)
+        .unwrap_or_else(|| {
+            broker
+                .group_coordinator
+                .get_or_create_group(&req.group_id, GroupKindTag::Classic)
+        });
 
     // Validate membership/epoch through the actor (kind-specific).
     if let Some(code) = validate(&handle, &req).await {

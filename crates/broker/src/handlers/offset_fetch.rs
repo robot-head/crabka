@@ -22,7 +22,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult, authorize_topics};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::unified::actor::GroupActorMessage;
+use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
 
 #[allow(clippy::too_many_lines)] // ACL preamble (group + per-topic) + fetch-all vs named-topic branches; splitting hurts readability
@@ -71,27 +71,26 @@ pub(crate) async fn handle(
     }
 
     // Fetch the group's committed offsets from its actor (a classic actor is
-    // created for an unknown id, matching the old get-or-create behavior).
+    // created for an unknown id; offsets are protocol-agnostic, so an existing
+    // actor of either kind serves `FetchCommitted` the same way).
     let committed = {
-        let handle = broker.group_coordinator.find(&req.group_id).or_else(|| {
-            broker
-                .group_coordinator
-                .get_or_create_classic(&req.group_id)
-        });
-        match handle {
-            Some(h) => {
-                let (tx, rx) = oneshot::channel();
-                if h.tx
-                    .send(GroupActorMessage::FetchCommitted { reply: tx })
-                    .await
-                    .is_ok()
-                {
-                    rx.await.unwrap_or_default()
-                } else {
-                    std::collections::HashMap::new()
-                }
-            }
-            None => std::collections::HashMap::new(),
+        let h = broker
+            .group_coordinator
+            .find(&req.group_id)
+            .unwrap_or_else(|| {
+                broker
+                    .group_coordinator
+                    .get_or_create_group(&req.group_id, GroupKindTag::Classic)
+            });
+        let (tx, rx) = oneshot::channel();
+        if h.tx
+            .send(GroupActorMessage::FetchCommitted { reply: tx })
+            .await
+            .is_ok()
+        {
+            rx.await.unwrap_or_default()
+        } else {
+            std::collections::HashMap::new()
         }
     };
 
@@ -290,27 +289,26 @@ async fn handle_groups(
         }
 
         // Fetch the group's committed offsets from its actor (a classic actor
-        // is created for an unknown id, matching get-or-create behavior).
+        // is created for an unknown id; offsets are protocol-agnostic, so an
+        // existing actor of either kind serves `FetchCommitted` the same way).
         let committed = {
-            let h = broker.group_coordinator.find(&grp.group_id).or_else(|| {
-                broker
-                    .group_coordinator
-                    .get_or_create_classic(&grp.group_id)
-            });
-            match h {
-                Some(h) => {
-                    let (tx, rx) = oneshot::channel();
-                    if h.tx
-                        .send(GroupActorMessage::FetchCommitted { reply: tx })
-                        .await
-                        .is_ok()
-                    {
-                        rx.await.unwrap_or_default()
-                    } else {
-                        std::collections::HashMap::new()
-                    }
-                }
-                None => std::collections::HashMap::new(),
+            let h = broker
+                .group_coordinator
+                .find(&grp.group_id)
+                .unwrap_or_else(|| {
+                    broker
+                        .group_coordinator
+                        .get_or_create_group(&grp.group_id, GroupKindTag::Classic)
+                });
+            let (tx, rx) = oneshot::channel();
+            if h.tx
+                .send(GroupActorMessage::FetchCommitted { reply: tx })
+                .await
+                .is_ok()
+            {
+                rx.await.unwrap_or_default()
+            } else {
+                std::collections::HashMap::new()
             }
         };
         let image = broker.controller.current_image();

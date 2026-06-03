@@ -1289,7 +1289,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn first_join_emits_one_batch() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
+        let handle = coord.get_or_create_consumer("g");
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
@@ -1321,7 +1321,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn first_join_adopts_client_member_id() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
+        let handle = coord.get_or_create_consumer("g");
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
@@ -1357,7 +1357,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn known_member_id_epoch_zero_is_stale() {
         let (coord, _log) = make_coordinator();
-        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
+        let handle = coord.get_or_create_consumer("g");
         // First join with a client id, epoch 0 → succeeds, epoch advances.
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -1403,7 +1403,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unchanged_heartbeat_emits_no_batch() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
+        let handle = coord.get_or_create_consumer("g");
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
@@ -1453,7 +1453,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn leave_emits_tombstone_batch() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
+        let handle = coord.get_or_create_consumer("g");
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
@@ -1502,7 +1502,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn actor_exits_on_append_error() {
         let (coord, log) = make_coordinator();
-        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
+        let handle = coord.get_or_create_consumer("g");
         log.fail_next
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1532,7 +1532,7 @@ mod tests {
         );
 
         // get_or_create should respawn a fresh actor.
-        let fresh = coord.get_or_create_consumer("g").expect("consumer actor");
+        let fresh = coord.get_or_create_consumer("g");
         assert!(!fresh.tx.is_closed());
     }
 
@@ -1700,7 +1700,7 @@ mod tests {
             log,
             crate::coordinator::unified::streams::config::StreamsGroupConfig::default(),
         ));
-        let handle = coord.get_or_create_consumer("g").expect("consumer actor");
+        let handle = coord.get_or_create_consumer("g");
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -1734,7 +1734,7 @@ mod tests {
     async fn classic_admin_surface_and_immediate_join() {
         use crabka_protocol::owned::join_group_request::JoinGroupRequest;
         let (coord, _log) = make_coordinator();
-        let handle = coord.get_or_create_classic("g").expect("classic actor");
+        let handle = coord.get_or_create_classic("g");
 
         // Empty member_id → immediate MEMBER_ID_REQUIRED (no member added).
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1779,7 +1779,7 @@ mod tests {
 
         use super::super::classic_state::OffsetEntry;
         let (coord, _log) = make_coordinator();
-        let handle = coord.get_or_create_classic("g").expect("classic actor");
+        let handle = coord.get_or_create_classic("g");
 
         // UpdateCommitted then FetchCommitted round-trips on the kind-agnostic Group.
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -1910,13 +1910,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cross_protocol_get_or_create_returns_none() {
+    async fn cross_protocol_get_or_create_returns_the_one_actor() {
+        // KIP-848 64d live migration: the registry no longer pins a group to its
+        // spawn kind. Both getters return the SAME actor for an id; the per-group
+        // kind lock now lives in the actor's message arms, not the registry.
         let (coord, _log) = make_coordinator();
-        // Consumer owns "c" → a classic get-or-create is refused.
-        let _ = coord.get_or_create_consumer("c").expect("consumer actor");
-        assert!(coord.get_or_create_classic("c").is_none());
-        // Classic owns "k" → a consumer get-or-create is refused.
-        let _ = coord.get_or_create_classic("k").expect("classic actor");
-        assert!(coord.get_or_create_consumer("k").is_none());
+        // Consumer owns "c" → a classic get-or-create returns that same actor.
+        let c_consumer = coord.get_or_create_consumer("c");
+        let c_classic = coord.get_or_create_classic("c");
+        assert!(Arc::ptr_eq(&c_consumer, &c_classic));
+        // Classic owns "k" → a consumer get-or-create returns that same actor.
+        let k_classic = coord.get_or_create_classic("k");
+        let k_consumer = coord.get_or_create_consumer("k");
+        assert!(Arc::ptr_eq(&k_classic, &k_consumer));
     }
 }

@@ -106,11 +106,14 @@ pub(crate) async fn handle(
     //    is not present we'll detect that below and return NOT_COORDINATOR.
     //    For a multi-broker future this would route to the leader for
     //    hash(group_id) % __consumer_offsets.partition_count.
-    let handle = broker.group_coordinator.find(&req.group_id).or_else(|| {
-        broker
-            .group_coordinator
-            .get_or_create_classic(&req.group_id)
-    });
+    let handle = broker
+        .group_coordinator
+        .find(&req.group_id)
+        .unwrap_or_else(|| {
+            broker
+                .group_coordinator
+                .get_or_create_group(&req.group_id, GroupKindTag::Classic)
+        });
 
     // 2. KIP-1319 stale-member-epoch check (api_version >= 3 adds
     //    generation_id/member_id). The coordinator does not yet expose a
@@ -119,13 +122,10 @@ pub(crate) async fn handle(
     //    classic group's current generation_id.
     //    TODO(KIP-1319 v4+): implement per-member epoch tracking and
     //    surface STALE_MEMBER_EPOCH (113) when supplied epoch < current.
-    if version >= 3
-        && req.generation_id >= 0
-        && let Some(h) = &handle
-        && h.kind == GroupKindTag::Classic
-    {
+    if version >= 3 && req.generation_id >= 0 && handle.kind == GroupKindTag::Classic {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        if h.tx
+        if handle
+            .tx
             .send(GroupActorMessage::ClassicInspect { reply: tx })
             .await
             .is_ok()
