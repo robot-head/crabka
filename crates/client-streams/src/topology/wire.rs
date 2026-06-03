@@ -163,4 +163,38 @@ mod tests {
         check!(cg.repartition_source_topics.is_empty());
         check!(cg.source_topic_regex.is_empty());
     }
+
+    #[test]
+    fn copartition_indices_into_repartition_array() {
+        let sources = vec!["a".to_string()];
+        let repartition = vec!["rp0".to_string(), "rp1".to_string()];
+        let cg = copartition_group(&sources, &repartition, &["rp1".into(), "a".into()]);
+        check!(cg.source_topics == vec![0i16]);
+        check!(cg.repartition_source_topics == vec![1i16]);
+    }
+
+    #[test]
+    fn copartition_unknown_member_is_silently_skipped() {
+        let sources = vec!["a".to_string()];
+        let repartition: Vec<String> = vec![];
+        let cg = copartition_group(&sources, &repartition, &["unknown".into()]);
+        check!(cg.source_topics.is_empty());
+        check!(cg.repartition_source_topics.is_empty());
+    }
+
+    #[test]
+    fn repartition_sink_and_source_topics_included_in_wire() {
+        let groups = vec![GroupTopics {
+            id: "0".into(),
+            source_topics: vec!["in".into()],
+            repartition_sink_topics: vec!["rp".into()],
+            repartition_source_topics: vec!["rp".into()],
+            ..Default::default()
+        }];
+        let topo = to_wire(&groups, "app");
+        let st = &topo.subtopologies[0];
+        check!(st.repartition_sink_topics == vec!["rp".to_string()]);
+        check!(st.repartition_source_topics.len() == 1);
+        check!(st.repartition_source_topics[0].name == "rp");
+    }
 }

@@ -25,29 +25,47 @@ mod tests {
     use assert2::check;
     use crabka_protocol::owned::common::streams_group_heartbeat_response::status::Status;
 
+    fn s(code: i8, detail: &str) -> Status {
+        Status {
+            status_code: code,
+            status_detail: detail.into(),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn maps_known_codes() {
-        let s = Status {
-            status_code: 1,
-            status_detail: "in".into(),
-            ..Default::default()
-        };
-        check!(matches!(map_status(&s), StreamsStatus::MissingSourceTopics(d) if d == "in"));
-        let s = Status {
-            status_code: 4,
-            status_detail: String::new(),
-            ..Default::default()
-        };
-        check!(matches!(map_status(&s), StreamsStatus::ShutdownApplication));
+        check!(
+            matches!(map_status(&s(1, "in")), StreamsStatus::MissingSourceTopics(d) if d == "in")
+        );
+        check!(matches!(
+            map_status(&s(4, "")),
+            StreamsStatus::ShutdownApplication
+        ));
+    }
+
+    #[test]
+    fn maps_all_remaining_known_codes() {
+        check!(matches!(map_status(&s(0, "t")), StreamsStatus::StaleTopology(d) if d == "t"));
+        check!(matches!(
+            map_status(&s(2, "p")),
+            StreamsStatus::IncorrectlyPartitionedTopics(d) if d == "p"
+        ));
+        check!(matches!(
+            map_status(&s(3, "m")),
+            StreamsStatus::MissingInternalTopics(d) if d == "m"
+        ));
+        check!(matches!(
+            map_status(&s(5, "a")),
+            StreamsStatus::AssignmentDelayed(d) if d == "a"
+        ));
     }
 
     #[test]
     fn maps_unknown_code_to_unknown() {
-        let s = Status {
-            status_code: 99,
-            status_detail: "x".into(),
-            ..Default::default()
-        };
-        check!(matches!(map_status(&s), StreamsStatus::Unknown(99, _)));
+        check!(matches!(
+            map_status(&s(99, "x")),
+            StreamsStatus::Unknown(99, _)
+        ));
     }
 }
