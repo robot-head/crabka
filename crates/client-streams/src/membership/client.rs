@@ -1,7 +1,206 @@
-//! `StreamsMembership` handle: stub placeholder for later implementation.
+//! `StreamsMembership` — public handle for a KIP-1071 streams group.
+//!
+//! `start` generates a member id, sends the join heartbeat (epoch 0 with
+//! topology), captures the broker-assigned epoch / heartbeat interval / initial
+//! assignment, then spawns the background heartbeat loop on its own connection
+//! (the broker serves a connection serially).
+//!
+//! `next_event` drains coordinator events; `close` leaves the group.
 
-/// Handle to the streams group membership loop.
-///
-/// Drives `StreamsGroupHeartbeat` (API key 88) and surfaces task assignments.
-/// Full implementation arrives in Task 9.
-pub struct StreamsMembership;
+use std::sync::Arc;
+use std::time::Duration;
+
+use tokio::sync::{Mutex, mpsc};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
+use crabka_client_core::Client;
+use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
+
+use super::coordinator::{self, CoordinatorState};
+use super::status::map_status;
+use super::types::{StreamsAssignment, StreamsEvent};
+use crate::error::StreamsClientError;
+use crate::membership::assignment::resolve;
+use crate::topology::BuiltTopology;
+
+const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
+
+/// A live streams-group membership. Construct via [`StreamsMembership::builder`].
+pub struct StreamsMembership {
+    member_id: String,
+    group_id: String,
+    events: mpsc::UnboundedReceiver<StreamsEvent>,
+    shutdown: CancellationToken,
+    hb_handle: Option<JoinHandle<()>>,
+}
+
+#[bon::bon]
+impl StreamsMembership {
+    /// Join a streams group and start heartbeating.
+    #[builder(start_fn = builder, finish_fn = build)]
+    #[allow(clippy::too_many_lines)]
+    pub async fn start(
+        #[builder(into)] bootstrap: String,
+        #[builder(into, default = "crabka-streams".to_string())] client_id: String,
+        #[builder(into)] group_id: String,
+        topology: BuiltTopology,
+        #[builder(into)] process_id: Option<String>,
+        #[builder(into)] instance_id: Option<String>,
+        #[builder(default = Duration::from_secs(30))] rebalance_timeout: Duration,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+    ) -> Result<Self, StreamsClientError> {
+        if group_id.is_empty() {
+            return Err(StreamsClientError::Server(0));
+        }
+        let process_id = process_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let rebalance_timeout_ms = i32::try_from(rebalance_timeout.as_millis()).unwrap_or(30_000);
+
+        let client = Client::builder()
+            .bootstrap(&bootstrap)
+            .client_id(client_id.clone())
+            .maybe_security(security.clone())
+            .build()
+            .await?;
+
+        let topology = Arc::new(topology);
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let join = loop {
+            let resp = client
+                .send(StreamsGroupHeartbeatRequest {
+                    group_id: group_id.clone(),
+                    member_id: member_id.clone(),
+                    member_epoch: 0,
+                    process_id: Some(process_id.clone()),
+                    instance_id: instance_id.clone(),
+                    rebalance_timeout_ms,
+                    topology: Some(topology.to_wire()),
+                    ..Default::default()
+                })
+                .await?;
+            if resp.error_code == COORDINATOR_LOAD_IN_PROGRESS {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+            break map_error(resp)?;
+        };
+
+        let member_epoch_val = join.member_epoch;
+        let hb_interval = if join.heartbeat_interval_ms > 0 {
+            Duration::from_millis(u64::try_from(join.heartbeat_interval_ms).unwrap_or(3000))
+        } else {
+            Duration::from_secs(3)
+        };
+
+        if let Some(statuses) = &join.status
+            && !statuses.is_empty()
+        {
+            let _ = events_tx.send(StreamsEvent::NotReady(
+                statuses.iter().map(map_status).collect(),
+            ));
+        }
+        let owned_active = Arc::new(Mutex::new(join.active_tasks.clone().unwrap_or_default()));
+        if join.active_tasks.is_some() {
+            let _ = events_tx.send(StreamsEvent::Assigned(StreamsAssignment {
+                active: resolve(join.active_tasks.as_ref(), &topology),
+                standby: resolve(join.standby_tasks.as_ref(), &topology),
+                warmup: resolve(join.warmup_tasks.as_ref(), &topology),
+            }));
+        }
+
+        let coordinator_client = Client::builder()
+            .bootstrap(&bootstrap)
+            .client_id(client_id.clone())
+            .maybe_security(security.clone())
+            .build()
+            .await?;
+        let shutdown = CancellationToken::new();
+        let state = CoordinatorState {
+            client: coordinator_client,
+            group_id: group_id.clone(),
+            member_id: member_id.clone(),
+            process_id,
+            instance_id,
+            rebalance_timeout_ms,
+            topology: Arc::clone(&topology),
+            member_epoch: Arc::new(Mutex::new(member_epoch_val)),
+            owned_active,
+            heartbeat_interval: hb_interval,
+            events: events_tx,
+        };
+        let hb_handle = tokio::spawn(coordinator::run(state, shutdown.clone()));
+
+        Ok(Self {
+            member_id,
+            group_id,
+            events: events_rx,
+            shutdown,
+            hb_handle: Some(hb_handle),
+        })
+    }
+}
+
+impl StreamsMembership {
+    /// The client-generated member id.
+    #[must_use]
+    pub fn member_id(&self) -> &str {
+        &self.member_id
+    }
+
+    /// The streams group id.
+    #[must_use]
+    pub fn group_id(&self) -> &str {
+        &self.group_id
+    }
+
+    /// Await the next membership event (assignment / not-ready / fenced).
+    /// Returns [`StreamsClientError::Closed`] once the heartbeat loop has ended.
+    pub async fn next_event(&mut self) -> Result<StreamsEvent, StreamsClientError> {
+        self.events.recv().await.ok_or(StreamsClientError::Closed)
+    }
+
+    /// Leave the group and stop heartbeating.
+    pub async fn close(&mut self) -> Result<(), StreamsClientError> {
+        self.shutdown.cancel();
+        if let Some(h) = self.hb_handle.take() {
+            let _ = h.await;
+        }
+        Ok(())
+    }
+}
+
+/// Map a join-response error code to a typed error (0 = ok).
+fn map_error(
+    resp: crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
+) -> Result<
+    crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
+    StreamsClientError,
+> {
+    // Kafka error codes for the STREAMS_INVALID_TOPOLOGY family (KIP-1071).
+    // These are not yet in crates/broker/src/codes.rs (the broker coordinator
+    // doesn't emit them yet), but they are valid response codes per the
+    // StreamsGroupHeartbeatResponse schema. Values from the Apache Kafka
+    // official error table (KIP-1071).
+    const STREAMS_INVALID_TOPOLOGY: i16 = 136;
+    const STREAMS_INVALID_TOPOLOGY_EPOCH: i16 = 137;
+    const STREAMS_TOPOLOGY_FENCED: i16 = 138;
+    // Verified against crates/broker/src/codes.rs:
+    const GROUP_AUTHORIZATION_FAILED: i16 = 30; // codes::GROUP_AUTHORIZATION_FAILED
+    const TOPIC_AUTHORIZATION_FAILED: i16 = 29; // codes::TOPIC_AUTHORIZATION_FAILED
+    const GROUP_ID_NOT_FOUND: i16 = 69; // codes::GROUP_ID_NOT_FOUND
+    match resp.error_code {
+        0 => Ok(resp),
+        c @ (STREAMS_INVALID_TOPOLOGY
+        | STREAMS_INVALID_TOPOLOGY_EPOCH
+        | STREAMS_TOPOLOGY_FENCED) => Err(StreamsClientError::InvalidTopology {
+            code: c,
+            message: resp.error_message.unwrap_or_default(),
+        }),
+        c @ (GROUP_AUTHORIZATION_FAILED | TOPIC_AUTHORIZATION_FAILED) => {
+            Err(StreamsClientError::Authorization(c))
+        }
+        GROUP_ID_NOT_FOUND => Err(StreamsClientError::GroupIdNotFound),
+        other => Err(StreamsClientError::Server(other)),
+    }
+}

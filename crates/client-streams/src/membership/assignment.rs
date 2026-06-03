@@ -8,7 +8,6 @@ use crate::topology::BuiltTopology;
 
 /// Map one role's assigned tasks to [`TaskAssignment`]s. `None` (unchanged
 /// since last heartbeat) resolves to an empty vec.
-#[allow(dead_code)]
 pub(crate) fn resolve(
     tasks: Option<&Vec<TaskIds>>,
     topology: &BuiltTopology,

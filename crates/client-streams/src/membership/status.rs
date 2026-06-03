@@ -5,7 +5,6 @@ use crabka_protocol::owned::common::streams_group_heartbeat_response::status::St
 use super::types::StreamsStatus;
 
 /// KIP-1071 `StreamsGroupHeartbeatResponse.Status` codes.
-#[allow(dead_code)]
 pub(crate) fn map_status(s: &Status) -> StreamsStatus {
     let detail = s.status_detail.clone();
     match s.status_code {

@@ -26,7 +26,6 @@ const UNKNOWN_MEMBER_ID: i16 = 25;
 const STALE_MEMBER_EPOCH: i16 = 113;
 
 /// State owned by the heartbeat task.
-#[allow(dead_code)]
 pub(crate) struct CoordinatorState {
     pub client: Client,
     pub group_id: String,
@@ -49,7 +48,6 @@ enum Outcome {
 }
 
 /// Drive the loop until `shutdown` fires, then leave.
-#[allow(dead_code)]
 pub(crate) async fn run(state: CoordinatorState, shutdown: CancellationToken) {
     let mut ticker = tokio::time::interval(state.heartbeat_interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
