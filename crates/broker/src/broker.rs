@@ -1591,6 +1591,7 @@ impl Broker {
         // the startup probe flagged unwritable.
         let supervisor = crate::replicator_supervisor::ReplicatorSupervisor::new(
             config.node_id,
+            config.broker_id,
             controller.clone(),
             partitions.clone(),
             log_dir_status.online_subset(&config.all_log_dirs()),

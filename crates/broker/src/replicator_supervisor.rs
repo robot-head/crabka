@@ -21,7 +21,6 @@ use dashmap::DashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
-use uuid::Uuid;
 
 use crabka_log::{Log, LogConfig};
 use crabka_metadata::MetadataImage;
@@ -134,8 +133,53 @@ pub(crate) async fn push_topic_configs(
     }
 }
 
+/// Compute the dir-assignment reports that changed since last reported.
+///
+/// Returns `(wire_assignments, tracker_updates)`:
+/// - `wire_assignments`: `(topic_id, partition, dir_uuid)` for `build_request`.
+/// - `tracker_updates`: `(topic_name, partition, dir_uuid)` to write into
+///   `reported_dirs` on a successful send.
+///
+/// Pure: reads each partition's current owning dir exactly once; no second load
+/// after the change-check, eliminating the TOCTOU race and O(n²) `Vec::contains`
+/// scan present in the previous double-iteration approach.
+#[allow(clippy::type_complexity)]
+pub(crate) fn collect_changed_assignments(
+    local_set: &std::collections::HashSet<(String, i32)>,
+    partitions: &PartitionRegistry,
+    log_dir_ids: &crate::log_dir_id::LogDirIds,
+    image: &MetadataImage,
+    reported_dirs: &dashmap::DashMap<(String, i32), uuid::Uuid>,
+) -> (
+    Vec<(uuid::Uuid, i32, uuid::Uuid)>,
+    Vec<(String, i32, uuid::Uuid)>,
+) {
+    let mut wire = Vec::new();
+    let mut updates = Vec::new();
+    for (topic, partition) in local_set {
+        let Some(part) = partitions.get(topic, *partition) else {
+            continue;
+        };
+        let dir = part.log_dir.load();
+        let Some(dir_uuid) = log_dir_ids.id_for(&dir) else {
+            continue;
+        };
+        let Some(topic_rec) = image.topic(topic) else {
+            continue;
+        };
+        let key = (topic.clone(), *partition);
+        if reported_dirs.get(&key).map(|e| *e.value()) == Some(dir_uuid) {
+            continue; // unchanged since last report
+        }
+        wire.push((topic_rec.topic_id, *partition, dir_uuid));
+        updates.push((topic.clone(), *partition, dir_uuid));
+    }
+    (wire, updates)
+}
+
 pub(crate) struct ReplicatorSupervisor {
     node_id: NodeId,
+    broker_id: i32,
     controller: Arc<dyn crate::metadata_source::MetadataSource>,
     partitions: Arc<PartitionRegistry>,
     log_dirs: Vec<PathBuf>,
@@ -186,6 +230,7 @@ impl ReplicatorSupervisor {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         node_id: NodeId,
+        broker_id: i32,
         controller: Arc<dyn crate::metadata_source::MetadataSource>,
         partitions: Arc<PartitionRegistry>,
         log_dirs: Vec<PathBuf>,
@@ -204,6 +249,7 @@ impl ReplicatorSupervisor {
     ) -> Self {
         Self {
             node_id,
+            broker_id,
             controller,
             partitions,
             log_dirs,
@@ -395,59 +441,21 @@ impl ReplicatorSupervisor {
         local_set: &std::collections::HashSet<(String, i32)>,
         image: &MetadataImage,
     ) {
-        let mut changed: Vec<(Uuid, i32, Uuid)> = Vec::new();
-
-        for (topic, partition) in local_set {
-            // Resolve dir UUID for this (topic, partition).
-            let Some(part) = self.partitions.get(topic, *partition) else {
-                continue;
-            };
-            let dir = part.log_dir.load();
-            let Some(dir_uuid) = self.log_dir_ids.id_for(&dir) else {
-                continue;
-            };
-
-            // Resolve topic_id.
-            let Some(topic_rec) = image.topic(topic) else {
-                continue;
-            };
-            let topic_id = topic_rec.topic_id;
-
-            let key = (topic.clone(), *partition);
-            let already_reported = self.reported_dirs.get(&key).is_some_and(|v| *v == dir_uuid);
-            if !already_reported {
-                changed.push((topic_id, *partition, dir_uuid));
-            }
-        }
-
-        if changed.is_empty() {
+        let (wire, updates) = collect_changed_assignments(
+            local_set,
+            &self.partitions,
+            &self.log_dir_ids,
+            image,
+            &self.reported_dirs,
+        );
+        if wire.is_empty() {
             return;
         }
-
-        let broker_id = i32::try_from(self.node_id).unwrap_or(-1);
-        let req = crate::assign_dirs::build_request(broker_id, &changed);
-
+        let req = crate::assign_dirs::build_request(self.broker_id, &wire);
         match crate::assign_dirs::send_assignments(&self.controller, &self.client_id, req).await {
             Ok(()) => {
-                // Update the tracker for each successfully reported assignment.
-                for (topic, partition) in local_set {
-                    let Some(part) = self.partitions.get(topic, *partition) else {
-                        continue;
-                    };
-                    let dir = part.log_dir.load();
-                    let Some(dir_uuid) = self.log_dir_ids.id_for(&dir) else {
-                        continue;
-                    };
-                    // Only update entries that were in the changed set so we
-                    // don't accidentally mark unreported partitions as done.
-                    let Some(topic_rec) = image.topic(topic) else {
-                        continue;
-                    };
-                    let topic_id = topic_rec.topic_id;
-                    if changed.contains(&(topic_id, *partition, dir_uuid)) {
-                        self.reported_dirs
-                            .insert((topic.clone(), *partition), dir_uuid);
-                    }
+                for (topic, partition, dir_uuid) in updates {
+                    self.reported_dirs.insert((topic, partition), dir_uuid);
                 }
             }
             Err(e) => {
@@ -455,7 +463,6 @@ impl ReplicatorSupervisor {
                     error = %e,
                     "assign_replicas_to_dirs report failed; will retry next reconcile"
                 );
-                // Do NOT update the tracker — the next reconcile will retry.
             }
         }
     }
@@ -777,5 +784,97 @@ mod tests {
         let part = partitions.get("t", 0).expect("partition");
         let snap = part.log.lock().expect("log lock").config_snapshot();
         assert!(snap.retention_ms == LogConfig::default().retention_ms);
+    }
+
+    #[tokio::test]
+    async fn collect_changed_assignments_reports_new_then_skips_unchanged() {
+        use crabka_log::LogConfig;
+        use crabka_metadata::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+        use tempfile::tempdir;
+        use uuid::Uuid;
+
+        // Build image with a single topic+partition.
+        let topic_id = Uuid::new_v4();
+        let mut img = MetadataImage::new(Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1],
+            isr: vec![1],
+            leader_epoch: 0,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+        }));
+
+        // Materialize the partition under a temp dir.
+        let dir = tempdir().expect("tempdir");
+        let partitions = Arc::new(PartitionRegistry::new());
+        materialize_partition(
+            &partitions,
+            "t",
+            0,
+            &[dir.path().to_path_buf()],
+            &LogConfig::default(),
+            &crate::log_dir_status::LogDirRegistry::default(),
+        )
+        .expect("materialize");
+
+        // Resolve LogDirIds over the same temp dir.
+        let log_dir_ids = crate::log_dir_id::LogDirIds::resolve(&[dir.path().to_path_buf()]);
+
+        // Confirm the partition's log_dir equals the temp dir (the parent of
+        // the placed partition sub-dir).
+        let part = partitions.get("t", 0).expect("part present");
+        let loaded_dir = part.log_dir.load();
+        assert!(**loaded_dir == dir.path().to_path_buf());
+
+        let dir_uuid = log_dir_ids.id_for(dir.path()).expect("dir uuid resolvable");
+
+        let mut local_set = HashSet::new();
+        local_set.insert(("t".to_string(), 0));
+        let reported_dirs: dashmap::DashMap<(String, i32), uuid::Uuid> = dashmap::DashMap::new();
+
+        // First call: nothing reported yet → one wire entry + one update entry.
+        let (wire, updates) = collect_changed_assignments(
+            &local_set,
+            &partitions,
+            &log_dir_ids,
+            &img,
+            &reported_dirs,
+        );
+        assert!(wire.len() == 1);
+        assert!(updates.len() == 1);
+        let (w_topic_id, w_partition, w_dir_uuid) = wire[0];
+        assert!(w_topic_id == topic_id);
+        assert!(w_partition == 0);
+        assert!(w_dir_uuid == dir_uuid);
+        let (u_topic, u_partition, u_dir_uuid) = &updates[0];
+        assert!(u_topic == "t");
+        assert!(*u_partition == 0);
+        assert!(*u_dir_uuid == dir_uuid);
+
+        // Simulate a successful send: insert the tracker update.
+        for (topic, partition, uuid) in updates {
+            reported_dirs.insert((topic, partition), uuid);
+        }
+
+        // Second call: already reported → both vecs empty.
+        let (wire2, updates2) = collect_changed_assignments(
+            &local_set,
+            &partitions,
+            &log_dir_ids,
+            &img,
+            &reported_dirs,
+        );
+        assert!(wire2.is_empty());
+        assert!(updates2.is_empty());
     }
 }
