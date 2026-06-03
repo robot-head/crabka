@@ -706,6 +706,13 @@ async fn txn_offset_commit_fences_next_gen_member_epoch() {
         "stale epoch should be STALE_MEMBER_EPOCH: {stale:?}"
     );
 
+    // Future epoch (> current) → FENCED_MEMBER_EPOCH (110).
+    let fenced = client.send(mk(epoch + 1)).await.unwrap();
+    assert!(
+        fenced.topics[0].partitions[0].error_code == 110,
+        "future epoch should be FENCED_MEMBER_EPOCH: {fenced:?}"
+    );
+
     // Current epoch + known member → accepted (NONE = 0).
     let ok = client.send(mk(epoch)).await.unwrap();
     assert!(
