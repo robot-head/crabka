@@ -153,11 +153,10 @@ pub(crate) async fn run(mut cfg: Config) {
             Err(e) => warn!(error = %e, "heartbeat send failed"),
         }
 
-        // KIP-112: re-check after the heartbeat round-trip. By this point the
-        // controller has received our `offline_log_dirs` report and can fail
-        // partitions over before we exit. The top-of-loop check fires on the
-        // next tick after dirs go offline; this one fires on the same tick
-        // when connect succeeded but we still need to shut down.
+        // KIP-112: re-check after the heartbeat round-trip. This covers the
+        // window where dirs went offline *during* the connect/send. The
+        // top-of-tick check already handles dirs that were offline before
+        // leader resolution; this one handles the same-tick race.
         if all_log_dirs_offline(&cfg) {
             trigger_all_dirs_offline_shutdown(&mut cfg, "detected after heartbeat send");
             // Returning stops heartbeats; if shutdown drags, the controller's
