@@ -574,8 +574,21 @@ impl GroupCoordinator {
     /// Apply a tombstone for a next-gen key. Removes the corresponding
     /// entry from both `seeds` and `seeds_cache`. Used by bootstrap replay
     /// to honor records with `value = None`.
+    ///
+    /// A `GroupMetadata` tombstone is the migration DOWNGRADE marker: it drops
+    /// the entire next-gen group. Replay must REMOVE the seed (from both
+    /// `seeds` and `seeds_cache`) so the group disappears from the next-gen set
+    /// `finalize` derives — letting a later classic k2 `GroupMetadata` record
+    /// reconstruct it as a CLASSIC group (log order wins). Merely zeroing the
+    /// epoch would leave the group classified next-gen and replay it back as an
+    /// empty consumer group.
     pub fn replay_next_gen_tombstone(&self, key: &persistence_next_gen::NextGenKey) {
         use persistence_next_gen::NextGenKey as K;
+        if let K::GroupMetadata { group_id } = key {
+            self.seeds.remove(group_id);
+            self.seeds_cache.remove(group_id);
+            return;
+        }
         let group_id = match key {
             K::GroupMetadata { group_id }
             | K::MemberMetadata { group_id, .. }
@@ -584,6 +597,8 @@ impl GroupCoordinator {
             | K::CurrentMemberAssignment { group_id, .. } => group_id.as_str(),
         };
         let scrub = |seed: &mut GroupSeed| match key {
+            // Unreachable: the `GroupMetadata` tombstone removes the whole seed
+            // and returns above. Kept only for match exhaustiveness.
             K::GroupMetadata { .. } => {
                 seed.group_epoch = 0;
             }

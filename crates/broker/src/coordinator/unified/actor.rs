@@ -208,6 +208,10 @@ pub struct DescribeMember {
     pub client_host: String,
     pub subscribed_topic_names: Vec<String>,
     pub assigned_partitions: HashMap<Uuid, Vec<i32>>,
+    /// `true` iff this is a classic member hosted in an upgraded group (its
+    /// `ClassicMemberFacade` is set). Distinguishes a classic-protocol member
+    /// served through the next-gen machinery from a native consumer member.
+    pub is_classic: bool,
 }
 
 #[derive(Debug)]
@@ -609,13 +613,29 @@ async fn handle_session_tick(
 }
 
 fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
+    use super::consumer_state::ClassicMemberFacade;
     state.group_epoch = seed.group_epoch;
     state.target.epoch = seed.target_epoch;
+    let group_generation = seed.group_epoch;
     for (mid, meta) in seed.members {
         let mut sub = std::collections::HashSet::new();
         for n in meta.subscribed_topic_names {
             sub.insert(n);
         }
+        // KIP-848 migration: a k5 record carrying a `classic` block describes a
+        // classic-protocol member hosted in an upgraded group. Rebuild its
+        // `ClassicMemberFacade` so the member keeps speaking
+        // `JoinGroup`/`SyncGroup`/`Heartbeat` after a coordinator failover; a
+        // native consumer-protocol member has `classic == None`.
+        let classic = meta.classic.as_ref().map(|c| ClassicMemberFacade {
+            generation_id: group_generation,
+            supported_protocols: c.supported_protocols.clone(),
+            session_timeout: Duration::from_millis(
+                u64::try_from(c.session_timeout_ms.max(0)).unwrap_or(30_000),
+            ),
+            last_synced_assignment: c.last_synced_assignment.clone(),
+            awaiting_sync: true,
+        });
         state.add_or_update_member(MemberState {
             member_id: mid.clone(),
             instance_id: meta.instance_id,
@@ -635,7 +655,7 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             assigned_partitions: HashMap::new(),
             partitions_pending_revocation: HashMap::new(),
             last_seen: Instant::now(),
-            classic: None,
+            classic,
         });
     }
     for (mid, cur) in seed.current_per_member {
@@ -965,6 +985,7 @@ fn build_describe(state: &GroupState) -> DescribeView {
                 client_host: m.client_host.clone(),
                 subscribed_topic_names: m.subscribed_topic_names.iter().cloned().collect(),
                 assigned_partitions: m.assigned_partitions.clone(),
+                is_classic: m.is_classic(),
             })
             .collect(),
     }
