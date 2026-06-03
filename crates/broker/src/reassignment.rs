@@ -153,6 +153,7 @@ mod tests {
             img.apply(&MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
                     node_id: n,
+                    broker_epoch: 0,
                     host: String::new(),
                     port: 0,
                     rack: None,
@@ -257,6 +258,7 @@ mod tests {
             img_inner.apply(&MetadataRecord::V1BrokerRegistration(
                 BrokerRegistrationRecord {
                     node_id: n,
+                    broker_epoch: 0,
                     host: String::new(),
                     port: 0,
                     rack: None,

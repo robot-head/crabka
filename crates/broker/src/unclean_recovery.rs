@@ -593,6 +593,7 @@ mod run_recovery_tests {
         img.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
                 node_id,
+                broker_epoch: 0,
                 host: host.into(),
                 port,
                 rack: None,
