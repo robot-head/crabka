@@ -46,12 +46,39 @@ pub(crate) struct Config {
     pub supervisor_shutdown: tokio_util::sync::CancellationToken,
 }
 
+/// Returns `true` when every configured log dir is currently offline.
+fn all_log_dirs_offline(cfg: &Config) -> bool {
+    !cfg.all_log_dirs.is_empty()
+        && cfg
+            .all_log_dirs
+            .iter()
+            .all(|d| cfg.log_dir_status.is_offline(d))
+}
+
+/// Trigger the KIP-112 self-shutdown: latch `should_shutdown` and cancel
+/// the supervisor. Called from every early-exit path so the check is not
+/// accidentally skipped when the controller is temporarily unreachable.
+fn trigger_all_dirs_offline_shutdown(cfg: &mut Config, reason: &str) {
+    tracing::error!(
+        reason,
+        "all log dirs offline — initiating broker self-shutdown (KIP-112)"
+    );
+    let _ = cfg.should_shutdown.send(true);
+    cfg.supervisor_shutdown.cancel();
+}
+
 pub(crate) async fn run(mut cfg: Config) {
     let mut tick = tokio::time::interval(cfg.interval);
     loop {
         tokio::select! {
             _ = tick.tick() => {},
             () = cfg.shutdown.cancelled() => return,
+        }
+        // KIP-112 check: even if we cannot reach the controller, self-shutdown
+        // must fire as long as every log dir is offline.
+        if all_log_dirs_offline(&cfg) {
+            trigger_all_dirs_offline_shutdown(&mut cfg, "detected before controller resolution");
+            return;
         }
         // Resolve current controller leader's listen address from
         // the metadata image (via brokers() iteration), or skip this
@@ -126,22 +153,15 @@ pub(crate) async fn run(mut cfg: Config) {
             Err(e) => warn!(error = %e, "heartbeat send failed"),
         }
 
-        // KIP-112: if every configured log dir is offline, the broker can
-        // serve nothing. Signal a self-shutdown (the BrokerHandle owner —
-        // the broker binary or a test — reacts to `should_shutdown`) and
-        // stop the supervisor. We do this AFTER sending the heartbeat so the
-        // controller receives this broker's final `offline_log_dirs` report
-        // and fails its partitions over first.
-        if !cfg.all_log_dirs.is_empty()
-            && cfg
-                .all_log_dirs
-                .iter()
-                .all(|d| cfg.log_dir_status.is_offline(d))
-        {
-            tracing::error!("all log dirs offline — initiating broker self-shutdown (KIP-112)");
-            let _ = cfg.should_shutdown.send(true);
-            cfg.supervisor_shutdown.cancel();
-            // Returning stops heartbeats; if shutdown drags, the controller's session timeout fences this broker independently.
+        // KIP-112: re-check after the heartbeat round-trip. By this point the
+        // controller has received our `offline_log_dirs` report and can fail
+        // partitions over before we exit. The top-of-loop check fires on the
+        // next tick after dirs go offline; this one fires on the same tick
+        // when connect succeeded but we still need to shut down.
+        if all_log_dirs_offline(&cfg) {
+            trigger_all_dirs_offline_shutdown(&mut cfg, "detected after heartbeat send");
+            // Returning stops heartbeats; if shutdown drags, the controller's
+            // session timeout fences this broker independently.
             return;
         }
     }

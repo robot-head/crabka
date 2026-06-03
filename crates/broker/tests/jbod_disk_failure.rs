@@ -229,3 +229,54 @@ async fn produce_to_partition_on_offline_dir_returns_storage_error() {
 
     handle.shutdown().await;
 }
+
+/// KIP-112: when ALL configured log dirs go offline the broker must
+/// self-shutdown (latch `should_shutdown` to `true`).  This test uses a
+/// single-dir broker so flipping that one dir offline immediately
+/// satisfies the all-dirs condition.
+///
+/// The `for_tests` heartbeat interval is 200 ms, so the check fires well
+/// within the 15-second timeout below.
+#[tokio::test]
+async fn all_log_dirs_offline_triggers_self_shutdown() {
+    let primary = tempfile::tempdir().unwrap();
+    // Single-dir broker: no extra_log_dirs.
+    let cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
+    let handle = Broker::start(cfg).await.expect("broker start");
+
+    // Subscribe before flipping so we can't miss the transition.
+    let mut shutdown_rx = handle.should_shutdown_rx();
+
+    // Flip the only log dir offline. This is the all-dirs condition.
+    assert!(
+        handle.test_mark_log_dir_offline(primary.path()),
+        "mark_offline must return true (dir was registered and online)"
+    );
+
+    // Wait up to 15 s for the heartbeat client to detect the all-dirs
+    // condition and latch should_shutdown to true.
+    let woke = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            if *shutdown_rx.borrow_and_update() {
+                return;
+            }
+            if shutdown_rx.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(
+        woke.is_ok(),
+        "broker did not signal self-shutdown when all log dirs went offline"
+    );
+    assert!(
+        *shutdown_rx.borrow(),
+        "should_shutdown must be true after all dirs offline"
+    );
+
+    // Shutdown should complete without hanging: the supervisor was already
+    // cancelled by the self-shutdown path, and cancelling an already-
+    // cancelled token is idempotent.
+    handle.shutdown().await;
+}
