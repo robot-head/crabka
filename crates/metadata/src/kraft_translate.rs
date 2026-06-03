@@ -417,9 +417,12 @@ pub fn to_kraft_values(
     to_kraft_records(rec, image)?
         .iter()
         .map(|kr| {
-            // KIP-858: PartitionRecord carries `directories` only at v1+.
-            // Every other modeled record still frames at the defaulted v0.
-            let version = i16::from(matches!(kr, KraftMetadataRecord::Partition(_)));
+            let version: i16 = match kr {
+                // KIP-858: directories field only present at v1+.
+                KraftMetadataRecord::Partition(_) => 1,
+                // All other modeled record types frame at the defaulted v0.
+                _ => 0,
+            };
             kr.encode_value(version)
                 .map_err(|e| TranslateError::Encode(e.to_string()))
         })
