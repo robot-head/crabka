@@ -93,6 +93,13 @@ pub enum GroupActorMessage {
     ClassicInspect {
         reply: oneshot::Sender<ClassicView>,
     },
+    /// Kind-agnostic admin snapshot for the classic `ListGroups`/`DescribeGroups`
+    /// path. Projects the LIVE group — classic OR consumer (hosted-classic
+    /// included, post-migration) — into a `GroupSnapshot`, so a migrated group
+    /// reports coherently regardless of the handle's spawn-time `kind` hint.
+    InspectAny {
+        reply: oneshot::Sender<GroupSnapshot>,
+    },
 
     // ── committed offsets (protocol-agnostic; on `Group.committed_offsets`) ──
     UpdateCommitted {
@@ -194,6 +201,44 @@ impl ClassicView {
                 })
                 .collect(),
         }
+    }
+}
+
+/// Project a next-gen consumer `GroupState` into the classic admin
+/// `GroupSnapshot` (`ListGroups`/`DescribeGroups`). KIP-848 consumer groups are
+/// reported to the classic admin path with `protocol_type = "consumer"`, the
+/// classic `Stable` state (the value the classic path uses for a settled group —
+/// Kafka shows a healthy consumer group as `Stable`), and `generation_id` set to
+/// the group epoch (the next-gen analogue of the classic generation). Each
+/// member's assignment is its reconciler TARGET translated to a
+/// `ConsumerProtocolAssignment` blob — the same source `serve_classic_sync` /
+/// the heartbeat response use — so an assigned member (hosted classic included)
+/// reports a non-empty assignment.
+fn build_consumer_snapshot(state: &GroupState, image: &ReconcileInput) -> GroupSnapshot {
+    GroupSnapshot {
+        group_id: state.group_id.clone(),
+        state: ClassicGroupState::Stable,
+        protocol_type: Some("consumer".into()),
+        generation_id: state.group_epoch,
+        members: state
+            .members
+            .values()
+            .map(|m| {
+                let target = state
+                    .target
+                    .per_member
+                    .get(&m.member_id)
+                    .cloned()
+                    .unwrap_or_default();
+                let assignment = migration::target_to_consumer_assignment(&target, image).to_vec();
+                MemberSnapshot {
+                    member_id: m.member_id.clone(),
+                    client_id: m.client_id.clone(),
+                    client_host: m.client_host.clone(),
+                    assignment,
+                }
+            })
+            .collect(),
     }
 }
 
@@ -509,6 +554,19 @@ async fn actor_loop(
                     GroupActorMessage::ClassicInspect { reply } => {
                         if let Some(state) = group.as_classic() {
                             let _ = reply.send(build_classic_view(state));
+                        }
+                    }
+                    GroupActorMessage::InspectAny { reply } => {
+                        // Project the LIVE group into a `GroupSnapshot`. A classic
+                        // group reuses the exact projection `ClassicInspect` uses;
+                        // a consumer group (hosted-classic members included) is
+                        // projected with each member's reconciler target translated
+                        // to a `ConsumerProtocolAssignment` blob, so assigned
+                        // members report a non-empty assignment.
+                        if let Some(state) = group.as_classic() {
+                            let _ = reply.send(build_classic_view(state).snapshot());
+                        } else if let Some(state) = group.as_consumer() {
+                            let _ = reply.send(build_consumer_snapshot(state, &metadata.snapshot()));
                         }
                     }
 
@@ -2827,6 +2885,73 @@ mod tests {
         assert!(log.has_next_gen_target_metadata_tombstone("g").await);
         // ...and wrote a classic k2 GroupMetadata (non-tombstone) for "g".
         assert!(log_has_classic_group_metadata_write(&log, "g").await);
+    }
+
+    /// KIP-848 admin coherence: after an in-place UPGRADE the group is
+    /// consumer-kind, yet the classic `kafka-consumer-groups --list`/`--describe`
+    /// path must still report it. `describe_group` (which used to return `None`
+    /// for any non-classic handle) now inspects the LIVE group and projects the
+    /// consumer state into a `GroupSnapshot`; `list_groups` includes it too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn describe_reports_an_upgraded_consumer_group() {
+        // Pin `Upgrade` policy so the transient native member's leave in
+        // `seed_and_upgrade` does NOT downgrade the group back to classic —
+        // we want it to STAY consumer-kind for this test.
+        let (coord, _log) = make_coordinator_with_topic_policy(
+            "t",
+            2,
+            crate::coordinator::unified::config::ConsumerGroupMigrationPolicy::Upgrade,
+        );
+        // Seed classic "m-classic" subscribed to "t", then upgrade in place via a
+        // native consumer heartbeat. The group is now consumer-kind, hosting the
+        // classic member (the native member left in the helper).
+        let _handle = seed_and_upgrade(&coord, "t").await;
+
+        let snap = coord
+            .describe_group("g")
+            .await
+            .expect("describe must surface an upgraded consumer group");
+        assert!(snap.group_id == "g");
+        // The hosted classic member survives the upgrade and is reported.
+        assert!(
+            !snap.members.is_empty(),
+            "an upgraded consumer group must report its members"
+        );
+        assert!(
+            snap.members.iter().any(|m| m.member_id == "m-classic"),
+            "the hosted classic member must appear in the describe snapshot"
+        );
+        // KIP-848 next-gen consumer groups report protocol_type "consumer".
+        assert!(snap.protocol_type.as_deref() == Some("consumer"));
+        // The assignment is projected from the member's reconciler target, so an
+        // assigned hosted-classic member has non-empty assignment bytes.
+        assert!(
+            snap.members
+                .iter()
+                .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty()),
+            "the assigned hosted classic member must carry a translated assignment"
+        );
+        // generation_id mirrors the group epoch (the next-gen analogue of a
+        // classic group's generation).
+        assert!(
+            snap.generation_id >= 1,
+            "an upgraded group's generation must have advanced off 0"
+        );
+
+        // `list_groups` produces the wire `group_type="classic"` rows; an
+        // upgraded (consumer-kind) group is NOT a classic row, so it does not
+        // appear here. The `ListGroups` handler surfaces it separately via
+        // `consumer_group_ids()` tagged `group_type="consumer"` (so it is neither
+        // double-counted nor mislabeled). Assert both halves of that contract.
+        let listed = coord.list_groups().await;
+        assert!(
+            !listed.iter().any(|s| s.group_id == "g"),
+            "an upgraded consumer group must not be reported as a classic row"
+        );
+        assert!(
+            coord.consumer_group_ids().contains(&"g".to_string()),
+            "the upgraded consumer group must be listed for the wire `consumer` pass"
+        );
     }
 
     /// `true` iff some appended record WRITES (non-null value) a classic k2

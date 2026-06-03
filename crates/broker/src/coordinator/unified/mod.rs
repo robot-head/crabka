@@ -419,6 +419,11 @@ impl GroupCoordinator {
     /// Ids of every live next-gen (KIP-848) consumer group actor. Mirrors
     /// [`share_group_ids`](Self::share_group_ids); used by `ListGroups` to emit
     /// `group_type="consumer"` entries without an actor round-trip.
+    ///
+    /// Note: this returns all group ids from the shared `groups` map (classic
+    /// included). The `ListGroups` handler's `emitted` dedup set prevents a
+    /// double wire emission, so a classic group is emitted once as
+    /// `group_type="classic"` and not repeated here.
     pub fn consumer_group_ids(&self) -> Vec<String> {
         self.groups.iter().map(|e| e.key().clone()).collect()
     }
@@ -429,19 +434,25 @@ impl GroupCoordinator {
         let _ = handle.tx.try_send(GroupActorMessage::ClassicSeed(group));
     }
 
-    /// Snapshot every **classic** group. Consumer groups are intentionally not
-    /// surfaced to the legacy admin APIs (preserved from the two-coordinator
-    /// era). TODO(64d-C+): surface consumer groups in admin APIs.
+    /// Snapshot every **live-classic** group for the wire `ListGroups`
+    /// (`group_type="classic"`) pass. Iterates ALL handles and discriminates on
+    /// the group's LIVE kind, not the spawn-time `handle.kind` hint (KIP-848 live
+    /// migration can make them differ): `ClassicInspect`'s arm replies only for a
+    /// classic-kind group, so a consumer/upgraded group drops its reply sender
+    /// and is skipped here. This keeps `list_groups` the sole producer of the
+    /// `classic` rows; consumer-kind groups are surfaced separately by the
+    /// `ListGroups` handler via [`consumer_group_ids`](Self::consumer_group_ids)
+    /// tagged `group_type="consumer"`, so they are NOT double-counted or
+    /// mislabeled. A *downgraded* group whose handle still reads `Consumer`
+    /// nonetheless appears here (the live kind is `Classic`).
     pub async fn list_groups(&self) -> Vec<GroupSnapshot> {
-        let handles: Vec<Arc<GroupActorHandle>> = self
-            .groups
-            .iter()
-            .filter(|e| e.value().kind == GroupKindTag::Classic)
-            .map(|e| e.value().clone())
-            .collect();
+        let handles: Vec<Arc<GroupActorHandle>> =
+            self.groups.iter().map(|e| e.value().clone()).collect();
         let mut out = Vec::with_capacity(handles.len());
         for h in handles {
             let (tx, rx) = oneshot::channel();
+            // `ClassicInspect` replies only for a classic-kind group; a
+            // consumer-kind group never sends, so `rx.await` errors and we skip.
             if h.tx
                 .send(GroupActorMessage::ClassicInspect { reply: tx })
                 .await
@@ -454,19 +465,20 @@ impl GroupCoordinator {
         out
     }
 
-    /// Snapshot a single **classic** group, or `None` if unknown / consumer.
+    /// Snapshot a single group (classic OR consumer/migrated), or `None` if
+    /// unknown. Inspects the LIVE group via [`InspectAny`] rather than gating on
+    /// the spawn-time `handle.kind`, so an upgraded consumer group still reports.
+    ///
+    /// [`InspectAny`]: GroupActorMessage::InspectAny
     pub async fn describe_group(&self, group_id: &str) -> Option<GroupSnapshot> {
         let handle = self.find(group_id)?;
-        if handle.kind != GroupKindTag::Classic {
-            return None;
-        }
         let (tx, rx) = oneshot::channel();
         handle
             .tx
-            .send(GroupActorMessage::ClassicInspect { reply: tx })
+            .send(GroupActorMessage::InspectAny { reply: tx })
             .await
             .ok()?;
-        rx.await.ok().map(|v| v.snapshot())
+        rx.await.ok()
     }
 
     /// Drop a **classic** group from the registry. `NonEmpty` if it still has
