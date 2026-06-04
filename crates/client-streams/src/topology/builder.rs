@@ -606,6 +606,8 @@ impl BuiltTopology {
             children,
             sources,
             output: Vec::new(),
+            // TODO(task5): populate from store factories
+            stores: crate::store::registry::StoreRegistry::default(),
         })
     }
 }

@@ -32,6 +32,16 @@ use super::serde::Serde;
 /// `deserialize` method — they are never the target of a `forward` from a
 /// parent node.
 pub(crate) trait ErasedNode: Send {
+    /// Called once before the first record (e.g. to open stores). Default is
+    /// a no-op so sink nodes don't need to implement it.
+    #[allow(dead_code)]
+    fn init(&mut self, _dispatch: &mut Dispatch<'_>) -> Result<(), ProcessorError> {
+        Ok(())
+    }
+
+    /// Called once at task shutdown. Default is a no-op.
+    fn close(&mut self) {}
+
     /// Process one erased record: downcast, run inner logic, push results.
     fn process(
         &mut self,
@@ -76,6 +86,16 @@ where
     KOut: Any + Send + Clone,
     VOut: Any + Send + Clone,
 {
+    fn init(&mut self, dispatch: &mut Dispatch<'_>) -> Result<(), ProcessorError> {
+        let mut ctx = ProcessorContext::<'_, '_, KOut, VOut>::new(dispatch);
+        self.inner.init(&mut ctx);
+        Ok(())
+    }
+
+    fn close(&mut self) {
+        self.inner.close();
+    }
+
     fn process(
         &mut self,
         dispatch: &mut Dispatch<'_>,
@@ -289,12 +309,14 @@ mod tests {
         children: &'a [usize],
         output: &'a mut Vec<crate::processor::erased::OutputRecord>,
         rc: &'a RecordContext,
+        stores: &'a mut crate::store::registry::StoreRegistry,
     ) -> Dispatch<'a> {
         Dispatch {
             buffer,
             children,
             output,
             record_ctx: rc,
+            stores,
         }
     }
 
@@ -314,7 +336,8 @@ mod tests {
         let mut output = Vec::new();
         let rc = default_rc();
         let children = [9usize];
-        let mut d = make_dispatch(&mut buffer, &children, &mut output, &rc);
+        let mut stores = crate::store::registry::StoreRegistry::default();
+        let mut d = make_dispatch(&mut buffer, &children, &mut output, &rc, &mut stores);
         let rec = ErasedRecord::new(
             Some(Box::new("k".to_string())),
             Box::new("hi".to_string()),
@@ -332,7 +355,8 @@ mod tests {
         let mut output = Vec::new();
         let rc = default_rc();
         let children = [0usize];
-        let mut d = make_dispatch(&mut buffer, &children, &mut output, &rc);
+        let mut stores = crate::store::registry::StoreRegistry::default();
+        let mut d = make_dispatch(&mut buffer, &children, &mut output, &rc, &mut stores);
         let rec = ErasedRecord::new(None, Box::new("hi".to_string()), 1);
         node.process(&mut d, rec).unwrap();
         let (_c, out) = buffer.pop_front().unwrap();
@@ -346,7 +370,8 @@ mod tests {
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
         let rc = default_rc();
-        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc);
+        let mut stores = crate::store::registry::StoreRegistry::default();
+        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
         // value is i32, not String — must fail
         let bad = ErasedRecord::new(None, Box::new(7i32), 0);
         check!(node.process(&mut d, bad).is_err());
@@ -358,7 +383,8 @@ mod tests {
         let mut buffer = VecDeque::new();
         let mut output = Vec::new();
         let rc = default_rc();
-        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc);
+        let mut stores = crate::store::registry::StoreRegistry::default();
+        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
         let rec = ErasedRecord::new(
             Some(Box::new("k".to_string())),
             Box::new("V".to_string()),
@@ -376,7 +402,8 @@ mod tests {
         let mut buffer = VecDeque::new();
         let mut output = Vec::new();
         let rc = default_rc();
-        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc);
+        let mut stores = crate::store::registry::StoreRegistry::default();
+        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
         let rec = ErasedRecord::new(None, Box::new("v".to_string()), 0);
         node.process(&mut d, rec).unwrap();
         check!(output.len() == 1);
@@ -390,7 +417,8 @@ mod tests {
         let mut buffer = VecDeque::new();
         let mut output = Vec::new();
         let rc = default_rc();
-        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc);
+        let mut stores = crate::store::registry::StoreRegistry::default();
+        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
         // value is i32, not String — must fail
         let bad = ErasedRecord::new(None, Box::new(7i32), 0);
         check!(node.process(&mut d, bad).is_err());
