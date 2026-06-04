@@ -83,7 +83,8 @@ impl StreamsBuilder {
     /// node + a [`KTableSourceProcessor`] + the materialized state store. The
     /// store name is taken from `Materialized` (else a fresh
     /// `KTABLE-SOURCE-STATE-STORE` counter); the changelog topic is
-    /// `<app>-<store>-changelog`. Source-topic reuse (optimizer) is Task 10.
+    /// `<app>-<store>-changelog`, unless the `REUSE_KTABLE_SOURCE_TOPICS`
+    /// optimizer pass (run by `build_optimized`) makes it reuse the source topic.
     ///
     /// [`KTableSourceProcessor`]: crate::dsl::processors::table::KTableSourceProcessor
     pub fn table<K, V, KS, VS>(
@@ -136,12 +137,30 @@ impl StreamsBuilder {
                     },
                     [&src],
                 );
-                state.topology.add_state_store::<K, V, KS, VS>(
-                    store_for_thunk.clone(),
-                    key_serde,
-                    value_serde,
-                    [h.name().to_string()],
-                );
+                // REUSE_KTABLE_SOURCE_TOPICS: if the optimizer flagged this
+                // TableSource, register the store with the source topic as its
+                // changelog; otherwise the default `<app>-<store>-changelog`.
+                match state.reuse_changelog.get(&id).cloned() {
+                    Some(changelog_topic) => {
+                        state
+                            .topology
+                            .add_state_store_with_changelog::<K, V, KS, VS>(
+                                store_for_thunk.clone(),
+                                key_serde,
+                                value_serde,
+                                [h.name().to_string()],
+                                changelog_topic,
+                            );
+                    }
+                    None => {
+                        state.topology.add_state_store::<K, V, KS, VS>(
+                            store_for_thunk.clone(),
+                            key_serde,
+                            value_serde,
+                            [h.name().to_string()],
+                        );
+                    }
+                }
                 // Children of the TableSource wire to the processor output.
                 state.handle_name.insert(id, h.name().to_string());
             },
@@ -176,16 +195,18 @@ impl StreamsBuilder {
     /// run the optimizer passes over the logical graph, then lower to the
     /// Processor-API [`Topology`] and finalize.
     ///
-    /// Today the only pass is `MERGE_REPARTITION_TOPICS` (two aggregations off one
-    /// key-changing op share a single repartition topic); the `KTable`
-    /// source-topic reuse pass is added in a later task. Same outstanding-handle
-    /// requirement as [`build`](Self::build).
+    /// The passes are `MERGE_REPARTITION_TOPICS` (two aggregations off one
+    /// key-changing op share a single repartition topic) and
+    /// `REUSE_KTABLE_SOURCE_TOPICS` (a `builder.table()` store reuses its source
+    /// topic as its changelog). They're independent, so order doesn't matter.
+    /// Same outstanding-handle requirement as [`build`](Self::build).
     pub fn build_optimized(
         self,
         app_id: &str,
     ) -> Result<crate::topology::BuiltTopology, crate::topology::TopologyError> {
         let mut graph = self.into_graph("build_optimized");
         crate::dsl::optimizer::merge_repartition_topics(&mut graph);
+        crate::dsl::optimizer::reuse_ktable_source_topics(&mut graph);
         let topology = crate::dsl::lower::lower(graph, app_id);
         topology.build(app_id)
     }
@@ -269,6 +290,55 @@ mod tests {
         let wire = b.build_optimized("app").unwrap().to_wire();
         check!(wire.subtopologies.len() == 1);
         check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
+    }
+
+    #[test]
+    fn table_default_build_keeps_derived_changelog_name() {
+        // Without the optimizer (plain `build`), a `table()` store's changelog is
+        // the JVM-default `<app>-<store>-changelog` — REUSE_KTABLE_SOURCE_TOPICS
+        // must NOT fire.
+        let b = StreamsBuilder::new();
+        b.table::<String, String, _, _>(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("store"),
+        )
+        .to_stream()
+        .to(
+            "out",
+            crate::processor::serde::Produced::with(StringSerde, StringSerde),
+        );
+        let wire = b.build("app").unwrap().to_wire();
+        let cl: Vec<&str> = wire.subtopologies[0]
+            .state_changelog_topics
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        check!(cl == vec!["app-store-changelog"]);
+    }
+
+    #[test]
+    fn table_optimized_build_reuses_source_topic_as_changelog() {
+        // With the optimizer (`build_optimized`), the `table()` store's changelog
+        // is the SOURCE topic ("in"), not "app-store-changelog".
+        let b = StreamsBuilder::new();
+        b.table::<String, String, _, _>(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("store"),
+        )
+        .to_stream()
+        .to(
+            "out",
+            crate::processor::serde::Produced::with(StringSerde, StringSerde),
+        );
+        let wire = b.build_optimized("app").unwrap().to_wire();
+        let cl: Vec<&str> = wire.subtopologies[0]
+            .state_changelog_topics
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect();
+        check!(cl == vec!["in"]);
     }
 
     #[test]

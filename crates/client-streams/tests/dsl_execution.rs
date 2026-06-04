@@ -154,7 +154,7 @@ fn dsl_table_map_values_executes() {
         Consumed::with(StringSerde, I64Serde),
         Materialized::with(StringSerde, I64Serde).as_store("tbl"),
     )
-    .map_values(
+    .map_values_materialized(
         |v: &i64| v * 10,
         Materialized::with(StringSerde, I64Serde).as_store("tbl-x10"),
     )

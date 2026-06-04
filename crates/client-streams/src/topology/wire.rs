@@ -84,8 +84,13 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
     let mut state_changelog_topics: Vec<TopicInfo> = g
         .changelog_stores
         .iter()
-        .map(|store| TopicInfo {
-            name: format!("{app}-{store}-changelog"),
+        .map(|(store, changelog_override)| TopicInfo {
+            // `REUSE_KTABLE_SOURCE_TOPICS`: when the store reuses its source
+            // topic as the changelog, the override carries that topic name;
+            // otherwise the JVM-default `<app>-<store>-changelog`.
+            name: changelog_override
+                .clone()
+                .unwrap_or_else(|| format!("{app}-{store}-changelog")),
             partitions: 0,
             replication_factor: INTERNAL_TOPIC_DEFAULT_RF,
             topic_configs: changelog_topic_configs(),
@@ -369,7 +374,7 @@ mod tests {
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
-            changelog_stores: vec!["store".into()],
+            changelog_stores: vec![("store".into(), None)],
             ..Default::default()
         }];
         let topo = to_wire(&groups, "my-app");
@@ -379,6 +384,36 @@ mod tests {
         check!(cl[0].partitions == 0);
         // JVM-faithful internal-topic encoding: RF = -1 (broker default) and the
         // sorted KV-store changelog configs.
+        check!(cl[0].replication_factor == -1);
+        let configs: Vec<(&str, &str)> = cl[0]
+            .topic_configs
+            .iter()
+            .map(|kv| (kv.key.as_str(), kv.value.as_str()))
+            .collect();
+        check!(
+            configs
+                == vec![
+                    ("cleanup.policy", "compact"),
+                    ("message.timestamp.type", "CreateTime"),
+                ]
+        );
+    }
+
+    #[test]
+    fn changelog_override_uses_source_topic_name_verbatim() {
+        // REUSE_KTABLE_SOURCE_TOPICS: the override makes the changelog topic the
+        // source topic ("in"), not "my-app-store-changelog". Configs/RF stay the
+        // standard KV-store changelog configs.
+        let groups = vec![GroupTopics {
+            id: "0".into(),
+            source_topics: vec!["in".into()],
+            changelog_stores: vec![("store".into(), Some("in".into()))],
+            ..Default::default()
+        }];
+        let topo = to_wire(&groups, "my-app");
+        let cl = &topo.subtopologies[0].state_changelog_topics;
+        check!(cl.len() == 1);
+        check!(cl[0].name == "in");
         check!(cl[0].replication_factor == -1);
         let configs: Vec<(&str, &str)> = cl[0]
             .topic_configs

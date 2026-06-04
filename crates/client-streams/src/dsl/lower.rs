@@ -7,13 +7,30 @@
 //! valid topological order (parents before children) for the stateless chain and
 //! merge. A node whose thunk is `None` (e.g. the repartition stub) is skipped;
 //! later tasks attach those thunks and refine optimizer/branch ordering.
-use crate::dsl::graph::{LogicalGraph, LowerState};
+use crate::dsl::graph::{GraphNodeKind, LogicalGraph, LowerState};
 
 pub(crate) fn lower(mut graph: LogicalGraph, app_id: &str) -> crate::topology::Topology {
+    // REUSE_KTABLE_SOURCE_TOPICS: collect node id → source topic for every
+    // TableSource the optimizer flagged, so its thunk can register its store with
+    // the source topic as the changelog. Empty when the optimizer didn't run.
+    let reuse_changelog = graph
+        .nodes
+        .iter()
+        .filter_map(|n| match &n.kind {
+            GraphNodeKind::TableSource {
+                topic,
+                reuse_source_for_changelog: true,
+                ..
+            } => Some((n.id, topic.clone())),
+            _ => None,
+        })
+        .collect();
+
     let mut state = LowerState {
         topology: crate::topology::Topology::new(),
         app_id: app_id.to_string(),
         handle_name: std::collections::HashMap::new(),
+        reuse_changelog,
     };
     let aliases = std::mem::take(&mut graph.aliases);
     for node in &mut graph.nodes {

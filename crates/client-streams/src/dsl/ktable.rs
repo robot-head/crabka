@@ -17,7 +17,8 @@ use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kstream::KStream;
 use crate::dsl::names;
 use crate::dsl::processors::table::{
-    KTableFilterProcessor, KTableMapValuesProcessor, KTableToStreamProcessor,
+    KTableFilterProcessor, KTableMapValuesProcessor, KTableMapValuesViewProcessor,
+    KTableToStreamProcessor,
 };
 use crate::processor::serde::Serde;
 use crate::topology::NodeHandle;
@@ -78,9 +79,44 @@ where
         KStream::new(Rc::clone(&self.builder), id)
     }
 
+    /// `mapValues`: transform each value and forward the rewritten table view
+    /// **without materializing** a store (the JVM's non-materialized
+    /// `mapValues`). Key unchanged; emits no changelog topic. Use
+    /// [`map_values_materialized`](Self::map_values_materialized) for the
+    /// store-backed form.
+    pub fn map_values<V2, F>(&self, f: F) -> KTable<K, V2>
+    where
+        V2: Any + Send + Clone,
+        F: Fn(&V) -> V2 + Clone + Send + Sync + 'static,
+    {
+        let parent_id = self.node;
+        let mut g = self.builder.borrow_mut();
+        let name = g.new_processor_name(names::TABLE_MAPVALUES);
+        let id = g.graph.add(
+            name.clone(),
+            GraphNodeKind::TableProcessor { store_name: None },
+            vec![parent_id],
+        );
+        let f2 = f.clone();
+        g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+            let h = state.topology.add_processor::<K, V, K, V2, _, _, _>(
+                name.clone(),
+                move || KTableMapValuesViewProcessor {
+                    f: f2.clone(),
+                    _pd: PhantomData,
+                },
+                [parent],
+            );
+            state.handle_name.insert(id, h.name().to_string());
+        }));
+        drop(g);
+        KTable::new(Rc::clone(&self.builder), id, None)
+    }
+
     /// `mapValues`: transform each value, materializing the rewritten table into
     /// a new store. Key unchanged.
-    pub fn map_values<V2, KS, VS, F>(
+    pub fn map_values_materialized<V2, KS, VS, F>(
         &self,
         f: F,
         materialized: crate::dsl::config::Materialized<KS, VS>,

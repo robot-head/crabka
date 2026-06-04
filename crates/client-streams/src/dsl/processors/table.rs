@@ -66,7 +66,8 @@ where
 // ── KTableMapValuesProcessor ─────────────────────────────────────────────────
 
 /// Applies a value-mapping function, writes the new value into the store, and
-/// forwards the rewritten record.
+/// forwards the rewritten record. Used by the **materialized** `map_values`
+/// form (`map_values_materialized`).
 #[allow(dead_code)]
 pub(crate) struct KTableMapValuesProcessor<K, V, V2, F> {
     pub f: F,
@@ -88,6 +89,31 @@ where
             .get_state_store::<K, V2>(&self.store_name)
             .expect("KTable map_values store not found");
         store.put(key.clone(), new_value.clone());
+        ctx.forward(Record::new(Some(key), new_value, r.timestamp));
+    }
+}
+
+// ── KTableMapValuesViewProcessor ─────────────────────────────────────────────
+
+/// Applies a value-mapping function and forwards the rewritten record **without
+/// materializing** a store. Backs the bare `KTable::map_values` form (the JVM's
+/// non-materialized `mapValues`, which produces no changelog topic).
+#[allow(dead_code)]
+pub(crate) struct KTableMapValuesViewProcessor<K, V, V2, F> {
+    pub f: F,
+    pub _pd: Marker<(K, V, V2)>,
+}
+
+impl<K, V, V2, F> Processor<K, V, K, V2> for KTableMapValuesViewProcessor<K, V, V2, F>
+where
+    K: std::any::Any + Send + Clone,
+    V: 'static,
+    V2: std::any::Any + Send + Clone,
+    F: Fn(&V) -> V2 + Send + 'static,
+{
+    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V2>, r: Record<K, V>) {
+        let key = r.key.expect("KTable map_values requires a non-null key");
+        let new_value = (self.f)(&r.value);
         ctx.forward(Record::new(Some(key), new_value, r.timestamp));
     }
 }
@@ -274,6 +300,39 @@ mod tests {
                 .get(&"k".to_string())
                 == Some("9".to_string())
         );
+    }
+
+    #[test]
+    fn ktable_map_values_view_rewrites_without_a_store() {
+        // The non-materialized map_values forwards the rewritten value and never
+        // touches a store — exercise with an empty StoreRegistry.
+        let mut stores = StoreRegistry::default();
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = rc();
+
+        let mut proc = KTableMapValuesViewProcessor::<String, i64, String, _> {
+            f: |v: &i64| v.to_string(),
+            _pd: PhantomData,
+        };
+
+        {
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
+            proc.process(&mut ctx, Record::new(Some("k".into()), 9i64, 0));
+        }
+
+        let (_, rec) = buffer.pop_front().unwrap();
+        check!(*rec.value.downcast::<String>().unwrap() == "9");
+        // No store was created or required.
+        check!(stores.names().is_empty());
     }
 
     #[test]

@@ -347,17 +347,69 @@ impl Topology {
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
+        self.add_state_store_inner::<K, V, KS, VS>(name, key_serde, value_serde, processors, None)
+    }
+
+    /// Register a state store whose changelog is an existing **source topic**
+    /// rather than the derived `<app_id>-<name>-changelog`.
+    ///
+    /// This backs the `REUSE_KTABLE_SOURCE_TOPICS` DSL optimizer: a
+    /// `builder.table(topic, ...)` store can reuse `topic` as its changelog, so
+    /// no separate `app-<store>-changelog` topic is created and the wire
+    /// topology lists `topic` as the store's changelog. `changelog_topic` is the
+    /// topic name used both in the wire `state_changelog_topics` entry and as the
+    /// runtime store's changelog target.
+    pub fn add_state_store_with_changelog<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+        changelog_topic: impl Into<String>,
+    ) -> &mut Self
+    where
+        K: 'static,
+        V: 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        self.add_state_store_inner::<K, V, KS, VS>(
+            name,
+            key_serde,
+            value_serde,
+            processors,
+            Some(changelog_topic.into()),
+        )
+    }
+
+    fn add_state_store_inner<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+        changelog_override: Option<String>,
+    ) -> &mut Self
+    where
+        K: 'static,
+        V: 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
         let name: String = name.into();
         let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
-        self.reg.add_store(&name, procs);
+        self.reg.add_store(&name, procs, changelog_override.clone());
         self.store_factories.insert(
             name,
             Box::new(move |app_id: &str, store_name: &str| {
+                let changelog = changelog_override
+                    .clone()
+                    .unwrap_or_else(|| format!("{app_id}-{store_name}-changelog"));
                 Box::new(crate::store::memory::InMemoryKeyValueStore::<K, V>::new(
                     store_name.to_string(),
                     Box::new(key_serde.clone()),
                     Box::new(value_serde.clone()),
-                    format!("{app_id}-{store_name}-changelog"),
+                    changelog,
                 )) as Box<dyn crate::store::api::StateStore>
             }),
         );

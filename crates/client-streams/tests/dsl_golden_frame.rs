@@ -40,6 +40,28 @@ fn count_matches_jvm() {
 }
 
 #[test]
+fn table_reuse_matches_jvm() {
+    use crabka_client_streams::Materialized;
+    // The JVM `tableReuse()` app: `builder.table("in", Materialized.as("store"))`
+    // followed by a NON-materialized `mapValues`, then `.toStream().to("out")`.
+    // Under `optimization=all` the REUSE_KTABLE_SOURCE_TOPICS pass makes the
+    // table store's changelog the SOURCE topic ("in") instead of
+    // "app-store-changelog", and the non-materialized mapValues adds no store —
+    // so the single subtopology carries exactly one changelog topic named "in".
+    let b = StreamsBuilder::new();
+    b.table(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("store"),
+    )
+    .map_values(|v: &String| v.clone()) // NON-materialized
+    .to_stream()
+    .to("out", Produced::with(StringSerde, StringSerde));
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "table_reuse");
+}
+
+#[test]
 fn repartition_merge_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     // The JVM `repartitionMerge()` app: one `selectKey` feeds TWO bare aggregations

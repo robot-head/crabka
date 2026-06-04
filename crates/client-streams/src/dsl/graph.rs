@@ -17,6 +17,12 @@ pub(crate) struct LowerState {
     pub topology: crate::topology::Topology,
     pub app_id: String,
     pub handle_name: std::collections::HashMap<NodeId, String>,
+    /// `REUSE_KTABLE_SOURCE_TOPICS`: node id → the source topic its store should
+    /// reuse as its changelog. A `TableSource` thunk consults this at lowering
+    /// time; if present it registers its store with that changelog topic
+    /// (via `add_state_store_with_changelog`) instead of the default
+    /// `<app>-<store>-changelog`. Empty unless the optimizer ran.
+    pub reuse_changelog: std::collections::HashMap<NodeId, String>,
 }
 
 #[allow(dead_code)]
