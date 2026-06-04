@@ -58,7 +58,7 @@
 //!
 //! let mut topo = Topology::new();
 //! topo.add_source("src", ["in"], StringSerde, StringSerde);
-//! topo.add_processor("up", || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>, ["src"]);
+//! topo.add_processor("up", || Upper, ["src"]);
 //! topo.add_sink("out", "out", ["up"], StringSerde, StringSerde);
 //! let built = topo.build("my-app").unwrap();
 //!

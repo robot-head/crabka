@@ -22,18 +22,54 @@ pub trait Processor<KIn, VIn, KOut, VOut>: Send + 'static {
     fn close(&mut self) {}
 }
 
+/// A boxed processor is itself a [`Processor`], delegating to the inner value.
+///
+/// This is what lets a [`ProcessorSupplier`] closure return `Box<dyn
+/// Processor<…>>` when the concrete type is chosen at runtime: the boxed value
+/// still satisfies the supplier blanket impl (which only requires the closure's
+/// return type to be *some* `Processor`). For the common case, return the
+/// concrete processor directly (`|| MyProc`) and skip the box entirely.
+impl<KIn, VIn, KOut, VOut> Processor<KIn, VIn, KOut, VOut>
+    for Box<dyn Processor<KIn, VIn, KOut, VOut>>
+where
+    KIn: 'static,
+    VIn: 'static,
+    KOut: 'static,
+    VOut: 'static,
+{
+    fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {
+        (**self).init(ctx);
+    }
+    fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, KOut, VOut>,
+        record: Record<KIn, VIn>,
+    ) {
+        (**self).process(ctx, record);
+    }
+    fn close(&mut self) {
+        (**self).close();
+    }
+}
+
 /// Factory for [`Processor`] instances (one per task → per-task isolation).
 pub trait ProcessorSupplier<KIn, VIn, KOut, VOut>: Send + Sync + 'static {
     fn get(&self) -> Box<dyn Processor<KIn, VIn, KOut, VOut>>;
 }
 
-// Blanket impl so a closure `|| Box::new(MyProc)` is a supplier.
-impl<F, KIn, VIn, KOut, VOut> ProcessorSupplier<KIn, VIn, KOut, VOut> for F
+// Blanket impl so a closure `|| MyProc` is a supplier. The closure returns a
+// *concrete* `P: Processor`, which we box. Because `P` is concrete, the four KV
+// type parameters are inferred from `P`'s single `Processor` impl — callers
+// never annotate them. A closure returning `Box<dyn Processor<…>>` also works
+// (the boxed value is itself a `Processor`, see the impl above), covering the
+// rarer case of picking the concrete processor type at runtime.
+impl<F, P, KIn, VIn, KOut, VOut> ProcessorSupplier<KIn, VIn, KOut, VOut> for F
 where
-    F: Fn() -> Box<dyn Processor<KIn, VIn, KOut, VOut>> + Send + Sync + 'static,
+    F: Fn() -> P + Send + Sync + 'static,
+    P: Processor<KIn, VIn, KOut, VOut>,
 {
     fn get(&self) -> Box<dyn Processor<KIn, VIn, KOut, VOut>> {
-        self()
+        Box::new(self())
     }
 }
 

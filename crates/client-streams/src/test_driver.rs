@@ -146,16 +146,8 @@ mod tests {
     fn map_filter() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
         t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["src"],
-        );
-        t.add_processor(
-            "flt",
-            || Box::new(DropEmpty) as Box<dyn Processor<String, String, String, String>>,
-            ["up"],
-        );
+        t.add_processor("up", || Upper, ["src"]);
+        t.add_processor("flt", || DropEmpty, ["up"]);
         t.add_sink("out", "out", ["flt"], StringSerde, StringSerde);
         t.build("app").unwrap()
     }
@@ -195,18 +187,10 @@ mod tests {
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
         t.add_source("s1", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "id",
-            || Box::new(Identity) as Box<dyn Processor<String, String, String, String>>,
-            ["s1"],
-        );
+        t.add_processor("id", || Identity, ["s1"]);
         t.add_sink("to_rp", "rp", ["id"], StringSerde, StringSerde);
         t.add_source("s2", ["rp"], StringSerde, StringSerde);
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["s2"],
-        );
+        t.add_processor("up", || Upper, ["s2"]);
         t.add_sink("out", "out", ["up"], StringSerde, StringSerde);
         let built = t.build("app").unwrap();
 
@@ -219,11 +203,7 @@ mod tests {
     fn branch_to_two_sinks() {
         let mut t = Topology::new();
         t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["src"],
-        );
+        t.add_processor("up", || Upper, ["src"]);
         t.add_sink("a", "out-a", ["up"], StringSerde, StringSerde);
         t.add_sink("b", "out-b", ["up"], StringSerde, StringSerde);
         let built = t.build("app").unwrap();

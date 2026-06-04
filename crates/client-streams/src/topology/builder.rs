@@ -179,8 +179,11 @@ impl Topology {
     /// Add a processor node with the given predecessor node names.
     ///
     /// `supplier` produces a fresh `Processor` instance per task. The closure
-    /// form `|| Box::new(MyProc)` satisfies [`ProcessorSupplier`] via a blanket
-    /// impl and is the most common form.
+    /// form `|| MyProc` satisfies [`ProcessorSupplier`] via a blanket impl and
+    /// is the most common form; the four KV type parameters are inferred from
+    /// the returned processor's `Processor` impl, so callers never annotate
+    /// them. (Returning `Box::new(MyProc) as Box<dyn Processor<…>>` also works
+    /// when the concrete type is chosen at runtime.)
     pub fn add_processor<KIn, VIn, KOut, VOut, S>(
         &mut self,
         name: impl Into<String>,
@@ -624,11 +627,7 @@ mod tests {
     fn build_single_source_sink_wire_unchanged() {
         let mut t = Topology::new();
         t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["src"],
-        );
+        t.add_processor("up", || Upper, ["src"]);
         t.add_sink("out", "out-topic", ["up"], StringSerde, StringSerde);
         let built = t.build("app").unwrap();
         let wire = built.to_wire();
@@ -642,11 +641,7 @@ mod tests {
     fn type_mismatch_is_reported_at_build() {
         let mut t = Topology::new();
         t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["src"],
-        ); // forwards Record<String,String>
+        t.add_processor("up", || Upper, ["src"]); // forwards Record<String,String>
         t.add_sink("out", "out-topic", ["up"], StringSerde, I64Serde); // expects Record<String,i64>
         let msg = t.build("app").unwrap_err().to_string();
         check!(msg.contains("wiring type error"));
@@ -666,11 +661,7 @@ mod tests {
     fn instantiate_runs_records() {
         let mut t = Topology::new();
         t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["src"],
-        );
+        t.add_processor("up", || Upper, ["src"]);
         t.add_sink("out", "out-topic", ["up"], StringSerde, StringSerde);
         let built = t.build("app").unwrap();
         let mut g = built.instantiate().unwrap();
@@ -691,11 +682,7 @@ mod tests {
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
         t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "proc",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["src"],
-        );
+        t.add_processor("proc", || Upper, ["src"]);
         t.add_state_store("store", ["proc"]);
         t.add_sink("rsink", "rp", ["proc"], StringSerde, StringSerde);
         t.add_source("rsrc", ["rp"], StringSerde, StringSerde);
@@ -747,7 +734,7 @@ mod tests {
         t.add_source("src", ["in"], StringSerde, StringSerde);
         t.add_processor(
             "p1",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
+            || Upper,
             ["src", "p2"], // p2 not added yet → forward reference → rejected
         );
         check!(t.build("app").is_err());
@@ -767,11 +754,7 @@ mod tests {
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
         t.add_source("s1", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "p",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["s1"],
-        );
+        t.add_processor("p", || Upper, ["s1"]);
         t.add_sink("to_rp", "rp", ["p"], StringSerde, StringSerde);
         t.add_source("s2", ["rp"], StringSerde, StringSerde);
         t.add_sink("out", "out", ["s2"], StringSerde, StringSerde);
