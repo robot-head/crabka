@@ -33,7 +33,6 @@ pub(crate) struct Graph {
 impl Graph {
     /// Feed one record arriving on `topic`; runs the graph to completion,
     /// appending sink outputs to `self.output`. Unknown topics are ignored.
-    #[allow(dead_code)] // called from builder tests; Task 8 TopologyTestDriver uses this
     pub fn pipe(
         &mut self,
         topic: &str,
@@ -85,7 +84,6 @@ impl Graph {
         Ok(())
     }
 
-    #[allow(dead_code)] // called from builder tests; Task 8 TopologyTestDriver uses this
     pub fn take_output(&mut self) -> Vec<OutputRecord> {
         std::mem::take(&mut self.output)
     }

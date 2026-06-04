@@ -9,6 +9,13 @@ use super::record::{Record, RecordContext};
 
 /// A stateless record processor. One instance is created per task via
 /// [`ProcessorSupplier::get`]. Mirrors `org.apache.kafka.streams.processor.api.Processor`.
+///
+/// ## Lifecycle
+///
+/// `init` is invoked once before the first record and `close` once at task
+/// shutdown — **by the runtime (`KafkaStreams`, sub-project #2b)**. The
+/// [`TopologyTestDriver`](crate::TopologyTestDriver) (#2a) does **not** yet
+/// invoke `init`/`close`; keep processors usable as-constructed for now.
 pub trait Processor<KIn, VIn, KOut, VOut>: Send + 'static {
     fn init(&mut self, _ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {}
     fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, KOut, VOut>, record: Record<KIn, VIn>);
@@ -48,7 +55,6 @@ where
     KOut: Any + Send + Clone,
     VOut: Any + Send + Clone,
 {
-    #[allow(dead_code)] // used by future tasks + tests
     pub(crate) fn new(dispatch: &'ctx mut Dispatch<'d>) -> Self {
         Self {
             dispatch,

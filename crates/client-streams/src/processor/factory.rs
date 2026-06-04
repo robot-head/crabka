@@ -63,10 +63,8 @@ pub(crate) struct NodeFactory {
     pub output_names: Option<(&'static str, &'static str)>,
 
     /// Constructs a fresh [`ErasedNode`]; `None` for sources.
-    #[allow(dead_code)] // used by BuiltTopology::instantiate (Task 7+)
     pub make_node: Option<MakeNode>,
 
     /// Constructs a fresh deserialization closure; `None` for non-sources.
-    #[allow(dead_code)] // used by BuiltTopology::instantiate (Task 7+)
     pub make_deser: Option<MakeDeser>,
 }

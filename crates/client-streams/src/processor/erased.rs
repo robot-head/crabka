@@ -23,7 +23,6 @@ pub enum ProcessorError {
 }
 
 /// A record with erased key/value, as it flows between nodes.
-#[allow(dead_code)] // fields read in future tasks + tests
 pub(crate) struct ErasedRecord {
     pub key: Option<Box<dyn Any + Send>>,
     pub value: Box<dyn Any + Send>,
@@ -47,7 +46,6 @@ impl ErasedRecord {
 /// A record emitted by a sink node, collected by the driver (test driver: into
 /// an output queue; runtime: into the producer).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) struct OutputRecord {
     pub topic: String,
     pub key: Option<Bytes>,
@@ -58,7 +56,6 @@ pub(crate) struct OutputRecord {
 /// What the driver lends to a node for the duration of one `process` call:
 /// the forward buffer (for source/processor children), this node's child
 /// indices, the sink output collector, and the source-record context.
-#[allow(dead_code)]
 pub(crate) struct Dispatch<'a> {
     pub buffer: &'a mut VecDeque<(usize, ErasedRecord)>,
     pub children: &'a [usize],

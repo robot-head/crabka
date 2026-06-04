@@ -422,12 +422,10 @@ impl Topology {
 /// Lightweight description of one node's wiring (no type parameters).
 /// Used during `BuiltTopology::instantiate()`.
 pub(crate) struct NodeSpec {
-    #[allow(dead_code)] // used by instantiate() (Task 7+)
     pub name: String,
     /// `"source"` | `"processor"` | `"sink"`
     pub kind: &'static str,
     /// Predecessor names (empty for sources).
-    #[allow(dead_code)] // used by instantiate() (Task 7+)
     pub predecessors: Vec<String>,
     /// Topics read (sources only; empty otherwise).
     pub source_topics: Vec<String>,
@@ -449,7 +447,6 @@ pub struct BuiltTopology {
     wire: WireTopology,
     source_topics: BTreeMap<String, Vec<String>>,
     application_id: String,
-    #[allow(dead_code)] // used by instantiate() (Task 7+)
     factories: HashMap<String, NodeFactory>,
     node_specs: Vec<NodeSpec>,
 }
@@ -507,7 +504,6 @@ impl BuiltTopology {
     /// Instantiate a runnable [`Graph`] for this topology.
     ///
     /// Each call produces an independent graph (its own processor instances).
-    #[allow(dead_code)] // called from test suite; Task 8 (TopologyTestDriver) will call it externally
     pub(crate) fn instantiate(&self) -> Result<Graph, ProcessorError> {
         // 1. Collect the processor/sink nodes in spec order and build a name→idx map.
         //    Sources are NOT in the nodes vec — they become GraphSources.
@@ -741,6 +737,19 @@ mod tests {
         let mut t = Topology::new();
         t.add_source("src", ["in"], StringSerde, StringSerde);
         t.add_source("src", ["other"], StringSerde, StringSerde); // duplicate
+        check!(t.build("app").is_err());
+    }
+
+    #[test]
+    fn forward_reference_predecessor_is_rejected_preventing_cycles() {
+        // Referencing a not-yet-added node (which is how you'd build a cycle) is rejected.
+        let mut t = Topology::new();
+        t.add_source("src", ["in"], StringSerde, StringSerde);
+        t.add_processor(
+            "p1",
+            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
+            ["src", "p2"], // p2 not added yet → forward reference → rejected
+        );
         check!(t.build("app").is_err());
     }
 }
