@@ -55,12 +55,14 @@ pub(crate) struct OutputRecord {
 
 /// What the driver lends to a node for the duration of one `process` call:
 /// the forward buffer (for source/processor children), this node's child
-/// indices, the sink output collector, and the source-record context.
+/// indices, the sink output collector, the source-record context, and the
+/// per-task store registry (for `get_state_store`).
 pub(crate) struct Dispatch<'a> {
     pub buffer: &'a mut VecDeque<(usize, ErasedRecord)>,
     pub children: &'a [usize],
     pub output: &'a mut Vec<OutputRecord>,
     pub record_ctx: &'a RecordContext,
+    pub stores: &'a mut crate::store::registry::StoreRegistry,
 }
 
 #[cfg(test)]

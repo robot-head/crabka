@@ -127,6 +127,15 @@ where
             .push_back((last, ErasedRecord::new(key, value, ts)));
     }
 
+    /// Access a connected state store, typed. `None` if absent or the K/V types
+    /// don't match. Fetch it per-record (do not hold across `process` calls).
+    pub fn get_state_store<K2: 'static, V2: 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::api::KeyValueStore<K2, V2>> {
+        self.dispatch.stores.get_kv::<K2, V2>(name)
+    }
+
     /// Metadata of the source record currently being processed.
     #[must_use]
     pub fn record_context(&self) -> &RecordContext {
@@ -174,11 +183,13 @@ mod tests {
             timestamp: 5,
         };
         let children = [3usize, 4usize];
+        let mut stores = crate::store::registry::StoreRegistry::default();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
             output: &mut output,
             record_ctx: &rc,
+            stores: &mut stores,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         Upper.process(&mut ctx, Record::new(Some("k".into()), "hi".into(), 5));
@@ -204,11 +215,13 @@ mod tests {
             timestamp: 5,
         };
         let children = [1usize];
+        let mut stores = crate::store::registry::StoreRegistry::default();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
             output: &mut output,
             record_ctx: &rc,
+            stores: &mut stores,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         boxed.init(&mut ctx); // forwards to Upper's default no-op
@@ -230,11 +243,13 @@ mod tests {
             offset: 0,
             timestamp: 9,
         };
+        let mut stores = crate::store::registry::StoreRegistry::default();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &[],
             output: &mut output,
             record_ctx: &rc,
+            stores: &mut stores,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         p.init(&mut ctx); // default no-op

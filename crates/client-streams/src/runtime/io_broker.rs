@@ -133,6 +133,7 @@ impl RecordProducer for BrokerProducer {
     async fn send(
         &self,
         topic: &str,
+        partition: Option<i32>,
         key: Option<Bytes>,
         value: Option<Bytes>,
     ) -> Result<(), StreamsClientError> {
@@ -140,7 +141,7 @@ impl RecordProducer for BrokerProducer {
             .inner
             .send(ProducerRecord {
                 topic: topic.to_string(),
-                partition: None,
+                partition,
                 key,
                 value,
                 ..Default::default()

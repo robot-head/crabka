@@ -8,6 +8,7 @@ use std::collections::VecDeque;
 use super::erased::{Dispatch, ErasedRecord, OutputRecord, ProcessorError};
 use super::node::ErasedNode;
 use super::record::RecordContext;
+use crate::store::registry::StoreRegistry;
 
 /// Closure type used by [`GraphSource`] to deserialize raw bytes into an
 /// [`ErasedRecord`]. Aliased here to keep the `GraphSource` field legible.
@@ -28,6 +29,7 @@ pub(crate) struct Graph {
     pub children: Vec<Vec<usize>>,
     pub sources: Vec<GraphSource>,
     pub output: Vec<OutputRecord>,
+    pub stores: StoreRegistry,
 }
 
 impl Graph {
@@ -67,14 +69,18 @@ impl Graph {
             // but rustc can't see through the index.
             let children = std::mem::take(&mut self.children[idx]);
             let res = {
-                // Borrow `nodes` and `output` as two independent `&mut` fields.
+                // Bind disjoint fields as separate locals so rustc can see
+                // they don't alias: nodes[idx], output, and stores are three
+                // distinct fields of `self`.
                 let node = &mut self.nodes[idx];
                 let out = &mut self.output;
+                let stores = &mut self.stores;
                 let mut d = Dispatch {
                     buffer: &mut buffer,
                     children: &children,
                     output: out,
                     record_ctx: &rc,
+                    stores,
                 };
                 node.process(&mut d, rec)
             };
@@ -86,6 +92,77 @@ impl Graph {
 
     pub fn take_output(&mut self) -> Vec<OutputRecord> {
         std::mem::take(&mut self.output)
+    }
+
+    /// Call `init` on every node in index order. Nodes that don't override
+    /// `ErasedNode::init` (sink, source) get the default no-op.
+    pub fn init_processors(&mut self) -> Result<(), ProcessorError> {
+        let n = self.nodes.len();
+        for idx in 0..n {
+            let mut buffer = VecDeque::new();
+            let mut output = Vec::new();
+            let rc = RecordContext {
+                topic: String::new(),
+                partition: -1,
+                offset: -1,
+                timestamp: -1,
+            };
+            let node = &mut self.nodes[idx];
+            let stores = &mut self.stores;
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &[],
+                output: &mut output,
+                record_ctx: &rc,
+                stores,
+            };
+            node.init(&mut d)?;
+        }
+        Ok(())
+    }
+
+    /// Call `close` on every node (in index order).
+    pub fn close_processors(&mut self) {
+        for node in &mut self.nodes {
+            node.close();
+        }
+    }
+
+    /// Drain every store's changelog buffer → `(changelog_topic, key, value)`.
+    pub fn drain_changelogs(&mut self) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>)> {
+        let mut out = Vec::new();
+        for name in self.stores.names() {
+            if let Some(store) = self.stores.get_mut(&name) {
+                let topic = store.changelog_topic().to_string();
+                for (k, v) in store.take_changelog() {
+                    out.push((topic.clone(), k, v));
+                }
+            }
+        }
+        out
+    }
+
+    /// Restore one changelog record into a named store (logging-off path is
+    /// the caller's responsibility).
+    pub fn restore_apply(
+        &mut self,
+        store_name: &str,
+        key: bytes::Bytes,
+        value: Option<bytes::Bytes>,
+    ) {
+        if let Some(store) = self.stores.get_mut(store_name) {
+            store.apply_changelog(key, value);
+        }
+    }
+
+    /// Toggle changelog logging on every store (off during restore, on during
+    /// processing).
+    pub fn set_logging(&mut self, on: bool) {
+        for name in self.stores.names() {
+            if let Some(s) = self.stores.get_mut(&name) {
+                s.set_logging(on);
+            }
+        }
     }
 }
 
@@ -130,6 +207,7 @@ mod tests {
             children: vec![vec![1], vec![]], // up -> sink ; sink -> none
             sources: vec![source],
             output: Vec::new(),
+            stores: crate::store::registry::StoreRegistry::default(),
         };
         graph.pipe("in", Some(b"k"), b"hi", 7).unwrap();
         let out = graph.take_output();
@@ -145,8 +223,78 @@ mod tests {
             children: vec![],
             sources: vec![],
             output: Vec::new(),
+            stores: crate::store::registry::StoreRegistry::default(),
         };
         graph.pipe("nope", None, b"x", 0).unwrap();
         check!(graph.take_output().is_empty());
+    }
+
+    #[test]
+    fn stateful_processor_accumulates_via_store() {
+        use crate::processor::api::{Processor, ProcessorContext};
+        use crate::processor::node::{ProcessorNode, SinkNode, SourceNode};
+        use crate::processor::record::Record;
+        use crate::processor::serde::{I64Serde, StringSerde};
+        use crate::store::memory::InMemoryKeyValueStore;
+        use crate::store::registry::StoreRegistry;
+
+        struct Counter;
+        impl Processor<String, String, String, i64> for Counter {
+            fn process(
+                &mut self,
+                ctx: &mut ProcessorContext<'_, '_, String, i64>,
+                r: Record<String, String>,
+            ) {
+                let store = ctx
+                    .get_state_store::<String, i64>("counts")
+                    .expect("counts store not found");
+                let n = store.get(&r.value).unwrap_or(0) + 1;
+                store.put(r.value.clone(), n);
+                ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+            }
+        }
+
+        let mut stores = StoreRegistry::default();
+        stores.insert(Box::new(InMemoryKeyValueStore::<String, i64>::new(
+            "counts".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "counts-changelog".into(),
+        )));
+
+        // nodes: index 0 = counter processor, index 1 = sink
+        let proc_node = Box::new(ProcessorNode::new(
+            "counter".into(),
+            &(|| Box::new(Counter) as Box<dyn Processor<String, String, String, i64>>),
+        )) as Box<dyn ErasedNode>;
+        let sink_node = Box::new(SinkNode::new(
+            "out".into(),
+            "out-topic".into(),
+            StringSerde,
+            I64Serde,
+        )) as Box<dyn ErasedNode>;
+        let src_node = SourceNode::new("src".into(), StringSerde, StringSerde);
+        let source = GraphSource {
+            topic: "in".into(),
+            deserialize: Box::new(move |k, v, ts| src_node.deserialize(k, v, ts)),
+            children: vec![0],
+        };
+
+        let mut graph = Graph {
+            nodes: vec![proc_node, sink_node],
+            children: vec![vec![1], vec![]],
+            sources: vec![source],
+            output: Vec::new(),
+            stores,
+        };
+
+        // pipe "in"/"a" twice — counter should accumulate to 2
+        graph.pipe("in", Some(b"k"), b"a", 1).unwrap();
+        graph.pipe("in", Some(b"k"), b"a", 2).unwrap();
+
+        let out = graph.take_output();
+        check!(out.len() == 2);
+        // last output value bytes should be big-endian i64(2) = [0,0,0,0,0,0,0,2]
+        check!(out[1].value.as_ref().unwrap().as_ref() == [0u8, 0, 0, 0, 0, 0, 0, 2]);
     }
 }

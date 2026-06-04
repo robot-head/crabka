@@ -3,6 +3,12 @@
 use std::any::{Any, TypeId, type_name};
 use std::collections::{BTreeMap, HashMap};
 
+/// Factory that builds a fresh erased [`StateStore`] given `(application_id, store_name)`.
+///
+/// The two `&str` arguments let the factory embed the correct changelog topic name
+/// (`<app_id>-<store_name>-changelog`) at construction time, matching the wire topology.
+type StoreFactory = Box<dyn Fn(&str, &str) -> Box<dyn crate::store::api::StateStore> + Send + Sync>;
+
 use crabka_protocol::owned::streams_group_heartbeat_request::Topology as WireTopology;
 
 use super::grouping::group_nodes;
@@ -106,6 +112,7 @@ pub struct Topology {
     reg: NodeRegistry,
     error: Option<StoredError>,
     factories: HashMap<String, NodeFactory>,
+    store_factories: HashMap<String, StoreFactory>,
 }
 
 impl std::fmt::Debug for Topology {
@@ -116,6 +123,10 @@ impl std::fmt::Debug for Topology {
             .field(
                 "factories",
                 &format!("<{} factories>", self.factories.len()),
+            )
+            .field(
+                "store_factories",
+                &format!("<{} store_factories>", self.store_factories.len()),
             )
             .finish()
     }
@@ -288,14 +299,36 @@ impl Topology {
     }
 
     /// Register a state store connected to the given processors (→ changelog).
-    pub fn add_state_store<S, I, T>(&mut self, name: S, processors: I) -> &mut Self
+    ///
+    /// `key_serde` / `value_serde` define how records are serialized into the
+    /// changelog topic (`<app_id>-<name>-changelog`) and the store's byte map.
+    pub fn add_state_store<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self
     where
-        S: Into<String>,
-        I: IntoIterator<Item = T>,
-        T: Into<String>,
+        K: 'static,
+        V: 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
     {
-        let procs = processors.into_iter().map(Into::into).collect();
-        self.reg.add_store(&name.into(), procs);
+        let name: String = name.into();
+        let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
+        self.reg.add_store(&name, procs);
+        self.store_factories.insert(
+            name,
+            Box::new(move |app_id: &str, store_name: &str| {
+                Box::new(crate::store::memory::InMemoryKeyValueStore::<K, V>::new(
+                    store_name.to_string(),
+                    Box::new(key_serde.clone()),
+                    Box::new(value_serde.clone()),
+                    format!("{app_id}-{store_name}-changelog"),
+                )) as Box<dyn crate::store::api::StateStore>
+            }),
+        );
         self
     }
 
@@ -416,6 +449,7 @@ impl Topology {
             application_id: app,
             factories: self.factories,
             node_specs,
+            store_factories: self.store_factories,
         })
     }
 
@@ -462,6 +496,7 @@ pub struct BuiltTopology {
     application_id: String,
     factories: HashMap<String, NodeFactory>,
     node_specs: Vec<NodeSpec>,
+    store_factories: HashMap<String, StoreFactory>,
 }
 
 impl std::fmt::Debug for BuiltTopology {
@@ -601,11 +636,18 @@ impl BuiltTopology {
             })
             .collect();
 
+        // Build the per-task store registry from the typed factories.
+        let mut store_registry = crate::store::registry::StoreRegistry::default();
+        for (store_name, factory) in &self.store_factories {
+            store_registry.insert(factory(&self.application_id, store_name));
+        }
+
         Ok(Graph {
             nodes,
             children,
             sources,
             output: Vec::new(),
+            stores: store_registry,
         })
     }
 }
@@ -713,7 +755,7 @@ mod tests {
         t.add_repartition_topic("rp");
         t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_processor("proc", || Upper, ["src"]);
-        t.add_state_store("store", ["proc"]);
+        t.add_state_store("store", StringSerde, StringSerde, ["proc"]);
         t.add_sink(
             "rsink",
             "rp",
@@ -830,5 +872,49 @@ mod tests {
         g.pipe("in", None, b"hi", 0).unwrap();
         let out1 = g.take_output();
         check!(out1.iter().any(|o| o.topic == "rp"));
+    }
+
+    #[test]
+    fn instantiate_builds_stores_and_processes_statefully() {
+        use crate::processor::serde::I64Serde;
+        struct Counter;
+        impl Processor<String, String, String, i64> for Counter {
+            fn process(
+                &mut self,
+                ctx: &mut ProcessorContext<'_, '_, String, i64>,
+                r: Record<String, String>,
+            ) {
+                let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+                let n = s.get(&r.value).unwrap_or(0) + 1;
+                s.put(r.value.clone(), n);
+                ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+            }
+        }
+        let mut t = Topology::new();
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_state_store("counts", StringSerde, I64Serde, ["c"]);
+        t.add_processor("c", || Counter, ["src"]);
+        t.add_sink("out", "out", ["c"], Produced::with(StringSerde, I64Serde));
+        let built = t.build("app").unwrap();
+        // wire topology still has the changelog topic (golden frame contract)
+        check!(built.to_wire().subtopologies.iter().any(|s| {
+            s.state_changelog_topics
+                .iter()
+                .any(|c| c.name == "app-counts-changelog")
+        }));
+        let mut g = built.instantiate().unwrap();
+        g.pipe("in", None, b"x", 0).unwrap();
+        g.pipe("in", None, b"x", 1).unwrap();
+        // After two "x" records the count should be 2 (i64 big-endian = [0,0,0,0,0,0,0,2])
+        check!(
+            g.take_output()
+                .last()
+                .unwrap()
+                .value
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                == [0, 0, 0, 0, 0, 0, 0, 2]
+        );
     }
 }
