@@ -1,7 +1,7 @@
 //! Top-level `Broker` lifecycle. Wires together the partition registry,
 //! metadata image, network listener, and handler table.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 
 use dashmap::DashMap;
@@ -9,7 +9,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use std::sync::atomic::{AtomicI32, AtomicU64};
+use std::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
 use crate::config::BrokerConfig;
 use crate::error::BrokerError;
@@ -90,6 +90,11 @@ pub struct Broker {
     /// KIP-13/KIP-124 quota buckets. Updated by the quota refresh task and
     /// consulted by the Produce/Fetch handlers and request-rate enforcement.
     pub quota_buckets: Arc<crate::quota::QuotaBuckets>,
+    /// Live connection accounting for the `max.connections` /
+    /// `max.connections.per.ip` caps. `accept_loop` consults these before
+    /// spawning a per-connection task and an RAII [`ConnectionGuard`]
+    /// decrements them when the connection ends.
+    pub(crate) connections: ConnectionLimiter,
     /// KIP-227 incremental-fetch-session cache. Consulted by the Fetch
     /// handler before each read; sized by
     /// `BrokerConfig::max_incremental_fetch_session_cache_slots`.
@@ -2428,6 +2433,11 @@ impl Broker {
             }
         }
 
+        // Capture the connection caps before `config` is moved into the
+        // struct literal below.
+        let config_max_connections = config.max_connections;
+        let config_max_connections_per_ip = config.max_connections_per_ip;
+
         let broker = Arc::new(Self {
             config,
             controller,
@@ -2451,6 +2461,10 @@ impl Broker {
             metrics_bound_addr,
             throttle_state,
             quota_buckets,
+            connections: ConnectionLimiter::new(
+                config_max_connections,
+                config_max_connections_per_ip,
+            ),
             fetch_session_cache,
             want_shutdown: want_shutdown_tx,
             should_shutdown: should_shutdown_tx,
@@ -2827,6 +2841,104 @@ fn parse_advertised_host_port(addr: &str) -> (String, u16) {
     ("localhost".into(), 9092)
 }
 
+/// Live-connection accounting backing the `max.connections` (global) and
+/// `max.connections.per.ip` caps. Cloning shares the same counters
+/// (`Arc`-wrapped internally), so every listener accept loop and every
+/// [`ConnectionGuard`] account against one set of totals.
+#[derive(Clone)]
+pub(crate) struct ConnectionLimiter {
+    /// Global ceiling. `usize::MAX` means unlimited.
+    max_connections: usize,
+    /// Per-IP ceiling. `usize::MAX` means unlimited.
+    max_connections_per_ip: usize,
+    /// Current live connection total across all listeners.
+    total: Arc<AtomicUsize>,
+    /// Current live connection count per client IP. Entries are removed
+    /// when they hit 0 so the map doesn't grow unbounded.
+    per_ip: Arc<DashMap<IpAddr, usize>>,
+}
+
+impl ConnectionLimiter {
+    fn new(max_connections: usize, max_connections_per_ip: usize) -> Self {
+        Self {
+            max_connections,
+            max_connections_per_ip,
+            total: Arc::new(AtomicUsize::new(0)),
+            per_ip: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Try to reserve a connection slot for `ip`. On success returns a
+    /// [`ConnectionGuard`] that releases both the global and per-IP slot
+    /// on drop. Returns `None` (and reserves nothing) when either the
+    /// global or the per-IP cap is already reached — the caller then
+    /// closes the socket, matching Kafka's silent-drop behavior.
+    fn try_acquire(&self, ip: IpAddr) -> Option<ConnectionGuard> {
+        // Global cap. `fetch_update` keeps the increment atomic so two
+        // concurrent accepts can't both slip past the ceiling.
+        let global_ok = self
+            .total
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |cur| {
+                (cur < self.max_connections).then_some(cur + 1)
+            })
+            .is_ok();
+        if !global_ok {
+            return None;
+        }
+        // Per-IP cap. The DashMap entry lock serializes the read-modify
+        // on a single IP. On rejection we must undo the global reserve.
+        let mut entry = self.per_ip.entry(ip).or_insert(0);
+        if *entry >= self.max_connections_per_ip {
+            drop(entry);
+            self.total.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        *entry += 1;
+        drop(entry);
+        Some(ConnectionGuard {
+            limiter: self.clone(),
+            ip,
+        })
+    }
+
+    /// Test/diagnostic accessor: current global live-connection count.
+    #[cfg(test)]
+    fn total(&self) -> usize {
+        self.total.load(Ordering::Acquire)
+    }
+
+    /// Test/diagnostic accessor: current per-IP live-connection count.
+    #[cfg(test)]
+    fn per_ip_count(&self, ip: IpAddr) -> usize {
+        self.per_ip.get(&ip).map_or(0, |e| *e)
+    }
+}
+
+/// RAII release for one accepted connection. Moved into the spawned
+/// per-connection task so it fires however the connection terminates
+/// (clean close, error, panic, task abort). On drop it decrements the
+/// global counter and the per-IP counter, removing the per-IP map entry
+/// when it reaches 0.
+pub(crate) struct ConnectionGuard {
+    limiter: ConnectionLimiter,
+    ip: IpAddr,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.limiter.total.fetch_sub(1, Ordering::AcqRel);
+        // Decrement the per-IP entry; remove it at 0 to bound map growth.
+        if let dashmap::mapref::entry::Entry::Occupied(mut occ) = self.limiter.per_ip.entry(self.ip)
+        {
+            let v = occ.get_mut();
+            *v -= 1;
+            if *v == 0 {
+                occ.remove();
+            }
+        }
+    }
+}
+
 async fn accept_loop(
     broker: Arc<Broker>,
     listener: TcpListener,
@@ -2843,42 +2955,63 @@ async fn accept_loop(
                 match accept {
                     Ok((stream, peer)) => {
                         tracing::debug!(%peer, name = %spec.name, "accepted connection");
-                        // KIP-612 connection_creation_rate enforcement.
-                        // IPv4 only, for ACL parity. IPv6 peers skip the quota check.
-                        if let std::net::IpAddr::V4(peer_ipv4) = peer.ip() {
-                            let image = broker.controller.current_image();
-                            if let Some((entity_key, rate)) =
-                                crate::quota::lookup_ip_quota_with_key(
-                                    &image,
-                                    &peer_ipv4,
-                                    "connection_creation_rate",
-                                )
-                                && rate > 0.0
-                            {
-                                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                                let initial_rate = rate.max(1.0) as u64;
-                                let bucket = broker.quota_buckets.get_or_create(
-                                    "connection_creation_rate",
-                                    &entity_key,
-                                    initial_rate,
-                                );
-                                if bucket.try_consume(1) == 0 {
-                                    #[allow(
-                                        clippy::cast_possible_truncation,
-                                        clippy::cast_sign_loss
-                                    )]
-                                    let delay_micros =
-                                        ((1.0_f64 / rate) * 1_000_000.0) as u64;
-                                    let delay =
-                                        std::time::Duration::from_micros(delay_micros)
-                                            .min(std::time::Duration::from_secs(1));
-                                    tokio::time::sleep(delay).await;
-                                }
+                        let peer_ip = peer.ip();
+
+                        // `max.connections` / `max.connections.per.ip` caps.
+                        // Reserve a slot before doing any work; on rejection
+                        // close the socket immediately (Kafka silently drops
+                        // connections past either ceiling). The returned guard
+                        // is moved into the spawned task so both counters are
+                        // released however the connection ends.
+                        let Some(conn_guard) = broker.connections.try_acquire(peer_ip) else {
+                            tracing::debug!(
+                                %peer,
+                                name = %spec.name,
+                                "connection limit reached; closing connection"
+                            );
+                            drop(stream);
+                            continue;
+                        };
+
+                        // KIP-612 connection_creation_rate enforcement. Applies
+                        // to both IPv4 and IPv6 peers — the quota is keyed by the
+                        // peer IP's string form for either family.
+                        let image = broker.controller.current_image();
+                        if let Some((entity_key, rate)) =
+                            crate::quota::lookup_ip_quota_with_key(
+                                &image,
+                                peer_ip,
+                                "connection_creation_rate",
+                            )
+                            && rate > 0.0
+                        {
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let initial_rate = rate.max(1.0) as u64;
+                            let bucket = broker.quota_buckets.get_or_create(
+                                "connection_creation_rate",
+                                &entity_key,
+                                initial_rate,
+                            );
+                            if bucket.try_consume(1) == 0 {
+                                #[allow(
+                                    clippy::cast_possible_truncation,
+                                    clippy::cast_sign_loss
+                                )]
+                                let delay_micros =
+                                    ((1.0_f64 / rate) * 1_000_000.0) as u64;
+                                let delay =
+                                    std::time::Duration::from_micros(delay_micros)
+                                        .min(std::time::Duration::from_secs(1));
+                                tokio::time::sleep(delay).await;
                             }
                         }
                         let b = broker.clone();
                         let s = spec.clone();
                         tokio::spawn(async move {
+                            // Hold the connection guard for the lifetime of the
+                            // connection; dropping it releases the global +
+                            // per-IP slots.
+                            let _conn_guard = conn_guard;
                             crate::network::dispatch::serve_connection_on_listener(b, stream, s).await;
                         });
                     }
@@ -2896,6 +3029,75 @@ mod tests {
     use super::*;
     use assert2::assert;
     use tempfile::tempdir;
+
+    #[test]
+    fn connection_guard_increments_and_decrements_global_and_per_ip() {
+        let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(limiter.total() == 0);
+        assert!(limiter.per_ip_count(ip) == 0);
+
+        let g1 = limiter
+            .try_acquire(ip)
+            .expect("acquire under unlimited caps");
+        assert!(limiter.total() == 1);
+        assert!(limiter.per_ip_count(ip) == 1);
+
+        let g2 = limiter.try_acquire(ip).expect("second acquire");
+        assert!(limiter.total() == 2);
+        assert!(limiter.per_ip_count(ip) == 2);
+
+        drop(g1);
+        assert!(limiter.total() == 1);
+        assert!(limiter.per_ip_count(ip) == 1);
+
+        drop(g2);
+        // Per-IP entry must be removed (not left at 0) when it hits zero.
+        assert!(limiter.total() == 0);
+        assert!(limiter.per_ip_count(ip) == 0);
+        assert!(limiter.per_ip.get(&ip).is_none());
+    }
+
+    #[test]
+    fn global_cap_rejects_at_limit() {
+        let limiter = Arc::new(ConnectionLimiter::new(1, usize::MAX));
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let b: IpAddr = "10.0.0.2".parse().unwrap();
+        let _g = limiter.try_acquire(a).expect("first connection accepted");
+        // Global ceiling of 1 reached — a different IP is still rejected,
+        // and the rejection reserves nothing (per-IP entry not created).
+        assert!(limiter.try_acquire(b).is_none());
+        assert!(limiter.total() == 1);
+        assert!(limiter.per_ip_count(b) == 0);
+        assert!(limiter.per_ip.get(&b).is_none());
+    }
+
+    #[test]
+    fn per_ip_cap_rejects_but_other_ip_allowed() {
+        let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, 1));
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let b: IpAddr = "10.0.0.2".parse().unwrap();
+        let _g1 = limiter.try_acquire(a).expect("first from a");
+        // Second from the same IP rejected; global must be rolled back so
+        // the count reflects only the one live connection.
+        assert!(limiter.try_acquire(a).is_none());
+        assert!(limiter.total() == 1);
+        assert!(limiter.per_ip_count(a) == 1);
+        // A different IP is still under its own per-IP ceiling.
+        let _g2 = limiter.try_acquire(b).expect("first from b allowed");
+        assert!(limiter.total() == 2);
+        assert!(limiter.per_ip_count(b) == 1);
+    }
+
+    #[test]
+    fn ipv6_peer_acquires_and_releases() {
+        let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
+        let ip: IpAddr = "2001:db8::1".parse().unwrap();
+        let g = limiter.try_acquire(ip).expect("ipv6 acquire");
+        assert!(limiter.per_ip_count(ip) == 1);
+        drop(g);
+        assert!(limiter.per_ip_count(ip) == 0);
+    }
 
     #[test]
     fn loopback_bootstrap_maps_wildcard_to_loopback() {
