@@ -77,6 +77,79 @@ impl StreamsBuilder {
         crate::dsl::kstream::KStream::new(Rc::clone(&self.internal), id)
     }
 
+    /// Source a materialized `KTable` from a changelog-style topic.
+    ///
+    /// Records a single `TableSource` logical node whose thunk lowers a source
+    /// node + a [`KTableSourceProcessor`] + the materialized state store. The
+    /// store name is taken from `Materialized` (else a fresh
+    /// `KTABLE-SOURCE-STATE-STORE` counter); the changelog topic is
+    /// `<app>-<store>-changelog`. Source-topic reuse (optimizer) is Task 10.
+    ///
+    /// [`KTableSourceProcessor`]: crate::dsl::processors::table::KTableSourceProcessor
+    pub fn table<K, V, KS, VS>(
+        &self,
+        topic: impl Into<String>,
+        consumed: Consumed<KS, VS>,
+        materialized: crate::dsl::config::Materialized<KS, VS>,
+    ) -> crate::dsl::ktable::KTable<K, V>
+    where
+        K: std::any::Any + Send + Clone,
+        V: std::any::Any + Send + Clone,
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+    {
+        let topic: String = topic.into();
+        let mut g = self.internal.borrow_mut();
+        // Store name at the JVM position (minted before the source/processor name).
+        let store_name = match &materialized.store_name {
+            Some(name) => name.clone(),
+            None => g.new_processor_name(crate::dsl::names::TABLE_SOURCE),
+        };
+        let source_name = g.new_processor_name(crate::dsl::names::SOURCE);
+        let proc_name = g.new_processor_name(crate::dsl::names::TABLE_SOURCE);
+        let id = g.graph.add(
+            source_name.clone(),
+            GraphNodeKind::TableSource {
+                topic: topic.clone(),
+                store_name: store_name.clone(),
+                reuse_source_for_changelog: false,
+            },
+            vec![],
+        );
+        let crate::dsl::config::Materialized {
+            key_serde,
+            value_serde,
+            ..
+        } = materialized;
+        let store_for_thunk = store_name.clone();
+        g.graph.nodes[id].lower = Some(Box::new(
+            move |state: &mut crate::dsl::graph::LowerState| {
+                let src = state
+                    .topology
+                    .add_source::<K, V, KS, VS>(source_name, [topic], consumed);
+                let store_for_proc = store_for_thunk.clone();
+                let h = state.topology.add_processor::<K, V, K, V, _, _, _>(
+                    proc_name,
+                    move || crate::dsl::processors::table::KTableSourceProcessor {
+                        store_name: store_for_proc.clone(),
+                        _pd: std::marker::PhantomData,
+                    },
+                    [&src],
+                );
+                state.topology.add_state_store::<K, V, KS, VS>(
+                    store_for_thunk.clone(),
+                    key_serde,
+                    value_serde,
+                    [h.name().to_string()],
+                );
+                // Children of the TableSource wire to the processor output.
+                state.handle_name.insert(id, h.name().to_string());
+            },
+        ));
+        drop(g);
+        crate::dsl::ktable::KTable::new(Rc::clone(&self.internal), id, Some(store_name))
+    }
+
     /// Build the topology with no optimizer (the JVM `NO_OPTIMIZATION` default):
     /// lower the logical graph straight to the Processor-API [`Topology`], then
     /// finalize it into a [`BuiltTopology`].

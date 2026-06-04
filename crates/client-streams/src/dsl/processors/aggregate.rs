@@ -48,6 +48,44 @@ where
     }
 }
 
+/// Reduce records per key in a #3 `KeyValueStore` keyed by `K`, holding `V`.
+///
+/// The JVM `Reducer` has no separate `init`: the **first** value for a key seeds
+/// the accumulator, and later values fold via `reducer(&acc, &value)`. This keeps
+/// the public value type `V` (no `Option`/sentinel leaks into the `KTable`); the
+/// "first value" check is the store lookup returning `None`.
+///
+/// Records with a null key are panicked — aggregations require non-null keys
+/// (enforced by the repartition step preceding this node in the DSL lowering).
+#[allow(dead_code)]
+pub(crate) struct KStreamReduceProcessor<K, V, R> {
+    pub store_name: String,
+    pub reducer: R,
+    pub _pd: Marker<(K, V)>,
+}
+
+impl<K, V, R> Processor<K, V, K, V> for KStreamReduceProcessor<K, V, R>
+where
+    K: std::any::Any + Send + Clone,
+    V: std::any::Any + Send + Clone,
+    R: Fn(&V, &V) -> V + Send + 'static,
+{
+    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V>, r: Record<K, V>) {
+        let key = r.key.expect("reduce requires a non-null key");
+        let store = ctx
+            .get_state_store::<K, V>(&self.store_name)
+            .expect("reduce state store not found");
+        let new = match store.get(&key) {
+            // First value for this key seeds the accumulator.
+            None => r.value,
+            // Later values fold via the reducer.
+            Some(acc) => (self.reducer)(&acc, &r.value),
+        };
+        store.put(key.clone(), new.clone());
+        ctx.forward(Record::new(Some(key), new, r.timestamp));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;

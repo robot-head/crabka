@@ -13,7 +13,9 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::dsl::builder::InternalStreamsBuilder;
+use crate::dsl::config::Grouped;
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
+use crate::dsl::kgrouped::KGroupedStream;
 use crate::dsl::names;
 use crate::dsl::processors::stateless;
 use crate::processor::serde::{Produced, Serde};
@@ -24,14 +26,29 @@ pub struct KStream<K, V> {
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     #[allow(dead_code)]
     pub(crate) node: NodeId,
+    /// True when the current key was produced by a key-changing op upstream
+    /// (`select_key`/`map`/`flat_map`/`group_by`) that has *not* since been
+    /// re-grouped through a repartition. A downstream aggregation reads this to
+    /// decide whether it must insert a repartition before the aggregate node.
+    /// A source stream starts `false`; value-only ops propagate the parent bit.
+    pub(crate) key_changing: bool,
     pub(crate) _pd: std::marker::PhantomData<fn() -> (K, V)>,
 }
 
 impl<K, V> KStream<K, V> {
     pub(crate) fn new(builder: Rc<RefCell<InternalStreamsBuilder>>, node: NodeId) -> Self {
+        Self::new_with_key_changing(builder, node, false)
+    }
+
+    pub(crate) fn new_with_key_changing(
+        builder: Rc<RefCell<InternalStreamsBuilder>>,
+        node: NodeId,
+        key_changing: bool,
+    ) -> Self {
         Self {
             builder,
             node,
+            key_changing,
             _pd: std::marker::PhantomData,
         }
     }
@@ -72,7 +89,8 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KStream::new(Rc::clone(&self.builder), id)
+        // map_values is value-only → key lineage unchanged.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
     }
 
     /// `filter`: keep records where `predicate(key, value)` is true.
@@ -125,7 +143,8 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KStream::new(Rc::clone(&self.builder), id)
+        // filter is value-only → key lineage unchanged.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
     }
 
     /// `map`: transform key and value. Key-changing.
@@ -161,7 +180,8 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KStream::new(Rc::clone(&self.builder), id)
+        // map rewrites the key → key-changing lineage.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, true)
     }
 
     /// `selectKey`: rewrite the key, value unchanged. Key-changing.
@@ -196,7 +216,8 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KStream::new(Rc::clone(&self.builder), id)
+        // select_key rewrites the key → key-changing lineage.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, true)
     }
 
     /// `flatMap`: one record → zero or more `(K2, V2)`. Key-changing.
@@ -233,7 +254,8 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KStream::new(Rc::clone(&self.builder), id)
+        // flat_map can rewrite the key → key-changing lineage.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, true)
     }
 
     /// `flatMapValues`: one record → zero or more `V2`, key unchanged.
@@ -267,7 +289,8 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KStream::new(Rc::clone(&self.builder), id)
+        // flat_map_values is value-only → key lineage unchanged.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
     }
 
     /// `peek`: observe each record, then forward it unchanged.
@@ -301,7 +324,8 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KStream::new(Rc::clone(&self.builder), id)
+        // peek is observe-only → key lineage unchanged.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
     }
 
     /// `foreach`: terminal side-effect on each record (consumes the stream).
@@ -388,7 +412,12 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KStream::new(Rc::clone(&self.builder), id)
+        // merge keeps keys; conservatively key-changing if either side is.
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            self.key_changing || other.key_changing,
+        )
     }
 
     /// `repartition`: force a repartition through an internal topic.
@@ -426,7 +455,48 @@ where
         // TODO(Task 8): attach the lowering thunk once repartition topic naming
         // is pinned to the JVM fixture.
         drop(g);
-        KStream::new(Rc::clone(&self.builder), id)
+        // An explicit repartition re-groups by key → downstream is no longer
+        // key-changing relative to its (now repartitioned) partitioning.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, false)
+    }
+
+    /// `groupByKey`: group by the existing key, preparing for an aggregation.
+    ///
+    /// Records no graph node — the (optional) repartition + aggregate node are
+    /// recorded when a terminal `count`/`reduce`/`aggregate` is called. The
+    /// returned [`KGroupedStream`] carries whether the upstream key lineage is
+    /// key-changing (→ the aggregation must insert a repartition) and a typed
+    /// repartition-lowering thunk built from the `Grouped` serdes.
+    pub fn group_by_key<KS, VS>(&self, grouped: Grouped<KS, VS>) -> KGroupedStream<K, V>
+    where
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+    {
+        KGroupedStream::new(
+            Rc::clone(&self.builder),
+            self.node,
+            self.key_changing,
+            grouped.name,
+            crate::dsl::kgrouped::repartition_lower::<K, V, KS, VS>(
+                grouped.key_serde,
+                grouped.value_serde,
+            ),
+        )
+    }
+
+    /// `groupBy`: re-key via `f`, then group by the new key.
+    ///
+    /// Equivalent to `select_key(f).group_by_key(grouped)`; the key change forces
+    /// a repartition before any subsequent aggregation.
+    pub fn group_by<K2, KS, VS, F>(&self, f: F, grouped: Grouped<KS, VS>) -> KGroupedStream<K2, V>
+    where
+        K: Default,
+        K2: Any + Send + Clone,
+        KS: Serde<K2> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+        F: Fn(&K, &V) -> K2 + Clone + Send + Sync + 'static,
+    {
+        self.select_key(f).group_by_key(grouped)
     }
 }
 

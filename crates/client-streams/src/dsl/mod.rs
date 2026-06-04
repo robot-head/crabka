@@ -3,9 +3,13 @@
 pub(crate) mod builder;
 pub mod config;
 pub(crate) mod graph;
+pub mod kgrouped;
 pub mod kstream;
+pub mod ktable;
 pub(crate) mod lower;
 pub(crate) mod names;
 pub(crate) mod processors;
 pub use builder::StreamsBuilder;
 pub use config::{Grouped, Materialized, Repartitioned};
+pub use kgrouped::KGroupedStream;
+pub use ktable::KTable;
