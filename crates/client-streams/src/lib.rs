@@ -69,6 +69,53 @@
 //!     Some((Some("k".to_string()), "HELLO".to_string())),
 //! );
 //! ```
+//! ## State stores (sub-project #3)
+//!
+//! Processors can persist and restore keyed state via a named [`KeyValueStore`].
+//! The store is attached to the topology with `add_state_store`, and accessed
+//! inside `process` via [`ProcessorContext::get_state_store`].
+//!
+//! ```
+//! use crabka_client_streams::{
+//!     I64Serde, Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver,
+//! };
+//!
+//! struct Counter;
+//! impl Processor<String, String, String, i64> for Counter {
+//!     fn process(&mut self, ctx: &mut ProcessorContext<String, i64>, r: Record<String, String>) {
+//!         let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+//!         let n = s.get(&r.value).unwrap_or(0) + 1;
+//!         s.put(r.value.clone(), n);
+//!         ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+//!     }
+//! }
+//!
+//! let mut topo = Topology::new();
+//! topo.add_source("src", ["in"], StringSerde, StringSerde);
+//! topo.add_state_store("counts", StringSerde, I64Serde, ["c"]);
+//! topo.add_processor(
+//!     "c",
+//!     || Box::new(Counter) as Box<dyn Processor<String, String, String, i64>>,
+//!     ["src"],
+//! );
+//! topo.add_sink("out", "out", ["c"], StringSerde, I64Serde);
+//! let built = topo.build("app").unwrap();
+//!
+//! let mut driver = TopologyTestDriver::new(&built).unwrap();
+//! driver.pipe_input("in", &StringSerde, &StringSerde, None, "a".to_string(), 0);
+//! driver.pipe_input("in", &StringSerde, &StringSerde, None, "a".to_string(), 1);
+//! assert_eq!(
+//!     driver.read_output("out", &StringSerde, &I64Serde),
+//!     Some((Some("a".to_string()), 1_i64)),
+//! );
+//! assert_eq!(
+//!     driver.read_output("out", &StringSerde, &I64Serde),
+//!     Some((Some("a".to_string()), 2_i64)),
+//! );
+//! let store = driver.get_key_value_store::<String, i64>("counts").unwrap();
+//! assert_eq!(store.get(&"a".to_string()), Some(2_i64));
+//! ```
+//!
 //! ## Running an app (`KafkaStreams`)
 //!
 //! Once built, run a topology against a broker with the managed runtime — it
