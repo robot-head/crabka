@@ -147,16 +147,12 @@ mod tests {
 
     fn built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["src"],
-        );
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let up = t.add_processor("up", || Upper, [&src]);
         t.add_sink(
             "out",
             "out",
-            ["up"],
+            [&up],
             Produced::with(StringSerde, StringSerde),
         );
         t.build("app").unwrap()
@@ -176,10 +172,10 @@ mod tests {
 
     fn stateful_built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_state_store("counts", StringSerde, I64Serde, ["c"]);
-        t.add_processor("c", || Counter, ["src"]);
-        t.add_sink("out", "out", ["c"], Produced::with(StringSerde, I64Serde));
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let c = t.add_processor("c", || Counter, [&src]);
+        t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
+        t.add_sink("out", "out", [&c], Produced::with(StringSerde, I64Serde));
         t.build("app").unwrap()
     }
 

@@ -18,8 +18,8 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
-//! topo.add_sink("snk", "output-topic", ["src"], Produced::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
+//! topo.add_sink("snk", "output-topic", [&src], Produced::with(StringSerde, StringSerde));
 //! let built = topo.build("my-application-id")?;
 //!
 //! let mut membership = StreamsMembership::builder()
@@ -57,9 +57,9 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-//! topo.add_processor("up", || Upper, ["src"]);
-//! topo.add_sink("out", "out", ["up"], Produced::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+//! let up = topo.add_processor("up", || Upper, [&src]);
+//! topo.add_sink("out", "out", [&up], Produced::with(StringSerde, StringSerde));
 //! let built = topo.build("my-app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
@@ -69,6 +69,20 @@
 //!     Some((Some("k".to_string()), "HELLO".to_string())),
 //! );
 //! ```
+//!
+//! Nodes are wired by handle, not by string name, so a mis-typed edge is a
+//! **compile error** rather than a `build()`-time failure:
+//!
+//! ```compile_fail
+//! use crabka_client_streams::{Consumed, I64Serde, Produced, StringSerde, Topology};
+//!
+//! let mut topo = Topology::new();
+//! // `src` produces Record<String, String>:
+//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+//! // but this sink expects Record<String, i64> — won't compile:
+//! topo.add_sink("out", "out", [&src], Produced::with(StringSerde, I64Serde));
+//! ```
+//!
 //! ## State stores (sub-project #3)
 //!
 //! Processors can persist and restore keyed state via a named [`KeyValueStore`].
@@ -92,10 +106,10 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-//! topo.add_state_store("counts", StringSerde, I64Serde, ["c"]);
-//! topo.add_processor("c", || Counter, ["src"]);
-//! topo.add_sink("out", "out", ["c"], Produced::with(StringSerde, I64Serde));
+//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+//! let c = topo.add_processor("c", || Counter, [&src]);
+//! topo.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
+//! topo.add_sink("out", "out", [&c], Produced::with(StringSerde, I64Serde));
 //! let built = topo.build("app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
@@ -131,9 +145,9 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
-//! topo.add_processor("up", || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>, ["src"]);
-//! topo.add_sink("out", "output-topic", ["up"], Produced::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
+//! let up = topo.add_processor("up", || Upper, [&src]);
+//! topo.add_sink("out", "output-topic", [&up], Produced::with(StringSerde, StringSerde));
 //! let built = topo.build("my-app")?;
 //!
 //! let mut streams = KafkaStreams::builder()
@@ -169,4 +183,4 @@ pub use processor::{
 pub use runtime::{KafkaStreams, KafkaStreamsState};
 pub use store::{InMemoryKeyValueStore, KeyValueStore, StateStore};
 pub use test_driver::TopologyTestDriver;
-pub use topology::{BuiltTopology, Topology, TopologyError};
+pub use topology::{BuiltTopology, NodeHandle, Topology, TopologyError};

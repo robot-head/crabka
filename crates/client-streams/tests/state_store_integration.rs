@@ -82,17 +82,17 @@ impl Processor<String, String, String, i64> for Counter {
 
 fn counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let mut topo = Topology::new();
-    topo.add_source(
+    let src = topo.add_source(
         "src",
         ["stream-in"],
         Consumed::with(StringSerde, StringSerde),
     );
-    topo.add_state_store("counts", StringSerde, I64Serde, ["c"]);
-    topo.add_processor("c", || Counter, ["src"]);
+    let c = topo.add_processor("c", || Counter, [&src]);
+    topo.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
     topo.add_sink(
         "out",
         "stream-out",
-        ["c"],
+        [&c],
         Produced::with(StringSerde, I64Serde),
     );
     topo.build(app_id).unwrap()

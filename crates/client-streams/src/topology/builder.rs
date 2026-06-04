@@ -1,7 +1,9 @@
 //! Topology builder: public Processor-API surface.
 
-use std::any::{Any, TypeId, type_name};
+use std::any::Any;
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
+use std::marker::PhantomData;
 
 /// Factory that builds a fresh erased [`StateStore`] given `(application_id, store_name)`.
 ///
@@ -16,7 +18,7 @@ use super::node::{NodeKind, NodeRegistry};
 use super::wire::to_wire;
 use crate::processor::api::ProcessorSupplier;
 use crate::processor::erased::ProcessorError;
-use crate::processor::factory::{FactoryKind, MakeDeser, NodeFactory};
+use crate::processor::factory::{MakeDeser, NodeFactory};
 use crate::processor::graph::{Graph, GraphSource};
 use crate::processor::node::{ErasedNode, ProcessorNode, SinkNode, SourceNode};
 use crate::processor::serde::{Consumed, Produced, Serde};
@@ -26,6 +28,10 @@ use crate::processor::serde::{Consumed, Produced, Serde};
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Error building a topology (bad node graph, invalid configuration, etc.).
+///
+/// Parent→child *type* mismatches are not represented here: typed
+/// [`NodeHandle`] wiring makes them a compile error, so they never reach
+/// `build()`.
 #[derive(Debug, thiserror::Error)]
 pub enum TopologyError {
     #[error("duplicate node name: {0}")]
@@ -34,42 +40,9 @@ pub enum TopologyError {
     UnknownPredecessor { node: String, predecessor: String },
     #[error("topology has no source nodes")]
     Empty,
-    /// Build-time type mismatch: boxed to keep enum size small.
-    #[error("{0}")]
-    TypeMismatch(Box<TypeMismatchDetail>),
 }
 
-/// Detail for [`TopologyError::TypeMismatch`], boxed so the enum stays small.
-#[derive(Debug)]
-pub struct TypeMismatchDetail {
-    pub parent: String,
-    pub parent_kind: &'static str,
-    pub produces: String,
-    pub child: String,
-    pub child_kind: &'static str,
-    pub expects: String,
-}
-
-impl std::fmt::Display for TypeMismatchDetail {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "topology wiring type error: {child_kind} `{child}` expects `{expects}`,\n  \
-             but its parent {parent_kind} `{parent}` forwards `{produces}`\n  \
-             = help: a node's output type (KOut, VOut) must match every child's input type (KIn, VIn)\n  \
-             = note: checked at build() because the Processor API wires nodes by name;\n          \
-             use the typed DSL (sub-project #4) for compile-time wiring safety",
-            child_kind = self.child_kind,
-            child = self.child,
-            expects = self.expects,
-            parent_kind = self.parent_kind,
-            parent = self.parent,
-            produces = self.produces,
-        )
-    }
-}
-
-// Cloneable error subset (minus TypeMismatch — only occurs during build, not stored).
+// Cloneable error subset.
 #[derive(Debug, Clone)]
 enum StoredError {
     DuplicateNode(String),
@@ -96,7 +69,7 @@ impl From<TopologyError> for StoredError {
             TopologyError::UnknownPredecessor { node, predecessor } => {
                 StoredError::UnknownPredecessor { node, predecessor }
             }
-            TopologyError::Empty | TopologyError::TypeMismatch(_) => StoredError::Empty,
+            TopologyError::Empty => StoredError::Empty,
         }
     }
 }
@@ -132,13 +105,63 @@ impl std::fmt::Debug for Topology {
     }
 }
 
+/// A typed handle to a node in a [`Topology`], returned by
+/// [`Topology::add_source`] and [`Topology::add_processor`]. Pass it (by
+/// reference) as a parent when adding a child node.
+///
+/// Wiring by value rather than by string name means the compiler does two jobs
+/// that `build()` used to: a parent that doesn't exist yet simply has no handle
+/// to pass (so forward references and cycles can't be written), and the
+/// parent's output type `(K, V)` is checked against the child's input type —
+/// a mismatch is a **compile error**, not a runtime `build()` failure.
+///
+/// `K` / `V` are the key/value types the node *produces*. The handle is cheap
+/// to [`Clone`] (it carries only the node name) so one parent can feed many
+/// children.
+pub struct NodeHandle<K, V> {
+    name: String,
+    _pd: PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V> NodeHandle<K, V> {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            _pd: PhantomData,
+        }
+    }
+
+    /// The node's name, as it appears in the wire topology. Useful for
+    /// [`Topology::add_state_store`], which connects stores to processors by
+    /// name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl<K, V> Clone for NodeHandle<K, V> {
+    fn clone(&self) -> Self {
+        Self::new(self.name.clone())
+    }
+}
+
+impl<K, V> std::fmt::Debug for NodeHandle<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeHandle")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
 impl Topology {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Add a source node reading the given external topics.
+    /// Add a source node reading the given external topics, returning a typed
+    /// [`NodeHandle`] used to wire children to it.
     ///
     /// `consumed` carries the key + value serdes used to deserialize incoming
     /// bytes into typed `Record<K, V>` values at runtime — written
@@ -148,7 +171,7 @@ impl Topology {
         name: impl Into<String>,
         topics: impl IntoIterator<Item = impl Into<String>>,
         consumed: Consumed<KS, VS>,
-    ) -> &mut Self
+    ) -> NodeHandle<K, V>
     where
         K: Any + Send + Clone,
         V: Any + Send + Clone,
@@ -177,43 +200,44 @@ impl Topology {
         };
 
         self.factories.insert(
-            name,
+            name.clone(),
             NodeFactory {
-                kind: FactoryKind::Source,
-                input_kv: None,
-                output_kv: Some((TypeId::of::<K>(), TypeId::of::<V>())),
-                input_names: None,
-                output_names: Some((type_name::<K>(), type_name::<V>())),
                 make_node: None,
                 make_deser: Some(make_deser),
             },
         );
-        self
+        NodeHandle::new(name)
     }
 
-    /// Add a processor node with the given predecessor node names.
+    /// Add a processor node fed by the given parent [`NodeHandle`]s, returning a
+    /// handle for its output.
     ///
-    /// `supplier` produces a fresh `Processor` instance per task. The closure
-    /// form `|| MyProc` satisfies [`ProcessorSupplier`] via a blanket impl and
-    /// is the most common form; the four KV type parameters are inferred from
-    /// the returned processor's `Processor` impl, so callers never annotate
-    /// them. (Returning `Box::new(MyProc) as Box<dyn Processor<…>>` also works
-    /// when the concrete type is chosen at runtime.)
-    pub fn add_processor<KIn, VIn, KOut, VOut, S>(
+    /// Wiring is by value: every parent's output type must equal this
+    /// processor's input type `(KIn, VIn)`, enforced by the compiler. `supplier`
+    /// produces a fresh `Processor` per task; the closure form `|| MyProc`
+    /// satisfies [`ProcessorSupplier`] via a blanket impl and infers all four KV
+    /// type parameters from the processor's `Processor` impl, so callers never
+    /// annotate them.
+    pub fn add_processor<KIn, VIn, KOut, VOut, S, P, I>(
         &mut self,
         name: impl Into<String>,
         supplier: S,
-        predecessors: impl IntoIterator<Item = impl Into<String>>,
-    ) -> &mut Self
+        parents: I,
+    ) -> NodeHandle<KOut, VOut>
     where
         KIn: Any + Send,
         VIn: Any + Send,
         KOut: Any + Send + Clone,
         VOut: Any + Send + Clone,
         S: ProcessorSupplier<KIn, VIn, KOut, VOut> + Clone,
+        I: IntoIterator<Item = P>,
+        P: Borrow<NodeHandle<KIn, VIn>>,
     {
         let name: String = name.into();
-        let preds: Vec<String> = predecessors.into_iter().map(Into::into).collect();
+        let preds: Vec<String> = parents
+            .into_iter()
+            .map(|p| p.borrow().name.clone())
+            .collect();
         let r = self.reg.add_processor(&name, preds);
         self.record(r);
 
@@ -227,36 +251,35 @@ impl Topology {
         };
 
         self.factories.insert(
-            name,
+            name.clone(),
             NodeFactory {
-                kind: FactoryKind::Processor,
-                input_kv: Some((TypeId::of::<KIn>(), TypeId::of::<VIn>())),
-                output_kv: Some((TypeId::of::<KOut>(), TypeId::of::<VOut>())),
-                input_names: Some((type_name::<KIn>(), type_name::<VIn>())),
-                output_names: Some((type_name::<KOut>(), type_name::<VOut>())),
                 make_node: Some(make_node),
                 make_deser: None,
             },
         );
-        self
+        NodeHandle::new(name)
     }
 
-    /// Add a sink node writing to `topic`, fed by the given predecessors.
+    /// Add a sink node writing to `topic`, fed by the given parent
+    /// [`NodeHandle`]s. Every parent's output type must equal the sink's input
+    /// type `(K, V)` — enforced by the compiler.
     ///
     /// `produced` carries the key + value serdes used to serialize outgoing
-    /// records — written `Produced::with(key_serde, value_serde)`.
-    pub fn add_sink<K, V, KS, VS>(
+    /// records — written `Produced::with(key_serde, value_serde)`. A sink is
+    /// terminal, so nothing is returned.
+    pub fn add_sink<K, V, KS, VS, P, I>(
         &mut self,
         name: impl Into<String>,
         topic: impl Into<String>,
-        predecessors: impl IntoIterator<Item = impl Into<String>>,
+        parents: I,
         produced: Produced<KS, VS>,
-    ) -> &mut Self
-    where
+    ) where
         K: Any + Send,
         V: Any + Send,
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
+        I: IntoIterator<Item = P>,
+        P: Borrow<NodeHandle<K, V>>,
     {
         let Produced {
             key_serde,
@@ -264,7 +287,10 @@ impl Topology {
         } = produced;
         let name: String = name.into();
         let topic: String = topic.into();
-        let preds: Vec<String> = predecessors.into_iter().map(Into::into).collect();
+        let preds: Vec<String> = parents
+            .into_iter()
+            .map(|p| p.borrow().name.clone())
+            .collect();
         let r = self.reg.add_sink(&name, topic.clone(), preds);
         self.record(r);
 
@@ -286,22 +312,18 @@ impl Topology {
         self.factories.insert(
             name,
             NodeFactory {
-                kind: FactoryKind::Sink,
-                input_kv: Some((TypeId::of::<K>(), TypeId::of::<V>())),
-                output_kv: None,
-                input_names: Some((type_name::<K>(), type_name::<V>())),
-                output_names: None,
                 make_node: Some(make_node),
                 make_deser: None,
             },
         );
-        self
     }
 
     /// Register a state store connected to the given processors (→ changelog).
     ///
     /// `key_serde` / `value_serde` define how records are serialized into the
     /// changelog topic (`<app_id>-<name>-changelog`) and the store's byte map.
+    /// Stores connect processors of possibly-differing types, so the processor
+    /// list is by name — pass [`NodeHandle::name`] for a handle you hold.
     pub fn add_state_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
@@ -341,8 +363,10 @@ impl Topology {
     /// Derive subtopologies and the wire topology. `application_id` drives
     /// internal-topic names (`<app>-<store>-changelog`).
     ///
-    /// This also validates that every parent→child edge has matching KV types.
-    /// The wire `Topology` is byte-identical to the untyped implementation.
+    /// Parent→child KV types are already guaranteed to match by the typed
+    /// [`NodeHandle`] wiring, so `build()` only checks structural invariants
+    /// (no duplicate names, every predecessor exists, at least one source). The
+    /// wire `Topology` is byte-identical to the untyped implementation.
     pub fn build<S: Into<String>>(
         mut self,
         application_id: S,
@@ -364,52 +388,6 @@ impl Topology {
             let mut all = g.source_topics.clone();
             all.extend(g.repartition_source_topics.iter().cloned());
             source_topics.insert(g.id.clone(), all);
-        }
-
-        // ── Build-time type validation ────────────────────────────────────────
-        for node in &self.reg.nodes {
-            let predecessors: &[String] = match &node.kind {
-                NodeKind::Processor { predecessors } | NodeKind::Sink { predecessors, .. } => {
-                    predecessors
-                }
-                NodeKind::Source { .. } => continue,
-            };
-
-            let child_factory = self.factories.get(&node.name);
-            let child_input = child_factory.and_then(|f| f.input_kv);
-            let child_input_names = child_factory.and_then(|f| f.input_names);
-            let child_kind = child_factory.map_or("unknown", |f| f.kind.as_str());
-
-            for parent_name in predecessors {
-                let Some(parent_factory) = self.factories.get(parent_name) else {
-                    continue;
-                };
-                let Some(parent_output) = parent_factory.output_kv else {
-                    continue;
-                };
-                let Some(child_input_kv) = child_input else {
-                    continue;
-                };
-
-                if parent_output != child_input_kv {
-                    let parent_output_names = parent_factory.output_names.unwrap_or(("?", "?"));
-                    let child_input_names_pair = child_input_names.unwrap_or(("?", "?"));
-                    return Err(TopologyError::TypeMismatch(Box::new(TypeMismatchDetail {
-                        parent: parent_name.clone(),
-                        parent_kind: parent_factory.kind.as_str(),
-                        produces: format!(
-                            "Record<{}, {}>",
-                            parent_output_names.0, parent_output_names.1
-                        ),
-                        child: node.name.clone(),
-                        child_kind,
-                        expects: format!(
-                            "Record<{}, {}>",
-                            child_input_names_pair.0, child_input_names_pair.1
-                        ),
-                    })));
-                }
-            }
         }
 
         // ── Build node specs for instantiation ────────────────────────────────
@@ -661,7 +639,7 @@ mod tests {
     use super::*;
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
-    use crate::processor::serde::{I64Serde, StringSerde};
+    use crate::processor::serde::StringSerde;
     use assert2::check;
 
     struct Upper;
@@ -678,12 +656,12 @@ mod tests {
     #[test]
     fn build_single_source_sink_wire_unchanged() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_processor("up", || Upper, ["src"]);
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let up = t.add_processor("up", || Upper, [&src]);
         t.add_sink(
             "out",
             "out-topic",
-            ["up"],
+            [&up],
             Produced::with(StringSerde, StringSerde),
         );
         let built = t.build("app").unwrap();
@@ -695,44 +673,74 @@ mod tests {
     }
 
     #[test]
-    fn type_mismatch_is_reported_at_build() {
-        let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_processor("up", || Upper, ["src"]); // forwards Record<String,String>
-        t.add_sink(
-            "out",
-            "out-topic",
-            ["up"],
-            Produced::with(StringSerde, I64Serde),
-        ); // expects Record<String,i64>
-        let msg = t.build("app").unwrap_err().to_string();
-        check!(msg.contains("wiring type error"));
-        check!(msg.contains("`out`"));
-        check!(msg.contains("`up`"));
+    fn topology_error_converts_to_stored_error() {
+        // `record()` stashes registry errors as the cloneable `StoredError`;
+        // exercise every arm of the conversion so it stays total (the registry
+        // only emits `DuplicateNode` at runtime, but the type covers all three).
+        check!(matches!(
+            StoredError::from(TopologyError::Empty),
+            StoredError::Empty
+        ));
+        check!(matches!(
+            StoredError::from(TopologyError::DuplicateNode("n".into())),
+            StoredError::DuplicateNode(_)
+        ));
+        check!(matches!(
+            StoredError::from(TopologyError::UnknownPredecessor {
+                node: "a".into(),
+                predecessor: "b".into(),
+            }),
+            StoredError::UnknownPredecessor { .. }
+        ));
     }
 
     #[test]
-    fn unknown_predecessor_still_rejected() {
+    fn node_handle_clone_debug_and_owned_wiring() {
+        // NodeHandle is Clone + Debug, and parents may be passed by value (an
+        // owned handle), not only by reference — exercise all three.
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src2 = src.clone();
+        check!(src2.name() == "src");
+        check!(format!("{src2:?}").contains("src"));
+        // `[src2]` wires by value (the owned-handle `Borrow` path).
         t.add_sink(
             "out",
-            "o",
-            ["nope"],
+            "out",
+            [src2],
             Produced::with(StringSerde, StringSerde),
         );
-        check!(t.build("app").is_err());
+        check!(t.build("app").is_ok());
+    }
+
+    #[test]
+    fn handle_from_another_topology_is_rejected_at_build() {
+        // A handle's node name is only registered in the topology that created
+        // it; wiring it into a different topology leaves a dangling predecessor
+        // that `build()` rejects. (Within one topology, forward references and
+        // cycles can't even be written — you need a parent's handle first.)
+        let mut a = Topology::new();
+        let foreign = a.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+
+        let mut b = Topology::new();
+        b.add_sink(
+            "out",
+            "o",
+            [&foreign],
+            Produced::with(StringSerde, StringSerde),
+        );
+        check!(b.build("app").is_err());
     }
 
     #[test]
     fn instantiate_runs_records() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_processor("up", || Upper, ["src"]);
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let up = t.add_processor("up", || Upper, [&src]);
         t.add_sink(
             "out",
             "out-topic",
-            ["up"],
+            [&up],
             Produced::with(StringSerde, StringSerde),
         );
         let built = t.build("app").unwrap();
@@ -753,20 +761,20 @@ mod tests {
     fn build_with_processor_store_and_repartition() {
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_processor("proc", || Upper, ["src"]);
-        t.add_state_store("store", StringSerde, StringSerde, ["proc"]);
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let proc = t.add_processor("proc", || Upper, [&src]);
+        t.add_state_store("store", StringSerde, StringSerde, [proc.name()]);
         t.add_sink(
             "rsink",
             "rp",
-            ["proc"],
+            [&proc],
             Produced::with(StringSerde, StringSerde),
         );
-        t.add_source("rsrc", ["rp"], Consumed::with(StringSerde, StringSerde));
+        let rsrc = t.add_source("rsrc", ["rp"], Consumed::with(StringSerde, StringSerde));
         t.add_sink(
             "out",
             "out-topic",
-            ["rsrc"],
+            [&rsrc],
             Produced::with(StringSerde, StringSerde),
         );
         let built = t.build("my-app").unwrap();
@@ -786,11 +794,11 @@ mod tests {
     #[test]
     fn application_id_accessor() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_sink(
             "snk",
             "out",
-            ["src"],
+            [&src],
             Produced::with(StringSerde, StringSerde),
         );
         let built = t.build("my-streams-app").unwrap();
@@ -800,11 +808,11 @@ mod tests {
     #[test]
     fn source_topics_for_unknown_id_returns_empty() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_sink(
             "snk",
             "out",
-            ["src"],
+            [&src],
             Produced::with(StringSerde, StringSerde),
         );
         let built = t.build("app").unwrap();
@@ -820,44 +828,22 @@ mod tests {
     }
 
     #[test]
-    fn forward_reference_predecessor_is_rejected_preventing_cycles() {
-        // Referencing a not-yet-added node (which is how you'd build a cycle) is rejected.
-        let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_processor(
-            "p1",
-            || Upper,
-            ["src", "p2"], // p2 not added yet → forward reference → rejected
-        );
-        check!(t.build("app").is_err());
-    }
-
-    #[test]
-    fn source_to_sink_type_mismatch_reported() {
-        let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde)); // produces Record<String,String>
-        t.add_sink("out", "o", ["src"], Produced::with(StringSerde, I64Serde)); // expects Record<String,i64>
-        let msg = t.build("app").unwrap_err().to_string();
-        check!(msg.contains("wiring type error"));
-    }
-
-    #[test]
     fn instantiate_repartition_topology_lists_topics() {
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
-        t.add_source("s1", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_processor("p", || Upper, ["s1"]);
+        let s1 = t.add_source("s1", ["in"], Consumed::with(StringSerde, StringSerde));
+        let p = t.add_processor("p", || Upper, [&s1]);
         t.add_sink(
             "to_rp",
             "rp",
-            ["p"],
+            [&p],
             Produced::with(StringSerde, StringSerde),
         );
-        t.add_source("s2", ["rp"], Consumed::with(StringSerde, StringSerde));
+        let s2 = t.add_source("s2", ["rp"], Consumed::with(StringSerde, StringSerde));
         t.add_sink(
             "out",
             "out",
-            ["s2"],
+            [&s2],
             Produced::with(StringSerde, StringSerde),
         );
         let built = t.build("app").unwrap();
@@ -891,10 +877,10 @@ mod tests {
             }
         }
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_state_store("counts", StringSerde, I64Serde, ["c"]);
-        t.add_processor("c", || Counter, ["src"]);
-        t.add_sink("out", "out", ["c"], Produced::with(StringSerde, I64Serde));
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let c = t.add_processor("c", || Counter, [&src]);
+        t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
+        t.add_sink("out", "out", [&c], Produced::with(StringSerde, I64Serde));
         let built = t.build("app").unwrap();
         // wire topology still has the changelog topic (golden frame contract)
         check!(built.to_wire().subtopologies.iter().any(|s| {
