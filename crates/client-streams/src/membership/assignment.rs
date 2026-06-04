@@ -47,13 +47,8 @@ mod tests {
     fn built() -> crate::topology::BuiltTopology {
         use crate::processor::serde::{BytesSerde, Consumed, Produced};
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(BytesSerde, BytesSerde));
-        t.add_sink(
-            "snk",
-            "out",
-            ["src"],
-            Produced::with(BytesSerde, BytesSerde),
-        );
+        let src = t.add_source("src", ["in"], Consumed::with(BytesSerde, BytesSerde));
+        t.add_sink("snk", "out", [&src], Produced::with(BytesSerde, BytesSerde));
         t.build("app").unwrap()
     }
 

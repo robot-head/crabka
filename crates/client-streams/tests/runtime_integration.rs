@@ -176,20 +176,16 @@ async fn kafka_streams_processes_records_end_to_end() {
 
     // 3. Build and start the upper-case streams app.
     let mut topo = Topology::new();
-    topo.add_source(
+    let src = topo.add_source(
         "src",
         ["stream-in"],
         Consumed::with(StringSerde, StringSerde),
     );
-    topo.add_processor(
-        "up",
-        || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-        ["src"],
-    );
+    let up = topo.add_processor("up", || Upper, [&src]);
     topo.add_sink(
         "out",
         "stream-out",
-        ["up"],
+        [&up],
         Produced::with(StringSerde, StringSerde),
     );
     let built = topo.build("stream-app").unwrap();

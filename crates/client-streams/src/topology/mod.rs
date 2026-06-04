@@ -5,4 +5,4 @@ mod grouping;
 mod node;
 mod wire;
 
-pub use builder::{BuiltTopology, Topology, TopologyError};
+pub use builder::{BuiltTopology, NodeHandle, Topology, TopologyError};

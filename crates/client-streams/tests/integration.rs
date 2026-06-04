@@ -69,7 +69,7 @@ async fn member_joins_converges_and_leaves() {
     create_topic(&admin, "streams-input", 2).await;
 
     let mut topo = Topology::new();
-    topo.add_source(
+    let src = topo.add_source(
         "src",
         ["streams-input"],
         Consumed::with(BytesSerde, BytesSerde),
@@ -77,7 +77,7 @@ async fn member_joins_converges_and_leaves() {
     topo.add_sink(
         "snk",
         "streams-output",
-        ["src"],
+        [&src],
         Produced::with(BytesSerde, BytesSerde),
     );
     let built = topo.build("streams-app").unwrap();
@@ -136,17 +136,12 @@ async fn missing_source_topic_reports_not_ready() {
     // Deliberately do NOT create "streams-missing".
 
     let mut topo = Topology::new();
-    topo.add_source(
+    let src = topo.add_source(
         "src",
         ["streams-missing"],
         Consumed::with(BytesSerde, BytesSerde),
     );
-    topo.add_sink(
-        "snk",
-        "out",
-        ["src"],
-        Produced::with(BytesSerde, BytesSerde),
-    );
+    topo.add_sink("snk", "out", [&src], Produced::with(BytesSerde, BytesSerde));
     let built = topo.build("streams-missing-app").unwrap();
 
     let mut membership = StreamsMembership::builder()
