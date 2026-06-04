@@ -37,7 +37,7 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
 use crate::coordinator::persistence::OffsetCommitValue;
-use crate::coordinator::unified::actor::validate_group_commit;
+use crate::coordinator::unified::actor::{GroupKindTag, validate_group_commit};
 use crate::error::BrokerError;
 use crate::txn::util::now_millis;
 
@@ -109,11 +109,14 @@ pub(crate) async fn handle(
     //    is not present we'll detect that below and return NOT_COORDINATOR.
     //    For a multi-broker future this would route to the leader for
     //    hash(group_id) % __consumer_offsets.partition_count.
-    let handle = broker.group_coordinator.find(&req.group_id).or_else(|| {
-        broker
-            .group_coordinator
-            .get_or_create_classic(&req.group_id)
-    });
+    let handle = broker
+        .group_coordinator
+        .find(&req.group_id)
+        .unwrap_or_else(|| {
+            broker
+                .group_coordinator
+                .get_or_create_group(&req.group_id, GroupKindTag::Classic)
+        });
 
     // 2. KIP-447 / KIP-1319 fencing — identical to a regular OffsetCommit
     //    (KIP-447: "consistent with normal offset fencing"). For a classic
@@ -124,11 +127,12 @@ pub(crate) async fn handle(
     //    UNKNOWN_MEMBER_ID. A producer that supplies no metadata (empty
     //    member_id, generation_id = -1) is a simple consumer and is not fenced.
     //    The fields only exist on v3+, so older requests carry the
-    //    simple-consumer defaults and no-op.
+    //    simple-consumer defaults and no-op. `validate_group_commit` dispatches
+    //    on the actor's LIVE `group.kind`, so a KIP-848-flipped group is fenced
+    //    against its current protocol, not the stale spawn-time `handle.kind`.
     if version >= 3
-        && let Some(h) = &handle
         && let Some(code) = validate_group_commit(
-            h,
+            &handle,
             &req.member_id,
             req.generation_id,
             req.group_instance_id.as_deref(),

@@ -37,7 +37,7 @@ use crate::broker::Broker;
 use crate::codes;
 use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
 use crate::coordinator::persistence::OffsetCommitValue;
-use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
+use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::coordinator::unified::classic_state::GroupState;
 use crate::error::BrokerError;
 use crate::partition::{ProduceJob, WriterMessage};
@@ -92,7 +92,13 @@ pub(crate) async fn handle(
     // *consumer-protocol* classic group with live members still subscribes to
     // the topic; Empty/Dead groups, non-`"consumer"` protocol_type groups, and
     // next-gen consumer groups skip the guard.
-    let subscribed_topics: HashSet<String> = if group_handle.kind == GroupKindTag::Classic {
+    // `ClassicInspect` dispatches on the actor's LIVE `group.kind`: it replies
+    // ONLY for a classic-kind group and drops the sender for a consumer-kind
+    // group, so the `&& let Ok(view) = rx.await` guard yields the empty set for
+    // a consumer group (including an UPGRADED one) without consulting the stale
+    // spawn-time `handle.kind`. A KIP-848 downgrade leaves the group classic, so
+    // its `ClassicInspect` view is the one that matters.
+    let subscribed_topics: HashSet<String> = {
         let (tx, rx) = oneshot::channel();
         if group_handle
             .tx
@@ -110,8 +116,6 @@ pub(crate) async fn handle(
         } else {
             HashSet::new()
         }
-    } else {
-        HashSet::new()
     };
 
     // Build per-topic/per-partition result rows and queue the tombstone

@@ -73,6 +73,25 @@ pub fn parse_key(mut buf: &[u8]) -> Result<Key, BrokerError> {
     }
 }
 
+/// Encode a [`Key`] back to its `__consumer_offsets` wire bytes, symmetric to
+/// [`parse_key`]. The k0/k1 `OffsetCommit` and k2 `GroupMetadata` variants are
+/// encoded here; the next-gen / share / streams families delegate to their own
+/// `encode_*` helpers.
+#[must_use]
+pub fn encode_key(key: &Key) -> Bytes {
+    match key {
+        Key::OffsetCommit {
+            group_id,
+            topic,
+            partition,
+        } => OffsetCommitValue::encode_key(group_id, topic, *partition),
+        Key::GroupMetadata { group_id } => GroupMetadataValue::encode_key(group_id),
+        Key::NextGen(k) => crate::coordinator::unified::persistence_next_gen::encode_key(k),
+        Key::Share(k) => crate::coordinator::unified::share::persistence::encode_share_key(k),
+        Key::Streams(k) => crate::coordinator::unified::streams::persistence::encode_streams_key(k),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OffsetCommitValue {
     pub offset: i64,

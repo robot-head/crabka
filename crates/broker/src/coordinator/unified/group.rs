@@ -102,6 +102,12 @@ impl Group {
             GroupKind::Classic(_) => None,
         }
     }
+
+    /// Mutable access to the discriminated `kind`, so a live-migration trigger
+    /// can replace `Classic(..)` with `Consumer(..)` in place (KIP-848 upgrade).
+    pub fn kind_mut(&mut self) -> &mut GroupKind {
+        &mut self.kind
+    }
 }
 
 #[cfg(test)]

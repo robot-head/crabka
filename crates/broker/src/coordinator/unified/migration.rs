@@ -4,8 +4,7 @@
 //! consume — the [`super::config::ConsumerGroupMigrationPolicy`] and the
 //! convertibility predicate — without performing any live conversion yet. The
 //! predicates are unit-tested here and wired into the conversion triggers in
-//! D/E, so they are dead in the lib build until then.
-#![allow(dead_code)]
+//! D/E.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -19,7 +18,7 @@ use crabka_protocol::owned::consumer_protocol_subscription::ConsumerProtocolSubs
 use crabka_protocol::primitives::uuid::Uuid;
 use crabka_protocol::{Decode, Encode};
 
-use super::classic_state::Group as ClassicState;
+use super::classic_state::{Group as ClassicState, Member as ClassicMember, select_protocol};
 use super::consumer_state::{ClassicMemberFacade, GroupState as ConsumerState, MemberState};
 use super::persistence_next_gen::MemberAssignmentState;
 use super::reconciler::ReconcileInput;
@@ -120,6 +119,99 @@ pub(crate) fn convert_classic_to_consumer(classic: &ClassicState) -> ConsumerSta
     state
 }
 
+/// The atomic record batch for an upgrade: tombstone the classic k2
+/// `GroupMetadata` and write the full next-gen record set for the converted
+/// group. The two go into one batch so the flip is all-or-nothing.
+pub(crate) fn upgrade_pending_records(state: &ConsumerState) -> super::actor::PendingRecords {
+    let mut pending = super::actor::full_pending_records(state);
+    pending.classic_group_metadata_tombstone = true;
+    pending
+}
+
+/// Convert a consumer group back into a classic group (KIP-848 downgrade, 64d-E).
+/// Every member is re-expressed as a classic [`ClassicMember`] restored from its
+/// [`ClassicMemberFacade`]; its assignment seed is the server-computed target
+/// translated to a `ConsumerProtocolAssignment` blob, so the member keeps its
+/// partitions across the flip with no spurious revoke. Committed offsets live on
+/// the kind-agnostic `Group` container and are untouched here.
+///
+/// Precondition: every member is a hosted classic member (`classic.is_some()`),
+/// which holds once the last native consumer-protocol member has departed.
+pub(crate) fn convert_consumer_to_classic(
+    state: &ConsumerState,
+    image: &ReconcileInput,
+) -> ClassicState {
+    let mut classic = ClassicState::new(state.group_id.clone());
+    classic.protocol_type = Some("consumer".into());
+    for (mid, m) in &state.members {
+        let facade = m
+            .classic
+            .as_ref()
+            .expect("downgrade precondition: all members are hosted classic members");
+        // Seed from the server-computed TARGET, not `assigned_partitions`: a
+        // hosted classic member's `assigned_partitions` only fills in as a
+        // NATIVE consumer acks epochs over heartbeats, which a hosted classic
+        // member never does. Its real partitions live in `target.per_member`,
+        // so reading the target keeps them across the downgrade.
+        let seed = member_target_assignment(state, mid, image);
+        let mut cm = ClassicMember::new(
+            mid.clone(),
+            m.client_id.clone(),
+            m.client_host.clone(),
+            facade.session_timeout,
+            m.rebalance_timeout,
+            facade.supported_protocols.clone(),
+        )
+        .with_instance_id(m.instance_id.clone());
+        cm.assignment = Some(seed);
+        classic.add_member(cm);
+    }
+    if let Some(name) = select_protocol(&classic.members) {
+        classic.complete_rebalance(&name);
+        // Drive to Stable so a downgraded member's first Heartbeat/SyncGroup
+        // reads its seed assignment instead of REBALANCE_IN_PROGRESS.
+        let assignments: std::collections::HashMap<String, bytes::Bytes> = classic
+            .members
+            .iter()
+            .filter_map(|(id, m)| m.assignment.clone().map(|a| (id.clone(), a)))
+            .collect();
+        classic.install_assignments(assignments);
+    }
+    // Set generation_id LAST so neither complete_rebalance (+1) nor
+    // install_assignments overrides the consumer group's epoch.
+    classic.generation_id = state.group_epoch.max(0);
+    classic
+}
+
+/// The atomic record batch for a downgrade: tombstone the consumer group's
+/// group-level next-gen k3 `GroupMetadata` and k6 `TargetAssignmentMetadata`,
+/// every member's k5/k7/k8, and write the classic k2 `GroupMetadata` for the
+/// re-expressed classic group. All in one batch so the flip is all-or-nothing
+/// (and bootstrap replay sees a clean next-gen-drop → classic-write sequence;
+/// log order wins).
+///
+/// The k6 tombstone is load-bearing under log compaction: `__consumer_offsets`
+/// is compacted, so without it a surviving post-upgrade k6 write (group-level,
+/// never per-member-tombstoned) would outlive the GC'd k3 and re-create a
+/// next-gen seed on replay, resurrecting the downgraded group as next-gen.
+pub(crate) fn downgrade_pending_records(
+    consumer: &ConsumerState,
+    classic: &ClassicState,
+) -> super::actor::PendingRecords {
+    let mut pending = super::actor::PendingRecords {
+        next_gen_group_metadata_tombstone: true,
+        next_gen_target_metadata_tombstone: true,
+        classic_group_metadata: Some(super::actor::classic_group_metadata_record(classic)),
+        ..Default::default()
+    };
+    for mid in consumer.members.keys() {
+        pending.member_metadata.push((mid.clone(), None));
+        pending.target_per_member.push((mid.clone(), None));
+        pending.current_per_member.push((mid.clone(), None));
+    }
+    pending
+}
+
 /// Translate a member's server-side target (topic-ID → partitions) into a
 /// classic `ConsumerProtocolAssignment` wire blob (topic-name → partitions),
 /// with the leading `i16` version prefix a classic client expects in the
@@ -159,6 +251,188 @@ pub(crate) fn target_to_consumer_assignment(
         .encode(&mut out, 0)
         .expect("ConsumerProtocolAssignment encode is infallible into BytesMut");
     out.freeze()
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Serving hosted classic members from the consumer-group reconciler (64d-F).
+//
+// A classic member hosted in an upgraded consumer group keeps speaking the
+// classic Heartbeat/JoinGroup/SyncGroup RPCs. We map those onto the next-gen
+// machinery: the member's server-side target (translated to a
+// `ConsumerProtocolAssignment` blob) is the assignment it should hold. The
+// "does this member owe a re-sync?" signal is whether that translated target
+// differs from `facade.last_synced_assignment` — purely derived from the
+// reconciler's output, so it needs no separate epoch bookkeeping.
+// ───────────────────────────────────────────────────────────────────────────
+
+use super::actor::{JoinResult, JoinResultMember, SyncResult};
+use crate::codes;
+
+/// Classic `Heartbeat` for a hosted member: refresh liveness and signal a
+/// re-sync while the member's current target differs from what it last synced.
+/// `REBALANCE_IN_PROGRESS` tells a classic client to re-`JoinGroup`/`SyncGroup`
+/// to pick up the changed assignment; `NONE` once it is in sync.
+pub(crate) fn serve_classic_heartbeat(
+    state: &mut ConsumerState,
+    member_id: &str,
+    image: &ReconcileInput,
+) -> i16 {
+    let Some(m) = state.members.get(member_id) else {
+        return codes::UNKNOWN_MEMBER_ID;
+    };
+    let current = member_target_assignment(state, member_id, image);
+    let owes = m
+        .classic
+        .as_ref()
+        .is_none_or(|c| c.last_synced_assignment != current);
+    if let Some(m) = state.members.get_mut(member_id) {
+        m.last_seen = Instant::now();
+    }
+    if owes {
+        codes::REBALANCE_IN_PROGRESS
+    } else {
+        codes::NONE
+    }
+}
+
+/// Translate a member's server-side TARGET (the source of truth for what it
+/// should own, mirroring the native heartbeat response) into a
+/// `ConsumerProtocolAssignment` blob. In the next-gen model a member's
+/// `assigned_partitions` only fills in as the client acks the target; a hosted
+/// classic member has no such ack loop, so the target is what it must sync.
+fn member_target_assignment(
+    state: &ConsumerState,
+    member_id: &str,
+    image: &ReconcileInput,
+) -> Bytes {
+    let target = state
+        .target
+        .per_member
+        .get(member_id)
+        .cloned()
+        .unwrap_or_default();
+    target_to_consumer_assignment(&target, image)
+}
+
+/// Classic `SyncGroup` for a hosted member: return its current target
+/// translated to a `ConsumerProtocolAssignment` blob and record it as
+/// `last_synced_assignment` so subsequent heartbeats report `NONE`.
+pub(crate) fn serve_classic_sync(
+    state: &mut ConsumerState,
+    member_id: &str,
+    image: &ReconcileInput,
+) -> SyncResult {
+    if !state.members.contains_key(member_id) {
+        return SyncResult {
+            error_code: codes::UNKNOWN_MEMBER_ID,
+            ..Default::default()
+        };
+    }
+    let blob = member_target_assignment(state, member_id, image);
+    if let Some(m) = state.members.get_mut(member_id)
+        && let Some(c) = m.classic.as_mut()
+    {
+        c.last_synced_assignment = blob.clone();
+        c.awaiting_sync = false;
+    }
+    SyncResult {
+        error_code: codes::NONE,
+        assignment: blob,
+        protocol_type: Some("consumer".into()),
+        protocol_name: None,
+    }
+}
+
+/// Upsert a hosted classic member from a classic `JoinGroup` into the consumer
+/// group. A rejoin of an existing member refreshes its facade/subscription and
+/// preserves its `assigned_partitions` / `last_synced_assignment`; a brand-new
+/// member is added with a fresh facade (`awaiting_sync = true`).
+///
+/// `add_or_update_member` marks the group dirty iff the subscription is new or
+/// changed, so the caller can reconcile + persist only when needed.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn upsert_classic_member(
+    state: &mut ConsumerState,
+    member_id: &str,
+    subscription_topics: HashSet<String>,
+    protocols: Vec<(String, Bytes)>,
+    client_id: String,
+    client_host: String,
+    session_timeout: std::time::Duration,
+    rebalance_timeout: std::time::Duration,
+    instance_id: Option<String>,
+) {
+    // Preserve a rejoining member's existing assignment + last-synced blob so a
+    // rejoin with an unchanged subscription is a pure no-op (no spurious revoke
+    // and no re-sync signal). A new member starts fresh, awaiting its first sync.
+    let existing = state.members.get(member_id);
+    let assigned_partitions = existing
+        .map(|m| m.assigned_partitions.clone())
+        .unwrap_or_default();
+    let partitions_pending_revocation = existing
+        .map(|m| m.partitions_pending_revocation.clone())
+        .unwrap_or_default();
+    let last_synced_assignment = existing
+        .and_then(|m| m.classic.as_ref())
+        .map(|c| c.last_synced_assignment.clone())
+        .unwrap_or_default();
+    let member_epoch = existing.map_or(state.group_epoch, |m| m.member_epoch);
+    let previous_member_epoch = existing.map_or(0, |m| m.previous_member_epoch);
+    let assignment_state = existing.map_or(MemberAssignmentState::Stable, |m| m.assignment_state);
+
+    let facade = ClassicMemberFacade {
+        generation_id: state.group_epoch,
+        supported_protocols: protocols,
+        session_timeout,
+        last_synced_assignment,
+        awaiting_sync: existing.is_none(),
+    };
+    state.add_or_update_member(MemberState {
+        member_id: member_id.to_string(),
+        instance_id,
+        rack_id: None,
+        client_id,
+        client_host,
+        subscribed_topic_names: subscription_topics,
+        subscribed_topic_regex: None,
+        compiled_regex: None,
+        server_assignor: None,
+        rebalance_timeout,
+        member_epoch,
+        previous_member_epoch,
+        assignment_state,
+        assigned_partitions,
+        partitions_pending_revocation,
+        last_seen: Instant::now(),
+        classic: Some(facade),
+    });
+}
+
+/// Build the `JoinGroup` result for a hosted classic member. The group is
+/// server-assigned, so the member is its own leader of a single-member view at
+/// `generation = group_epoch`; the real assignment arrives on the next
+/// `SyncGroup`.
+pub(crate) fn build_hosted_classic_join_result(
+    state: &ConsumerState,
+    member_id: &str,
+    protocol_name: Option<String>,
+) -> JoinResult {
+    JoinResult {
+        error_code: codes::NONE,
+        generation_id: state.group_epoch,
+        protocol_type: Some("consumer".into()),
+        protocol_name,
+        leader: member_id.to_string(),
+        member_id: member_id.to_string(),
+        members: vec![JoinResultMember {
+            member_id: member_id.to_string(),
+            group_instance_id: state
+                .members
+                .get(member_id)
+                .and_then(|m| m.instance_id.clone()),
+            metadata: Bytes::new(),
+        }],
+    }
 }
 
 #[cfg(test)]
@@ -325,5 +599,86 @@ mod tests {
         let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
         assert!(decoded.assigned_partitions.len() == 1);
         assert!(decoded.assigned_partitions[0].topic == "orders");
+    }
+
+    #[test]
+    fn downgrade_re_expresses_members_as_classic() {
+        use crate::coordinator::unified::classic_state::GroupState as ClassicGroupState;
+        use crate::coordinator::unified::consumer_state::{
+            ClassicMemberFacade, GroupState, MemberState,
+        };
+        use crate::coordinator::unified::persistence_next_gen::MemberAssignmentState;
+        use std::time::{Duration, Instant};
+
+        let t1 = Uuid([1; 16]);
+        let image = ReconcileInput {
+            topic_id_by_name: [("orders".to_string(), t1)].into(),
+            ..Default::default()
+        };
+        let mut state = GroupState::new("g");
+        state.group_epoch = 7;
+        let m = MemberState {
+            member_id: "m1".into(),
+            instance_id: Some("inst-a".into()),
+            rack_id: None,
+            client_id: "c".into(),
+            client_host: "/127.0.0.1".into(),
+            subscribed_topic_names: ["orders".to_string()].into(),
+            subscribed_topic_regex: None,
+            compiled_regex: None,
+            server_assignor: None,
+            rebalance_timeout: Duration::from_mins(1),
+            member_epoch: 7,
+            previous_member_epoch: 6,
+            assignment_state: MemberAssignmentState::Stable,
+            // A hosted classic member never acks epochs, so its
+            // `assigned_partitions` stays EMPTY — its real partitions live in
+            // the group's target (set below). The downgrade must seed from the
+            // target, not from this empty map.
+            assigned_partitions: std::collections::HashMap::new(),
+            partitions_pending_revocation: std::collections::HashMap::new(),
+            last_seen: Instant::now(),
+            classic: Some(ClassicMemberFacade {
+                generation_id: 7,
+                supported_protocols: vec![("range".into(), bytes::Bytes::from_static(b"meta"))],
+                session_timeout: Duration::from_secs(30),
+                last_synced_assignment: bytes::Bytes::new(),
+                awaiting_sync: false,
+            }),
+        };
+        state.add_or_update_member(m);
+        // The member's real partitions are in the server target, not in
+        // `assigned_partitions`.
+        state.target.epoch = 7;
+        state
+            .target
+            .per_member
+            .insert("m1".into(), [(t1, vec![0, 1])].into());
+
+        let classic = convert_consumer_to_classic(&state, &image);
+        assert!(classic.group_id == "g");
+        assert!(classic.generation_id == 7);
+        let member = classic.members.get("m1").expect("member preserved");
+        assert!(member.group_instance_id.as_deref() == Some("inst-a"));
+        assert!(member.session_timeout == Duration::from_secs(30));
+        let asn = member.assignment.clone().expect("seed assignment");
+        let mut cur = &asn[..];
+        let version = cur.get_i16();
+        assert!(version == 0);
+        let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
+        assert!(decoded.assigned_partitions[0].topic == "orders");
+        assert!(decoded.assigned_partitions[0].partitions == vec![0, 1]);
+        // Group must land in Stable so the first Heartbeat/SyncGroup after
+        // downgrade does not trigger a spurious full rebalance.
+        assert!(classic.state == ClassicGroupState::Stable);
+        // Seed assignment is still intact after stabilization.
+        let asn2 = member
+            .assignment
+            .clone()
+            .expect("seed assignment still set after stabilize");
+        assert!(asn2 == asn);
+        // complete_rebalance must have set the protocol metadata coherently.
+        assert!(classic.protocol_name.as_deref() == Some("range"));
+        assert!(classic.leader_id.as_deref() == Some("m1"));
     }
 }

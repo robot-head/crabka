@@ -13,7 +13,7 @@ use crabka_protocol::{Decode, Encode};
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::unified::actor::GroupActorMessage;
+use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
 
 pub(crate) async fn handle(
@@ -57,12 +57,12 @@ pub(crate) async fn handle(
             return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
         }
 
-        // The actor's kind is the per-group type lock: a classic group rejects
-        // a next-gen heartbeat (and `get_or_create_consumer` returns `None`),
-        // mirroring the old `group_type == Classic` rejection.
-        let Some(handle) = coordinator.get_or_create_consumer(&req.group_id) else {
-            return encode(version, &error(codes::GROUP_ID_NOT_FOUND));
-        };
+        // Route to the one actor for this id, spawning a consumer-kind actor if
+        // the id is brand-new. Both RPC families reach the same actor; a classic
+        // group rejects a next-gen heartbeat from inside the actor's `Heartbeat`
+        // arm (replying `GROUP_ID_NOT_FOUND`), which is where the per-group kind
+        // lock now lives.
+        let handle = coordinator.get_or_create_group(&req.group_id, GroupKindTag::Consumer);
         let (tx, rx) = oneshot::channel();
         if handle
             .tx

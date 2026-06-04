@@ -105,12 +105,16 @@ What works today:
   surface) and a Cruise-Control-equivalent rebalancer.
 
 Notable gaps (see the [KIP matrix](#kip-implementation-status) for detail): the
-next-gen consumer group protocol (KIP-848) consumes end to end with GA
-`group.protocol=consumer` clients (kafka-clients 4.0) over a unified group
-coordinator — `__consumer_offsets` persistence, a rack-aware `UniformAssignor`,
-the pluggable server-side assignor surface, and `subscribed_topic_regex` are all
-in tree — but live classic↔next-gen group migration is not yet wired (the
-conversion predicates exist and are unit-tested; the triggers are not). Tiered
+next-gen consumer group protocol (KIP-848) is fully implemented — `__consumer_offsets`
+persistence, a rack-aware `UniformAssignor`, the pluggable server-side assignor
+surface, and `subscribed_topic_regex` are all in tree, and live bidirectional
+classic↔next-gen group migration is now wired: in-place upgrade (classic→consumer on
+`ConsumerGroupHeartbeat`), downgrade (consumer→classic when the last native consumer
+member leaves), hosted classic members served through the unified coordinator, and
+the transition governed by `group.consumer.migration.policy` (default: bidirectional).
+JVM-validated with a classic cp-kafka consumer and an apache/kafka:4.0.0
+consumer-protocol consumer co-existing in the same group with a coherent
+cross-protocol assignment. Tiered
 storage (KIP-405) is fully wired: the topic-backed `RemoteLogMetadataManager`
 (durable `__remote_log_metadata` internal topic) is the default RLMM whenever
 tiered storage is enabled; in-memory metadata is an explicit opt-out for
@@ -226,7 +230,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Cooperative incremental rebalance (KIP-429) | ✅ |
 | Static membership (KIP-345) | ✅ |
 | `OffsetDelete` admin API (KIP-496) | ✅ |
-| Next-gen consumer group protocol (KIP-848) | ⚠️ |
+| Next-gen consumer group protocol (KIP-848) | ✅ |
 | Share groups / queues (KIP-932) | ✅ |
 | Streams rebalance protocol (KIP-1071) | ⚠️ |
 
@@ -413,7 +417,7 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 | [KIP-345](https://cwiki.apache.org/confluence/display/KAFKA/KIP-345) | Static membership | ✅ |
 | [KIP-429](https://cwiki.apache.org/confluence/display/KAFKA/KIP-429) | Cooperative incremental rebalance protocol | ✅ |
 | [KIP-496](https://cwiki.apache.org/confluence/display/KAFKA/KIP-496) | `OffsetDelete` admin API | ✅ |
-| [KIP-848](https://cwiki.apache.org/confluence/display/KAFKA/KIP-848) | Next-generation consumer rebalance protocol | ⚠️ |
+| [KIP-848](https://cwiki.apache.org/confluence/display/KAFKA/KIP-848) | Next-generation consumer rebalance protocol | ✅ |
 
 ### Storage & log
 

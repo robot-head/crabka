@@ -199,6 +199,17 @@ impl GroupCoordinator {
             .or_insert(GroupType::Classic);
     }
 
+    /// After an in-place downgrade (KIP-848), drop the consumer seed so a
+    /// respawn does not re-hydrate the group as next-gen, and record it as
+    /// classic. Unlike [`mark_classic`] (first-mark-wins via `or_insert`), this
+    /// FORCES the type to `Classic` — a downgrade must override any prior
+    /// `NextGen` lock the group carried while it was a consumer group.
+    pub fn mark_classic_after_downgrade(&self, group_id: &str) {
+        self.seeds.remove(group_id);
+        self.seeds_cache.remove(group_id);
+        self.group_types.insert(group_id.into(), GroupType::Classic);
+    }
+
     pub fn mark_next_gen(&self, group_id: &str) {
         self.group_types
             .entry(group_id.into())
@@ -245,34 +256,33 @@ impl GroupCoordinator {
             .map(|e| e.value().clone())
     }
 
-    /// Get the existing actor for `group_id`, or spawn one of `kind`.
+    /// Get the one actor for `group_id`, spawning it with `initial_kind` if
+    /// absent.
     ///
-    /// Returns `None` if a *live* actor of the **other** protocol already owns
-    /// the id — this enforces the per-group type lock (formerly the
-    /// `group_types` map + `mark_*`): the first protocol to create the actor
-    /// wins, and the second is rejected by its handler, exactly as before.
+    /// The kind argument only decides the spawn kind for a brand-new group.
+    /// Both families route to one actor; the actor rejects the family it does
+    /// not currently serve. (A later slice lets the actor flip kind in place,
+    /// so a group is no longer pinned to its spawn kind.) Keeps the dead-actor
+    /// (closed tx) respawn and the consumer re-hydrate-from-seed paths.
     #[must_use]
-    pub fn get_or_create(
+    pub fn get_or_create_group(
         self: &Arc<Self>,
         group_id: &str,
-        kind: GroupKindTag,
-    ) -> Option<Arc<GroupActorHandle>> {
+        initial_kind: GroupKindTag,
+    ) -> Arc<GroupActorHandle> {
         if let Some(h) = self.groups.get(group_id) {
             // Dead-actor detection: if the mpsc sender is closed, the actor
             // has exited (typically after a log-write failure). Drop the
             // entry and fall through to spawn a fresh actor.
             if !h.value().tx.is_closed() {
-                if h.value().kind != kind {
-                    return None;
-                }
-                return Some(h.value().clone());
+                return h.value().clone();
             }
             drop(h);
             self.groups.remove(group_id);
         }
         let h = Arc::new(GroupActorHandle::spawn(
             group_id.into(),
-            kind,
+            initial_kind,
             self.config.clone(),
             self.metadata.clone(),
             self.offsets_log.clone(),
@@ -284,37 +294,29 @@ impl GroupCoordinator {
             .or_insert(h)
             .value()
             .clone();
-        if inserted.kind != kind {
-            // Lost a spawn race against the other protocol.
-            return None;
-        }
         // Re-hydrate a respawned consumer actor from its last-known-good state.
-        if kind == GroupKindTag::Consumer
+        if initial_kind == GroupKindTag::Consumer
             && let Some(seed) = self.cached_seed(group_id)
         {
             let _ = inserted.tx.try_send(GroupActorMessage::Seed(seed));
         }
-        Some(inserted)
+        inserted
     }
 
-    /// Get-or-create a classic-protocol actor. `None` if a consumer group
-    /// already owns the id.
+    /// Get-or-create a classic-protocol actor. Spawns a classic actor for a
+    /// brand-new id; for an existing id returns the one actor regardless of its
+    /// kind (the actor serves or rejects per its live kind).
     #[must_use]
-    pub fn get_or_create_classic(
-        self: &Arc<Self>,
-        group_id: &str,
-    ) -> Option<Arc<GroupActorHandle>> {
-        self.get_or_create(group_id, GroupKindTag::Classic)
+    pub fn get_or_create_classic(self: &Arc<Self>, group_id: &str) -> Arc<GroupActorHandle> {
+        self.get_or_create_group(group_id, GroupKindTag::Classic)
     }
 
-    /// Get-or-create a next-gen consumer-protocol actor. `None` if a classic
-    /// group already owns the id.
+    /// Get-or-create a next-gen consumer-protocol actor. Spawns a consumer actor
+    /// for a brand-new id; for an existing id returns the one actor regardless
+    /// of its kind (the actor serves or rejects per its live kind).
     #[must_use]
-    pub fn get_or_create_consumer(
-        self: &Arc<Self>,
-        group_id: &str,
-    ) -> Option<Arc<GroupActorHandle>> {
-        self.get_or_create(group_id, GroupKindTag::Consumer)
+    pub fn get_or_create_consumer(self: &Arc<Self>, group_id: &str) -> Arc<GroupActorHandle> {
+        self.get_or_create_group(group_id, GroupKindTag::Consumer)
     }
 
     #[must_use]
@@ -417,30 +419,40 @@ impl GroupCoordinator {
     /// Ids of every live next-gen (KIP-848) consumer group actor. Mirrors
     /// [`share_group_ids`](Self::share_group_ids); used by `ListGroups` to emit
     /// `group_type="consumer"` entries without an actor round-trip.
+    ///
+    /// Note: this returns all group ids from the shared `groups` map (classic
+    /// included). The `ListGroups` handler's `emitted` dedup set prevents a
+    /// double wire emission, so a classic group is emitted once as
+    /// `group_type="classic"` and not repeated here.
     pub fn consumer_group_ids(&self) -> Vec<String> {
         self.groups.iter().map(|e| e.key().clone()).collect()
     }
 
     /// Spawn a classic actor seeded with a fully-replayed `Group` (bootstrap).
     pub fn seed_classic(self: &Arc<Self>, group_id: &str, group: Box<Group>) {
-        if let Some(handle) = self.get_or_create_classic(group_id) {
-            let _ = handle.tx.try_send(GroupActorMessage::ClassicSeed(group));
-        }
+        let handle = self.get_or_create_classic(group_id);
+        let _ = handle.tx.try_send(GroupActorMessage::ClassicSeed(group));
     }
 
-    /// Snapshot every **classic** group. Consumer groups are intentionally not
-    /// surfaced to the legacy admin APIs (preserved from the two-coordinator
-    /// era). TODO(64d-C+): surface consumer groups in admin APIs.
+    /// Snapshot every **live-classic** group for the wire `ListGroups`
+    /// (`group_type="classic"`) pass. Iterates ALL handles and discriminates on
+    /// the group's LIVE kind, not the spawn-time `handle.kind` hint (KIP-848 live
+    /// migration can make them differ): `ClassicInspect`'s arm replies only for a
+    /// classic-kind group, so a consumer/upgraded group drops its reply sender
+    /// and is skipped here. This keeps `list_groups` the sole producer of the
+    /// `classic` rows; consumer-kind groups are surfaced separately by the
+    /// `ListGroups` handler via [`consumer_group_ids`](Self::consumer_group_ids)
+    /// tagged `group_type="consumer"`, so they are NOT double-counted or
+    /// mislabeled. A *downgraded* group whose handle still reads `Consumer`
+    /// nonetheless appears here (the live kind is `Classic`).
     pub async fn list_groups(&self) -> Vec<GroupSnapshot> {
-        let handles: Vec<Arc<GroupActorHandle>> = self
-            .groups
-            .iter()
-            .filter(|e| e.value().kind == GroupKindTag::Classic)
-            .map(|e| e.value().clone())
-            .collect();
+        let handles: Vec<Arc<GroupActorHandle>> =
+            self.groups.iter().map(|e| e.value().clone()).collect();
         let mut out = Vec::with_capacity(handles.len());
         for h in handles {
             let (tx, rx) = oneshot::channel();
+            // `ClassicInspect` replies only for a classic-kind group; a
+            // consumer-kind group never sends, so `rx.await` errors and we skip.
             if h.tx
                 .send(GroupActorMessage::ClassicInspect { reply: tx })
                 .await
@@ -453,28 +465,32 @@ impl GroupCoordinator {
         out
     }
 
-    /// Snapshot a single **classic** group, or `None` if unknown / consumer.
+    /// Snapshot a single group (classic OR consumer/migrated), or `None` if
+    /// unknown. Inspects the LIVE group via [`InspectAny`] rather than gating on
+    /// the spawn-time `handle.kind`, so an upgraded consumer group still reports.
+    ///
+    /// [`InspectAny`]: GroupActorMessage::InspectAny
     pub async fn describe_group(&self, group_id: &str) -> Option<GroupSnapshot> {
         let handle = self.find(group_id)?;
-        if handle.kind != GroupKindTag::Classic {
-            return None;
-        }
         let (tx, rx) = oneshot::channel();
         handle
             .tx
-            .send(GroupActorMessage::ClassicInspect { reply: tx })
+            .send(GroupActorMessage::InspectAny { reply: tx })
             .await
             .ok()?;
-        rx.await.ok().map(|v| v.snapshot())
+        rx.await.ok()
     }
 
     /// Drop a **classic** group from the registry. `NonEmpty` if it still has
     /// live members; `NotFound` if unknown / consumer.
     pub async fn delete_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
         let handle = self.find(group_id).ok_or(DeleteGroupError::NotFound)?;
-        if handle.kind != GroupKindTag::Classic {
-            return Err(DeleteGroupError::NotFound);
-        }
+        // `ClassicInspect` replies ONLY when the actor's LIVE group is classic;
+        // a consumer-kind group drops the sender, so `rx.await` errors and we
+        // map that to `NotFound`. This single source of truth handles the
+        // KIP-848 flip cases: a group that downgraded in place is now classic
+        // and becomes deletable, while an upgraded (consumer) group is reported
+        // `NotFound` — without consulting the stale spawn-time `handle.kind`.
         let (tx, rx) = oneshot::channel();
         handle
             .tx
@@ -584,8 +600,21 @@ impl GroupCoordinator {
     /// Apply a tombstone for a next-gen key. Removes the corresponding
     /// entry from both `seeds` and `seeds_cache`. Used by bootstrap replay
     /// to honor records with `value = None`.
+    ///
+    /// A `GroupMetadata` tombstone is the migration DOWNGRADE marker: it drops
+    /// the entire next-gen group. Replay must REMOVE the seed (from both
+    /// `seeds` and `seeds_cache`) so the group disappears from the next-gen set
+    /// `finalize` derives — letting a later classic k2 `GroupMetadata` record
+    /// reconstruct it as a CLASSIC group (log order wins). Merely zeroing the
+    /// epoch would leave the group classified next-gen and replay it back as an
+    /// empty consumer group.
     pub fn replay_next_gen_tombstone(&self, key: &persistence_next_gen::NextGenKey) {
         use persistence_next_gen::NextGenKey as K;
+        if let K::GroupMetadata { group_id } = key {
+            self.seeds.remove(group_id);
+            self.seeds_cache.remove(group_id);
+            return;
+        }
         let group_id = match key {
             K::GroupMetadata { group_id }
             | K::MemberMetadata { group_id, .. }
@@ -594,6 +623,8 @@ impl GroupCoordinator {
             | K::CurrentMemberAssignment { group_id, .. } => group_id.as_str(),
         };
         let scrub = |seed: &mut GroupSeed| match key {
+            // Unreachable: the `GroupMetadata` tombstone removes the whole seed
+            // and returns above. Kept only for match exhaustiveness.
             K::GroupMetadata { .. } => {
                 seed.group_epoch = 0;
             }
@@ -880,9 +911,8 @@ impl GroupCoordinator {
     pub fn finalize_bootstrap(self: &Arc<Self>) {
         let group_ids: Vec<String> = self.seeds.iter().map(|e| e.key().clone()).collect();
         for gid in group_ids {
-            if let Some((_, seed)) = self.seeds.remove(&gid)
-                && let Some(handle) = self.get_or_create_consumer(&gid)
-            {
+            if let Some((_, seed)) = self.seeds.remove(&gid) {
+                let handle = self.get_or_create_consumer(&gid);
                 let _ = handle.tx.try_send(actor::GroupActorMessage::Seed(seed));
             }
         }
@@ -1053,6 +1083,18 @@ mod tests {
         // First mark wins: a later mark_classic must not override.
         coord.mark_classic("sg");
         assert!(coord.group_type("sg") == Some(GroupType::Share));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn get_or_create_group_returns_the_one_actor_regardless_of_kind() {
+        // KIP-848 64d live migration: BOTH RPC families route to the one actor.
+        // The kind argument only decides the spawn kind for a brand-new group;
+        // a later request of the other kind returns the SAME actor (the kind
+        // lock now lives in the actor's message arms, not in this registry).
+        let coord = make_coord();
+        let a = coord.get_or_create_group("g", GroupKindTag::Classic);
+        let b = coord.get_or_create_group("g", GroupKindTag::Consumer);
+        assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

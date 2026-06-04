@@ -13,7 +13,7 @@ use crabka_protocol::{Decode, Encode};
 
 use crate::broker::Broker;
 use crate::codes;
-use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
+use crate::coordinator::unified::actor::GroupActorMessage;
 use crate::error::BrokerError;
 
 pub(crate) fn handle(
@@ -55,9 +55,14 @@ pub(crate) fn handle(
                 continue;
             }
             // Only next-gen (consumer) groups are described here; a classic
-            // group (or an unknown id) is GROUP_ID_NOT_FOUND.
-            let handle = coordinator.find(group_id);
-            let Some(handle) = handle.filter(|h| h.kind == GroupKindTag::Consumer) else {
+            // group (or an unknown id) is GROUP_ID_NOT_FOUND. The `Describe` arm
+            // dispatches on the actor's LIVE `group.kind`: it replies ONLY for a
+            // consumer-kind group and drops the sender otherwise, so an UPGRADED
+            // group (spawned classic, now consumer in place via KIP-848) is
+            // reachable while a classic group's no-reply maps to
+            // GROUP_ID_NOT_FOUND — without consulting the stale spawn-time
+            // `h.kind`.
+            let Some(handle) = coordinator.find(group_id) else {
                 row.error_code = codes::GROUP_ID_NOT_FOUND;
                 described.push(row);
                 continue;
@@ -80,7 +85,10 @@ pub(crate) fn handle(
                 };
                 described.push(row);
             } else {
-                row.error_code = codes::UNKNOWN_SERVER_ERROR;
+                // No reply means the live group is classic (not describable via
+                // api 69), which surfaces as GROUP_ID_NOT_FOUND — matching the
+                // pre-refactor behavior for a classic group.
+                row.error_code = codes::GROUP_ID_NOT_FOUND;
                 described.push(row);
             }
         }
