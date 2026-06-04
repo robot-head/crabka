@@ -207,7 +207,11 @@ impl Record {
         }
         #[allow(clippy::cast_sign_loss)] // checked < 0 above
         let header_count_usize = header_count as usize;
-        let mut headers = Vec::with_capacity(header_count_usize);
+        // Bound pre-allocation: a record header is at least 1 byte on the wire,
+        // so an honest `header_count` can never exceed the bytes left in the
+        // record body. Clamp the capacity hint to reject huge declared counts
+        // without affecting the loop (it stops at EOF anyway).
+        let mut headers = Vec::with_capacity(header_count_usize.min(buf.remaining()));
         for i in 0..header_count {
             headers.push(
                 decode_record_header(buf)
@@ -369,6 +373,29 @@ mod record_tests {
             other => panic!("expected RecordParse, got {other:?}"),
         }
     }
+
+    #[test]
+    fn decode_huge_header_count_does_not_overallocate() {
+        // A record that declares ~1 billion headers but supplies none. The
+        // capacity hint must be clamped to the (tiny) body remaining, and the
+        // decode must fail cleanly on EOF rather than attempting a multi-GB
+        // allocation.
+        let mut inner = BytesMut::new();
+        inner.put_i8(0); // attributes
+        put_varlong(&mut inner, 0); // timestamp_delta
+        put_varint(&mut inner, 0); // offset_delta
+        put_varint(&mut inner, -1); // key len = null
+        put_varint(&mut inner, -1); // value len = null
+        put_varint(&mut inner, 1_000_000_000); // absurd header count
+
+        let mut buf = BytesMut::new();
+        put_varlong(&mut buf, i64::try_from(inner.len()).unwrap());
+        buf.extend_from_slice(&inner);
+
+        let mut cur: &[u8] = &buf[..];
+        // Must return an Err (EOF reading the first header), not OOM.
+        assert!(Record::decode(&mut cur).is_err());
+    }
 }
 
 impl RecordBatch {
@@ -435,7 +462,17 @@ impl RecordBatch {
         let body_for_records: Bytes = if codec == crabka_compression::CompressionType::None {
             Bytes::from(body)
         } else {
-            crabka_compression::decompress(codec, &body)?
+            // Bound decompressed output: generous vs. legit ratios, but finite.
+            // A small compressed batch must not be able to expand to gigabytes
+            // and OOM the broker (decompression bomb).
+            const DECOMPRESS_MIN_CAP: usize = 16 * 1024 * 1024; // 16 MiB floor (small inputs)
+            const DECOMPRESS_MAX_RATIO: usize = 100; // ≤100x the compressed size
+            const DECOMPRESS_ABSOLUTE_CEILING: usize = 1024 * 1024 * 1024; // 1 GiB hard ceiling
+            let max_output = body
+                .len()
+                .saturating_mul(DECOMPRESS_MAX_RATIO)
+                .clamp(DECOMPRESS_MIN_CAP, DECOMPRESS_ABSOLUTE_CEILING);
+            crabka_compression::decompress(codec, &body, max_output)?
         };
 
         // Parse records.
@@ -446,8 +483,11 @@ impl RecordBatch {
             )));
         }
         let mut body_cur: &[u8] = &body_for_records[..];
+        // Bound pre-allocation: each record is at least 1 byte in the
+        // decompressed body, so an honest `records_count` can never exceed the
+        // body length. Clamp the capacity hint to reject huge declared counts.
         #[allow(clippy::cast_sign_loss)] // checked < 0 above
-        let mut records = Vec::with_capacity(count as usize);
+        let mut records = Vec::with_capacity((count as usize).min(body_for_records.len()));
         for i in 0..count {
             records.push(
                 Record::decode(&mut body_cur)
@@ -676,6 +716,32 @@ mod batch_tests {
     roundtrip_compressed!(compressed_snappy, CompressionType::Snappy);
     roundtrip_compressed!(compressed_lz4, CompressionType::Lz4);
     roundtrip_compressed!(compressed_zstd, CompressionType::Zstd);
+
+    #[test]
+    fn decode_huge_records_count_does_not_overallocate() {
+        // Encode an empty uncompressed batch, then overwrite records_count with
+        // an absurd value (~1 billion) and fix up the CRC. The capacity hint
+        // must be clamped to the (empty) decompressed body, and decode must
+        // fail cleanly on EOF rather than attempting a multi-GB allocation.
+        let mut b = fixture_empty_batch();
+        b.attributes = b.attributes.with_compression(CompressionType::None);
+        let mut buf = BytesMut::new();
+        b.encode(&mut buf).unwrap();
+
+        // records_count is the last 4 bytes of the fixed header.
+        let rc_off = HEADER_LEN - 4;
+        buf[rc_off..HEADER_LEN].copy_from_slice(&1_000_000_000i32.to_be_bytes());
+
+        // Recompute CRC over header[21..HEADER_LEN] + body (body is empty here).
+        let body = &buf[HEADER_LEN..];
+        let mut computed = crc32c(&buf[21..HEADER_LEN]);
+        computed = crc32c_append(computed, body);
+        buf[17..21].copy_from_slice(&computed.to_be_bytes());
+
+        let mut cur: &[u8] = &buf[..];
+        // Must return an Err (EOF reading the first record), not OOM.
+        assert!(RecordBatch::decode(&mut cur).is_err());
+    }
 }
 
 impl crate::Encode for RecordBatch {

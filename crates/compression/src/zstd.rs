@@ -12,18 +12,21 @@ pub fn compress(data: &[u8]) -> Result<Bytes, CompressionError> {
     Ok(Bytes::from(out))
 }
 
-pub fn decompress(data: &[u8]) -> Result<Bytes, CompressionError> {
+pub fn decompress(data: &[u8], max_output: usize) -> Result<Bytes, CompressionError> {
     if data.is_empty() {
         return Err(CompressionError::InvalidData("empty zstd payload".into()));
     }
-    // The decompressor needs an upper bound on the output size. We don't
-    // know it ahead of time, so use `bulk::Decompressor` and feed the
-    // input through a growable buffer.
-    let mut decoder = zstd::stream::Decoder::new(data)
+    let decoder = zstd::stream::Decoder::new(data)
         .map_err(|e| CompressionError::InvalidData(format!("zstd open: {e}")))?;
-    let mut out = Vec::with_capacity(data.len() * 4);
-    std::io::Read::read_to_end(&mut decoder, &mut out)
+    // Read at most `max_output + 1` bytes so we can detect overflow without
+    // materializing the oversized output.
+    let mut limited = std::io::Read::take(decoder, (max_output as u64).saturating_add(1));
+    let mut out = Vec::with_capacity(data.len().saturating_mul(2).min(max_output));
+    std::io::Read::read_to_end(&mut limited, &mut out)
         .map_err(|e| CompressionError::InvalidData(format!("zstd decode: {e}")))?;
+    if out.len() > max_output {
+        return Err(CompressionError::TooLarge { limit: max_output });
+    }
     Ok(Bytes::from(out))
 }
 
@@ -33,18 +36,19 @@ mod tests {
     use assert2::assert;
 
     const HELLO: &[u8] = b"hello kafka, this is a moderately repetitive payload to compress";
+    const BIG_CAP: usize = 256 * 1024 * 1024;
 
     #[test]
     fn roundtrip() {
         let z = compress(HELLO).unwrap();
-        let back = decompress(&z).unwrap();
+        let back = decompress(&z, BIG_CAP).unwrap();
         assert!(back.as_ref() == HELLO);
     }
 
     #[test]
     fn decompress_empty_rejected() {
         assert!(matches!(
-            decompress(b""),
+            decompress(b"", BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
     }
@@ -52,7 +56,7 @@ mod tests {
     #[test]
     fn decompress_garbage_rejected() {
         assert!(matches!(
-            decompress(b"this is not zstd"),
+            decompress(b"this is not zstd", BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
     }
@@ -61,7 +65,19 @@ mod tests {
     fn larger_payload_roundtrips() {
         let big = vec![0xABu8; 128 * 1024];
         let z = compress(&big).unwrap();
-        let back = decompress(&z).unwrap();
+        let back = decompress(&z, BIG_CAP).unwrap();
         assert!(back.as_ref() == big.as_slice());
+    }
+
+    #[test]
+    fn decompression_bomb_rejected() {
+        let bomb = vec![0u8; 64 * 1024 * 1024];
+        let z = compress(&bomb).unwrap();
+        assert!(matches!(
+            decompress(&z, 1024),
+            Err(CompressionError::TooLarge { limit: 1024 })
+        ));
+        let back = decompress(&z, BIG_CAP).unwrap();
+        assert!(back.len() == bomb.len());
     }
 }

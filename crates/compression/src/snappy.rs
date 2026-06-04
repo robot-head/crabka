@@ -47,7 +47,7 @@ pub fn compress(data: &[u8]) -> Result<Bytes, CompressionError> {
     Ok(out.freeze())
 }
 
-pub fn decompress(data: &[u8]) -> Result<Bytes, CompressionError> {
+pub fn decompress(data: &[u8], max_output: usize) -> Result<Bytes, CompressionError> {
     if data.len() < XERIAL_HEADER.len() {
         return Err(CompressionError::InvalidData(
             "snappy payload too short for xerial header".into(),
@@ -61,7 +61,7 @@ pub fn decompress(data: &[u8]) -> Result<Bytes, CompressionError> {
     // Ignore version fields (bytes 8..16); Kafka never bumped them.
     let mut rest = &data[XERIAL_HEADER.len()..];
 
-    let mut out = BytesMut::with_capacity(data.len() * 2);
+    let mut out = BytesMut::with_capacity(data.len().saturating_mul(2).min(max_output));
     let mut decoder = snap::raw::Decoder::new();
     while !rest.is_empty() {
         if rest.len() < 4 {
@@ -81,6 +81,12 @@ pub fn decompress(data: &[u8]) -> Result<Bytes, CompressionError> {
 
         let max_out = snap::raw::decompress_len(block)
             .map_err(|e| CompressionError::InvalidData(format!("snappy decode_len: {e}")))?;
+        // Reject before allocating this chunk if it would push us past the cap.
+        // `decompress_len` reads the block's stored uncompressed size, so this
+        // bounds allocation without materializing the oversized output.
+        if out.len().saturating_add(max_out) > max_output {
+            return Err(CompressionError::TooLarge { limit: max_output });
+        }
         let mut buf = vec![0u8; max_out];
         let n = decoder
             .decompress(block, &mut buf)
@@ -96,18 +102,19 @@ mod tests {
     use assert2::assert;
 
     const HELLO: &[u8] = b"hello kafka, this is a moderately repetitive payload to compress";
+    const BIG_CAP: usize = 256 * 1024 * 1024;
 
     #[test]
     fn roundtrip() {
         let z = compress(HELLO).unwrap();
-        let back = decompress(&z).unwrap();
+        let back = decompress(&z, BIG_CAP).unwrap();
         assert!(back.as_ref() == HELLO);
     }
 
     #[test]
     fn decompress_truncated_header() {
         assert!(matches!(
-            decompress(&XERIAL_HEADER[..4]),
+            decompress(&XERIAL_HEADER[..4], BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
     }
@@ -116,7 +123,7 @@ mod tests {
     fn decompress_missing_magic() {
         let bytes = [0u8; 20];
         assert!(matches!(
-            decompress(&bytes),
+            decompress(&bytes, BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
     }
@@ -127,8 +134,20 @@ mod tests {
         bytes.extend_from_slice(&[0, 0, 0, 100]); // claim 100-byte chunk
         bytes.push(0); // only 1 byte present
         assert!(matches!(
-            decompress(&bytes),
+            decompress(&bytes, BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
+    }
+
+    #[test]
+    fn decompression_bomb_rejected() {
+        let bomb = vec![0u8; 64 * 1024 * 1024];
+        let z = compress(&bomb).unwrap();
+        assert!(matches!(
+            decompress(&z, 1024),
+            Err(CompressionError::TooLarge { limit: 1024 })
+        ));
+        let back = decompress(&z, BIG_CAP).unwrap();
+        assert!(back.len() == bomb.len());
     }
 }

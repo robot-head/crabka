@@ -55,7 +55,15 @@ pub(crate) async fn handle(
             // A terminating push that later fails to decode still fences the
             // instance and drops those metrics (best-effort, matches Kafka).
             let ct = codec.expect("authorize_push guarantees a supported codec on Accept");
-            match crabka_compression::decompress(ct, &req.metrics) {
+            // Bound decompressed output to guard against a decompression bomb
+            // in the client-metrics payload: ≤100x the compressed size, with a
+            // 16 MiB floor and a 1 GiB ceiling.
+            let max_output = req
+                .metrics
+                .len()
+                .saturating_mul(100)
+                .clamp(16 * 1024 * 1024, 1024 * 1024 * 1024);
+            match crabka_compression::decompress(ct, &req.metrics, max_output) {
                 Ok(raw) => match otlp::decode_metrics(&raw) {
                     Ok(md) => {
                         let instance_str = instance.to_string();
