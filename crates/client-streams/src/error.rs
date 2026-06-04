@@ -27,4 +27,7 @@ pub enum StreamsClientError {
     /// An unmapped broker error code.
     #[error("broker error code {0}")]
     Server(i16),
+    /// A runtime processing/produce/commit failure.
+    #[error("runtime error: {0}")]
+    Runtime(String),
 }

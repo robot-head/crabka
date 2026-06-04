@@ -74,6 +74,7 @@
 mod error;
 pub mod membership;
 pub mod processor;
+pub mod runtime;
 pub mod test_driver;
 pub mod topology;
 
@@ -86,5 +87,6 @@ pub use processor::{
     BytesSerde, Consumed, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier,
     Produced, Record, RecordContext, Serde, SerdeError, StringSerde,
 };
+pub use runtime::{KafkaStreams, KafkaStreamsState};
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, Topology, TopologyError};
