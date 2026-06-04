@@ -76,7 +76,7 @@
 //! produces to sink topics, and commits offsets (at-least-once):
 //!
 //! ```no_run
-//! use crabka_client_streams::{KafkaStreams, Processor, ProcessorContext, Record, StringSerde, Topology};
+//! use crabka_client_streams::{Consumed, KafkaStreams, Processor, ProcessorContext, Produced, Record, StringSerde, Topology};
 //!
 //! struct Upper;
 //! impl Processor<String, String, String, String> for Upper {
@@ -87,9 +87,9 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! topo.add_source("src", ["input-topic"], StringSerde, StringSerde);
+//! topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
 //! topo.add_processor("up", || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>, ["src"]);
-//! topo.add_sink("out", "output-topic", ["up"], StringSerde, StringSerde);
+//! topo.add_sink("out", "output-topic", ["up"], Produced::with(StringSerde, StringSerde));
 //! let built = topo.build("my-app")?;
 //!
 //! let mut streams = KafkaStreams::builder()

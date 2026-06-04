@@ -116,7 +116,7 @@ mod tests {
     use crate::membership::{StreamsAssignment, TaskAssignment, TopicPartition};
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
-    use crate::processor::serde::StringSerde;
+    use crate::processor::serde::{Consumed, Produced, StringSerde};
     use crate::runtime::io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
     use crate::topology::Topology;
     use assert2::check;
@@ -137,13 +137,18 @@ mod tests {
 
     fn built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_processor(
             "up",
             || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
             ["src"],
         );
-        t.add_sink("out", "out", ["up"], StringSerde, StringSerde);
+        t.add_sink(
+            "out",
+            "out",
+            ["up"],
+            Produced::with(StringSerde, StringSerde),
+        );
         t.build("app").unwrap()
     }
 

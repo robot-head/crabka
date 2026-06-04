@@ -7,7 +7,7 @@ use std::time::Duration;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_streams::{
-    KafkaStreams, Processor, ProcessorContext, Record, StringSerde, Topology,
+    Consumed, KafkaStreams, Processor, ProcessorContext, Produced, Record, StringSerde, Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
@@ -176,13 +176,22 @@ async fn kafka_streams_processes_records_end_to_end() {
 
     // 3. Build and start the upper-case streams app.
     let mut topo = Topology::new();
-    topo.add_source("src", ["stream-in"], StringSerde, StringSerde);
+    topo.add_source(
+        "src",
+        ["stream-in"],
+        Consumed::with(StringSerde, StringSerde),
+    );
     topo.add_processor(
         "up",
         || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
         ["src"],
     );
-    topo.add_sink("out", "stream-out", ["up"], StringSerde, StringSerde);
+    topo.add_sink(
+        "out",
+        "stream-out",
+        ["up"],
+        Produced::with(StringSerde, StringSerde),
+    );
     let built = topo.build("stream-app").unwrap();
 
     let mut streams = KafkaStreams::builder()
