@@ -131,6 +131,16 @@ impl<K, V> NodeHandle<K, V> {
         }
     }
 
+    /// Reconstruct a typed handle from a node name recorded during DSL lowering.
+    ///
+    /// The DSL (sub-project #4) lowers a type-erased logical graph: each lowering
+    /// thunk knows its own concrete `K`/`V` statically and looks up its parent's
+    /// Processor-API node name from `LowerState`, rebuilding a typed handle to
+    /// pass to [`Topology::add_processor`] / [`Topology::add_sink`].
+    pub(crate) fn from_name(name: String) -> Self {
+        Self::new(name)
+    }
+
     /// The node's name, as it appears in the wire topology. Useful for
     /// [`Topology::add_state_store`], which connects stores to processors by
     /// name.

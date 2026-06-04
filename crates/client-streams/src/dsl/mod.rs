@@ -5,5 +5,6 @@ pub mod config;
 pub(crate) mod graph;
 pub mod kstream;
 pub(crate) mod names;
+pub(crate) mod processors;
 pub use builder::StreamsBuilder;
 pub use config::{Grouped, Materialized, Repartitioned};
