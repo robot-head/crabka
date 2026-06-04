@@ -163,6 +163,7 @@
 //! ```
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.0.0")]
 
+pub mod dsl;
 mod error;
 pub mod membership;
 pub mod processor;
@@ -171,6 +172,7 @@ pub mod store;
 pub mod test_driver;
 pub mod topology;
 
+pub use dsl::{Grouped, Materialized, Repartitioned};
 pub use error::StreamsClientError;
 pub use membership::{
     StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus, TaskAssignment,
