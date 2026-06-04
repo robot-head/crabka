@@ -69,6 +69,40 @@
 //!     Some((Some("k".to_string()), "HELLO".to_string())),
 //! );
 //! ```
+//! ## Running an app (`KafkaStreams`)
+//!
+//! Once built, run a topology against a broker with the managed runtime — it
+//! joins the streams group, fetches its assigned partitions, processes records,
+//! produces to sink topics, and commits offsets (at-least-once):
+//!
+//! ```no_run
+//! use crabka_client_streams::{KafkaStreams, Processor, ProcessorContext, Record, StringSerde, Topology};
+//!
+//! struct Upper;
+//! impl Processor<String, String, String, String> for Upper {
+//!     fn process(&mut self, ctx: &mut ProcessorContext<String, String>, r: Record<String, String>) {
+//!         ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
+//!     }
+//! }
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut topo = Topology::new();
+//! topo.add_source("src", ["input-topic"], StringSerde, StringSerde);
+//! topo.add_processor("up", || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>, ["src"]);
+//! topo.add_sink("out", "output-topic", ["up"], StringSerde, StringSerde);
+//! let built = topo.build("my-app")?;
+//!
+//! let mut streams = KafkaStreams::builder()
+//!     .bootstrap("localhost:9092")
+//!     .application_id("my-app")
+//!     .topology(built)
+//!     .build()
+//!     .await?;
+//! // ... app runs in the background; later:
+//! streams.close().await?;
+//! # Ok(())
+//! # }
+//! ```
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.0.0")]
 
 mod error;
