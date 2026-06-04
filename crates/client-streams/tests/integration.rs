@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
-use crabka_client_streams::{StreamsEvent, StreamsMembership, Topology};
+use crabka_client_streams::{
+    BytesSerde, Consumed, Produced, StreamsEvent, StreamsMembership, Topology,
+};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
 
@@ -70,15 +72,13 @@ async fn member_joins_converges_and_leaves() {
     topo.add_source(
         "src",
         ["streams-input"],
-        crabka_client_streams::BytesSerde,
-        crabka_client_streams::BytesSerde,
+        Consumed::with(BytesSerde, BytesSerde),
     );
     topo.add_sink(
         "snk",
         "streams-output",
         ["src"],
-        crabka_client_streams::BytesSerde,
-        crabka_client_streams::BytesSerde,
+        Produced::with(BytesSerde, BytesSerde),
     );
     let built = topo.build("streams-app").unwrap();
 
@@ -139,15 +139,13 @@ async fn missing_source_topic_reports_not_ready() {
     topo.add_source(
         "src",
         ["streams-missing"],
-        crabka_client_streams::BytesSerde,
-        crabka_client_streams::BytesSerde,
+        Consumed::with(BytesSerde, BytesSerde),
     );
     topo.add_sink(
         "snk",
         "out",
         ["src"],
-        crabka_client_streams::BytesSerde,
-        crabka_client_streams::BytesSerde,
+        Produced::with(BytesSerde, BytesSerde),
     );
     let built = topo.build("streams-missing-app").unwrap();
 

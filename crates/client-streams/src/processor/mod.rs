@@ -11,4 +11,4 @@ pub mod serde;
 pub use api::{Processor, ProcessorContext, ProcessorSupplier};
 pub use erased::ProcessorError;
 pub use record::{Record, RecordContext};
-pub use serde::{BytesSerde, I64Serde, Serde, SerdeError, StringSerde};
+pub use serde::{BytesSerde, Consumed, I64Serde, Produced, Serde, SerdeError, StringSerde};

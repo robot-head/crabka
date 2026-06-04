@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::processor::erased::{OutputRecord, ProcessorError};
 use crate::processor::graph::Graph;
-use crate::processor::serde::Serde;
+use crate::processor::serde::{Consumed, Produced, Serde};
 use crate::topology::BuiltTopology;
 
 /// A pending record entry in the repartition loop-back queue.
@@ -36,18 +36,20 @@ impl TopologyTestDriver {
     }
 
     /// Serialize + pipe one record on `topic`; loops repartition outputs back.
+    ///
+    /// `consumed` is the same `Consumed::with(key_serde, value_serde)` pair the
+    /// source for `topic` reads with.
     #[allow(clippy::needless_pass_by_value)] // owned K/V is the natural API
     pub fn pipe_input<K, V, KS: Serde<K>, VS: Serde<V>>(
         &mut self,
         topic: &str,
-        key_serde: &KS,
-        value_serde: &VS,
+        consumed: Consumed<KS, VS>,
         key: Option<K>,
         value: V,
         timestamp: i64,
     ) {
-        let kb = key.as_ref().map(|k| key_serde.serialize(k));
-        let vb = value_serde.serialize(&value);
+        let kb = key.as_ref().map(|k| consumed.key_serde.serialize(k));
+        let vb = consumed.value_serde.serialize(&value);
         self.pipe_bytes(topic, kb.as_deref(), &vb, timestamp);
     }
 
@@ -82,19 +84,24 @@ impl TopologyTestDriver {
     }
 
     /// Pop + deserialize the next output record for `topic`.
+    ///
+    /// `produced` is the same `Produced::with(key_serde, value_serde)` pair the
+    /// sink writing `topic` produced with.
+    #[allow(clippy::needless_pass_by_value)] // Produced holds Copy serdes; by-value reads cleanly
     pub fn read_output<K, V, KS: Serde<K>, VS: Serde<V>>(
         &mut self,
         topic: &str,
-        key_serde: &KS,
-        value_serde: &VS,
+        produced: Produced<KS, VS>,
     ) -> Option<(Option<K>, V)> {
         let out = self.output.get_mut(topic)?.pop_front()?;
         let key = out.key.map(|b| {
-            key_serde
+            produced
+                .key_serde
                 .deserialize(&b)
                 .expect("test: deserialize output key")
         });
-        let value = value_serde
+        let value = produced
+            .value_serde
             .deserialize(&out.value.unwrap_or_default())
             .expect("test: deserialize output value");
         Some((key, value))
@@ -145,18 +152,15 @@ mod tests {
 
     fn map_filter() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["src"],
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_processor("up", || Upper, ["src"]);
+        t.add_processor("flt", || DropEmpty, ["up"]);
+        t.add_sink(
+            "out",
+            "out",
+            ["flt"],
+            Produced::with(StringSerde, StringSerde),
         );
-        t.add_processor(
-            "flt",
-            || Box::new(DropEmpty) as Box<dyn Processor<String, String, String, String>>,
-            ["up"],
-        );
-        t.add_sink("out", "out", ["flt"], StringSerde, StringSerde);
         t.build("app").unwrap()
     }
 
@@ -166,26 +170,25 @@ mod tests {
         let mut d = TopologyTestDriver::new(&built).unwrap();
         d.pipe_input(
             "in",
-            &StringSerde,
-            &StringSerde,
+            Consumed::with(StringSerde, StringSerde),
             Some("k".to_string()),
             "hello".to_string(),
             0,
         );
         check!(
-            d.read_output("out", &StringSerde, &StringSerde)
+            d.read_output("out", Produced::with(StringSerde, StringSerde))
                 == Some((Some("k".to_string()), "HELLO".to_string()))
         );
         d.pipe_input(
             "in",
-            &StringSerde,
-            &StringSerde,
+            Consumed::with(StringSerde, StringSerde),
             Some("k2".to_string()),
             String::new(),
             1,
         );
         check!(
-            d.read_output("out", &StringSerde, &StringSerde) == None::<(Option<String>, String)>
+            d.read_output("out", Produced::with(StringSerde, StringSerde))
+                == None::<(Option<String>, String)>
         );
     }
 
@@ -194,42 +197,71 @@ mod tests {
         // src(in) -> identity -> sink(rp, internal repartition) ; src(rp) -> up -> sink(out)
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
-        t.add_source("s1", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "id",
-            || Box::new(Identity) as Box<dyn Processor<String, String, String, String>>,
-            ["s1"],
+        t.add_source("s1", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_processor("id", || Identity, ["s1"]);
+        t.add_sink(
+            "to_rp",
+            "rp",
+            ["id"],
+            Produced::with(StringSerde, StringSerde),
         );
-        t.add_sink("to_rp", "rp", ["id"], StringSerde, StringSerde);
-        t.add_source("s2", ["rp"], StringSerde, StringSerde);
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["s2"],
+        t.add_source("s2", ["rp"], Consumed::with(StringSerde, StringSerde));
+        t.add_processor("up", || Upper, ["s2"]);
+        t.add_sink(
+            "out",
+            "out",
+            ["up"],
+            Produced::with(StringSerde, StringSerde),
         );
-        t.add_sink("out", "out", ["up"], StringSerde, StringSerde);
         let built = t.build("app").unwrap();
 
         let mut d = TopologyTestDriver::new(&built).unwrap();
-        d.pipe_input("in", &StringSerde, &StringSerde, None, "hi".to_string(), 0);
-        check!(d.read_output("out", &StringSerde, &StringSerde) == Some((None, "HI".to_string())));
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            None,
+            "hi".to_string(),
+            0,
+        );
+        check!(
+            d.read_output("out", Produced::with(StringSerde, StringSerde))
+                == Some((None, "HI".to_string()))
+        );
     }
 
     #[test]
     fn branch_to_two_sinks() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_processor(
-            "up",
-            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
-            ["src"],
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_processor("up", || Upper, ["src"]);
+        t.add_sink(
+            "a",
+            "out-a",
+            ["up"],
+            Produced::with(StringSerde, StringSerde),
         );
-        t.add_sink("a", "out-a", ["up"], StringSerde, StringSerde);
-        t.add_sink("b", "out-b", ["up"], StringSerde, StringSerde);
+        t.add_sink(
+            "b",
+            "out-b",
+            ["up"],
+            Produced::with(StringSerde, StringSerde),
+        );
         let built = t.build("app").unwrap();
         let mut d = TopologyTestDriver::new(&built).unwrap();
-        d.pipe_input("in", &StringSerde, &StringSerde, None, "x".to_string(), 0);
-        check!(d.read_output("out-a", &StringSerde, &StringSerde) == Some((None, "X".to_string())));
-        check!(d.read_output("out-b", &StringSerde, &StringSerde) == Some((None, "X".to_string())));
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            None,
+            "x".to_string(),
+            0,
+        );
+        check!(
+            d.read_output("out-a", Produced::with(StringSerde, StringSerde))
+                == Some((None, "X".to_string()))
+        );
+        check!(
+            d.read_output("out-b", Produced::with(StringSerde, StringSerde))
+                == Some((None, "X".to_string()))
+        );
     }
 }

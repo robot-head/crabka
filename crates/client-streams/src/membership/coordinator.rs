@@ -286,10 +286,15 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn built() -> Arc<BuiltTopology> {
-        use crate::processor::serde::BytesSerde;
+        use crate::processor::serde::{BytesSerde, Consumed, Produced};
         let mut t = Topology::new();
-        t.add_source("src", ["in"], BytesSerde, BytesSerde);
-        t.add_sink("snk", "out", ["src"], BytesSerde, BytesSerde);
+        t.add_source("src", ["in"], Consumed::with(BytesSerde, BytesSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            ["src"],
+            Produced::with(BytesSerde, BytesSerde),
+        );
         Arc::new(t.build("app").unwrap())
     }
 
@@ -514,10 +519,15 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn built_plain() -> BuiltTopology {
-        use crate::processor::serde::BytesSerde;
+        use crate::processor::serde::{BytesSerde, Consumed, Produced};
         let mut t = Topology::new();
-        t.add_source("src", ["in"], BytesSerde, BytesSerde);
-        t.add_sink("snk", "out", ["src"], BytesSerde, BytesSerde);
+        t.add_source("src", ["in"], Consumed::with(BytesSerde, BytesSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            ["src"],
+            Produced::with(BytesSerde, BytesSerde),
+        );
         t.build("app").unwrap()
     }
 

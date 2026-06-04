@@ -309,10 +309,7 @@ mod tests {
 
     #[test]
     fn processor_node_downcasts_runs_forwards() {
-        let mut node = ProcessorNode::new(
-            "upcase".into(),
-            &(|| Box::new(Upper) as Box<dyn Processor<String, String, String, String>>),
-        );
+        let mut node = ProcessorNode::new("upcase".into(), &(|| Upper));
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
         let rc = default_rc();
@@ -330,10 +327,7 @@ mod tests {
 
     #[test]
     fn processor_node_none_key_passes_through() {
-        let mut node = ProcessorNode::new(
-            "upcase".into(),
-            &(|| Box::new(Upper) as Box<dyn Processor<String, String, String, String>>),
-        );
+        let mut node = ProcessorNode::new("upcase".into(), &(|| Upper));
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
         let rc = default_rc();
@@ -348,10 +342,7 @@ mod tests {
 
     #[test]
     fn processor_node_downcast_error() {
-        let mut node = ProcessorNode::new(
-            "p".into(),
-            &(|| Box::new(Upper) as Box<dyn Processor<String, String, String, String>>),
-        );
+        let mut node = ProcessorNode::new("p".into(), &(|| Upper));
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
         let rc = default_rc();

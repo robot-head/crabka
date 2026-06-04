@@ -45,10 +45,15 @@ mod tests {
     use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds;
 
     fn built() -> crate::topology::BuiltTopology {
-        use crate::processor::serde::BytesSerde;
+        use crate::processor::serde::{BytesSerde, Consumed, Produced};
         let mut t = Topology::new();
-        t.add_source("src", ["in"], BytesSerde, BytesSerde);
-        t.add_sink("snk", "out", ["src"], BytesSerde, BytesSerde);
+        t.add_source("src", ["in"], Consumed::with(BytesSerde, BytesSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            ["src"],
+            Produced::with(BytesSerde, BytesSerde),
+        );
         t.build("app").unwrap()
     }
 

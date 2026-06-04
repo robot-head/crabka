@@ -112,10 +112,7 @@ mod tests {
     #[test]
     fn drives_source_processor_sink() {
         // nodes: index 0 = processor "up", index 1 = sink "out"
-        let up = Box::new(ProcessorNode::new(
-            "up".into(),
-            &(|| Box::new(Upper) as Box<dyn Processor<String, String, String, String>>),
-        )) as Box<dyn ErasedNode>;
+        let up = Box::new(ProcessorNode::new("up".into(), &(|| Upper))) as Box<dyn ErasedNode>;
         let sink = Box::new(SinkNode::new(
             "out".into(),
             "out-topic".into(),

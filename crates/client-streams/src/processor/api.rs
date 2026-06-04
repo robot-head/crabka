@@ -22,18 +22,54 @@ pub trait Processor<KIn, VIn, KOut, VOut>: Send + 'static {
     fn close(&mut self) {}
 }
 
+/// A boxed processor is itself a [`Processor`], delegating to the inner value.
+///
+/// This is what lets a [`ProcessorSupplier`] closure return `Box<dyn
+/// Processor<…>>` when the concrete type is chosen at runtime: the boxed value
+/// still satisfies the supplier blanket impl (which only requires the closure's
+/// return type to be *some* `Processor`). For the common case, return the
+/// concrete processor directly (`|| MyProc`) and skip the box entirely.
+impl<KIn, VIn, KOut, VOut> Processor<KIn, VIn, KOut, VOut>
+    for Box<dyn Processor<KIn, VIn, KOut, VOut>>
+where
+    KIn: 'static,
+    VIn: 'static,
+    KOut: 'static,
+    VOut: 'static,
+{
+    fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {
+        (**self).init(ctx);
+    }
+    fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, KOut, VOut>,
+        record: Record<KIn, VIn>,
+    ) {
+        (**self).process(ctx, record);
+    }
+    fn close(&mut self) {
+        (**self).close();
+    }
+}
+
 /// Factory for [`Processor`] instances (one per task → per-task isolation).
 pub trait ProcessorSupplier<KIn, VIn, KOut, VOut>: Send + Sync + 'static {
     fn get(&self) -> Box<dyn Processor<KIn, VIn, KOut, VOut>>;
 }
 
-// Blanket impl so a closure `|| Box::new(MyProc)` is a supplier.
-impl<F, KIn, VIn, KOut, VOut> ProcessorSupplier<KIn, VIn, KOut, VOut> for F
+// Blanket impl so a closure `|| MyProc` is a supplier. The closure returns a
+// *concrete* `P: Processor`, which we box. Because `P` is concrete, the four KV
+// type parameters are inferred from `P`'s single `Processor` impl — callers
+// never annotate them. A closure returning `Box<dyn Processor<…>>` also works
+// (the boxed value is itself a `Processor`, see the impl above), covering the
+// rarer case of picking the concrete processor type at runtime.
+impl<F, P, KIn, VIn, KOut, VOut> ProcessorSupplier<KIn, VIn, KOut, VOut> for F
 where
-    F: Fn() -> Box<dyn Processor<KIn, VIn, KOut, VOut>> + Send + Sync + 'static,
+    F: Fn() -> P + Send + Sync + 'static,
+    P: Processor<KIn, VIn, KOut, VOut>,
 {
     fn get(&self) -> Box<dyn Processor<KIn, VIn, KOut, VOut>> {
-        self()
+        Box::new(self())
     }
 }
 
@@ -149,6 +185,37 @@ mod tests {
         check!(buffer.len() == 2);
         let (child, rec) = buffer.pop_front().unwrap();
         check!(child == 3);
+        check!(*rec.value.downcast::<String>().unwrap() == "HI");
+    }
+
+    #[test]
+    fn boxed_dyn_processor_delegates_init_process_close() {
+        // A `Box<dyn Processor>` is itself a `Processor`, forwarding every method
+        // to the inner value. This is the runtime-dispatch path a
+        // `ProcessorSupplier` closure takes when it returns `Box<dyn Processor<…>>`
+        // instead of a concrete processor.
+        let mut boxed: Box<dyn Processor<String, String, String, String>> = Box::new(Upper);
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 5,
+        };
+        let children = [1usize];
+        let mut dispatch = Dispatch {
+            buffer: &mut buffer,
+            children: &children,
+            output: &mut output,
+            record_ctx: &rc,
+        };
+        let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
+        boxed.init(&mut ctx); // forwards to Upper's default no-op
+        boxed.process(&mut ctx, Record::new(None, "hi".into(), 5)); // forwards → uppercases
+        boxed.close(); // forwards to Upper's default no-op
+        check!(buffer.len() == 1);
+        let (_child, rec) = buffer.pop_front().unwrap();
         check!(*rec.value.downcast::<String>().unwrap() == "HI");
     }
 
