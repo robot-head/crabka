@@ -123,6 +123,6 @@ pub use processor::{
     Produced, Record, RecordContext, Serde, SerdeError, StringSerde,
 };
 pub use runtime::{KafkaStreams, KafkaStreamsState};
-pub use store::{KeyValueStore, StateStore};
+pub use store::{InMemoryKeyValueStore, KeyValueStore, StateStore};
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, Topology, TopologyError};
