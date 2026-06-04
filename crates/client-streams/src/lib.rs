@@ -127,6 +127,62 @@
 //! assert_eq!(store.get(&"a".to_string()), Some(2_i64));
 //! ```
 //!
+//! ## DSL (KStream/KTable)
+//!
+//! [`StreamsBuilder`] is the high-level DSL entry point. It wires a topology
+//! from source streams through stateless transforms, aggregations, and sinks
+//! without writing explicit [`Processor`] implementations. The resulting
+//! [`BuiltTopology`] is interchangeable with the Processor-API variant — run it
+//! with [`TopologyTestDriver`] for broker-free testing or [`KafkaStreams`] for
+//! production.
+//!
+//! ```
+//! use crabka_client_streams::{
+//!     Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder, StringSerde,
+//!     TopologyTestDriver,
+//! };
+//!
+//! // Build a word-count topology: group by key, count, forward to "out".
+//! let b = StreamsBuilder::new();
+//! b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+//!     .group_by_key(Grouped::with(StringSerde, StringSerde))
+//!     .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+//!     .to_stream()
+//!     .to("out", Produced::with(StringSerde, I64Serde));
+//! let built = b.build("word-count").unwrap();
+//!
+//! // Drive it broker-free with TopologyTestDriver.
+//! let mut driver = TopologyTestDriver::new(&built).unwrap();
+//! for word in ["a", "a", "b"] {
+//!     driver.pipe_input(
+//!         "in",
+//!         Consumed::with(StringSerde, StringSerde),
+//!         Some(word.to_string()),
+//!         word.to_string(),
+//!         0,
+//!     );
+//! }
+//!
+//! // The stream output carries the running count per key.
+//! assert_eq!(
+//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
+//!     Some((Some("a".to_string()), 1)),
+//! );
+//! assert_eq!(
+//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
+//!     Some((Some("a".to_string()), 2)),
+//! );
+//! assert_eq!(
+//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
+//!     Some((Some("b".to_string()), 1)),
+//! );
+//!
+//! // The materialized store holds the final count per key.
+//! let store = driver.get_key_value_store::<String, i64>("counts").unwrap();
+//! assert_eq!(store.get(&"a".to_string()), Some(2));
+//! assert_eq!(store.get(&"b".to_string()), Some(1));
+//! ```
+//!
 //! ## Running an app (`KafkaStreams`)
 //!
 //! Once built, run a topology against a broker with the managed runtime — it
