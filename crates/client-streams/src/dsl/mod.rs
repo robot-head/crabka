@@ -13,4 +13,5 @@ pub(crate) mod processors;
 pub use builder::StreamsBuilder;
 pub use config::{Grouped, Materialized, Repartitioned};
 pub use kgrouped::KGroupedStream;
+pub use kstream::BranchedStream;
 pub use ktable::KTable;

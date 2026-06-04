@@ -460,6 +460,28 @@ where
         KStream::new_with_key_changing(Rc::clone(&self.builder), id, false)
     }
 
+    /// `split`: begin a branching fan-out. Returns a [`BranchedStream`] builder
+    /// from which individual [`branch`](BranchedStream::branch) calls create
+    /// filtered child streams. The split itself adds no node to the topology —
+    /// each `branch` call creates a [`FilterProcessor`]-backed child wired
+    /// directly to this stream's node.
+    ///
+    /// **Simplification vs JVM:** each branch receives a record when its predicate
+    /// matches, not just the first matching branch. For mutually-exclusive
+    /// predicates the behaviour is identical to the JVM first-match-wins semantics.
+    ///
+    /// [`branch`]: BranchedStream::branch
+    /// [`FilterProcessor`]: crate::dsl::processors::stateless::FilterProcessor
+    #[must_use]
+    pub fn split(&self) -> BranchedStream<K, V> {
+        BranchedStream {
+            builder: Rc::clone(&self.builder),
+            parent: self.node,
+            key_changing: self.key_changing,
+            _pd: std::marker::PhantomData,
+        }
+    }
+
     /// `groupByKey`: group by the existing key, preparing for an aggregation.
     ///
     /// Records no graph node — the (optional) repartition + aggregate node are
@@ -497,6 +519,76 @@ where
         F: Fn(&K, &V) -> K2 + Clone + Send + Sync + 'static,
     {
         self.select_key(f).group_by_key(grouped)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BranchedStream
+// ---------------------------------------------------------------------------
+
+/// Builder returned by [`KStream::split`]. Each [`branch`](Self::branch) call
+/// adds a [`FilterProcessor`]-backed child node wired to the parent node and
+/// returns a new [`KStream`] carrying only the records for which the predicate
+/// returns `true`.
+///
+/// **Simplification vs JVM first-match-wins:** records are forwarded to ALL
+/// branches whose predicate matches. For mutually-exclusive predicates the
+/// behaviour is identical.
+///
+/// Drop `BranchedStream` before calling [`StreamsBuilder::build`] — it holds an
+/// `Rc` clone of the shared internal builder and will otherwise cause the
+/// `Rc::try_unwrap` inside `build` to fail.
+///
+/// [`StreamsBuilder::build`]: crate::dsl::builder::StreamsBuilder::build
+/// [`FilterProcessor`]: crate::dsl::processors::stateless::FilterProcessor
+pub struct BranchedStream<K, V> {
+    pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
+    pub(crate) parent: NodeId,
+    pub(crate) key_changing: bool,
+    pub(crate) _pd: std::marker::PhantomData<fn() -> (K, V)>,
+}
+
+impl<K, V> BranchedStream<K, V>
+where
+    K: Any + Send + Clone + Default,
+    V: Any + Send + Clone,
+{
+    /// Add a branch: records for which `predicate(key, value)` returns `true`
+    /// are forwarded to the returned [`KStream`]. Uses a `KSTREAM-BRANCHCHILD-`
+    /// node backed by a [`FilterProcessor`] (negate = false).
+    ///
+    /// [`FilterProcessor`]: crate::dsl::processors::stateless::FilterProcessor
+    pub fn branch<P>(&self, predicate: P) -> KStream<K, V>
+    where
+        P: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,
+    {
+        let parent_id = self.parent;
+        let mut g = self.builder.borrow_mut();
+        let name = g.new_processor_name(names::BRANCHCHILD);
+        let id = g.graph.add(
+            name.clone(),
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![parent_id],
+        );
+        let p2 = predicate.clone();
+        g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+            let h = state.topology.add_processor::<K, V, K, V, _, _, _>(
+                name.clone(),
+                move || stateless::FilterProcessor {
+                    predicate: p2.clone(),
+                    negate: false,
+                    _pd: std::marker::PhantomData,
+                },
+                [parent],
+            );
+            state.handle_name.insert(id, h.name().to_string());
+        }));
+        drop(g);
+        // branch is filter-only → key lineage unchanged.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
     }
 }
 

@@ -143,6 +143,56 @@ fn dsl_reduce_executes() {
     );
 }
 
+/// `split`/`branch`: records are routed to matching branch children.
+///
+/// Uses mutually-exclusive predicates so each record reaches exactly one branch;
+/// both branches are merged to a single output. The implementation routes a record
+/// to EVERY branch whose predicate matches (not first-match-wins); with
+/// mutually-exclusive predicates the behaviour is identical.
+#[test]
+fn dsl_branch_executes() {
+    let b = StreamsBuilder::new();
+    let src = b.stream(["in"], Consumed::with(StringSerde, StringSerde));
+    let split = src.split();
+    // b1 matches records with value "a"; b2 matches anything else.
+    let b1 = split.branch(|_k: &String, v: &String| v == "a");
+    let b2 = split.branch(|_k: &String, v: &String| v != "a");
+    b1.merge(&b2)
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(b1);
+    drop(b2);
+    drop(src);
+    drop(split);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for v in ["a", "b", "a"] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some(v.to_string()),
+            v.to_string(),
+            0,
+        );
+    }
+    // All three records reach the output (each exactly once via its branch).
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("a".into()), "a".into()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("b".into()), "b".into()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("a".into()), "a".into()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
 /// `StreamsBuilder::table` materializes a source topic into a `KTable`, and
 /// `map_values` rewrites + re-materializes it. Exercises the table source +
 /// table map-values execution paths end-to-end through `to_stream`.

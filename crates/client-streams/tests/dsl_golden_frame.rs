@@ -62,6 +62,32 @@ fn table_reuse_matches_jvm() {
 }
 
 #[test]
+fn branch_merge_matches_jvm() {
+    // Mirrors Capture.java `branchMerge()`:
+    //   stream("in").split()
+    //     .branch((k,v)->true, grab)
+    //     .branch((k,v)->false, grab)
+    //     .noDefaultBranch()
+    //   captured[0].merge(captured[1]).to("out")
+    //
+    // Wire result: ONE subtopology "0", source_topics=["in"], everything else empty.
+    // Branch/merge are stateless (no internal/repartition/changelog topics).
+    let b = StreamsBuilder::new();
+    let src = b.stream(["in"], Consumed::with(StringSerde, StringSerde));
+    let split = src.split();
+    let b1 = split.branch(|_k: &String, _v: &String| true);
+    let b2 = split.branch(|_k: &String, _v: &String| false);
+    b1.merge(&b2)
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(b1);
+    drop(b2);
+    drop(src);
+    drop(split);
+    let wire = b.build("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "branch_merge");
+}
+
+#[test]
 fn repartition_merge_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     // The JVM `repartitionMerge()` app: one `selectKey` feeds TWO bare aggregations
