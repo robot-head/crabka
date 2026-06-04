@@ -14,12 +14,12 @@
 //!
 //! ```no_run
 //! use std::time::Duration;
-//! use crabka_client_streams::{StreamsEvent, StreamsMembership, Topology};
+//! use crabka_client_streams::{StreamsEvent, StreamsMembership, StringSerde, Topology};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! topo.add_source("src", ["input-topic"]);
-//! topo.add_sink("snk", "output-topic", ["src"]);
+//! topo.add_source("src", ["input-topic"], StringSerde, StringSerde);
+//! topo.add_sink("snk", "output-topic", ["src"], StringSerde, StringSerde);
 //! let built = topo.build("my-application-id")?;
 //!
 //! let mut membership = StreamsMembership::builder()
@@ -41,6 +41,33 @@
 //!     }
 //! }
 //! # }
+//! ```
+//! ## Processor API (sub-project #2)
+//!
+//! Define a typed topology, then test it with the broker-free [`TopologyTestDriver`]:
+//!
+//! ```
+//! use crabka_client_streams::{Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver};
+//!
+//! struct Upper;
+//! impl Processor<String, String, String, String> for Upper {
+//!     fn process(&mut self, ctx: &mut ProcessorContext<String, String>, r: Record<String, String>) {
+//!         ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
+//!     }
+//! }
+//!
+//! let mut topo = Topology::new();
+//! topo.add_source("src", ["in"], StringSerde, StringSerde);
+//! topo.add_processor("up", || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>, ["src"]);
+//! topo.add_sink("out", "out", ["up"], StringSerde, StringSerde);
+//! let built = topo.build("my-app").unwrap();
+//!
+//! let mut driver = TopologyTestDriver::new(&built).unwrap();
+//! driver.pipe_input("in", &StringSerde, &StringSerde, Some("k".to_string()), "hello".to_string(), 0);
+//! assert_eq!(
+//!     driver.read_output("out", &StringSerde, &StringSerde),
+//!     Some((Some("k".to_string()), "HELLO".to_string())),
+//! );
 //! ```
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.0.0")]
 
