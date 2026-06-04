@@ -40,7 +40,7 @@ impl<K: 'static, V: 'static> InMemoryKeyValueStore<K, V> {
     }
 }
 
-impl<K: 'static + Send, V: 'static + Send> StateStore for InMemoryKeyValueStore<K, V> {
+impl<K: 'static, V: 'static> StateStore for InMemoryKeyValueStore<K, V> {
     fn name(&self) -> &str {
         &self.name
     }
@@ -70,7 +70,7 @@ impl<K: 'static + Send, V: 'static + Send> StateStore for InMemoryKeyValueStore<
     }
 }
 
-impl<K: 'static + Send, V: 'static + Send> KeyValueStore<K, V> for InMemoryKeyValueStore<K, V> {
+impl<K: 'static, V: 'static> KeyValueStore<K, V> for InMemoryKeyValueStore<K, V> {
     fn get(&self, key: &K) -> Option<V> {
         let kb = self.key_serde.serialize(key);
         self.map.get(&kb).map(|vb| {

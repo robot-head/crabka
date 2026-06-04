@@ -129,7 +129,7 @@ where
 
     /// Access a connected state store, typed. `None` if absent or the K/V types
     /// don't match. Fetch it per-record (do not hold across `process` calls).
-    pub fn get_state_store<K2: 'static + Send, V2: 'static + Send>(
+    pub fn get_state_store<K2: 'static, V2: 'static>(
         &mut self,
         name: &str,
     ) -> Option<&mut dyn crate::store::api::KeyValueStore<K2, V2>> {

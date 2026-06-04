@@ -19,7 +19,7 @@ impl StoreRegistry {
 
     /// Typed mutable access: downcast the erased store to the in-memory KV store
     /// of the requested types. `None` if absent or the types don't match.
-    pub fn get_kv<K: 'static + Send, V: 'static + Send>(
+    pub fn get_kv<K: 'static, V: 'static>(
         &mut self,
         name: &str,
     ) -> Option<&mut dyn KeyValueStore<K, V>> {
