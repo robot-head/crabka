@@ -53,6 +53,10 @@ pub(crate) async fn handle(
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
+    // KIP-124 request_percentage meters server-side handler time; capture the
+    // start so the request throttle can be combined with the byte-rate throttle
+    // below (KIP-219).
+    let handler_start = std::time::Instant::now();
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
     let producer_state = broker.producer_state.clone();
@@ -255,14 +259,31 @@ pub(crate) async fn handle(
         });
     }
 
-    // ── KIP-13 producer_byte_rate enforcement ───────────────────────
-    let delay = consume_producer_quota(
+    // ── KIP-13 producer_byte_rate + KIP-124 request_percentage ──────
+    // Combine the data (byte-rate) and request (handler-time) throttles as
+    // their max, surface it in throttle_time_ms, and mute the channel once
+    // before responding (KIP-219). The dispatch loop skips request_percentage
+    // for Produce so it is charged exactly once, here.
+    let data_delay = consume_producer_quota(
         &image,
         &broker.quota_buckets,
         &ctx.principal.name,
         ctx.client_id,
         total_produce_bytes,
     );
+    #[allow(clippy::cast_possible_truncation)]
+    let elapsed_micros = handler_start
+        .elapsed()
+        .as_micros()
+        .min(u128::from(u64::MAX)) as u64;
+    let request_delay = crate::quota::consume_request_quota(
+        &image,
+        &broker.quota_buckets,
+        &ctx.principal.name,
+        ctx.client_id,
+        elapsed_micros,
+    );
+    let delay = data_delay.max(request_delay);
     let resp = ProduceResponse {
         responses: topic_results,
         throttle_time_ms: i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),

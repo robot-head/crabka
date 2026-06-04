@@ -207,6 +207,34 @@ jobs:
           flags: client-consumer-integration
           fail_ci_if_error: true
 
+  # crabka-client-streams integration: KIP-1071 streams-group membership
+  # (join / heartbeat / assignment / leave) against an in-process Rust broker
+  # (no Docker). Like the consumer job, the `unit` flag's `--lib --bins` walk
+  # never descends into these `tests/` binaries, so StreamsMembership::start and
+  # the heartbeat-coordinator lifecycle are only exercised here.
+  client-streams-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: client-streams-integration
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Client streams integration coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov -p crabka-client-streams --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
+      - uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/client-streams-integration.lcov
+          disable_search: true
+          flags: client-streams-integration
+          fail_ci_if_error: true
+
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
   # reach back via the Docker bridge gateway (typically 172.17.0.1). See

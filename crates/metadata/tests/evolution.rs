@@ -46,7 +46,7 @@ prop_compose! {
         port in 1024..65535u16,
         rack in prop::option::of("[a-zA-Z][a-zA-Z0-9-]{0,16}"),
     ) -> BrokerRegistrationRecord {
-        BrokerRegistrationRecord { node_id, host, port, rack, endpoints: vec![] }
+        BrokerRegistrationRecord { node_id, broker_epoch: 0, host, port, rack, endpoints: vec![] }
     }
 }
 

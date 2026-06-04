@@ -50,6 +50,12 @@ pub struct BrokerEndpoint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokerRegistrationRecord {
     pub node_id: NodeId,
+    /// KIP-903 broker epoch: the raft log offset at which this registration
+    /// record committed. The controller leader assigns it at append time
+    /// (`on_submit_change`); a freshly-built literal carries `0` until the
+    /// leader stamps it. Used to fence stale replicas from the ISR on
+    /// `AlterPartition`.
+    pub broker_epoch: i64,
     /// Legacy single-listener host, used as inter-broker default and by
     /// pre-v9 `Metadata` responses. v9+ projects [`Self::endpoints`].
     pub host: String,
@@ -296,6 +302,7 @@ mod tests {
     fn broker_registration_round_trip() {
         let r = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 7,
+            broker_epoch: 0,
             host: "192.168.1.10".into(),
             port: 9092,
             rack: Some("us-east-1a".into()),
@@ -308,6 +315,7 @@ mod tests {
     fn broker_registration_with_endpoints_round_trip() {
         let r = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 1,
+            broker_epoch: 0,
             host: "h".into(),
             port: 9092,
             rack: None,

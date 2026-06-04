@@ -171,8 +171,8 @@ async fn send_alter_partition(
     // `new_isr_with_epochs` is the v3 field; the client negotiates MAX_VERSION
     // (= 3), so we must populate both so that whichever version is selected
     // carries the correct ISR.  The handler side reads `new_isr_with_epochs`
-    // when `new_isr` is empty (i.e. version 3).  Broker epochs are unknown
-    // at this call site so we send -1 (the standard "unknown epoch" sentinel).
+    // when `new_isr` is empty (i.e. version 3).
+    // KIP-903: per-member epochs come from the metadata image; unknown brokers fall back to -1.
     let new_isr_i32: Vec<i32> = new_isr
         .iter()
         .map(|n| i32::try_from(*n).unwrap_or(i32::MAX))
@@ -181,14 +181,21 @@ async fn send_alter_partition(
         .iter()
         .map(|&bid| BrokerState {
             broker_id: bid,
-            broker_epoch: -1,
+            broker_epoch: image
+                .broker_epoch(u64::try_from(bid).unwrap_or(0))
+                .unwrap_or(-1),
             ..Default::default()
         })
         .collect();
 
     let req = AlterPartitionRequest {
         broker_id,
-        broker_epoch: -1,
+        // KIP-903: the partition leader stamps its own broker epoch and each
+        // ISR member's epoch from the metadata image so the controller can
+        // fence stale replicas. Unknown brokers fall back to -1 (skip-check).
+        broker_epoch: image
+            .broker_epoch(u64::try_from(broker_id).unwrap_or(0))
+            .unwrap_or(-1),
         topics: vec![TopicData {
             topic_id,
             partitions: vec![PartitionData {

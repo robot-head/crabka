@@ -76,6 +76,10 @@ pub(crate) async fn handle(
     req_bytes: &[u8],
     ctx: &crate::handlers::RequestContext<'_>,
 ) -> Result<Bytes, BrokerError> {
+    // KIP-124 request_percentage meters server-side handler time; capture the
+    // start so the request throttle can be combined with the consumer
+    // byte-rate throttle below (KIP-219).
+    let handler_start = std::time::Instant::now();
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
     let log_dir_status = broker.log_dir_status.clone();
@@ -581,16 +585,34 @@ pub(crate) async fn handle(
     // fetches (replica_id >= 0) use the KIP-73 throttle.
     let mut throttle_time_ms_val: i32 = 0;
     if !is_follower_fetch {
-        // KIP-13 consumer_byte_rate. Mutually exclusive with the
-        // inter-broker leader throttle (which fires only when replica_id >= 0).
+        // KIP-13 consumer_byte_rate + KIP-124 request_percentage. Combine the
+        // data and request throttles as their max, surface it in
+        // throttle_time_ms, and mute the channel once before responding
+        // (KIP-219). The dispatch loop skips request_percentage for Fetch so it
+        // is charged exactly once, here. (Inter-broker follower fetches use the
+        // KIP-73 leader throttle above, which fires only when replica_id >= 0,
+        // and are not client-quota traffic.)
         let total_bytes = sum_response_bytes(&responses);
-        let delay = consume_consumer_quota(
+        let data_delay = consume_consumer_quota(
             &image,
             &broker.quota_buckets,
             &ctx.principal.name,
             ctx.client_id,
             total_bytes,
         );
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed_micros = handler_start
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        let request_delay = crate::quota::consume_request_quota(
+            &image,
+            &broker.quota_buckets,
+            &ctx.principal.name,
+            ctx.client_id,
+            elapsed_micros,
+        );
+        let delay = data_delay.max(request_delay);
         if delay > Duration::ZERO {
             throttle_time_ms_val = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
             tokio::time::sleep(delay).await;

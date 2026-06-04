@@ -265,6 +265,13 @@ impl MetadataImage {
         self.brokers.get(&node_id)
     }
 
+    /// KIP-903: the broker epoch (registration commit offset) for `node_id`,
+    /// or `None` if the broker is not registered in this image.
+    #[must_use]
+    pub fn broker_epoch(&self, node_id: NodeId) -> Option<i64> {
+        self.brokers.get(&node_id).map(|b| b.broker_epoch)
+    }
+
     pub fn brokers(&self) -> impl Iterator<Item = &BrokerRegistrationRecord> {
         self.brokers.values()
     }
@@ -953,6 +960,7 @@ mod tests {
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
                 node_id: 1,
+                broker_epoch: 0,
                 host: "h1".into(),
                 port: 9092,
                 rack: Some("r1".into()),
@@ -967,6 +975,7 @@ mod tests {
         image.apply(&MetadataRecord::V1BrokerRegistration(
             BrokerRegistrationRecord {
                 node_id: 2,
+                broker_epoch: 0,
                 host: "h2".into(),
                 port: 9092,
                 rack: None,
@@ -1422,6 +1431,7 @@ mod tests {
         let mut m = img();
         let b = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 1,
+            broker_epoch: 0,
             host: "h".into(),
             port: 9092,
             rack: None,
@@ -2206,5 +2216,22 @@ mod tests {
         ));
         assert!(img.topic_by_id(&id).is_none());
         assert!(img.topic_name_by_id(&id).is_none());
+    }
+
+    #[test]
+    fn broker_epoch_reads_back_registered_epoch() {
+        let mut image = MetadataImage::new(Uuid::nil());
+        image.apply(&MetadataRecord::V1BrokerRegistration(
+            BrokerRegistrationRecord {
+                node_id: 5,
+                broker_epoch: 99,
+                host: "h".into(),
+                port: 9092,
+                rack: None,
+                endpoints: vec![],
+            },
+        ));
+        assert!(image.broker_epoch(5) == Some(99));
+        assert!(image.broker_epoch(404) == None);
     }
 }

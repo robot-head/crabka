@@ -57,6 +57,7 @@ mod sender;
 mod transactional;
 
 pub use compression::Compression;
+pub use crabka_client_consumer::ConsumerGroupMetadata;
 pub use error::ProducerError;
 pub use producer::{Acks, Producer};
 pub use record::{Header, ProducerRecord, RecordMetadata};
