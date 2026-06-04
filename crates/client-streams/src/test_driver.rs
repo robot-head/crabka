@@ -27,7 +27,8 @@ impl TopologyTestDriver {
     /// invalid (propagates `instantiate`'s error).
     pub fn new(built: &BuiltTopology) -> Result<Self, ProcessorError> {
         let source_topics: HashSet<String> = built.list_source_topics().into_iter().collect();
-        let graph = built.instantiate()?;
+        let mut graph = built.instantiate()?;
+        graph.init_processors()?;
         Ok(Self {
             graph,
             source_topics,
@@ -80,7 +81,19 @@ impl TopologyTestDriver {
                         .push_back(out);
                 }
             }
+            // Drain changelog buffers so they don't grow unbounded; the test driver
+            // has no broker, so we discard them (restore is a no-op with fresh stores).
+            let _ = self.graph.drain_changelogs();
         }
+    }
+
+    /// Inspect a state store's contents after piping (mirrors the JVM
+    /// `TopologyTestDriver.getKeyValueStore`). Test-only; not for interactive queries.
+    pub fn get_key_value_store<K: 'static, V: 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::api::KeyValueStore<K, V>> {
+        self.graph.stores.get_kv::<K, V>(name)
     }
 
     /// Pop + deserialize the next output record for `topic`.
@@ -263,5 +276,39 @@ mod tests {
             d.read_output("out-b", Produced::with(StringSerde, StringSerde))
                 == Some((None, "X".to_string()))
         );
+    }
+
+    #[test]
+    fn stateful_count_and_store_inspection() {
+        use crate::processor::serde::I64Serde;
+        struct Counter;
+        impl Processor<String, String, String, i64> for Counter {
+            fn process(
+                &mut self,
+                ctx: &mut ProcessorContext<String, i64>,
+                r: Record<String, String>,
+            ) {
+                let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+                let n = s.get(&r.value).unwrap_or(0) + 1;
+                s.put(r.value.clone(), n);
+                ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+            }
+        }
+        let mut t = Topology::new();
+        t.add_source("src", ["in"], StringSerde, StringSerde);
+        t.add_state_store("counts", StringSerde, I64Serde, ["c"]);
+        t.add_processor(
+            "c",
+            || Box::new(Counter) as Box<dyn Processor<String, String, String, i64>>,
+            ["src"],
+        );
+        t.add_sink("out", "out", ["c"], StringSerde, I64Serde);
+        let mut d = TopologyTestDriver::new(&t.build("app").unwrap()).unwrap();
+        d.pipe_input("in", &StringSerde, &StringSerde, None, "a".to_string(), 0);
+        d.pipe_input("in", &StringSerde, &StringSerde, None, "a".to_string(), 1);
+        check!(d.read_output("out", &StringSerde, &I64Serde) == Some((Some("a".to_string()), 1)));
+        check!(d.read_output("out", &StringSerde, &I64Serde) == Some((Some("a".to_string()), 2)));
+        let store = d.get_key_value_store::<String, i64>("counts").unwrap();
+        check!(store.get(&"a".to_string()) == Some(2));
     }
 }
