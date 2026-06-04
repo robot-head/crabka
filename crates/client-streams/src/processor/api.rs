@@ -117,6 +117,16 @@ mod tests {
         }
     }
 
+    struct Noop;
+    impl Processor<String, String, String, String> for Noop {
+        fn process(
+            &mut self,
+            _ctx: &mut ProcessorContext<String, String>,
+            _r: Record<String, String>,
+        ) {
+        }
+    }
+
     #[test]
     fn forward_pushes_erased_record_to_each_child() {
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -140,5 +150,30 @@ mod tests {
         let (child, rec) = buffer.pop_front().unwrap();
         check!(child == 3);
         check!(*rec.value.downcast::<String>().unwrap() == "HI");
+    }
+
+    #[test]
+    fn default_init_and_close_are_noops_and_forward_with_no_children_drops() {
+        let mut p = Noop;
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 9,
+        };
+        let mut dispatch = Dispatch {
+            buffer: &mut buffer,
+            children: &[],
+            output: &mut output,
+            record_ctx: &rc,
+        };
+        let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
+        p.init(&mut ctx); // default no-op
+        check!(ctx.record_context().timestamp == 9);
+        ctx.forward(Record::new(None, "x".to_string(), 0)); // no children → dropped, no panic
+        check!(buffer.is_empty());
+        p.close(); // default no-op
     }
 }

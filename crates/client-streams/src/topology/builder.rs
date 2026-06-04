@@ -752,4 +752,40 @@ mod tests {
         );
         check!(t.build("app").is_err());
     }
+
+    #[test]
+    fn source_to_sink_type_mismatch_reported() {
+        let mut t = Topology::new();
+        t.add_source("src", ["in"], StringSerde, StringSerde); // produces Record<String,String>
+        t.add_sink("out", "o", ["src"], StringSerde, I64Serde); // expects Record<String,i64>
+        let msg = t.build("app").unwrap_err().to_string();
+        check!(msg.contains("wiring type error"));
+    }
+
+    #[test]
+    fn instantiate_repartition_topology_lists_topics() {
+        let mut t = Topology::new();
+        t.add_repartition_topic("rp");
+        t.add_source("s1", ["in"], StringSerde, StringSerde);
+        t.add_processor(
+            "p",
+            || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>,
+            ["s1"],
+        );
+        t.add_sink("to_rp", "rp", ["p"], StringSerde, StringSerde);
+        t.add_source("s2", ["rp"], StringSerde, StringSerde);
+        t.add_sink("out", "out", ["s2"], StringSerde, StringSerde);
+        let built = t.build("app").unwrap();
+        let mut srcs = built.list_source_topics();
+        srcs.sort();
+        check!(srcs == vec!["in".to_string(), "rp".to_string()]);
+        let mut sinks = built.list_sink_topics();
+        sinks.sort();
+        check!(sinks == vec!["out".to_string(), "rp".to_string()]);
+        // instantiate must succeed and pipe through the first subtopology
+        let mut g = built.instantiate().unwrap();
+        g.pipe("in", None, b"hi", 0).unwrap();
+        let out1 = g.take_output();
+        check!(out1.iter().any(|o| o.topic == "rp"));
+    }
 }
