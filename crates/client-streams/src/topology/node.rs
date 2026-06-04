@@ -48,6 +48,25 @@ impl NodeRegistry {
         Ok(())
     }
 
+    /// Reject any predecessor name not already present in the registry.
+    /// Called at add time to guarantee a DAG by construction — a forward
+    /// reference (including a self-reference) makes a cycle possible.
+    fn require_predecessors_exist(
+        &self,
+        node: &str,
+        predecessors: &[String],
+    ) -> Result<(), TopologyError> {
+        for p in predecessors {
+            if !self.index.contains_key(p) {
+                return Err(TopologyError::UnknownPredecessor {
+                    node: node.to_string(),
+                    predecessor: p.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn add_source(&mut self, name: &str, topics: Vec<String>) -> Result<(), TopologyError> {
         self.insert(Node {
             name: name.to_string(),
@@ -60,6 +79,7 @@ impl NodeRegistry {
         name: &str,
         predecessors: Vec<String>,
     ) -> Result<(), TopologyError> {
+        self.require_predecessors_exist(name, &predecessors)?;
         self.insert(Node {
             name: name.to_string(),
             kind: NodeKind::Processor { predecessors },
@@ -72,6 +92,7 @@ impl NodeRegistry {
         topic: String,
         predecessors: Vec<String>,
     ) -> Result<(), TopologyError> {
+        self.require_predecessors_exist(name, &predecessors)?;
         self.insert(Node {
             name: name.to_string(),
             kind: NodeKind::Sink {

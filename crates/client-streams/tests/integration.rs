@@ -67,8 +67,19 @@ async fn member_joins_converges_and_leaves() {
     create_topic(&admin, "streams-input", 2).await;
 
     let mut topo = Topology::new();
-    topo.add_source("src", ["streams-input"]);
-    topo.add_sink("snk", "streams-output", ["src"]);
+    topo.add_source(
+        "src",
+        ["streams-input"],
+        crabka_client_streams::BytesSerde,
+        crabka_client_streams::BytesSerde,
+    );
+    topo.add_sink(
+        "snk",
+        "streams-output",
+        ["src"],
+        crabka_client_streams::BytesSerde,
+        crabka_client_streams::BytesSerde,
+    );
     let built = topo.build("streams-app").unwrap();
 
     let mut membership = StreamsMembership::builder()
@@ -125,8 +136,19 @@ async fn missing_source_topic_reports_not_ready() {
     // Deliberately do NOT create "streams-missing".
 
     let mut topo = Topology::new();
-    topo.add_source("src", ["streams-missing"]);
-    topo.add_sink("snk", "out", ["src"]);
+    topo.add_source(
+        "src",
+        ["streams-missing"],
+        crabka_client_streams::BytesSerde,
+        crabka_client_streams::BytesSerde,
+    );
+    topo.add_sink(
+        "snk",
+        "out",
+        ["src"],
+        crabka_client_streams::BytesSerde,
+        crabka_client_streams::BytesSerde,
+    );
     let built = topo.build("streams-missing-app").unwrap();
 
     let mut membership = StreamsMembership::builder()
