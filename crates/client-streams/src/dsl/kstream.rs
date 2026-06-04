@@ -422,38 +422,69 @@ where
 
     /// `repartition`: force a repartition through an internal topic.
     ///
-    /// Records the `Repartition` node + name only; the lowering thunk is left
-    /// unattached. Repartition lowering (internal-topic naming, partition count,
-    /// sink/source pair) is pinned to a JVM fixture and is filled in by Task 8 —
-    /// do not attach a half-correct thunk before then.
+    /// Lowers as `sink → add_repartition_topic → source`, the same pattern used
+    /// by the implicit repartition inserted before a stateful aggregation. The
+    /// repartition topic name is `<app_id>-<name>-repartition`, where `<name>` is
+    /// the explicit [`Repartitioned`](crate::dsl::config::Repartitioned) name when
+    /// set, otherwise an auto-name minted from the counter.
+    ///
+    /// **Byte-exactness vs JVM:** the JVM assigns a distinct `KSTREAM-REPARTITION-`
+    /// counter for standalone `repartition()` calls. That counter is NOT validated
+    /// against a golden fixture in this slice — functional correctness (no panic,
+    /// records flow through) is the bar here.
     #[must_use]
     pub fn repartition<KS, VS>(
         &self,
         repartitioned: crate::dsl::config::Repartitioned<KS, VS>,
     ) -> KStream<K, V>
     where
-        KS: Serde<K> + Clone,
-        VS: Serde<V> + Clone,
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
     {
-        // Consume the config (the serdes are wired in Task 8's lowering thunk).
         let crate::dsl::config::Repartitioned {
             name: explicit_name,
             partitions,
-            ..
+            key_serde,
+            value_serde,
         } = repartitioned;
         let parent_id = self.node;
         let mut g = self.builder.borrow_mut();
-        // JVM names the repartition node from the explicit name or a fresh
-        // KSTREAM-REPARTITION counter; the exact scheme is pinned in Task 8.
+        // Mint the base name: explicit name or a fresh counter.
         let base = explicit_name.unwrap_or_else(|| g.new_processor_name(names::SOURCE));
-        let topic = format!("{base}{}", names::REPARTITION_SUFFIX);
+        // Sink + source names used inside the thunk (minted now to advance
+        // the counter at the right position relative to later ops).
+        let sink_name = g.new_processor_name(names::SINK);
+        let source_name = g.new_processor_name(names::SOURCE);
+        let topic_base = base.clone();
         let id = g.graph.add(
-            base,
-            GraphNodeKind::Repartition { topic, partitions },
+            source_name.clone(),
+            GraphNodeKind::Repartition {
+                topic: format!("{topic_base}{}", names::REPARTITION_SUFFIX),
+                partitions,
+            },
             vec![parent_id],
         );
-        // TODO(Task 8): attach the lowering thunk once repartition topic naming
-        // is pinned to the JVM fixture.
+        g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent_name = state.handle_name[&parent_id].clone();
+            let parent = NodeHandle::<K, V>::from_name(parent_name);
+            let topic = format!("{}-{topic_base}{}", state.app_id, names::REPARTITION_SUFFIX);
+            // sink: write to repartition topic
+            state.topology.add_sink::<K, V, KS, VS, _, _>(
+                sink_name.clone(),
+                topic.clone(),
+                [parent],
+                crate::processor::serde::Produced::with(key_serde.clone(), value_serde.clone()),
+            );
+            // mark the topic as internal repartition (loop-back)
+            state.topology.add_repartition_topic(topic.clone());
+            // source: read from repartition topic
+            state.topology.add_source::<K, V, KS, VS>(
+                source_name.clone(),
+                [topic],
+                crate::processor::serde::Consumed::with(key_serde, value_serde),
+            );
+            state.handle_name.insert(id, source_name.clone());
+        }));
         drop(g);
         // An explicit repartition re-groups by key → downstream is no longer
         // key-changing relative to its (now repartitioned) partitioning.
@@ -474,6 +505,12 @@ where
     /// [`FilterProcessor`]: crate::dsl::processors::stateless::FilterProcessor
     #[must_use]
     pub fn split(&self) -> BranchedStream<K, V> {
+        // The JVM mints a `KSTREAM-BRANCH-` node at split() time (counter-only:
+        // the branch node itself is not wire-visible). Advance the counter here so
+        // that downstream auto-names (e.g. from a subsequent aggregation) land at
+        // the same indices as the JVM byte-for-byte. Mirrors the FILTER counter
+        // mint in `KGroupedStream::record_repartition`.
+        let _branch_name = self.builder.borrow_mut().new_processor_name(names::BRANCH);
         BranchedStream {
             builder: Rc::clone(&self.builder),
             parent: self.node,

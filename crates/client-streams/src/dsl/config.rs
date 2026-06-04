@@ -56,9 +56,7 @@ impl<KS, VS> Materialized<KS, VS> {
 
 /// Serdes + optional name/partitions for an explicit `repartition()`.
 pub struct Repartitioned<KS, VS> {
-    #[allow(dead_code)]
     pub(crate) key_serde: KS,
-    #[allow(dead_code)]
     pub(crate) value_serde: VS,
     pub(crate) name: Option<String>,
     pub(crate) partitions: Option<i32>,

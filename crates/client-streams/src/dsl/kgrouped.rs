@@ -237,12 +237,26 @@ where
                 },
                 [parent],
             );
-            state.topology.add_state_store::<K, VA, KS, VS>(
-                store_for_thunk.clone(),
-                key_serde.clone(),
-                value_serde.clone(),
-                [h.name().to_string()],
-            );
+            // Honor `Materialized::with_logging(bool)`:
+            // - logging=true  → standard add_state_store (changelog topic emitted)
+            // - logging=false → add_state_store_no_changelog (store usable at
+            //   runtime, but NO state_changelog_topics entry in the wire topology)
+            if logging {
+                state.topology.add_state_store::<K, VA, KS, VS>(
+                    store_for_thunk.clone(),
+                    key_serde.clone(),
+                    value_serde.clone(),
+                    [h.name().to_string()],
+                );
+            } else {
+                state
+                    .topology
+                    .add_state_store_no_changelog::<K, VA, KS, VS>(
+                        store_for_thunk.clone(),
+                        key_serde.clone(),
+                        value_serde.clone(),
+                    );
+            }
             state.handle_name.insert(agg_id, h.name().to_string());
         }));
 
@@ -299,12 +313,21 @@ where
                 },
                 [parent],
             );
-            state.topology.add_state_store::<K, V, KS, VS>(
-                store_for_thunk.clone(),
-                key_serde.clone(),
-                value_serde.clone(),
-                [h.name().to_string()],
-            );
+            // Honor `Materialized::with_logging(bool)` for reduce as well.
+            if logging {
+                state.topology.add_state_store::<K, V, KS, VS>(
+                    store_for_thunk.clone(),
+                    key_serde.clone(),
+                    value_serde.clone(),
+                    [h.name().to_string()],
+                );
+            } else {
+                state.topology.add_state_store_no_changelog::<K, V, KS, VS>(
+                    store_for_thunk.clone(),
+                    key_serde.clone(),
+                    value_serde.clone(),
+                );
+            }
             state.handle_name.insert(red_id, h.name().to_string());
         }));
 

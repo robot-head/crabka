@@ -416,6 +416,42 @@ impl Topology {
         self
     }
 
+    /// Register a state store **without** a changelog topic.
+    ///
+    /// The store is available at runtime (for in-memory state), but NO entry is
+    /// emitted in the wire topology's `state_changelog_topics` array. This backs
+    /// `Materialized::with_logging(false)` in the DSL.
+    pub(crate) fn add_state_store_no_changelog<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+    ) -> &mut Self
+    where
+        K: 'static,
+        V: 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        let name: String = name.into();
+        // Insert only into store_factories (runtime use) — NOT into reg.stores,
+        // so no changelog topic appears in the wire topology.
+        self.store_factories.insert(
+            name,
+            Box::new(move |_app_id: &str, store_name: &str| {
+                // No changelog: use an empty placeholder string; the store will
+                // never flush to a changelog topic at runtime.
+                Box::new(crate::store::memory::InMemoryKeyValueStore::<K, V>::new(
+                    store_name.to_string(),
+                    Box::new(key_serde.clone()),
+                    Box::new(value_serde.clone()),
+                    String::new(),
+                )) as Box<dyn crate::store::api::StateStore>
+            }),
+        );
+        self
+    }
+
     /// Register a topic name as an internal repartition topic.
     pub fn add_repartition_topic<S: Into<String>>(&mut self, name: S) -> &mut Self {
         self.reg.repartition_topics.insert(name.into());

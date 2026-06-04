@@ -193,6 +193,90 @@ fn dsl_branch_executes() {
     );
 }
 
+/// `repartition()` must not panic — records must flow through the internal
+/// loop-back repartition topic and arrive at the sink.
+///
+/// Topology: stream("in") → repartition → `map_values(upper)` → to("out").
+/// The test driver loops the repartition topic back automatically.
+#[test]
+fn dsl_repartition_executes() {
+    use crabka_client_streams::Repartitioned;
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .repartition(Repartitioned::with(StringSerde, StringSerde))
+        .map_values(|v: &String| v.to_uppercase())
+        .to("out", Produced::with(StringSerde, StringSerde));
+    // build must succeed (no missing thunk panic)
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for v in ["hello", "world"] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some(v.to_string()),
+            v.to_string(),
+            0,
+        );
+    }
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("hello".into()), "HELLO".into()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("world".into()), "WORLD".into()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// `Materialized::with_logging(false)` must suppress the changelog topic from
+/// the wire topology. The store is still functional (in-memory state is
+/// maintained), but `state_changelog_topics` must be empty.
+#[test]
+fn dsl_count_no_logging_omits_changelog() {
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .count(
+            Materialized::with(StringSerde, I64Serde)
+                .as_store("counts")
+                .with_logging(false),
+        )
+        .to_stream()
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let built = b.build("app").unwrap();
+    // No changelog topics anywhere in the wire topology.
+    let wire = built.to_wire();
+    let any_changelog = wire
+        .subtopologies
+        .iter()
+        .any(|s| !s.state_changelog_topics.is_empty());
+    assert!(
+        !any_changelog,
+        "expected no changelog topics but found some"
+    );
+    // The store still works at runtime.
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for v in ["a", "a", "b"] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some(v.to_string()),
+            v.to_string(),
+            0,
+        );
+    }
+    assert_eq!(
+        d.get_key_value_store::<String, i64>("counts")
+            .unwrap()
+            .get(&"a".to_string()),
+        Some(2)
+    );
+}
+
 /// `StreamsBuilder::table` materializes a source topic into a `KTable`, and
 /// `map_values` rewrites + re-materializes it. Exercises the table source +
 /// table map-values execution paths end-to-end through `to_stream`.
