@@ -70,6 +70,13 @@ pub(crate) struct GraphNode {
 #[derive(Default)]
 pub(crate) struct LogicalGraph {
     pub nodes: Vec<GraphNode>,
+    /// Optimizer-installed redundant→keeper redirects. When `aliases[&b] == a`,
+    /// the lowering driver does not run node `b`'s thunk; instead it points
+    /// `handle_name[&b]` at whatever `a` lowered to. The `MERGE_REPARTITION_TOPICS`
+    /// pass uses this to collapse two repartition nodes (off the same key-changing
+    /// source) onto a single shared repartition topic. The keeper always has the
+    /// lower id, so id-order lowering visits it first.
+    pub aliases: std::collections::HashMap<NodeId, NodeId>,
 }
 
 impl LogicalGraph {

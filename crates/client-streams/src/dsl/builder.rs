@@ -167,24 +167,42 @@ impl StreamsBuilder {
         self,
         app_id: &str,
     ) -> Result<crate::topology::BuiltTopology, crate::topology::TopologyError> {
-        let graph = Rc::try_unwrap(self.internal)
-            .unwrap_or_else(|_| panic!("StreamsBuilder::build: outstanding KStream/KTable handles"))
-            .into_inner()
-            .graph;
+        let graph = self.into_graph("build");
         let topology = crate::dsl::lower::lower(graph, app_id);
         topology.build(app_id)
     }
 
-    /// Build the topology with DSL optimizations enabled (JVM `optimization=all`).
+    /// Build the topology with DSL optimizations enabled (JVM `optimization=all`):
+    /// run the optimizer passes over the logical graph, then lower to the
+    /// Processor-API [`Topology`] and finalize.
     ///
-    /// Placeholder: today it lowers identically to [`build`](Self::build). The
-    /// optimizer passes (merge repartition topics, reuse `KTable` source topics)
-    /// are added in later tasks.
+    /// Today the only pass is `MERGE_REPARTITION_TOPICS` (two aggregations off one
+    /// key-changing op share a single repartition topic); the `KTable`
+    /// source-topic reuse pass is added in a later task. Same outstanding-handle
+    /// requirement as [`build`](Self::build).
     pub fn build_optimized(
         self,
         app_id: &str,
     ) -> Result<crate::topology::BuiltTopology, crate::topology::TopologyError> {
-        self.build(app_id)
+        let mut graph = self.into_graph("build_optimized");
+        crate::dsl::optimizer::merge_repartition_topics(&mut graph);
+        let topology = crate::dsl::lower::lower(graph, app_id);
+        topology.build(app_id)
+    }
+
+    /// Unwrap the shared internal builder into its [`LogicalGraph`]. Requires that
+    /// no [`KStream`]/[`KTable`] handles are still alive (each holds an `Rc` clone
+    /// of the internal builder); an outstanding handle makes `Rc::try_unwrap`
+    /// fail → panic.
+    ///
+    /// [`KStream`]: crate::dsl::kstream::KStream
+    /// [`KTable`]: crate::dsl::ktable::KTable
+    /// [`LogicalGraph`]: crate::dsl::graph::LogicalGraph
+    fn into_graph(self, who: &str) -> LogicalGraph {
+        Rc::try_unwrap(self.internal)
+            .unwrap_or_else(|_| panic!("StreamsBuilder::{who}: outstanding KStream/KTable handles"))
+            .into_inner()
+            .graph
     }
 }
 

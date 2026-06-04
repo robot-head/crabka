@@ -8,6 +8,7 @@ pub mod kstream;
 pub mod ktable;
 pub(crate) mod lower;
 pub(crate) mod names;
+pub(crate) mod optimizer;
 pub(crate) mod processors;
 pub use builder::StreamsBuilder;
 pub use config::{Grouped, Materialized, Repartitioned};

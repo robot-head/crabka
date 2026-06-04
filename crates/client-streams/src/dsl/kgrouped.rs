@@ -330,6 +330,13 @@ where
         if !key_changing_upstream {
             return parent;
         }
+        // The JVM's `KStreamImpl.createRepartitionedSource` first mints a
+        // null-key **filter** node (records with a null key can't be repartitioned
+        // by key), then the sink + source. We don't lower a filter node (the
+        // aggregate processors already reject null keys), but we must consume the
+        // counter index so downstream auto-names match the JVM byte-for-byte — e.g.
+        // a second aggregation's store lands at the same index as the JVM fixture.
+        let _filter_name = g.new_processor_name(names::FILTER);
         let sink_name = g.new_processor_name(names::SINK);
         let source_name = g.new_processor_name(names::SOURCE);
         let upstream = parent;

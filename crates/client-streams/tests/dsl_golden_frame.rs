@@ -38,3 +38,31 @@ fn count_matches_jvm() {
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "count");
 }
+
+#[test]
+fn repartition_merge_matches_jvm() {
+    use crabka_client_streams::{Grouped, I64Serde, Materialized};
+    // The JVM `repartitionMerge()` app: one `selectKey` feeds TWO bare aggregations
+    // (no toStream/to). Under `optimization=all` the two repartitions collapse into
+    // a single repartition topic, named after the FIRST aggregation's store.
+    let b = StreamsBuilder::new();
+    let s = b
+        .stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .select_key(|k: &String, _v: &String| k.clone());
+    // First aggregation: count → store KSTREAM-AGGREGATE-STATE-STORE-0000000002.
+    drop(
+        s.group_by_key(Grouped::with(StringSerde, StringSerde))
+            .count(Materialized::with(StringSerde, I64Serde)),
+    );
+    // Second aggregation: reduce → store KSTREAM-REDUCE-STATE-STORE-0000000007.
+    drop(
+        s.group_by_key(Grouped::with(StringSerde, StringSerde))
+            .reduce(
+                |a: &String, _b: &String| a.clone(),
+                Materialized::with(StringSerde, StringSerde),
+            ),
+    );
+    drop(s); // release the shared Rc so build_optimized can unwrap it
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "repartition_merge");
+}

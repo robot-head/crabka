@@ -15,7 +15,25 @@ pub(crate) fn lower(mut graph: LogicalGraph, app_id: &str) -> crate::topology::T
         app_id: app_id.to_string(),
         handle_name: std::collections::HashMap::new(),
     };
+    let aliases = std::mem::take(&mut graph.aliases);
     for node in &mut graph.nodes {
+        // An optimizer-aliased node (e.g. a redundant repartition merged into a
+        // keeper) is *not* lowered: running its thunk would re-emit the merged
+        // sink/topic/source. Instead inherit the keeper's lowered node name so
+        // children that captured this node's id resolve to the shared node. The
+        // keeper has a strictly lower id, so it was lowered earlier in this loop.
+        if let Some(&target) = aliases.get(&node.id) {
+            debug_assert!(
+                target < node.id,
+                "alias keeper id {target} must precede aliased id {} for id-order lowering",
+                node.id
+            );
+            let name = state.handle_name[&target].clone();
+            state.handle_name.insert(node.id, name);
+            // Drop the redundant thunk without running it.
+            node.lower.take();
+            continue;
+        }
         if let Some(thunk) = node.lower.take() {
             thunk(&mut state);
         }
