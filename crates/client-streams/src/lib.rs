@@ -14,12 +14,12 @@
 //!
 //! ```no_run
 //! use std::time::Duration;
-//! use crabka_client_streams::{StreamsEvent, StreamsMembership, StringSerde, Topology};
+//! use crabka_client_streams::{Consumed, Produced, StreamsEvent, StreamsMembership, StringSerde, Topology};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! topo.add_source("src", ["input-topic"], StringSerde, StringSerde);
-//! topo.add_sink("snk", "output-topic", ["src"], StringSerde, StringSerde);
+//! topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
+//! topo.add_sink("snk", "output-topic", ["src"], Produced::with(StringSerde, StringSerde));
 //! let built = topo.build("my-application-id")?;
 //!
 //! let mut membership = StreamsMembership::builder()
@@ -47,7 +47,7 @@
 //! Define a typed topology, then test it with the broker-free [`TopologyTestDriver`]:
 //!
 //! ```
-//! use crabka_client_streams::{Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver};
+//! use crabka_client_streams::{Consumed, Processor, ProcessorContext, Produced, Record, StringSerde, Topology, TopologyTestDriver};
 //!
 //! struct Upper;
 //! impl Processor<String, String, String, String> for Upper {
@@ -57,15 +57,15 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! topo.add_source("src", ["in"], StringSerde, StringSerde);
+//! topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
 //! topo.add_processor("up", || Upper, ["src"]);
-//! topo.add_sink("out", "out", ["up"], StringSerde, StringSerde);
+//! topo.add_sink("out", "out", ["up"], Produced::with(StringSerde, StringSerde));
 //! let built = topo.build("my-app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
-//! driver.pipe_input("in", &StringSerde, &StringSerde, Some("k".to_string()), "hello".to_string(), 0);
+//! driver.pipe_input("in", Consumed::with(StringSerde, StringSerde), Some("k".to_string()), "hello".to_string(), 0);
 //! assert_eq!(
-//!     driver.read_output("out", &StringSerde, &StringSerde),
+//!     driver.read_output("out", Produced::with(StringSerde, StringSerde)),
 //!     Some((Some("k".to_string()), "HELLO".to_string())),
 //! );
 //! ```
@@ -83,8 +83,8 @@ pub use membership::{
     TopicPartition,
 };
 pub use processor::{
-    BytesSerde, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier, Record,
-    RecordContext, Serde, SerdeError, StringSerde,
+    BytesSerde, Consumed, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier,
+    Produced, Record, RecordContext, Serde, SerdeError, StringSerde,
 };
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, Topology, TopologyError};

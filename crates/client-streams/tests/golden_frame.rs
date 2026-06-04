@@ -2,7 +2,7 @@
 //! Processor-API topology must match the JVM 4.x fixture.
 #![cfg(not(target_os = "windows"))]
 
-use crabka_client_streams::Topology;
+use crabka_client_streams::{BytesSerde, Consumed, Produced, Topology};
 
 #[test]
 fn single_source_sink_matches_jvm_fixture() {
@@ -11,15 +11,13 @@ fn single_source_sink_matches_jvm_fixture() {
     topo.add_source(
         "src",
         ["streams-input"],
-        crabka_client_streams::BytesSerde,
-        crabka_client_streams::BytesSerde,
+        Consumed::with(BytesSerde, BytesSerde),
     );
     topo.add_sink(
         "snk",
         "streams-output",
         ["src"],
-        crabka_client_streams::BytesSerde,
-        crabka_client_streams::BytesSerde,
+        Produced::with(BytesSerde, BytesSerde),
     );
     let wire = topo.build("streams-app").unwrap().to_wire();
 

@@ -14,6 +14,58 @@ pub trait Serde<T>: Send + Sync + 'static {
     fn deserialize(&self, bytes: &[u8]) -> Result<T, SerdeError>;
 }
 
+/// The key + value [`Serde`]s used to **read** a topic into the topology.
+///
+/// A source node (and [`TopologyTestDriver::pipe_input`]) deserializes incoming
+/// bytes with these. Pairing the two serdes into one named argument keeps their
+/// roles visible at the call site — `Consumed::with(keySerde, valueSerde)` reads
+/// the same as Kafka Streams' `Consumed`.
+///
+/// [`TopologyTestDriver::pipe_input`]: crate::TopologyTestDriver::pipe_input
+#[derive(Debug, Clone, Copy)]
+pub struct Consumed<KS, VS> {
+    pub(crate) key_serde: KS,
+    pub(crate) value_serde: VS,
+}
+
+impl<KS, VS> Consumed<KS, VS> {
+    /// Pair a key serde with a value serde (key first, mirroring
+    /// `Consumed.with(keySerde, valueSerde)`).
+    #[must_use]
+    pub fn with(key_serde: KS, value_serde: VS) -> Self {
+        Self {
+            key_serde,
+            value_serde,
+        }
+    }
+}
+
+/// The key + value [`Serde`]s used to **write** a topic from the topology.
+///
+/// A sink node serializes outgoing records with these;
+/// [`TopologyTestDriver::read_output`] uses them to deserialize what a sink
+/// wrote. `Produced::with(keySerde, valueSerde)` reads the same as Kafka
+/// Streams' `Produced`.
+///
+/// [`TopologyTestDriver::read_output`]: crate::TopologyTestDriver::read_output
+#[derive(Debug, Clone, Copy)]
+pub struct Produced<KS, VS> {
+    pub(crate) key_serde: KS,
+    pub(crate) value_serde: VS,
+}
+
+impl<KS, VS> Produced<KS, VS> {
+    /// Pair a key serde with a value serde (key first, mirroring
+    /// `Produced.with(keySerde, valueSerde)`).
+    #[must_use]
+    pub fn with(key_serde: KS, value_serde: VS) -> Self {
+        Self {
+            key_serde,
+            value_serde,
+        }
+    }
+}
+
 /// Identity serde for raw `Bytes`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BytesSerde;

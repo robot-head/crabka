@@ -13,7 +13,7 @@ use crate::processor::erased::ProcessorError;
 use crate::processor::factory::{FactoryKind, MakeDeser, NodeFactory};
 use crate::processor::graph::{Graph, GraphSource};
 use crate::processor::node::{ErasedNode, ProcessorNode, SinkNode, SourceNode};
-use crate::processor::serde::Serde;
+use crate::processor::serde::{Consumed, Produced, Serde};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // TopologyError
@@ -129,14 +129,14 @@ impl Topology {
 
     /// Add a source node reading the given external topics.
     ///
-    /// `key_serde` / `value_serde` are used to deserialize incoming bytes into
-    /// typed `Record<K, V>` values at runtime.
+    /// `consumed` carries the key + value serdes used to deserialize incoming
+    /// bytes into typed `Record<K, V>` values at runtime — written
+    /// `Consumed::with(key_serde, value_serde)` so the two roles are visible.
     pub fn add_source<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         topics: impl IntoIterator<Item = impl Into<String>>,
-        key_serde: KS,
-        value_serde: VS,
+        consumed: Consumed<KS, VS>,
     ) -> &mut Self
     where
         K: Any + Send + Clone,
@@ -144,6 +144,10 @@ impl Topology {
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
+        let Consumed {
+            key_serde,
+            value_serde,
+        } = consumed;
         let name: String = name.into();
         let topics: Vec<String> = topics.into_iter().map(Into::into).collect();
         let r = self.reg.add_source(&name, topics.clone());
@@ -227,13 +231,15 @@ impl Topology {
     }
 
     /// Add a sink node writing to `topic`, fed by the given predecessors.
+    ///
+    /// `produced` carries the key + value serdes used to serialize outgoing
+    /// records — written `Produced::with(key_serde, value_serde)`.
     pub fn add_sink<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         topic: impl Into<String>,
         predecessors: impl IntoIterator<Item = impl Into<String>>,
-        key_serde: KS,
-        value_serde: VS,
+        produced: Produced<KS, VS>,
     ) -> &mut Self
     where
         K: Any + Send,
@@ -241,6 +247,10 @@ impl Topology {
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
+        let Produced {
+            key_serde,
+            value_serde,
+        } = produced;
         let name: String = name.into();
         let topic: String = topic.into();
         let preds: Vec<String> = predecessors.into_iter().map(Into::into).collect();
@@ -626,9 +636,14 @@ mod tests {
     #[test]
     fn build_single_source_sink_wire_unchanged() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_processor("up", || Upper, ["src"]);
-        t.add_sink("out", "out-topic", ["up"], StringSerde, StringSerde);
+        t.add_sink(
+            "out",
+            "out-topic",
+            ["up"],
+            Produced::with(StringSerde, StringSerde),
+        );
         let built = t.build("app").unwrap();
         let wire = built.to_wire();
         check!(wire.epoch == 0);
@@ -640,9 +655,14 @@ mod tests {
     #[test]
     fn type_mismatch_is_reported_at_build() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_processor("up", || Upper, ["src"]); // forwards Record<String,String>
-        t.add_sink("out", "out-topic", ["up"], StringSerde, I64Serde); // expects Record<String,i64>
+        t.add_sink(
+            "out",
+            "out-topic",
+            ["up"],
+            Produced::with(StringSerde, I64Serde),
+        ); // expects Record<String,i64>
         let msg = t.build("app").unwrap_err().to_string();
         check!(msg.contains("wiring type error"));
         check!(msg.contains("`out`"));
@@ -652,17 +672,27 @@ mod tests {
     #[test]
     fn unknown_predecessor_still_rejected() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_sink("out", "o", ["nope"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_sink(
+            "out",
+            "o",
+            ["nope"],
+            Produced::with(StringSerde, StringSerde),
+        );
         check!(t.build("app").is_err());
     }
 
     #[test]
     fn instantiate_runs_records() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_processor("up", || Upper, ["src"]);
-        t.add_sink("out", "out-topic", ["up"], StringSerde, StringSerde);
+        t.add_sink(
+            "out",
+            "out-topic",
+            ["up"],
+            Produced::with(StringSerde, StringSerde),
+        );
         let built = t.build("app").unwrap();
         let mut g = built.instantiate().unwrap();
         g.pipe("in", Some(b"k"), b"hi", 0).unwrap();
@@ -681,12 +711,22 @@ mod tests {
     fn build_with_processor_store_and_repartition() {
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
-        t.add_source("src", ["in"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_processor("proc", || Upper, ["src"]);
         t.add_state_store("store", ["proc"]);
-        t.add_sink("rsink", "rp", ["proc"], StringSerde, StringSerde);
-        t.add_source("rsrc", ["rp"], StringSerde, StringSerde);
-        t.add_sink("out", "out-topic", ["rsrc"], StringSerde, StringSerde);
+        t.add_sink(
+            "rsink",
+            "rp",
+            ["proc"],
+            Produced::with(StringSerde, StringSerde),
+        );
+        t.add_source("rsrc", ["rp"], Consumed::with(StringSerde, StringSerde));
+        t.add_sink(
+            "out",
+            "out-topic",
+            ["rsrc"],
+            Produced::with(StringSerde, StringSerde),
+        );
         let built = t.build("my-app").unwrap();
         check!(built.application_id() == "my-app");
         let wire = built.to_wire();
@@ -704,8 +744,13 @@ mod tests {
     #[test]
     fn application_id_accessor() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_sink("snk", "out", ["src"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            ["src"],
+            Produced::with(StringSerde, StringSerde),
+        );
         let built = t.build("my-streams-app").unwrap();
         check!(built.application_id() == "my-streams-app");
     }
@@ -713,8 +758,13 @@ mod tests {
     #[test]
     fn source_topics_for_unknown_id_returns_empty() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_sink("snk", "out", ["src"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            ["src"],
+            Produced::with(StringSerde, StringSerde),
+        );
         let built = t.build("app").unwrap();
         check!(built.source_topics_for("99").is_empty());
     }
@@ -722,8 +772,8 @@ mod tests {
     #[test]
     fn duplicate_node_name_propagates_error() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
-        t.add_source("src", ["other"], StringSerde, StringSerde); // duplicate
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_source("src", ["other"], Consumed::with(StringSerde, StringSerde)); // duplicate
         check!(t.build("app").is_err());
     }
 
@@ -731,7 +781,7 @@ mod tests {
     fn forward_reference_predecessor_is_rejected_preventing_cycles() {
         // Referencing a not-yet-added node (which is how you'd build a cycle) is rejected.
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_processor(
             "p1",
             || Upper,
@@ -743,8 +793,8 @@ mod tests {
     #[test]
     fn source_to_sink_type_mismatch_reported() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde); // produces Record<String,String>
-        t.add_sink("out", "o", ["src"], StringSerde, I64Serde); // expects Record<String,i64>
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde)); // produces Record<String,String>
+        t.add_sink("out", "o", ["src"], Produced::with(StringSerde, I64Serde)); // expects Record<String,i64>
         let msg = t.build("app").unwrap_err().to_string();
         check!(msg.contains("wiring type error"));
     }
@@ -753,11 +803,21 @@ mod tests {
     fn instantiate_repartition_topology_lists_topics() {
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
-        t.add_source("s1", ["in"], StringSerde, StringSerde);
+        t.add_source("s1", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_processor("p", || Upper, ["s1"]);
-        t.add_sink("to_rp", "rp", ["p"], StringSerde, StringSerde);
-        t.add_source("s2", ["rp"], StringSerde, StringSerde);
-        t.add_sink("out", "out", ["s2"], StringSerde, StringSerde);
+        t.add_sink(
+            "to_rp",
+            "rp",
+            ["p"],
+            Produced::with(StringSerde, StringSerde),
+        );
+        t.add_source("s2", ["rp"], Consumed::with(StringSerde, StringSerde));
+        t.add_sink(
+            "out",
+            "out",
+            ["s2"],
+            Produced::with(StringSerde, StringSerde),
+        );
         let built = t.build("app").unwrap();
         let mut srcs = built.list_source_topics();
         srcs.sort();
