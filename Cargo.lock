@@ -1268,6 +1268,7 @@ dependencies = [
  "bytes",
  "crabka-broker",
  "crabka-client-core",
+ "crabka-client-producer",
  "crabka-protocol",
  "tempfile",
  "thiserror",
