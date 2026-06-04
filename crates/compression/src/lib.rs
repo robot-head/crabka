@@ -42,13 +42,30 @@ pub fn compress(ct: CompressionType, data: &[u8]) -> Result<Bytes, CompressionEr
 }
 
 /// Decompress `data` using the codec identified by `ct`. See `compress`.
-pub fn decompress(ct: CompressionType, data: &[u8]) -> Result<Bytes, CompressionError> {
+///
+/// `max_output` bounds the size of the decompressed output: if decompression
+/// would produce more than `max_output` bytes, returns
+/// `Err(CompressionError::TooLarge { .. })` without materializing the oversized
+/// buffer. This guards against decompression bombs on the untrusted decode
+/// path. Callers that handle wire input should derive `max_output` from the
+/// compressed length (e.g. a bounded ratio plus an absolute ceiling).
+pub fn decompress(
+    ct: CompressionType,
+    data: &[u8],
+    max_output: usize,
+) -> Result<Bytes, CompressionError> {
     match ct {
-        CompressionType::None => Ok(Bytes::copy_from_slice(data)),
-        CompressionType::Gzip => gzip_decompress(data),
-        CompressionType::Snappy => snappy_decompress(data),
-        CompressionType::Lz4 => lz4_decompress(data),
-        CompressionType::Zstd => zstd_decompress(data),
+        CompressionType::None => {
+            if data.len() > max_output {
+                Err(CompressionError::TooLarge { limit: max_output })
+            } else {
+                Ok(Bytes::copy_from_slice(data))
+            }
+        }
+        CompressionType::Gzip => gzip_decompress(data, max_output),
+        CompressionType::Snappy => snappy_decompress(data, max_output),
+        CompressionType::Lz4 => lz4_decompress(data, max_output),
+        CompressionType::Zstd => zstd_decompress(data, max_output),
     }
 }
 
@@ -63,7 +80,7 @@ fn gzip_compress(_: &[u8]) -> Result<Bytes, CompressionError> {
     Err(CompressionError::FeatureDisabled("gzip"))
 }
 #[cfg(not(feature = "gzip"))]
-fn gzip_decompress(_: &[u8]) -> Result<Bytes, CompressionError> {
+fn gzip_decompress(_: &[u8], _: usize) -> Result<Bytes, CompressionError> {
     Err(CompressionError::FeatureDisabled("gzip"))
 }
 
@@ -76,7 +93,7 @@ fn snappy_compress(_: &[u8]) -> Result<Bytes, CompressionError> {
     Err(CompressionError::FeatureDisabled("snappy"))
 }
 #[cfg(not(feature = "snappy"))]
-fn snappy_decompress(_: &[u8]) -> Result<Bytes, CompressionError> {
+fn snappy_decompress(_: &[u8], _: usize) -> Result<Bytes, CompressionError> {
     Err(CompressionError::FeatureDisabled("snappy"))
 }
 
@@ -89,7 +106,7 @@ fn lz4_compress(_: &[u8]) -> Result<Bytes, CompressionError> {
     Err(CompressionError::FeatureDisabled("lz4"))
 }
 #[cfg(not(feature = "lz4"))]
-fn lz4_decompress(_: &[u8]) -> Result<Bytes, CompressionError> {
+fn lz4_decompress(_: &[u8], _: usize) -> Result<Bytes, CompressionError> {
     Err(CompressionError::FeatureDisabled("lz4"))
 }
 
@@ -102,7 +119,7 @@ fn zstd_compress(_: &[u8]) -> Result<Bytes, CompressionError> {
     Err(CompressionError::FeatureDisabled("zstd"))
 }
 #[cfg(not(feature = "zstd"))]
-fn zstd_decompress(_: &[u8]) -> Result<Bytes, CompressionError> {
+fn zstd_decompress(_: &[u8], _: usize) -> Result<Bytes, CompressionError> {
     Err(CompressionError::FeatureDisabled("zstd"))
 }
 
@@ -119,7 +136,16 @@ mod tests {
 
     #[test]
     fn passthrough_none_decompress() {
-        let out = decompress(CompressionType::None, b"abcdef").unwrap();
+        let out = decompress(CompressionType::None, b"abcdef", 1024).unwrap();
         assert!(out.as_ref() == b"abcdef");
+    }
+
+    #[test]
+    fn passthrough_none_decompress_respects_cap() {
+        // Input larger than the cap is rejected even for the None passthrough.
+        assert!(matches!(
+            decompress(CompressionType::None, b"abcdef", 3),
+            Err(CompressionError::TooLarge { limit: 3 })
+        ));
     }
 }

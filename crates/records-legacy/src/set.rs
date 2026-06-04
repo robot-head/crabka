@@ -90,7 +90,14 @@ fn decode_into(
             let inner_compressed = msg.value.ok_or_else(|| {
                 LegacyRecordsError::Malformed("compressed wrapper has null value".into())
             })?;
-            let inner_bytes = crabka_compression::decompress(codec, &inner_compressed)?;
+            // Bound decompressed output to guard against a decompression bomb
+            // in a legacy compressed wrapper: ≤100x the compressed size, with a
+            // 16 MiB floor and a 1 GiB ceiling.
+            let max_output = inner_compressed
+                .len()
+                .saturating_mul(100)
+                .clamp(16 * 1024 * 1024, 1024 * 1024 * 1024);
+            let inner_bytes = crabka_compression::decompress(codec, &inner_compressed, max_output)?;
 
             // Parse the inner set (no nested compression allowed).
             let start_len = out.len();

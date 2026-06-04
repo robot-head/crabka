@@ -485,6 +485,10 @@ fn bench_array(c: &mut Criterion) {
     group.bench_function("get_array_len_flexible", |b| {
         let mut bm = BytesMut::new();
         array::put_array_len(&mut bm, 1000, true);
+        // `get_array_len` rejects a length larger than the remaining buffer
+        // (pre-allocation DoS bound), so pad with 1000 element bytes; the
+        // benchmark still only measures parsing the length prefix.
+        bm.resize(bm.len() + 1000, 0);
         let data = bm.freeze();
         b.iter(|| {
             let mut cur: &[u8] = black_box(&data);

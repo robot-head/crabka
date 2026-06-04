@@ -116,7 +116,17 @@ fn decode_borrow_impl<'de>(buf: &mut &'de [u8]) -> Result<RecordBatch<'de>, Reco
     let body = if codec == crabka_compression::CompressionType::None {
         RecordBody::Borrowed(raw_body)
     } else {
-        let decompressed = crabka_compression::decompress(codec, raw_body)?;
+        // Bound decompressed output: generous vs. legit ratios, but finite.
+        // A small compressed batch must not be able to expand to gigabytes and
+        // OOM the broker (decompression bomb).
+        const DECOMPRESS_MIN_CAP: usize = 16 * 1024 * 1024; // 16 MiB floor (small inputs)
+        const DECOMPRESS_MAX_RATIO: usize = 100; // ≤100x the compressed size
+        const DECOMPRESS_ABSOLUTE_CEILING: usize = 1024 * 1024 * 1024; // 1 GiB hard ceiling
+        let max_output = raw_body
+            .len()
+            .saturating_mul(DECOMPRESS_MAX_RATIO)
+            .clamp(DECOMPRESS_MIN_CAP, DECOMPRESS_ABSOLUTE_CEILING);
+        let decompressed = crabka_compression::decompress(codec, raw_body, max_output)?;
         RecordBody::Owned(decompressed)
     };
 
@@ -220,8 +230,11 @@ fn parse_body<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
             "negative header count {header_count}"
         )));
     }
+    // Bound pre-allocation: a record header is at least 1 byte on the wire, so
+    // an honest `header_count` can never exceed the bytes left in the record
+    // body. Clamp the capacity hint to reject huge declared counts.
     #[allow(clippy::cast_sign_loss)] // guarded by < 0 check above
-    let mut headers = Vec::with_capacity(header_count as usize);
+    let mut headers = Vec::with_capacity((header_count as usize).min(buf.len()));
     for i in 0..header_count {
         let key_len = get_varint(buf)
             .map_err(|e| RecordsError::RecordParse(format!("header[{i}] key length: {e}")))?;

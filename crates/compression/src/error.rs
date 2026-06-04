@@ -16,6 +16,12 @@ pub enum CompressionError {
     #[error("invalid compressed data: {0}")]
     InvalidData(String),
 
+    /// Decompression produced (or would produce) more output than the caller's
+    /// `max_output` cap allows. Guards against decompression bombs: a small
+    /// compressed payload that expands to gigabytes.
+    #[error("decompressed output exceeds limit of {limit} bytes")]
+    TooLarge { limit: usize },
+
     /// I/O error from one of the codec libraries.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

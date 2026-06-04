@@ -53,14 +53,14 @@ pub fn nullable_array_len_prefix_len(len: Option<usize>, flexible: bool) -> usiz
 /// Read a non-nullable array length.  Returns an error if the encoded value is
 /// null (−1 / 0).
 pub fn get_array_len<B: Buf>(buf: &mut B, flexible: bool) -> Result<usize, ProtocolError> {
-    if flexible {
+    let n = if flexible {
         let raw = get_uvarint(buf)?;
         if raw == 0 {
             return Err(ProtocolError::InvalidValue(
                 "non-nullable array was null (compact encoding)",
             ));
         }
-        Ok((raw - 1) as usize)
+        (raw - 1) as usize
     } else {
         let n = get_i32(buf)?;
         if n < 0 {
@@ -68,8 +68,18 @@ pub fn get_array_len<B: Buf>(buf: &mut B, flexible: bool) -> Result<usize, Proto
                 "non-nullable array had negative length",
             ));
         }
-        Ok(usize::try_from(n).expect("n is non-negative"))
+        usize::try_from(n).expect("n is non-negative")
+    };
+    // Every array element occupies at least one byte on the wire, so a
+    // legitimate array of `n` elements always has at least `n` bytes left in
+    // the buffer. Any larger `n` is impossible and indicates a malformed or
+    // hostile frame; reject before a caller can `Vec::with_capacity(n)`.
+    if n > buf.remaining() {
+        return Err(ProtocolError::InvalidValue(
+            "array length exceeds remaining buffer",
+        ));
     }
+    Ok(n)
 }
 
 /// Read a nullable array length.  Returns `None` when the encoded value is
@@ -78,21 +88,27 @@ pub fn get_nullable_array_len<B: Buf>(
     buf: &mut B,
     flexible: bool,
 ) -> Result<Option<usize>, ProtocolError> {
-    if flexible {
+    let n = if flexible {
         let raw = get_uvarint(buf)?;
         if raw == 0 {
-            Ok(None)
-        } else {
-            Ok(Some((raw - 1) as usize))
+            return Ok(None);
         }
+        (raw - 1) as usize
     } else {
         let n = get_i32(buf)?;
         if n < 0 {
-            Ok(None)
-        } else {
-            Ok(Some(usize::try_from(n).expect("n is non-negative")))
+            return Ok(None);
         }
+        usize::try_from(n).expect("n is non-negative")
+    };
+    // See `get_array_len`: a length larger than the remaining bytes cannot
+    // describe a real array and must be rejected before pre-allocation.
+    if n > buf.remaining() {
+        return Err(ProtocolError::InvalidValue(
+            "array length exceeds remaining buffer",
+        ));
     }
+    Ok(Some(n))
 }
 
 #[cfg(test)]
@@ -118,9 +134,11 @@ mod tests {
         let mut buf = BytesMut::new();
         put_array_len(&mut buf, 3, false);
         assert!(buf.len() == 4);
+        // Provide 3 bytes of element payload so the length is within bounds.
+        buf.extend_from_slice(&[0u8; 3]);
         let mut cur = &buf[..];
         assert!(get_array_len(&mut cur, false).unwrap() == 3);
-        assert!(cur.is_empty());
+        assert!(cur.len() == 3);
     }
 
     // --- non-nullable, flexible (compact) -----------------------------------
@@ -142,9 +160,11 @@ mod tests {
         put_array_len(&mut buf, 3, true);
         // len=3 → encode 4 → single byte 0x04
         assert!(&buf[..] == &[0x04]);
+        // Provide 3 bytes of element payload so the length is within bounds.
+        buf.extend_from_slice(&[0u8; 3]);
         let mut cur = &buf[..];
         assert!(get_array_len(&mut cur, true).unwrap() == 3);
-        assert!(cur.is_empty());
+        assert!(cur.len() == 3);
     }
 
     // --- nullable, non-flexible ---------------------------------------------
@@ -163,9 +183,10 @@ mod tests {
     fn non_flex_nullable_some_roundtrip() {
         let mut buf = BytesMut::new();
         put_nullable_array_len(&mut buf, Some(3), false);
+        buf.extend_from_slice(&[0u8; 3]);
         let mut cur = &buf[..];
         assert!(get_nullable_array_len(&mut cur, false).unwrap() == Some(3));
-        assert!(cur.is_empty());
+        assert!(cur.len() == 3);
     }
 
     // --- nullable, flexible -------------------------------------------------
@@ -186,9 +207,10 @@ mod tests {
         put_nullable_array_len(&mut buf, Some(3), true);
         // Some(3) → encode 4 → 0x04
         assert!(&buf[..] == &[0x04]);
+        buf.extend_from_slice(&[0u8; 3]);
         let mut cur = &buf[..];
         assert!(get_nullable_array_len(&mut cur, true).unwrap() == Some(3));
-        assert!(cur.is_empty());
+        assert!(cur.len() == 3);
     }
 
     // --- prefix_len helpers -------------------------------------------------
@@ -241,5 +263,77 @@ mod tests {
             get_array_len(&mut cur, true),
             Err(ProtocolError::InvalidValue(_))
         ));
+    }
+
+    // --- pre-allocation DoS bound (length > remaining buffer) ----------------
+
+    #[test]
+    fn non_flex_rejects_length_exceeding_remaining() {
+        // Declare a ~2-billion-element array with no element bytes following.
+        let mut buf = BytesMut::new();
+        put_array_len(&mut buf, 2_000_000_000, false);
+        let mut cur = &buf[..];
+        assert!(matches!(
+            get_array_len(&mut cur, false),
+            Err(ProtocolError::InvalidValue(
+                "array length exceeds remaining buffer"
+            ))
+        ));
+    }
+
+    #[test]
+    fn flex_rejects_length_exceeding_remaining() {
+        let mut buf = BytesMut::new();
+        put_array_len(&mut buf, 2_000_000_000, true);
+        let mut cur = &buf[..];
+        assert!(matches!(
+            get_array_len(&mut cur, true),
+            Err(ProtocolError::InvalidValue(
+                "array length exceeds remaining buffer"
+            ))
+        ));
+    }
+
+    #[test]
+    fn nullable_non_flex_rejects_length_exceeding_remaining() {
+        let mut buf = BytesMut::new();
+        put_nullable_array_len(&mut buf, Some(2_000_000_000), false);
+        let mut cur = &buf[..];
+        assert!(matches!(
+            get_nullable_array_len(&mut cur, false),
+            Err(ProtocolError::InvalidValue(
+                "array length exceeds remaining buffer"
+            ))
+        ));
+    }
+
+    #[test]
+    fn nullable_flex_rejects_length_exceeding_remaining() {
+        let mut buf = BytesMut::new();
+        put_nullable_array_len(&mut buf, Some(2_000_000_000), true);
+        let mut cur = &buf[..];
+        assert!(matches!(
+            get_nullable_array_len(&mut cur, true),
+            Err(ProtocolError::InvalidValue(
+                "array length exceeds remaining buffer"
+            ))
+        ));
+    }
+
+    #[test]
+    fn length_equal_to_remaining_is_accepted() {
+        // Non-flex: declare 5, supply exactly 5 trailing bytes.
+        let mut buf = BytesMut::new();
+        put_array_len(&mut buf, 5, false);
+        buf.extend_from_slice(&[0u8; 5]);
+        let mut cur = &buf[..];
+        assert!(get_array_len(&mut cur, false).unwrap() == 5);
+
+        // Compact: same, declare 5 with 5 trailing bytes.
+        let mut buf = BytesMut::new();
+        put_array_len(&mut buf, 5, true);
+        buf.extend_from_slice(&[0u8; 5]);
+        let mut cur = &buf[..];
+        assert!(get_array_len(&mut cur, true).unwrap() == 5);
     }
 }
