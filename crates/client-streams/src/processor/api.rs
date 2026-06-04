@@ -189,6 +189,37 @@ mod tests {
     }
 
     #[test]
+    fn boxed_dyn_processor_delegates_init_process_close() {
+        // A `Box<dyn Processor>` is itself a `Processor`, forwarding every method
+        // to the inner value. This is the runtime-dispatch path a
+        // `ProcessorSupplier` closure takes when it returns `Box<dyn Processor<…>>`
+        // instead of a concrete processor.
+        let mut boxed: Box<dyn Processor<String, String, String, String>> = Box::new(Upper);
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "t".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 5,
+        };
+        let children = [1usize];
+        let mut dispatch = Dispatch {
+            buffer: &mut buffer,
+            children: &children,
+            output: &mut output,
+            record_ctx: &rc,
+        };
+        let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
+        boxed.init(&mut ctx); // forwards to Upper's default no-op
+        boxed.process(&mut ctx, Record::new(None, "hi".into(), 5)); // forwards → uppercases
+        boxed.close(); // forwards to Upper's default no-op
+        check!(buffer.len() == 1);
+        let (_child, rec) = buffer.pop_front().unwrap();
+        check!(*rec.value.downcast::<String>().unwrap() == "HI");
+    }
+
+    #[test]
     fn default_init_and_close_are_noops_and_forward_with_no_children_drops() {
         let mut p = Noop;
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
