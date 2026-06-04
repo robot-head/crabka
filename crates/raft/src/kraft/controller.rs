@@ -661,16 +661,17 @@ impl Engine {
         match inbound {
             Inbound::Vote { req, reply } => {
                 if let Some(wire::PeerRequest::Vote {
+                    voter_id,
                     candidate_epoch,
                     candidate,
                     last_epoch,
                     last_offset,
                     pre_vote,
-                    ..
                 }) = wire::decode_vote(&req)
                 {
                     let event = Event::ReceiveVoteRequest {
                         from: candidate,
+                        voter_id,
                         candidate_epoch,
                         candidate,
                         candidate_log_end: LogEnd {

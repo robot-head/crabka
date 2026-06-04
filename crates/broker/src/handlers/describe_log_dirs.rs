@@ -10,14 +10,15 @@
 use std::collections::BTreeMap;
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 
+use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest;
 use crabka_protocol::owned::describe_log_dirs_response::{
     DescribeLogDirsPartition, DescribeLogDirsResponse, DescribeLogDirsResult, DescribeLogDirsTopic,
 };
 use crabka_protocol::{Decode, Encode};
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::disk_scanner::scan::sum_partition_dir;
@@ -45,20 +46,36 @@ impl Filter {
     }
 }
 
-pub(crate) fn handle(
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    ctx: &crate::handlers::RequestContext<'_>,
+) -> Result<Bytes, BrokerError> {
     let log_dirs = broker.config.all_log_dirs();
     let partitions = broker.partitions.clone();
     let future_logs = broker.future_logs.clone();
     let log_dir_status = broker.log_dir_status.clone();
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
+    {
+        let mut cur: &[u8] = req_bytes;
         let req = DescribeLogDirsRequest::decode(&mut cur, version)?;
+
+        // ── ACL preamble ────────────────────────────────────────────
+        // `Describe` on `Cluster("kafka-cluster")`. On Deny → whole-response
+        // `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
+        {
+            let image = broker.controller.current_image();
+            if cluster_describe_denied(
+                broker.config.authorizer.as_ref(),
+                &image,
+                ctx.principal,
+                ctx.peer,
+            ) {
+                return denied_response(version);
+            }
+        }
 
         let filter = match req.topics {
             None => Filter::All,
@@ -172,7 +189,39 @@ pub(crate) fn handle(
         let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
-    })
+    }
+}
+
+/// `Describe` on `Cluster("kafka-cluster")` gate. Returns `true` when denied.
+fn cluster_describe_denied(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &crabka_metadata::MetadataImage,
+    principal: &crabka_security::Principal,
+    host: &std::net::SocketAddr,
+) -> bool {
+    authorizer.authorize(
+        image,
+        &AuthorizationRequest {
+            principal,
+            host,
+            resource_type: ResourceType::Cluster,
+            resource_name: "kafka-cluster",
+            operation: AclOperation::Describe,
+        },
+    ) == AuthorizationResult::Deny
+}
+
+/// Whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` response built on Deny.
+fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
+    let resp = DescribeLogDirsResponse {
+        throttle_time_ms: 0,
+        error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+        results: Vec::new(),
+        ..Default::default()
+    };
+    let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
+    resp.encode(&mut buf, version)?;
+    Ok(buf.freeze())
 }
 
 /// `LEO − HW`, clamped to ≥ 0, for a loaded current log; 0 when the
@@ -331,5 +380,34 @@ mod tests {
     fn log_dir_capacity_returns_minus_one_for_missing_path() {
         let phantom = std::path::Path::new("/nonexistent/crabka/test/dir/should/not/exist");
         assert!(log_dir_capacity(phantom) == (-1, -1));
+    }
+
+    #[test]
+    fn cluster_describe_denied_yields_cluster_authorization_failed() {
+        use crabka_protocol::owned::describe_log_dirs_response::{self, DescribeLogDirsResponse};
+
+        let authorizer =
+            crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());
+        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        let principal = crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        };
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+
+        assert!(cluster_describe_denied(
+            &authorizer,
+            &image,
+            &principal,
+            &peer
+        ));
+
+        let bytes = denied_response(describe_log_dirs_response::MAX_VERSION).expect("encode");
+        let mut cur: &[u8] = &bytes;
+        let resp =
+            DescribeLogDirsResponse::decode(&mut cur, describe_log_dirs_response::MAX_VERSION)
+                .unwrap();
+        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
     }
 }

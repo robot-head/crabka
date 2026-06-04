@@ -6,32 +6,48 @@
 //! `PartitionRecord` via `controller.submit_change`.
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 
-use crabka_metadata::{MetadataRecord, PartitionRecord};
+use crabka_metadata::{AclOperation, MetadataRecord, PartitionRecord, ResourceType};
 use crabka_protocol::owned::alter_partition_request::AlterPartitionRequest;
 use crabka_protocol::owned::alter_partition_response::{
     AlterPartitionResponse, PartitionData as RespPartitionData, TopicData as RespTopicData,
 };
 use crabka_protocol::{Decode, Encode};
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
 
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    ctx: &crate::handlers::RequestContext<'_>,
+) -> Result<Bytes, BrokerError> {
     let controller = broker.controller.clone();
     let node_id = broker.config.node_id;
 
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
+    {
+        let mut cur: &[u8] = req_bytes;
         let req = AlterPartitionRequest::decode(&mut cur, version)?;
+
+        // ── ACL preamble ────────────────────────────────────────────
+        // Inter-broker control-plane RPC: `ClusterAction` on
+        // `Cluster("kafka-cluster")`. On Deny → whole-response
+        // `error_code = CLUSTER_AUTHORIZATION_FAILED (31)`.
+        {
+            let image = controller.current_image();
+            if cluster_action_denied(
+                broker.config.authorizer.as_ref(),
+                &image,
+                ctx.principal,
+                ctx.peer,
+            ) {
+                return denied_response(version);
+            }
+        }
 
         // Only the openraft leader handles AlterPartition.
         let is_leader = controller
@@ -96,7 +112,7 @@ pub(crate) fn handle(
                 ..Default::default()
             },
         )
-    })
+    }
 }
 
 /// Validate and apply a single partition's ISR proposal. Returns the
@@ -247,6 +263,38 @@ fn error_part(
     }
 }
 
+/// `ClusterAction` on `Cluster("kafka-cluster")` gate. Returns `true`
+/// when the principal is denied (inter-broker control-plane RPC).
+fn cluster_action_denied(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &crabka_metadata::MetadataImage,
+    principal: &crabka_security::Principal,
+    host: &std::net::SocketAddr,
+) -> bool {
+    authorizer.authorize(
+        image,
+        &AuthorizationRequest {
+            principal,
+            host,
+            resource_type: ResourceType::Cluster,
+            resource_name: "kafka-cluster",
+            operation: AclOperation::ClusterAction,
+        },
+    ) == AuthorizationResult::Deny
+}
+
+/// Whole-response `CLUSTER_AUTHORIZATION_FAILED (31)` response built on Deny.
+fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
+    encode_resp(
+        version,
+        &AlterPartitionResponse {
+            throttle_time_ms: 0,
+            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
+            ..Default::default()
+        },
+    )
+}
+
 fn encode_resp(version: i16, resp: &AlterPartitionResponse) -> Result<Bytes, BrokerError> {
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
@@ -306,6 +354,37 @@ mod tests {
             broker_epoch,
             ..Default::default()
         }
+    }
+
+    /// Empty ACLs + no super-users → every principal is denied
+    /// `ClusterAction`, so the denied response carries
+    /// `CLUSTER_AUTHORIZATION_FAILED`.
+    #[test]
+    fn cluster_action_denied_yields_cluster_authorization_failed() {
+        use crabka_protocol::owned::alter_partition_response::{self, AlterPartitionResponse};
+
+        let authorizer =
+            crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());
+        let image = MetadataImage::new(uuid::Uuid::nil());
+        let principal = crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        };
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+
+        assert!(cluster_action_denied(
+            &authorizer,
+            &image,
+            &principal,
+            &peer
+        ));
+
+        let bytes = denied_response(alter_partition_response::MAX_VERSION).expect("encode");
+        let mut cur: &[u8] = &bytes;
+        let resp = AlterPartitionResponse::decode(&mut cur, alter_partition_response::MAX_VERSION)
+            .unwrap();
+        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
     }
 
     #[test]

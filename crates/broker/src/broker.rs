@@ -1097,6 +1097,21 @@ impl Broker {
             .controller_listener_protocol
             == crabka_security::ListenerProtocol::Plaintext
         {
+            // C-1: the controller listener carries raft/controller RPCs
+            // (Vote, BeginQuorumEpoch, Fetch, SubmitChange) — i.e. cluster
+            // metadata and leadership. Running it as PLAINTEXT means there
+            // is NO authentication and NO authorization on that path: any
+            // host with network reachability to this port can inject
+            // cluster metadata, hijack leadership, or disrupt consensus.
+            // We keep dev/single-node working (do not refuse to start), but
+            // warn loudly so this is never an accidental production posture.
+            tracing::warn!(
+                "controller listener is PLAINTEXT: no authentication or authorization is \
+                 enforced on raft/controller RPCs. Any host with network access to this port \
+                 can inject cluster metadata or manipulate leadership. Configure TLS or SASL \
+                 (controller_listener_protocol = Ssl / SaslPlaintext / SaslSsl) for any \
+                 non-isolated deployment."
+            );
             None
         } else {
             // Raft handshake uses the current (snapshot) acceptor. A
@@ -1112,6 +1127,7 @@ impl Broker {
                 enabled_sasl_mechanisms: config.enabled_sasl_mechanisms.clone(),
                 protocol: config.controller_listener_protocol,
                 controller: controller_cell.clone(),
+                authorizer: config.authorizer.clone(),
             };
             Some(Arc::new(hs) as Arc<dyn crabka_raft::RaftListenerHandshake>)
         };

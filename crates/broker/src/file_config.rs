@@ -174,7 +174,7 @@ pub struct FileKafkaRlmmConfig {
 
 /// TOML shape of `[remote_storage.s3]`. Maps to
 /// [`crabka_remote_storage::S3Config`].
-#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq)]
+#[derive(Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileRemoteStorageS3Config {
     /// S3 bucket name.
@@ -212,6 +212,26 @@ pub struct FileRemoteStorageS3Config {
     /// tolerates smaller values.
     #[serde(default)]
     pub multipart_chunk_size: Option<usize>,
+}
+
+impl std::fmt::Debug for FileRemoteStorageS3Config {
+    /// Redacts the credential fields so a stray `{:?}` / tracing call never
+    /// leaks them. Mirrors the hand-written `Debug` on
+    /// [`crabka_remote_storage::S3Config`].
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redact = |opt: &Option<String>| opt.as_ref().map(|_| "***");
+        f.debug_struct("FileRemoteStorageS3Config")
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("prefix", &self.prefix)
+            .field("endpoint", &self.endpoint)
+            .field("access_key_id", &redact(&self.access_key_id))
+            .field("secret_access_key", &redact(&self.secret_access_key))
+            .field("allow_http", &self.allow_http)
+            .field("multipart_threshold", &self.multipart_threshold)
+            .field("multipart_chunk_size", &self.multipart_chunk_size)
+            .finish()
+    }
 }
 
 /// TOML shape of `[authorization]`. `type` (renamed to `authz_type` on
@@ -1121,6 +1141,28 @@ mod tests {
     static ENV_LOCK_CELL: OnceLock<Mutex<()>> = OnceLock::new();
     fn env_lock() -> &'static Mutex<()> {
         ENV_LOCK_CELL.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn s3_config_debug_redacts_credentials() {
+        let cfg = FileRemoteStorageS3Config {
+            bucket: "logs".to_string(),
+            region: "us-east-1".to_string(),
+            prefix: None,
+            endpoint: None,
+            access_key_id: Some("AKIAEXAMPLEKEYID".to_string()),
+            secret_access_key: Some("super-secret-key-value".to_string()),
+            allow_http: false,
+            multipart_threshold: None,
+            multipart_chunk_size: None,
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(!dbg.contains("super-secret-key-value"));
+        assert!(!dbg.contains("AKIAEXAMPLEKEYID"));
+        assert!(dbg.contains("***"));
+        // Non-secret fields are still printed.
+        assert!(dbg.contains("logs"));
+        assert!(dbg.contains("us-east-1"));
     }
 
     #[test]

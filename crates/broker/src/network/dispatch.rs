@@ -553,6 +553,62 @@ async fn serve_connection_stream<S>(
                 handle_update_raft_voter_frame(&broker, &frame, &auth, &peer),
                 "UpdateRaftVoter"
             ),
+            Some(56) => intercept!(
+                handle_alter_partition_frame(&broker, &frame, &auth, &peer),
+                "AlterPartition"
+            ),
+            Some(63) => intercept!(
+                handle_broker_heartbeat_frame(&broker, &frame, &auth, &peer),
+                "BrokerHeartbeat"
+            ),
+            Some(93) => intercept!(
+                handle_get_replica_log_info_frame(&broker, &frame, &auth, &peer),
+                "GetReplicaLogInfo"
+            ),
+            Some(12) => intercept!(
+                handle_heartbeat_frame(&broker, &frame, &auth, &peer),
+                "Heartbeat"
+            ),
+            Some(14) => intercept!(
+                handle_sync_group_frame(&broker, &frame, &auth, &peer),
+                "SyncGroup"
+            ),
+            Some(13) => intercept!(
+                handle_leave_group_frame(&broker, &frame, &auth, &peer),
+                "LeaveGroup"
+            ),
+            Some(68) => intercept!(
+                handle_consumer_group_heartbeat_frame(&broker, &frame, &auth, &peer),
+                "ConsumerGroupHeartbeat"
+            ),
+            Some(76) => intercept!(
+                handle_share_group_heartbeat_frame(&broker, &frame, &auth, &peer),
+                "ShareGroupHeartbeat"
+            ),
+            Some(88) => intercept!(
+                handle_streams_group_heartbeat_frame(&broker, &frame, &auth, &peer),
+                "StreamsGroupHeartbeat"
+            ),
+            Some(10) => intercept!(
+                handle_find_coordinator_frame(&broker, &frame, &auth, &peer),
+                "FindCoordinator"
+            ),
+            Some(2) => intercept!(
+                handle_list_offsets_frame(&broker, &frame, &auth, &peer),
+                "ListOffsets"
+            ),
+            Some(23) => intercept!(
+                handle_offset_for_leader_epoch_frame(&broker, &frame, &auth, &peer),
+                "OffsetForLeaderEpoch"
+            ),
+            Some(32) => intercept!(
+                handle_describe_configs_frame(&broker, &frame, &auth, &peer),
+                "DescribeConfigs"
+            ),
+            Some(35) => intercept!(
+                handle_describe_log_dirs_frame(&broker, &frame, &auth, &peer),
+                "DescribeLogDirs"
+            ),
             Some(29) => intercept!(
                 handle_describe_acls_frame(&broker, &frame, &auth, &peer),
                 "DescribeAcls"
@@ -1305,6 +1361,447 @@ async fn handle_update_raft_voter_frame(
     };
     let resp_body =
         crate::handlers::update_raft_voter::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `AlterPartition` (`api_key` 56) frame. Inter-broker
+/// control-plane RPC: `ClusterAction` on `Cluster`; Deny → whole-response
+/// `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_alter_partition_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 56);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::alter_partition::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `BrokerHeartbeat` (`api_key` 63) frame. Inter-broker
+/// control-plane RPC: `ClusterAction` on `Cluster`; Deny → whole-response
+/// `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_broker_heartbeat_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 63);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::broker_heartbeat::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `GetReplicaLogInfo` (`api_key` 93, KIP-966) frame.
+/// Inter-broker control-plane RPC: `ClusterAction` on `Cluster`; Deny →
+/// per-partition `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_get_replica_log_info_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 93);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body = crate::handlers::get_replica_log_info::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `Heartbeat` (`api_key` 12) frame. `Read` on
+/// `Group(group_id)`; Deny → whole-response `GROUP_AUTHORIZATION_FAILED`.
+async fn handle_heartbeat_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 12);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::heartbeat::handle(broker, api_version, correlation_id, body, &ctx).await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `SyncGroup` (`api_key` 14) frame. `Read` on
+/// `Group(group_id)`; Deny → whole-response `GROUP_AUTHORIZATION_FAILED`.
+async fn handle_sync_group_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 14);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::sync_group::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `LeaveGroup` (`api_key` 13) frame. `Read` on
+/// `Group(group_id)`; Deny → whole-response `GROUP_AUTHORIZATION_FAILED`.
+async fn handle_leave_group_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 13);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::leave_group::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `ConsumerGroupHeartbeat` (`api_key` 68, KIP-848)
+/// frame. `Read` on `Group(group_id)`; Deny → whole-response
+/// `GROUP_AUTHORIZATION_FAILED`.
+async fn handle_consumer_group_heartbeat_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 68);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body = crate::handlers::consumer_group_heartbeat::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `ShareGroupHeartbeat` (`api_key` 76, KIP-932) frame.
+/// `Read` on `Group(group_id)`; Deny → whole-response
+/// `GROUP_AUTHORIZATION_FAILED`.
+async fn handle_share_group_heartbeat_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 76);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body = crate::handlers::share_group_heartbeat::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `StreamsGroupHeartbeat` (`api_key` 88, KIP-1071)
+/// frame. `Read` on `Group(group_id)`; Deny → whole-response
+/// `GROUP_AUTHORIZATION_FAILED`.
+async fn handle_streams_group_heartbeat_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 88);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body = crate::handlers::streams_group_heartbeat::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `FindCoordinator` (`api_key` 10) frame. Per-key
+/// `Describe`: GROUP → `Group(key)`, TRANSACTION → `TransactionalId(key)`.
+/// Denied keys are stamped with the authorization-failed code.
+async fn handle_find_coordinator_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 10);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::find_coordinator::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `ListOffsets` (`api_key` 2) frame. Per-topic
+/// `Describe` on `Topic(name)`; denied topics → `TOPIC_AUTHORIZATION_FAILED`
+/// per partition.
+async fn handle_list_offsets_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 2);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::list_offsets::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch an `OffsetForLeaderEpoch` (`api_key` 23) frame.
+/// Per-topic `Describe` on `Topic(name)`; denied topics →
+/// `TOPIC_AUTHORIZATION_FAILED` per partition.
+async fn handle_offset_for_leader_epoch_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 23);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body = crate::handlers::offset_for_leader_epoch::handle(
+        broker,
+        api_version,
+        correlation_id,
+        body,
+        &ctx,
+    )
+    .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeConfigs` (`api_key` 32) frame. Per-resource
+/// `DescribeConfigs`: Topic → `Topic(name)`, Broker → `Cluster`. Denied
+/// resources are stamped with the matching authorization-failed code.
+async fn handle_describe_configs_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 32);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::describe_configs::handle(broker, api_version, correlation_id, body, &ctx)
+            .await?;
+    Ok(encode_response(
+        api_key,
+        correlation_id,
+        body_flexible,
+        &resp_body,
+    ))
+}
+
+/// Decode + dispatch a `DescribeLogDirs` (`api_key` 35, KIP-113) frame.
+/// `Describe` on `Cluster`; Deny → whole-response
+/// `CLUSTER_AUTHORIZATION_FAILED`.
+async fn handle_describe_log_dirs_frame(
+    broker: &Broker,
+    frame: &[u8],
+    auth: &crate::network::auth::ConnectionAuth,
+    peer: &SocketAddr,
+) -> Result<Bytes, BrokerError> {
+    let (api_key, api_version, correlation_id, body) = parse_request_header(frame)?;
+    debug_assert_eq!(api_key, 35);
+    let body_flexible = handler_body_flexible(api_key, api_version);
+    let principal = principal_or_anonymous(auth);
+    let client_id = peek_client_id(frame).unwrap_or("");
+    let ctx = crate::handlers::RequestContext {
+        principal,
+        peer,
+        client_id,
+    };
+    let resp_body =
+        crate::handlers::describe_log_dirs::handle(broker, api_version, correlation_id, body, &ctx)
             .await?;
     Ok(encode_response(
         api_key,

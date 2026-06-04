@@ -55,7 +55,13 @@ impl LeaderEpochCheckpoint {
             .next()
             .and_then(|l| l.trim().parse().ok())
             .unwrap_or(0);
-        let mut out = Vec::with_capacity(count);
+        // Do NOT pre-size from the untrusted `count`: a corrupt or hostile
+        // checkpoint (local dir, or bytes restored from tiered storage) could
+        // declare a huge count and trigger a multi-GB allocation before the
+        // bounded `lines.take(count)` loop ever runs. `count` is used only to
+        // bound the number of rows read; the Vec grows as entries are parsed.
+        // Matches Kafka's CheckpointFile, which reads entries line-by-line.
+        let mut out = Vec::new();
         for line in lines.take(count) {
             let mut parts = line.split_whitespace();
             let epoch = parts
@@ -315,6 +321,26 @@ mod tests {
         let c = LeaderEpochCheckpoint::open(path).unwrap();
         assert!(c.entries().is_empty());
         assert!(c.latest_epoch() == None);
+    }
+
+    #[test]
+    fn absurd_declared_count_does_not_over_allocate() {
+        // Hostile/corrupt checkpoint: header declares billions of rows but only
+        // one actual entry line follows. Parsing must not pre-size a giant Vec;
+        // it should grow to fit the real rows and return just those.
+        let s = "0\n9999999999999\n3 42\n";
+        let entries = LeaderEpochCheckpoint::parse(s).unwrap();
+        assert!(
+            entries
+                == [EpochEntry {
+                    epoch: 3,
+                    start_offset: 42,
+                }],
+            "only the one real row is parsed despite the absurd declared count"
+        );
+        // `lines.take(count)` bounds reads to the available lines, so capacity
+        // stays at the grown size, not the untrusted billions.
+        assert!(entries.capacity() < 9_999_999_999_999);
     }
 
     // ── epoch_for_offset ──────────────────────────────────────────────────────

@@ -587,6 +587,7 @@ impl<L: SimNodeLog> Sim<L> {
                     peer,
                     Event::ReceiveVoteRequest {
                         from: id,
+                        voter_id: peer,
                         candidate_epoch: epoch,
                         candidate: id,
                         candidate_log_end: cand_log,

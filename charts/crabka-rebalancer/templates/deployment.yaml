@@ -20,6 +20,7 @@ spec:
         {{- include "rebalancer.selectorLabels" . | nindent 8 }}
     spec:
       serviceAccountName: {{ include "rebalancer.fullname" . }}
+      securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
       containers:
         - name: crabka-rebalancer
           image: {{ include "rebalancer.image" . }}
@@ -110,6 +111,7 @@ spec:
             {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
       volumes:
         - name: data
           persistentVolumeClaim:
