@@ -1,0 +1,584 @@
+//! Real broker-backed implementations of the [`RecordFetcher`],
+//! [`RecordProducer`], and [`OffsetStore`] I/O traits.
+//!
+//! # Multi-broker routing limitation
+//!
+//! `BrokerFetcher` opens a single connection to the bootstrap address and uses
+//! that connection for every `fetch_partition` call. In a single-node broker
+//! setup (the common test scenario) this is always correct because the
+//! bootstrap broker is the leader for all partitions. In a multi-broker
+//! cluster the fetch may be routed to a broker that is not the partition
+//! leader, resulting in `NOT_LEADER_OR_FOLLOWER` errors.
+//!
+//! TODO: implement per-partition leader routing for `BrokerFetcher` to support
+//! multi-broker deployments (look up `leader_id` from metadata, dial the
+//! correct broker connection from a pool).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use bytes::Bytes;
+use tokio::sync::Mutex;
+use tokio::sync::oneshot;
+
+use crabka_client_core::{Client, Connection, ConnectionOptions, fetch_partition};
+use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
+use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+
+use crabka_protocol::owned::list_offsets_request::{
+    ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
+};
+use crabka_protocol::owned::offset_commit_request::{
+    OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+};
+use crabka_protocol::owned::offset_fetch_request::{
+    OffsetFetchRequest, OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
+};
+
+use crate::error::StreamsClientError;
+use crate::runtime::io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
+
+// ─── BrokerFetcher ────────────────────────────────────────────────────────────
+
+/// A [`RecordFetcher`] backed by a real Kafka broker.
+///
+/// Uses a single connection to the bootstrap broker for all fetch calls.
+/// See module-level doc for the multi-broker routing limitation.
+pub(crate) struct BrokerFetcher {
+    /// Dedicated connection used for every `fetch_partition` call.
+    conn: Connection,
+    /// Metadata client used to resolve `topic_id` on cache miss.
+    client: Client,
+    /// Cache of topic name → `topic_id` (populated lazily via metadata refresh).
+    topic_ids: Mutex<HashMap<String, WireUuid>>,
+    /// Maximum time the broker waits before returning an empty fetch (ms).
+    max_wait_ms: i32,
+    /// Maximum bytes the broker returns per partition per fetch.
+    partition_max_bytes: i32,
+}
+
+#[async_trait::async_trait]
+impl RecordFetcher for BrokerFetcher {
+    async fn fetch(
+        &self,
+        topic: &str,
+        partition: i32,
+        offset: i64,
+    ) -> Result<FetchBatch, StreamsClientError> {
+        let topic_id = self.resolve_topic_id(topic).await?;
+
+        let fetched = fetch_partition(
+            &self.conn,
+            topic,
+            topic_id,
+            partition,
+            offset,
+            self.max_wait_ms,
+            self.partition_max_bytes,
+        )
+        .await?;
+
+        let records = fetched
+            .into_iter()
+            .map(|r| FetchedRec {
+                offset: r.offset,
+                key: r.key,
+                value: r.value,
+                timestamp: -1,
+            })
+            .collect();
+
+        Ok(FetchBatch { records })
+    }
+}
+
+impl BrokerFetcher {
+    /// Look up the `topic_id` in the local cache; on miss, refresh metadata
+    /// from the broker and populate the cache.
+    async fn resolve_topic_id(&self, topic: &str) -> Result<WireUuid, StreamsClientError> {
+        {
+            let cache = self.topic_ids.lock().await;
+            if let Some(&id) = cache.get(topic) {
+                return Ok(id);
+            }
+        }
+
+        // Cache miss — fetch fresh metadata.
+        let meta = self.client.refresh_metadata().await?;
+        let mut cache = self.topic_ids.lock().await;
+        for t in &meta.topics {
+            if let Some(name) = &t.name {
+                cache.insert(name.clone(), t.topic_id);
+            }
+        }
+        // Return the id for the requested topic (fall back to ZERO if not found).
+        Ok(cache.get(topic).copied().unwrap_or_default())
+    }
+}
+
+// ─── BrokerProducer ───────────────────────────────────────────────────────────
+
+/// A [`RecordProducer`] backed by a real Kafka `Producer`.
+///
+/// Pending ack receivers are accumulated in `pending` so that `flush` can
+/// observe per-record produce failures, preserving the at-least-once guarantee.
+pub(crate) struct BrokerProducer {
+    inner: Producer,
+    /// Receivers from pending `Producer::send` calls. Drained by `flush`.
+    pending: Mutex<Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>>>,
+}
+
+#[async_trait::async_trait]
+impl RecordProducer for BrokerProducer {
+    async fn send(
+        &self,
+        topic: &str,
+        key: Option<Bytes>,
+        value: Option<Bytes>,
+    ) -> Result<(), StreamsClientError> {
+        let rx = self
+            .inner
+            .send(ProducerRecord {
+                topic: topic.to_string(),
+                partition: None,
+                key,
+                value,
+                ..Default::default()
+            })
+            .await;
+        self.pending.lock().await.push(rx);
+        Ok(())
+    }
+
+    /// Flush: first ask the inner producer to drain its batch buffer, then
+    /// await every pending per-record ack. Any `Err` result from a record ack
+    /// is surfaced so the caller knows a commit would be unsafe.
+    async fn flush(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .flush()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+
+        let receivers: Vec<_> = std::mem::take(&mut *self.pending.lock().await);
+        for rx in receivers {
+            match rx.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    return Err(StreamsClientError::Runtime(format!(
+                        "produce ack failed: {e}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(StreamsClientError::Runtime(
+                        "produce ack receiver dropped".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ─── BrokerOffsetStore ────────────────────────────────────────────────────────
+
+/// An [`OffsetStore`] backed by a real Kafka broker.
+///
+/// Uses the group coordinator protocol (`OffsetFetch` / `OffsetCommit` /
+/// `ListOffsets`) via the streams consumer group id.
+///
+/// Both `commit` and `committed` populate the v8+ `groups[]` shape AND set
+/// `topic_id` on each topic (required at v10). The codec encodes only the
+/// fields that are valid for the negotiated version, so a single request
+/// construction works across v0-10.
+pub(crate) struct BrokerOffsetStore {
+    client: Client,
+    group_id: String,
+    /// Cache of topic name → `topic_id` (populated lazily via metadata refresh).
+    topic_ids: Mutex<HashMap<String, WireUuid>>,
+}
+
+impl BrokerOffsetStore {
+    /// Construct a `BrokerOffsetStore` directly. Used from integration tests and
+    /// from [`build`].
+    pub(crate) fn new(client: Client, group_id: impl Into<String>) -> Self {
+        Self {
+            client,
+            group_id: group_id.into(),
+            topic_ids: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Look up the `topic_id` for `topic`; refreshes metadata on cache miss.
+    async fn resolve_topic_id(&self, topic: &str) -> Result<WireUuid, StreamsClientError> {
+        {
+            let cache = self.topic_ids.lock().await;
+            if let Some(&id) = cache.get(topic) {
+                return Ok(id);
+            }
+        }
+        // Cache miss — refresh metadata.
+        let meta = self.client.refresh_metadata().await?;
+        let mut cache = self.topic_ids.lock().await;
+        for t in &meta.topics {
+            if let Some(name) = &t.name {
+                cache.insert(name.clone(), t.topic_id);
+            }
+        }
+        Ok(cache.get(topic).copied().unwrap_or_default())
+    }
+}
+
+#[async_trait::async_trait]
+impl OffsetStore for BrokerOffsetStore {
+    /// Fetch the committed offset for `(topic, partition)` from the group
+    /// coordinator. Sends the request using the v8+ `groups[]` shape (with
+    /// `topic_id` for v10). Parses the response from the `groups[]` field;
+    /// falls back to the legacy `topics` field for v0-7 responses.
+    async fn committed(
+        &self,
+        topic: &str,
+        partition: i32,
+    ) -> Result<Option<i64>, StreamsClientError> {
+        let topic_id = self.resolve_topic_id(topic).await?;
+
+        let resp = self
+            .client
+            .send(OffsetFetchRequest {
+                // Legacy fields (v0-7): kept for version negotiation fallback.
+                group_id: self.group_id.clone(),
+                topics: Some(vec![OffsetFetchRequestTopic {
+                    name: topic.to_string(),
+                    partition_indexes: vec![partition],
+                    ..Default::default()
+                }]),
+                // v8+ groups[] shape (also carries topic_id for v10).
+                groups: vec![OffsetFetchRequestGroup {
+                    group_id: self.group_id.clone(),
+                    topics: Some(vec![OffsetFetchRequestTopics {
+                        name: topic.to_string(),
+                        topic_id,
+                        partition_indexes: vec![partition],
+                        ..Default::default()
+                    }]),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await?;
+
+        if resp.groups.is_empty() {
+            // v0-7 fallback: data in top-level topics[].
+            for t in &resp.topics {
+                if t.name == topic {
+                    for p in &t.partitions {
+                        if p.partition_index == partition {
+                            return Ok(if p.committed_offset < 0 {
+                                None
+                            } else {
+                                Some(p.committed_offset)
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            // v8+ response: data lives in groups[].topics[].partitions[].
+            for g in &resp.groups {
+                for t in &g.topics {
+                    // At v10 the topic name is empty; match by topic_id or
+                    // accept any since we only requested one topic.
+                    let name_matches = t.name.is_empty() || t.name == topic;
+                    let id_matches = t.topic_id == topic_id
+                        || t.topic_id == WireUuid::default()
+                        || topic_id == WireUuid::default();
+                    if name_matches || id_matches {
+                        for p in &t.partitions {
+                            if p.partition_index == partition {
+                                return Ok(if p.committed_offset < 0 {
+                                    None
+                                } else {
+                                    Some(p.committed_offset)
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn earliest(&self, topic: &str, partition: i32) -> Result<i64, StreamsClientError> {
+        let resp = self
+            .client
+            .send(ListOffsetsRequest {
+                replica_id: -1,
+                topics: vec![ListOffsetsTopic {
+                    name: topic.to_string(),
+                    partitions: vec![ListOffsetsPartition {
+                        partition_index: partition,
+                        timestamp: -2, // LIST_OFFSETS_EARLIEST
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await?;
+
+        resp.topics
+            .first()
+            .and_then(|t| t.partitions.first())
+            .map_or_else(
+                || {
+                    Err(StreamsClientError::Runtime(format!(
+                        "ListOffsets: no partition in response for {topic}/{partition}"
+                    )))
+                },
+                |p| {
+                    if p.error_code != 0 {
+                        Err(StreamsClientError::Runtime(format!(
+                            "ListOffsets error code {} for {topic}/{partition}",
+                            p.error_code
+                        )))
+                    } else {
+                        Ok(p.offset)
+                    }
+                },
+            )
+    }
+
+    /// Commit `offsets` to the group coordinator. Each topic is tagged with its
+    /// `topic_id` (required at `OffsetCommit` v10; encoder ignores it at v0-9).
+    /// Returns an error if the broker reports a non-zero partition error code so
+    /// that a broken commit is never silently swallowed.
+    async fn commit(&self, offsets: &[(String, i32, i64)]) -> Result<(), StreamsClientError> {
+        // Group offsets by topic name, resolving topic_ids in parallel.
+        let mut by_topic: HashMap<String, Vec<(i32, i64)>> = HashMap::new();
+        for (topic, partition, offset) in offsets {
+            by_topic
+                .entry(topic.clone())
+                .or_default()
+                .push((*partition, *offset));
+        }
+
+        // Resolve topic_ids for all topics that appear in this commit.
+        let mut topic_ids: HashMap<String, WireUuid> = HashMap::new();
+        for name in by_topic.keys() {
+            let id = self.resolve_topic_id(name).await?;
+            topic_ids.insert(name.clone(), id);
+        }
+
+        let topics: Vec<OffsetCommitRequestTopic> = by_topic
+            .into_iter()
+            .map(|(name, parts)| {
+                let topic_id = topic_ids.get(&name).copied().unwrap_or_default();
+                OffsetCommitRequestTopic {
+                    name,
+                    topic_id,
+                    partitions: parts
+                        .into_iter()
+                        .map(
+                            |(partition_index, committed_offset)| OffsetCommitRequestPartition {
+                                partition_index,
+                                committed_offset,
+                                committed_leader_epoch: -1,
+                                committed_metadata: Some(String::new()),
+                                ..Default::default()
+                            },
+                        )
+                        .collect(),
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        let resp = self
+            .client
+            .send(OffsetCommitRequest {
+                group_id: self.group_id.clone(),
+                generation_id_or_member_epoch: -1,
+                member_id: String::new(),
+                topics,
+                ..Default::default()
+            })
+            .await?;
+
+        // Surface the first non-zero error code.
+        for t in &resp.topics {
+            for p in &t.partitions {
+                if p.error_code != 0 {
+                    return Err(StreamsClientError::Runtime(format!(
+                        "OffsetCommit error code {} for topic {} partition {}",
+                        p.error_code, t.name, p.partition_index
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+// ─── build ────────────────────────────────────────────────────────────────────
+
+/// Construct the three broker-backed I/O trait objects from a single bootstrap
+/// address.
+///
+/// Returns `(BrokerFetcher, Arc<BrokerProducer>, Arc<BrokerOffsetStore>)`.
+/// The producer is `Arc`-wrapped so it can be shared across multiple
+/// `StreamTask`s within the same `StreamThread`.
+pub(crate) async fn build(
+    bootstrap: &str,
+    group_id: &str,
+    client_id: &str,
+) -> Result<(BrokerFetcher, Arc<BrokerProducer>, Arc<BrokerOffsetStore>), StreamsClientError> {
+    // 1. Client for metadata + offset RPCs.
+    let metadata_client = Client::builder()
+        .bootstrap(bootstrap)
+        .client_id(client_id)
+        .build()
+        .await?;
+
+    // 2. Dedicated fetch connection (single bootstrap broker).
+    // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
+    let addr = tokio::net::lookup_host(bootstrap)
+        .await
+        .map_err(|e| {
+            StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
+        })?
+        .next()
+        .ok_or_else(|| {
+            StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
+        })?;
+    let fetch_conn = Connection::connect_with_options(
+        addr,
+        ConnectionOptions {
+            client_id: client_id.to_string(),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    // 3. Idempotent producer.
+    let producer = Producer::builder()
+        .bootstrap(bootstrap)
+        .client_id(format!("{client_id}-producer"))
+        .enable_idempotence(true)
+        .acks(Acks::All)
+        .build()
+        .await
+        .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+
+    // 4. Offset client — re-use a second Client for offset RPCs so the
+    //    metadata client's connection isn't head-of-line-blocked by slow
+    //    OffsetFetch or OffsetCommit calls.
+    let offset_client = Client::builder()
+        .bootstrap(bootstrap)
+        .client_id(format!("{client_id}-offsets"))
+        .build()
+        .await?;
+
+    let fetcher = BrokerFetcher {
+        conn: fetch_conn,
+        client: metadata_client,
+        topic_ids: Mutex::new(HashMap::new()),
+        max_wait_ms: 500,
+        partition_max_bytes: 1 << 20,
+    };
+    let broker_producer = Arc::new(BrokerProducer {
+        inner: producer,
+        pending: Mutex::new(Vec::new()),
+    });
+    let offset_store = Arc::new(BrokerOffsetStore::new(offset_client, group_id));
+
+    Ok((fetcher, broker_producer, offset_store))
+}
+
+// ─── tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod tests {
+
+    use crabka_broker::{Broker, BrokerConfig};
+    use crabka_client_core::Client;
+    use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+
+    use super::BrokerOffsetStore;
+    use crate::runtime::io::OffsetStore as _;
+
+    async fn boot() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .unwrap();
+        let bootstrap = broker.listen_addr().to_string();
+        (broker, bootstrap, dir)
+    }
+
+    async fn create_topic(client: &Client, topic: &str, partitions: i32) {
+        let resp = client
+            .send(CreateTopicsRequest {
+                topics: vec![CreatableTopic {
+                    name: topic.into(),
+                    num_partitions: partitions,
+                    replication_factor: 1,
+                    ..Default::default()
+                }],
+                timeout_ms: 5_000,
+                ..Default::default()
+            })
+            .await
+            .expect("CreateTopics");
+        assert_eq!(
+            resp.topics[0].error_code, 0,
+            "topic create failed: {resp:?}"
+        );
+    }
+
+    /// Round-trip test: `committed` returns `None` before any commit, `Some(42)`
+    /// after committing offset 42. This exercises both C1 (`topic_id` set on
+    /// `OffsetCommitRequestTopic`) and C2 (`groups[]` shape on `OffsetFetchRequest`).
+    ///
+    /// The test must FAIL with the old implementation (missing `topic_id` + legacy
+    /// topics-only request) and PASS with the fixed implementation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn offset_store_commits_and_reads_back() {
+        let (_broker, bootstrap, _dir) = boot().await;
+
+        // Admin client: create the topic so topic_id is resolvable.
+        let admin = Client::builder()
+            .bootstrap(&bootstrap)
+            .client_id("ostore-admin")
+            .build()
+            .await
+            .unwrap();
+        create_topic(&admin, "ostore-topic", 1).await;
+
+        // Build a BrokerOffsetStore for group "ostore-grp".
+        let offset_client = Client::builder()
+            .bootstrap(&bootstrap)
+            .client_id("ostore-client")
+            .build()
+            .await
+            .unwrap();
+        let store = BrokerOffsetStore::new(offset_client, "ostore-grp");
+
+        // 1. No commit yet → None.
+        let before = store.committed("ostore-topic", 0).await.unwrap();
+        assert_eq!(
+            before, None,
+            "expected no committed offset before first commit"
+        );
+
+        // 2. Commit offset 42.
+        store
+            .commit(&[("ostore-topic".to_string(), 0, 42)])
+            .await
+            .unwrap();
+
+        // 3. Now reads back Some(42).
+        let after = store.committed("ostore-topic", 0).await.unwrap();
+        assert_eq!(after, Some(42), "expected committed offset 42 after commit");
+    }
+}

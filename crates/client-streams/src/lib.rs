@@ -25,7 +25,7 @@
 //! let mut membership = StreamsMembership::builder()
 //!     .bootstrap("localhost:9092")
 //!     .group_id("my-application-id")
-//!     .topology(built)
+//!     .topology(std::sync::Arc::new(built))
 //!     .build()
 //!     .await?;
 //!
@@ -69,11 +69,46 @@
 //!     Some((Some("k".to_string()), "HELLO".to_string())),
 //! );
 //! ```
+//! ## Running an app (`KafkaStreams`)
+//!
+//! Once built, run a topology against a broker with the managed runtime — it
+//! joins the streams group, fetches its assigned partitions, processes records,
+//! produces to sink topics, and commits offsets (at-least-once):
+//!
+//! ```no_run
+//! use crabka_client_streams::{Consumed, KafkaStreams, Processor, ProcessorContext, Produced, Record, StringSerde, Topology};
+//!
+//! struct Upper;
+//! impl Processor<String, String, String, String> for Upper {
+//!     fn process(&mut self, ctx: &mut ProcessorContext<String, String>, r: Record<String, String>) {
+//!         ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
+//!     }
+//! }
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut topo = Topology::new();
+//! topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
+//! topo.add_processor("up", || Box::new(Upper) as Box<dyn Processor<String, String, String, String>>, ["src"]);
+//! topo.add_sink("out", "output-topic", ["up"], Produced::with(StringSerde, StringSerde));
+//! let built = topo.build("my-app")?;
+//!
+//! let mut streams = KafkaStreams::builder()
+//!     .bootstrap("localhost:9092")
+//!     .application_id("my-app")
+//!     .topology(built)
+//!     .build()
+//!     .await?;
+//! // ... app runs in the background; later:
+//! streams.close().await?;
+//! # Ok(())
+//! # }
+//! ```
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.0.0")]
 
 mod error;
 pub mod membership;
 pub mod processor;
+pub mod runtime;
 pub mod test_driver;
 pub mod topology;
 
@@ -86,5 +121,6 @@ pub use processor::{
     BytesSerde, Consumed, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier,
     Produced, Record, RecordContext, Serde, SerdeError, StringSerde,
 };
+pub use runtime::{KafkaStreams, KafkaStreamsState};
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, Topology, TopologyError};
