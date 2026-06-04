@@ -12,13 +12,15 @@ use crate::topology::BuiltTopology;
 
 pub(crate) struct StreamThread {
     tasks: HashMap<(String, i32), StreamTask>,
+    /// Shared fetcher reference kept for restore (replaying changelog on task creation).
+    fetcher: Arc<dyn RecordFetcher>,
 }
 
 impl StreamThread {
-    #[allow(clippy::new_without_default)]
-    pub fn new() -> Self {
+    pub fn new(fetcher: Arc<dyn RecordFetcher>) -> Self {
         Self {
             tasks: HashMap::new(),
+            fetcher,
         }
     }
 
@@ -45,7 +47,7 @@ impl StreamThread {
             }
         }
 
-        // Drop removed (commit first).
+        // Drop removed: close processors, commit, then drop.
         let to_remove: Vec<(String, i32)> = self
             .tasks
             .keys()
@@ -54,6 +56,7 @@ impl StreamThread {
             .collect();
         for k in to_remove {
             if let Some(mut t) = self.tasks.remove(&k) {
+                t.close_processors();
                 t.commit().await?;
             }
         }
@@ -79,7 +82,12 @@ impl StreamThread {
                 Arc::clone(producer),
                 Arc::clone(store),
             );
+            // Seek positions to committed offsets (or earliest) BEFORE restore so
+            // that normal processing knows where to start after restore completes.
             task.seek_to_start().await?;
+            // Restore state stores from changelog, then initialise processors.
+            task.restore(&*self.fetcher).await?;
+            task.init()?;
             self.tasks.insert(key, task);
         }
         Ok(())
@@ -116,13 +124,15 @@ mod tests {
     use crate::membership::{StreamsAssignment, TaskAssignment, TopicPartition};
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
-    use crate::processor::serde::{Consumed, Produced, StringSerde};
+    use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
     use crate::runtime::io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
     use crate::topology::Topology;
     use assert2::check;
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
+
+    // ─── stateless Upper processor ────────────────────────────────────────────
 
     struct Upper;
     impl Processor<String, String, String, String> for Upper {
@@ -150,6 +160,59 @@ mod tests {
             Produced::with(StringSerde, StringSerde),
         );
         t.build("app").unwrap()
+    }
+
+    // ─── stateful Counter processor ───────────────────────────────────────────
+
+    struct Counter;
+    impl Processor<String, String, String, i64> for Counter {
+        fn process(&mut self, ctx: &mut ProcessorContext<String, i64>, r: Record<String, String>) {
+            let store = ctx.get_state_store::<String, i64>("counts").unwrap();
+            let n = store.get(&r.value).unwrap_or(0) + 1;
+            store.put(r.value.clone(), n);
+            ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+        }
+    }
+
+    fn stateful_built() -> crate::topology::BuiltTopology {
+        let mut t = Topology::new();
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_state_store("counts", StringSerde, I64Serde, ["c"]);
+        t.add_processor("c", || Counter, ["src"]);
+        t.add_sink("out", "out", ["c"], Produced::with(StringSerde, I64Serde));
+        t.build("app").unwrap()
+    }
+
+    // ─── fakes ────────────────────────────────────────────────────────────────
+
+    /// Returns one batch at its scripted (topic, partition, offset), then empty.
+    struct ScriptedFetcher {
+        scripts: StdMutex<HashMap<(String, i32, i64), FetchBatch>>,
+    }
+
+    impl ScriptedFetcher {
+        fn new(scripts: Vec<((String, i32, i64), FetchBatch)>) -> Self {
+            Self {
+                scripts: StdMutex::new(scripts.into_iter().collect()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RecordFetcher for ScriptedFetcher {
+        async fn fetch(
+            &self,
+            t: &str,
+            p: i32,
+            o: i64,
+        ) -> Result<FetchBatch, crate::StreamsClientError> {
+            Ok(self
+                .scripts
+                .lock()
+                .unwrap()
+                .remove(&(t.to_string(), p, o))
+                .unwrap_or_default())
+        }
     }
 
     struct OneShot {
@@ -243,6 +306,13 @@ mod tests {
         }
     }
 
+    fn empty_fetcher() -> Arc<dyn RecordFetcher> {
+        // Returns empty for all fetches; used when restore has nothing to replay.
+        Arc::new(ScriptedFetcher::new(vec![])) as Arc<dyn RecordFetcher>
+    }
+
+    // ─── tests ────────────────────────────────────────────────────────────────
+
     #[tokio::test]
     async fn apply_assignment_creates_task_polls_commits() {
         let producer_c = Arc::new(CollectProducer::default());
@@ -250,7 +320,7 @@ mod tests {
         let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
         let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
         let built = built();
-        let mut thread = StreamThread::new();
+        let mut thread = StreamThread::new(empty_fetcher());
         thread
             .apply_assignment(&assignment(), &built, &producer, &store)
             .await
@@ -286,11 +356,67 @@ mod tests {
                 == Some(&1)
         );
 
-        // empty assignment → task removed (committed on the way out)
+        // empty assignment → task removed (close_processors + committed on the way out)
         thread
             .apply_assignment(&StreamsAssignment::default(), &built, &producer, &store)
             .await
             .unwrap();
         check!(thread.task_count() == 0);
+    }
+
+    /// Verify that `apply_assignment` replays changelog records into the task's
+    /// store during restore, so that the first `process_once` continues from the
+    /// restored count rather than from zero.
+    #[tokio::test]
+    async fn stateful_apply_assignment_restores_store_from_changelog() {
+        // Changelog: key="a", value=i64 BE 7 at offset 0 on "app-counts-changelog".
+        let cl_key = bytes::Bytes::copy_from_slice(b"a");
+        let cl_val = bytes::Bytes::copy_from_slice(&7i64.to_be_bytes());
+        let restore_fetcher: Arc<dyn RecordFetcher> = Arc::new(ScriptedFetcher::new(vec![(
+            ("app-counts-changelog".to_string(), 0, 0),
+            FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: Some(cl_key),
+                    value: Some(cl_val),
+                    timestamp: -1,
+                }],
+            },
+        )]));
+
+        let producer_c = Arc::new(CollectProducer::default());
+        let store_c = Arc::new(MemStore::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
+        let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
+        let built = stateful_built();
+
+        let mut thread = StreamThread::new(Arc::clone(&restore_fetcher));
+        thread
+            .apply_assignment(&assignment(), &built, &producer, &store)
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        // Now process one "a" record.  Restored count is 7, so output must be 8.
+        let process_fetcher = ScriptedFetcher::new(vec![(
+            ("in".to_string(), 0, 0),
+            FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: None,
+                    value: Some("a".into()),
+                    timestamp: -1,
+                }],
+            },
+        )]);
+        thread.poll_all(&process_fetcher).await.unwrap();
+        thread.commit_all().await.unwrap();
+
+        let sent = producer_c.sent.lock().unwrap();
+        check!(
+            sent.iter()
+                .any(|(t, v)| t == "out" && v.as_deref() == Some(8i64.to_be_bytes().as_ref())),
+            "after restore with N=7, processing 'a' must emit count = 8"
+        );
     }
 }

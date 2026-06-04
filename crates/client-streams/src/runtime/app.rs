@@ -67,8 +67,9 @@ impl KafkaStreams {
         let shutdown = CancellationToken::new();
         let sd = shutdown.clone();
         let topo_for_thread = Arc::clone(&built);
+        let fetcher_for_thread = Arc::clone(&fetcher);
         let handle = tokio::spawn(async move {
-            let mut thread = StreamThread::new();
+            let mut thread = StreamThread::new(fetcher_for_thread);
             let mut poll = tokio::time::interval(poll_interval);
             let mut commit = tokio::time::interval(commit_interval);
             loop {
