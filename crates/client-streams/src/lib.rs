@@ -172,7 +172,7 @@ pub mod store;
 pub mod test_driver;
 pub mod topology;
 
-pub use dsl::{Grouped, Materialized, Repartitioned};
+pub use dsl::{Grouped, Materialized, Repartitioned, StreamsBuilder};
 pub use error::StreamsClientError;
 pub use membership::{
     StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus, TaskAssignment,
