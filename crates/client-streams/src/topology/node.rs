@@ -27,13 +27,28 @@ pub(crate) struct Node {
     pub kind: NodeKind,
 }
 
+/// A registered state store: its name, the processors it connects (used to
+/// union the owning subtopology), and an optional **changelog-topic override**.
+///
+/// The override is `None` for the default case — the changelog topic name is
+/// then derived as `<app_id>-<store_name>-changelog`. The DSL
+/// `REUSE_KTABLE_SOURCE_TOPICS` optimizer sets it to the table's *source* topic
+/// so the materialized store reuses that topic as its changelog (no separate
+/// `app-<store>-changelog` topic is created).
+#[derive(Debug, Clone)]
+pub(crate) struct StoreEntry {
+    pub name: String,
+    pub processors: Vec<String>,
+    pub changelog_override: Option<String>,
+}
+
 /// The full node graph, recorded in insertion order.
 #[derive(Debug, Default)]
 pub(crate) struct NodeRegistry {
     pub nodes: Vec<Node>,
     pub index: HashMap<String, usize>,
-    /// `(store_name, connected_processor_names)` in insertion order.
-    pub stores: Vec<(String, Vec<String>)>,
+    /// One registered state store, in insertion order.
+    pub stores: Vec<StoreEntry>,
     /// Topic names registered as internal repartition topics.
     pub repartition_topics: HashSet<String>,
 }
@@ -102,8 +117,17 @@ impl NodeRegistry {
         })
     }
 
-    pub fn add_store(&mut self, name: &str, processors: Vec<String>) {
-        self.stores.push((name.to_string(), processors));
+    pub fn add_store(
+        &mut self,
+        name: &str,
+        processors: Vec<String>,
+        changelog_override: Option<String>,
+    ) {
+        self.stores.push(StoreEntry {
+            name: name.to_string(),
+            processors,
+            changelog_override,
+        });
     }
 
     /// Validate that every referenced predecessor exists. Call after all nodes

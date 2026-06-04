@@ -1,0 +1,85 @@
+// JVM Kafka Streams 4.x DSL → StreamsGroupHeartbeatRequest.Topology capture harness.
+//
+// Two entry points:
+//   * `capture`       — no broker. Builds the 5 DSL topologies with optimization=all and
+//                       runs Kafka's own DSL→heartbeat conversion via reflection, writing
+//                       Crabka wire-shape JSON fixtures. (mechanism A — the committed path)
+//   * `captureBroker` — cross-check. Runs the `count` topology against a real Apache Kafka
+//                       4.1 broker with group.protocol=streams and dumps the LIVE
+//                       StreamsRebalanceData the client actually sends. (mechanism B)
+//
+// We pin to kafka-streams/kafka-clients 4.1.0 because the KIP-1071 client-side
+// StreamsGroupHeartbeatRequest topology converter (StreamsGroupHeartbeatRequestManager +
+// StreamsRebalanceData) only exists from 4.1.0 — it is NOT present in 4.0.0. The DSL
+// topology shape and auto-names are identical across 4.0/4.1; only the wire-topology
+// builder differs, and 4.1.0 is the version that actually ships it.
+
+plugins {
+    id 'application'
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    kafkaVersion = '4.1.0'
+}
+
+sourceSets {
+    main {
+        java {
+            srcDirs = ['src/main/java']
+        }
+    }
+    verify {
+        java {
+            srcDirs = ['src/verify/java']
+        }
+        compileClasspath += sourceSets.main.output
+        runtimeClasspath += sourceSets.main.output
+    }
+}
+
+dependencies {
+    implementation "org.apache.kafka:kafka-streams:${kafkaVersion}"
+    implementation "org.apache.kafka:kafka-clients:${kafkaVersion}"
+    // RocksDB is required: building each subtopology instantiates the state stores,
+    // which is the step that registers the implicit changelog topics surfaced in the
+    // heartbeat (e.g. the count store's -changelog).
+    implementation 'org.rocksdb:rocksdbjni:9.7.3'
+    runtimeOnly 'org.slf4j:slf4j-nop:1.7.36'
+
+    verifyImplementation "org.apache.kafka:kafka-streams:${kafkaVersion}"
+    verifyImplementation "org.apache.kafka:kafka-clients:${kafkaVersion}"
+    verifyRuntimeOnly 'org.rocksdb:rocksdbjni:9.7.3'
+    verifyRuntimeOnly 'com.fasterxml.jackson.core:jackson-databind:2.19.0'
+    verifyRuntimeOnly 'org.lz4:lz4-java:1.8.0'
+    verifyRuntimeOnly 'org.xerial.snappy:snappy-java:1.1.10.5'
+    verifyRuntimeOnly 'com.github.luben:zstd-jni:1.5.6-4'
+    verifyRuntimeOnly 'org.slf4j:slf4j-nop:1.7.36'
+}
+
+// mechanism A: write the 5 golden fixtures (no broker).
+application {
+    mainClass = 'crabka.capture.Capture'
+}
+
+tasks.named('run') {
+    // default output dir; run.sh overrides to the testdata dir.
+    args = [project.findProperty('outDir') ?: 'out']
+}
+
+// mechanism B: cross-check against a real broker (group.protocol=streams).
+tasks.register('captureBroker', JavaExec) {
+    group = 'verification'
+    description = 'Run the count topology against a real Kafka 4.1 broker and dump the live StreamsRebalanceData.'
+    classpath = sourceSets.verify.runtimeClasspath
+    mainClass = 'crabka.capture.CaptureBroker'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}

@@ -1270,6 +1270,8 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-protocol",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",

@@ -23,3 +23,16 @@ against the hand-derived expectation (from the documented JVM 4.x rules) AND is
 written so a JVM-captured `.bin` fixture can replace it without changing the test
 shape. The real JVM byte-capture (and the mixed JVM+Crabka group test) is the
 follow-on interop-validation milestone.
+
+## `dsl/` — empirically captured DSL fixtures (KIP-1071, JVM 4.1.0)
+
+`dsl/*.topology.json` are **real JVM captures** (not hand-derived) of the
+`StreamsGroupHeartbeatRequest.Topology` that Kafka Streams emits for five DSL
+topologies built with `optimization=all`. They are produced by the Dockerized
+capture harness in `../../jvm-capture/` (run `./jvm-capture/run.sh`), which drives
+Kafka's own `StreamThread.initBrokerTopology` +
+`StreamsGroupHeartbeatRequestManager.fromStreamsToHeartbeatRequest` conversion and
+was cross-validated against a live `apache/kafka:4.1.0` broker
+(`./jvm-capture/run.sh --verify-broker`). See `../../jvm-capture/README.md` for the
+exact classes/methods, the 4.1.0-vs-4.0.0 rationale, and the `replication_factor:
+-1` / `topic_configs` caveat the Rust encoder must match.

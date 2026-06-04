@@ -1,0 +1,4 @@
+# Gradle / build artifacts produced when running the harness in Docker.
+.gradle/
+build/
+out/

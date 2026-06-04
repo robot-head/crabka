@@ -17,8 +17,11 @@ pub(crate) struct GroupTopics {
     pub repartition_source_topics: Vec<String>,
     /// Internal repartition topics this subtopology writes.
     pub repartition_sink_topics: Vec<String>,
-    /// Store names whose changelog topics back this subtopology.
-    pub changelog_stores: Vec<String>,
+    /// Stores whose changelog topics back this subtopology, as
+    /// `(store_name, changelog_override)`. When the override is `None` the wire
+    /// layer derives `<app>-<store>-changelog`; when `Some(topic)` (set by the
+    /// `REUSE_KTABLE_SOURCE_TOPICS` pass) that topic name is used verbatim.
+    pub changelog_stores: Vec<(String, Option<String>)>,
 }
 
 /// Minimal quick-union over `usize` node indices (path-compressing find).
@@ -66,8 +69,11 @@ pub(crate) fn group_nodes(reg: &NodeRegistry) -> Vec<GroupTopics> {
             }
         }
     }
-    for (_store, procs) in &reg.stores {
-        let mut iter = procs.iter().filter_map(|p| reg.index.get(p).copied());
+    for store in &reg.stores {
+        let mut iter = store
+            .processors
+            .iter()
+            .filter_map(|p| reg.index.get(p).copied());
         if let Some(first) = iter.next() {
             for other in iter {
                 uf.unite(first, other);
@@ -110,13 +116,14 @@ pub(crate) fn group_nodes(reg: &NodeRegistry) -> Vec<GroupTopics> {
             NodeKind::Processor { .. } => {}
         }
     }
-    for (store, procs) in &reg.stores {
-        if let Some(&first) = procs.first().and_then(|p| reg.index.get(p)) {
+    for store in &reg.stores {
+        if let Some(&first) = store.processors.first().and_then(|p| reg.index.get(p)) {
             let root = uf.find(first);
             if let Some(&id) = root_to_id.get(&root)
                 && let Some(g) = groups.get_mut(&id)
             {
-                g.changelog_stores.push(store.clone());
+                g.changelog_stores
+                    .push((store.name.clone(), store.changelog_override.clone()));
             }
         }
     }
@@ -173,13 +180,13 @@ mod tests {
         reg.add_processor("p1", vec!["s1".into()]).unwrap();
         reg.add_source("s2", vec!["b".into()]).unwrap();
         reg.add_processor("p2", vec!["s2".into()]).unwrap();
-        reg.add_store("store", vec!["p1".into(), "p2".into()]);
+        reg.add_store("store", vec!["p1".into(), "p2".into()], None);
         let groups = group_nodes(&reg);
         check!(ids(&groups) == vec!["0"]);
         let mut srcs = groups[0].source_topics.clone();
         srcs.sort();
         check!(srcs == vec!["a".to_string(), "b".to_string()]);
-        check!(groups[0].changelog_stores == vec!["store".to_string()]);
+        check!(groups[0].changelog_stores == vec![("store".to_string(), None)]);
     }
 
     #[test]

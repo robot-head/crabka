@@ -1,0 +1,384 @@
+package crabka.capture;
+
+import org.apache.kafka.clients.consumer.internals.StreamsRebalanceData;
+import org.apache.kafka.common.message.StreamsGroupHeartbeatRequestData;
+import org.apache.kafka.common.serialization.Serdes;
+import org.apache.kafka.streams.StreamsBuilder;
+import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.Topology;
+import org.apache.kafka.streams.kstream.BranchedKStream;
+import org.apache.kafka.streams.kstream.Branched;
+import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.streams.kstream.KStream;
+import org.apache.kafka.streams.kstream.Materialized;
+import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
+
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.function.Consumer;
+
+/**
+ * Captures the byte-exact {@code StreamsGroupHeartbeatRequest.Topology} (KIP-1071)
+ * that Apache Kafka Streams 4.x would send to a streams-group coordinator, for five
+ * DSL topologies built with {@code optimization=all}.
+ *
+ * <p><b>Capture mechanism (A — Kafka's own conversion, no broker):</b> we drive the
+ * exact same private code path the JVM client uses to build the heartbeat:
+ * <ol>
+ *   <li>{@code StreamsBuilder.build(props)} with {@code TOPOLOGY_OPTIMIZATION_CONFIG=OPTIMIZE}
+ *       produces an optimized {@link Topology}.</li>
+ *   <li>Reflect the package-private {@code Topology.internalTopologyBuilder} field.</li>
+ *   <li>Reflect {@code StreamThread.initBrokerTopology(StreamsConfig, InternalTopologyBuilder)}
+ *       → {@code Map<String, StreamsRebalanceData.Subtopology>} (the streams-internal
+ *       per-subtopology topic sets, keyed by the integer node-group index rendered as a
+ *       decimal string — exactly what {@code StreamsRebalanceData} feeds the heartbeat).</li>
+ *   <li>Reflect {@code StreamsGroupHeartbeatRequestManager.HeartbeatState
+ *       .fromStreamsToHeartbeatRequest(Map)} → {@code List<StreamsGroupHeartbeatRequestData
+ *       .Subtopology>} — the EXACT wire subtopologies (sorted source/sink topics, sorted
+ *       changelog/repartition TopicInfo, copartition groups encoded as int16 indices). This
+ *       is the literal method {@code StreamsGroupHeartbeatRequestManager} calls when JOINING.</li>
+ * </ol>
+ * We then render each wire {@code Subtopology} into Crabka's snake_case wire JSON shape
+ * (matching {@code testdata/golden/single_source_sink.topology.json}) and write one file
+ * per topology.
+ *
+ * <p>The integer node-group index → decimal-string subtopology id, the topic sorting, and
+ * the copartition int16 index encoding are all done by Kafka's own code, not by us, so the
+ * fixtures are ground truth.
+ */
+public final class Capture {
+
+    private static final String APP_ID = "app";
+
+    public static void main(String[] args) throws Exception {
+        Path outDir = Paths.get(args.length > 0 ? args[0] : "out");
+        Files.createDirectories(outDir);
+
+        write(outDir, "stateless_chain", statelessChain());
+        write(outDir, "count", count());
+        write(outDir, "repartition_merge", repartitionMerge());
+        write(outDir, "table_reuse", tableReuse());
+        write(outDir, "branch_merge", branchMerge());
+
+        System.out.println("Capture complete. Wrote 5 fixtures to " + outDir.toAbsolutePath());
+    }
+
+    // ---- the 5 DSL topologies (all with optimization=all) -------------------
+
+    /** 1. stateless_chain: stream -> mapValues -> filter -> to. */
+    static Topology statelessChain() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .mapValues(v -> v)
+            .filter((k, v) -> true)
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /** 2. count: stream -> selectKey -> groupByKey -> count -> toStream -> to. */
+    static Topology count() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .selectKey((k, v) -> k)
+            .groupByKey()
+            .count()
+            .toStream()
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 3. repartition_merge: one selectKey feeding TWO aggregations. Under optimization the
+     * two aggregations share a single repartition topic.
+     */
+    static Topology repartitionMerge() {
+        StreamsBuilder b = new StreamsBuilder();
+        KStream<String, String> s = b.<String, String>stream("in").selectKey((k, v) -> k);
+        s.groupByKey().count();
+        s.groupByKey().reduce((a, c) -> a);
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 4. table_reuse: builder.table with a materialized store. Source-topic-reuse means the
+     * store's changelog should be the source topic {@code in}, not {@code app-store-changelog}.
+     */
+    static Topology tableReuse() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.table("in", Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("store"))
+            .mapValues(v -> v)
+            .toStream()
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /** 5. branch_merge: split into two branches, merge them, then .to("out"). */
+    static Topology branchMerge() {
+        StreamsBuilder b = new StreamsBuilder();
+        List<KStream<String, String>> captured = new ArrayList<>();
+        BranchedKStream<String, String> split = b.<String, String>stream("in").split();
+        Consumer<KStream<String, String>> grab = captured::add;
+        split.branch((k, v) -> true, Branched.withConsumer(grab));
+        split.branch((k, v) -> false, Branched.withConsumer(grab));
+        split.noDefaultBranch();
+        captured.get(0).merge(captured.get(1)).to("out");
+        return b.build(optimizedProps());
+    }
+
+    private static Properties optimizedProps() {
+        Properties p = new Properties();
+        p.put(StreamsConfig.APPLICATION_ID_CONFIG, APP_ID);
+        p.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9092");
+        p.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.StringSerde.class);
+        p.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, Serdes.StringSerde.class);
+        // optimization=all
+        p.put(StreamsConfig.TOPOLOGY_OPTIMIZATION_CONFIG, StreamsConfig.OPTIMIZE);
+        return p;
+    }
+
+    // ---- capture: optimized Topology -> wire Subtopology list ----------------
+
+    /**
+     * Run Kafka's own DSL→heartbeat conversion and return the wire subtopologies.
+     * Mirrors exactly what {@code StreamsGroupHeartbeatRequestManager} sends on JOIN.
+     */
+    @SuppressWarnings("unchecked")
+    static List<StreamsGroupHeartbeatRequestData.Subtopology> wireSubtopologies(Topology topology)
+            throws Exception {
+        InternalTopologyBuilder itb = internalTopologyBuilder(topology);
+
+        StreamsConfig config = new StreamsConfig(optimizedProps());
+
+        // StreamThread.initBrokerTopology(StreamsConfig, InternalTopologyBuilder)
+        //   -> Map<String, StreamsRebalanceData.Subtopology>
+        Class<?> streamThread = Class.forName(
+            "org.apache.kafka.streams.processor.internals.StreamThread");
+        Method initBrokerTopology = streamThread.getDeclaredMethod(
+            "initBrokerTopology", StreamsConfig.class, InternalTopologyBuilder.class);
+        initBrokerTopology.setAccessible(true);
+        Map<String, StreamsRebalanceData.Subtopology> rebalance =
+            (Map<String, StreamsRebalanceData.Subtopology>) initBrokerTopology.invoke(
+                null, config, itb);
+
+        // StreamsGroupHeartbeatRequestManager.HeartbeatState
+        //   .fromStreamsToHeartbeatRequest(Map<String, StreamsRebalanceData.Subtopology>)
+        //   -> List<StreamsGroupHeartbeatRequestData.Subtopology>
+        Class<?> heartbeatState = Class.forName(
+            "org.apache.kafka.clients.consumer.internals."
+                + "StreamsGroupHeartbeatRequestManager$HeartbeatState");
+        Method fromStreams = heartbeatState.getDeclaredMethod(
+            "fromStreamsToHeartbeatRequest", Map.class);
+        fromStreams.setAccessible(true);
+        return (List<StreamsGroupHeartbeatRequestData.Subtopology>)
+            fromStreams.invoke(null, rebalance);
+    }
+
+    @SuppressWarnings("unchecked")
+    private static InternalTopologyBuilder internalTopologyBuilder(Topology topology)
+            throws Exception {
+        Field f = Topology.class.getDeclaredField("internalTopologyBuilder");
+        f.setAccessible(true);
+        InternalTopologyBuilder itb = (InternalTopologyBuilder) f.get(topology);
+        StreamsConfig config = new StreamsConfig(optimizedProps());
+
+        // rewriteTopology sets the application id and applies optimizer-dependent
+        // finalization (source-topic reuse, repartition merge) the same way KafkaStreams
+        // does before building the runtime. subtopologyToTopicsInfo() requires the app id.
+        Method rewrite = InternalTopologyBuilder.class.getDeclaredMethod(
+            "rewriteTopology", StreamsConfig.class);
+        rewrite.setAccessible(true);
+        rewrite.invoke(itb, config);
+
+        // Build every subtopology — exactly what StreamThread/TaskManager does when it
+        // materializes the ProcessorTopology. This is the step that populates
+        // storeToChangelogTopic (via buildProcessorNode), so that subtopologyToTopicsInfo()
+        // reports the implicit changelog topics (e.g. the count store's changelog). Without
+        // this the changelog set is empty. Building instantiates the (RocksDB) stores, so
+        // rocksdbjni must be on the classpath.
+        Method nodeGroups = InternalTopologyBuilder.class.getDeclaredMethod("nodeGroups");
+        nodeGroups.setAccessible(true);
+        Map<Integer, ?> groups = (Map<Integer, ?>) nodeGroups.invoke(itb);
+        Method buildSubtopology = InternalTopologyBuilder.class.getDeclaredMethod(
+            "buildSubtopology", int.class);
+        buildSubtopology.setAccessible(true);
+        for (Integer gid : groups.keySet()) {
+            buildSubtopology.invoke(itb, gid);
+        }
+        return itb;
+    }
+
+    // ---- render to Crabka wire JSON shape ------------------------------------
+
+    private static void write(Path outDir, String name,
+                              Topology topology) throws Exception {
+        List<StreamsGroupHeartbeatRequestData.Subtopology> subs = wireSubtopologies(topology);
+        String json = toCrabkaWireJson(subs);
+        Path file = outDir.resolve(name + ".topology.json");
+        Files.writeString(file, json, StandardCharsets.UTF_8);
+        System.out.println("wrote " + file + "\n" + json);
+    }
+
+    /**
+     * Render the wire subtopologies into Crabka's snake_case wire JSON shape — the exact
+     * field set and ordering of {@code single_source_sink.topology.json}:
+     * {@code epoch} + {@code subtopologies[]} with
+     * {@code subtopology_id, source_topics, source_topic_regex, repartition_sink_topics,
+     * repartition_source_topics, state_changelog_topics, copartition_groups}.
+     *
+     * <p>Topic arrays are already sorted by Kafka's converter; we do not re-sort.
+     * Epoch is the topology epoch (0 for a freshly built topology).
+     */
+    static String toCrabkaWireJson(List<StreamsGroupHeartbeatRequestData.Subtopology> subs) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\n");
+        sb.append("  \"epoch\": 0,\n");
+        sb.append("  \"subtopologies\": [");
+        for (int i = 0; i < subs.size(); i++) {
+            sb.append(i == 0 ? "\n" : ",\n");
+            renderSubtopology(sb, subs.get(i), "    ");
+        }
+        sb.append(subs.isEmpty() ? "]\n" : "\n  ]\n");
+        sb.append("}\n");
+        return sb.toString();
+    }
+
+    private static void renderSubtopology(StringBuilder sb,
+                                          StreamsGroupHeartbeatRequestData.Subtopology s,
+                                          String ind) {
+        sb.append(ind).append("{\n");
+        sb.append(ind).append("  \"subtopology_id\": ").append(jsonStr(s.subtopologyId())).append(",\n");
+        sb.append(ind).append("  \"source_topics\": ").append(jsonStrArray(s.sourceTopics())).append(",\n");
+        sb.append(ind).append("  \"source_topic_regex\": ").append(jsonStrArray(s.sourceTopicRegex())).append(",\n");
+        sb.append(ind).append("  \"repartition_sink_topics\": ").append(jsonStrArray(s.repartitionSinkTopics())).append(",\n");
+        sb.append(ind).append("  \"repartition_source_topics\": ").append(topicInfoArray(s.repartitionSourceTopics(), ind + "  ")).append(",\n");
+        sb.append(ind).append("  \"state_changelog_topics\": ").append(topicInfoArray(s.stateChangelogTopics(), ind + "  ")).append(",\n");
+        sb.append(ind).append("  \"copartition_groups\": ").append(copartitionArray(s.copartitionGroups(), ind + "  ")).append("\n");
+        sb.append(ind).append("}");
+    }
+
+    private static String topicInfoArray(List<StreamsGroupHeartbeatRequestData.TopicInfo> infos,
+                                         String ind) {
+        if (infos.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < infos.size(); i++) {
+            StreamsGroupHeartbeatRequestData.TopicInfo t = infos.get(i);
+            sb.append(i == 0 ? "\n" : ",\n");
+            sb.append(ind).append("  {\n");
+            sb.append(ind).append("    \"name\": ").append(jsonStr(t.name())).append(",\n");
+            sb.append(ind).append("    \"partitions\": ").append(t.partitions()).append(",\n");
+            sb.append(ind).append("    \"replication_factor\": ").append(t.replicationFactor()).append(",\n");
+            sb.append(ind).append("    \"topic_configs\": ").append(keyValueArray(t.topicConfigs(), ind + "    ")).append("\n");
+            sb.append(ind).append("  }");
+        }
+        sb.append("\n").append(ind).append("]");
+        return sb.toString();
+    }
+
+    private static String keyValueArray(List<StreamsGroupHeartbeatRequestData.KeyValue> kvs,
+                                        String ind) {
+        if (kvs.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < kvs.size(); i++) {
+            StreamsGroupHeartbeatRequestData.KeyValue kv = kvs.get(i);
+            sb.append(i == 0 ? "\n" : ",\n");
+            sb.append(ind).append("  { \"key\": ").append(jsonStr(kv.key()))
+                .append(", \"value\": ").append(jsonStr(kv.value())).append(" }");
+        }
+        sb.append("\n").append(ind).append("]");
+        return sb.toString();
+    }
+
+    private static String copartitionArray(List<StreamsGroupHeartbeatRequestData.CopartitionGroup> groups,
+                                           String ind) {
+        if (groups.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < groups.size(); i++) {
+            StreamsGroupHeartbeatRequestData.CopartitionGroup g = groups.get(i);
+            sb.append(i == 0 ? "\n" : ",\n");
+            sb.append(ind).append("  {\n");
+            sb.append(ind).append("    \"source_topics\": ").append(shortArray(g.sourceTopics())).append(",\n");
+            sb.append(ind).append("    \"source_topic_regex\": ").append(shortArray(g.sourceTopicRegex())).append(",\n");
+            sb.append(ind).append("    \"repartition_source_topics\": ").append(shortArray(g.repartitionSourceTopics())).append("\n");
+            sb.append(ind).append("  }");
+        }
+        sb.append("\n").append(ind).append("]");
+        return sb.toString();
+    }
+
+    // ---- tiny JSON helpers (deterministic, no external deps) -----------------
+
+    private static String jsonStrArray(List<String> xs) {
+        if (xs.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < xs.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(jsonStr(xs.get(i)));
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private static String shortArray(List<Short> xs) {
+        if (xs == null || xs.isEmpty()) {
+            return "[]";
+        }
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < xs.size(); i++) {
+            if (i > 0) {
+                sb.append(", ");
+            }
+            sb.append(xs.get(i));
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+
+    private static String jsonStr(String s) {
+        if (s == null) {
+            return "null";
+        }
+        StringBuilder sb = new StringBuilder("\"");
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"': sb.append("\\\""); break;
+                case '\\': sb.append("\\\\"); break;
+                case '\n': sb.append("\\n"); break;
+                case '\r': sb.append("\\r"); break;
+                case '\t': sb.append("\\t"); break;
+                default:
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+            }
+        }
+        sb.append("\"");
+        return sb.toString();
+    }
+
+    private Capture() {
+    }
+}
