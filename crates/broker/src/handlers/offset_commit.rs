@@ -279,50 +279,31 @@ fn now_ms() -> i64 {
 
 /// Validate the commit against the group's membership/epoch through its actor.
 /// Returns `Some(error_code)` if the request should be rejected.
+///
+/// `ValidateCommit` dispatches on the actor's LIVE `group.kind`: a KIP-848 live
+/// migration may have flipped the actor's protocol in place after spawn (e.g. a
+/// group spawned Consumer that downgraded to Classic when its last native member
+/// left), so validation must run against the current protocol, not the
+/// spawn-time `handle.kind`.
 async fn validate(handle: &Arc<GroupActorHandle>, req: &OffsetCommitRequest) -> Option<i16> {
-    // Dispatch on the group's LIVE kind: a KIP-848 live migration may have
-    // flipped the actor's kind in place after spawn (e.g. a group spawned
-    // Consumer that downgraded to Classic when its last native member left),
-    // leaving the spawn-time `handle.kind` stale.
-    match handle.live_kind() {
-        GroupKindTag::Consumer => {
-            // Next-gen: validate member_epoch via the per-group actor.
-            let (tx, rx) = oneshot::channel();
-            if handle
-                .tx
-                .send(GroupActorMessage::OffsetValidate {
-                    member_id: req.member_id.clone(),
-                    member_epoch: req.generation_id_or_member_epoch,
-                    reply: tx,
-                })
-                .await
-                .is_err()
-            {
-                return Some(codes::UNKNOWN_SERVER_ERROR);
-            }
-            match rx.await {
-                Ok(Ok(())) => None,
-                Ok(Err(code)) => Some(code),
-                Err(_) => Some(codes::UNKNOWN_SERVER_ERROR),
-            }
-        }
-        GroupKindTag::Classic => {
-            let (tx, rx) = oneshot::channel();
-            if handle
-                .tx
-                .send(GroupActorMessage::ClassicValidateCommit {
-                    member_id: req.member_id.clone(),
-                    group_instance_id: req.group_instance_id.clone(),
-                    generation_id: req.generation_id_or_member_epoch,
-                    reply: tx,
-                })
-                .await
-                .is_err()
-            {
-                return Some(codes::UNKNOWN_SERVER_ERROR);
-            }
-            rx.await.unwrap_or(Some(codes::UNKNOWN_SERVER_ERROR))
-        }
+    let (tx, rx) = oneshot::channel();
+    if handle
+        .tx
+        .send(GroupActorMessage::ValidateCommit {
+            member_id: req.member_id.clone(),
+            group_instance_id: req.group_instance_id.clone(),
+            generation_or_epoch: req.generation_id_or_member_epoch,
+            reply: tx,
+        })
+        .await
+        .is_err()
+    {
+        return Some(codes::UNKNOWN_SERVER_ERROR);
+    }
+    match rx.await {
+        Ok(Ok(())) => None,
+        Ok(Err(code)) => Some(code),
+        Err(_) => Some(codes::UNKNOWN_SERVER_ERROR),
     }
 }
 

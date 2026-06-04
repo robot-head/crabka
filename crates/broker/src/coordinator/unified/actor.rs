@@ -55,9 +55,15 @@ pub enum GroupActorMessage {
         client_host: String,
         reply: oneshot::Sender<ConsumerGroupHeartbeatResponse>,
     },
-    OffsetValidate {
+    /// Validate an `OffsetCommit` against the group's LIVE protocol. The actor
+    /// dispatches on `group.kind`: next-gen checks `member_epoch`, classic checks
+    /// member/instance/generation. `Ok(())` = allowed; `Err(code)` = reject.
+    ValidateCommit {
         member_id: String,
-        member_epoch: i32,
+        group_instance_id: Option<String>,
+        /// The request's `generation_id_or_member_epoch` field; interpreted as the
+        /// consumer `member_epoch` or the classic generation per the live kind.
+        generation_or_epoch: i32,
         reply: oneshot::Sender<Result<(), i16>>,
     },
     Describe {
@@ -82,12 +88,6 @@ pub enum GroupActorMessage {
         req: LeaveGroupRequest,
         version: i16,
         reply: oneshot::Sender<Vec<MemberResponse>>,
-    },
-    ClassicValidateCommit {
-        member_id: String,
-        group_instance_id: Option<String>,
-        generation_id: i32,
-        reply: oneshot::Sender<Option<i16>>,
     },
     /// Read-only classic snapshot for the admin/offset-delete handlers.
     ClassicInspect {
@@ -265,30 +265,16 @@ pub struct DescribeMember {
     pub is_classic: bool,
 }
 
-/// Encoded `GroupKindTag` for the `live_kind` atomic.
-const LIVE_KIND_CLASSIC: u8 = 0;
-const LIVE_KIND_CONSUMER: u8 = 1;
-
-fn encode_live_kind(kind: GroupKindTag) -> u8 {
-    match kind {
-        GroupKindTag::Classic => LIVE_KIND_CLASSIC,
-        GroupKindTag::Consumer => LIVE_KIND_CONSUMER,
-    }
-}
-
 #[derive(Debug)]
 pub struct GroupActorHandle {
     pub tx: mpsc::Sender<GroupActorMessage>,
-    /// Spawn-time protocol hint. Fixed for the actor's lifetime. Prefer
-    /// [`GroupActorHandle::live_kind`] for any routing/visibility decision that
-    /// depends on the group's CURRENT protocol — a KIP-848 live migration can
-    /// flip the group's kind in place after spawn, leaving this stale.
+    /// Spawn-time protocol hint. Fixed for the actor's lifetime — a KIP-848 live
+    /// migration can flip the group's kind in place after spawn, leaving this
+    /// stale. It is therefore used ONLY for spawn-time wiring (the initial
+    /// `Group::new_classic`/`new_consumer`) and replay assertions; every
+    /// routing/validation decision dispatches on the actor's LIVE `group.kind`
+    /// inside the actor, never on this field.
     pub kind: GroupKindTag,
-    /// LIVE protocol the actor's `Group` currently speaks. The actor stores the
-    /// new kind here on every in-place flip (upgrade classic→consumer, downgrade
-    /// consumer→classic), so a handler reading it sees the group's current
-    /// protocol rather than the spawn-time `kind`.
-    live_kind: Arc<std::sync::atomic::AtomicU8>,
     _task: JoinHandle<()>,
 }
 
@@ -302,7 +288,6 @@ impl GroupActorHandle {
         coordinator: Arc<super::GroupCoordinator>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(64);
-        let live_kind = Arc::new(std::sync::atomic::AtomicU8::new(encode_live_kind(kind)));
         let task = tokio::spawn(actor_loop(
             group_id,
             kind,
@@ -311,26 +296,11 @@ impl GroupActorHandle {
             offsets_log,
             coordinator,
             rx,
-            live_kind.clone(),
         ));
         Self {
             tx,
             kind,
-            live_kind,
             _task: task,
-        }
-    }
-
-    /// The protocol the actor's `Group` currently speaks. Reflects in-place
-    /// KIP-848 migration flips, unlike the spawn-time [`kind`](Self::kind).
-    /// `Relaxed` is sufficient: the handle and actor coordinate through the
-    /// mailbox/registry, so a momentarily-stale read at worst routes one RPC to
-    /// the actor, which then answers against its live `group.kind`.
-    #[must_use]
-    pub fn live_kind(&self) -> GroupKindTag {
-        match self.live_kind.load(std::sync::atomic::Ordering::Relaxed) {
-            LIVE_KIND_CONSUMER => GroupKindTag::Consumer,
-            _ => GroupKindTag::Classic,
         }
     }
 }
@@ -349,7 +319,6 @@ struct ParkedWaiters {
 }
 
 #[allow(clippy::too_many_lines)] // one match arm per message variant; splitting hurts readability
-#[allow(clippy::too_many_arguments)] // per-actor wiring (config/metadata/log/coordinator/live_kind)
 async fn actor_loop(
     group_id: String,
     kind: GroupKindTag,
@@ -358,23 +327,11 @@ async fn actor_loop(
     offsets_log: Arc<dyn OffsetsLog>,
     coordinator: Arc<super::GroupCoordinator>,
     mut rx: mpsc::Receiver<GroupActorMessage>,
-    live_kind: Arc<std::sync::atomic::AtomicU8>,
 ) {
     let mut group = match kind {
         GroupKindTag::Classic => Group::new_classic(group_id),
         GroupKindTag::Consumer => Group::new_consumer(group_id),
     };
-    // Defensive: align the handle's live-kind atomic with the actual `group`
-    // kind at startup (equals the spawn `kind`). Every in-place flip below
-    // restores this invariant via `store`.
-    live_kind.store(
-        encode_live_kind(if group.is_classic() {
-            GroupKindTag::Classic
-        } else {
-            GroupKindTag::Consumer
-        }),
-        std::sync::atomic::Ordering::Relaxed,
-    );
     let mut parked = ParkedWaiters::default();
     // A single 1-second session-expiry tick, kind-agnostic. The tick arm
     // dispatches on the live `group.kind`, so the cadence must not depend on
@@ -424,10 +381,6 @@ async fn actor_loop(
                                     break;
                                 }
                                 *group.kind_mut() = GroupKind::Consumer(new_state);
-                                live_kind.store(
-                                    LIVE_KIND_CONSUMER,
-                                    std::sync::atomic::Ordering::Relaxed,
-                                );
                             } else {
                                 // TODO(kip-848): confirm against apache/kafka:4.0.0 — an
                                 // un-upgradable/disallowed classic group appears to surface as
@@ -469,7 +422,6 @@ async fn actor_loop(
                         // remains. The reply for this RPC is already sent above.
                         if let Err(e) = maybe_downgrade(
                             &mut group, &config, &*metadata, &*offsets_log, &coordinator,
-                            &live_kind,
                         ).await {
                             tracing::warn!(
                                 group_id = %group.group_id, error = %e,
@@ -478,12 +430,21 @@ async fn actor_loop(
                             break;
                         }
                     }
-                    GroupActorMessage::OffsetValidate { member_id, member_epoch, reply } => {
-                        let result = match group.as_consumer().and_then(|s| s.members.get(&member_id)) {
-                            None => Err(codes::UNKNOWN_MEMBER_ID),
-                            Some(m) if member_epoch < m.member_epoch => Err(codes::STALE_MEMBER_EPOCH),
-                            Some(m) if member_epoch > m.member_epoch => Err(codes::FENCED_MEMBER_EPOCH),
-                            Some(_) => Ok(()),
+                    GroupActorMessage::ValidateCommit { member_id, group_instance_id, generation_or_epoch, reply } => {
+                        let result: Result<(), i16> = if let Some(s) = group.as_consumer() {
+                            match s.members.get(&member_id) {
+                                None => Err(codes::UNKNOWN_MEMBER_ID),
+                                Some(m) if generation_or_epoch < m.member_epoch => Err(codes::STALE_MEMBER_EPOCH),
+                                Some(m) if generation_or_epoch > m.member_epoch => Err(codes::FENCED_MEMBER_EPOCH),
+                                Some(_) => Ok(()),
+                            }
+                        } else if let Some(s) = group.as_classic() {
+                            match classic_ops::validate_commit(s, &member_id, group_instance_id.as_deref(), generation_or_epoch) {
+                                None => Ok(()),
+                                Some(code) => Err(code),
+                            }
+                        } else {
+                            Ok(())
                         };
                         let _ = reply.send(result);
                     }
@@ -595,16 +556,6 @@ async fn actor_loop(
                             let _ = reply.send(Vec::new());
                         }
                     }
-                    GroupActorMessage::ClassicValidateCommit {
-                        member_id, group_instance_id, generation_id, reply,
-                    } => {
-                        let code = group.as_classic().and_then(|s| {
-                            classic_ops::validate_commit(
-                                s, &member_id, group_instance_id.as_deref(), generation_id,
-                            )
-                        });
-                        let _ = reply.send(code);
-                    }
                     GroupActorMessage::ClassicInspect { reply } => {
                         if let Some(state) = group.as_classic() {
                             let _ = reply.send(build_classic_view(state));
@@ -649,14 +600,6 @@ async fn actor_loop(
                     }
                     GroupActorMessage::ClassicSeed(seeded) => {
                         group = *seeded;
-                        live_kind.store(
-                            encode_live_kind(if group.is_classic() {
-                                GroupKindTag::Classic
-                            } else {
-                                GroupKindTag::Consumer
-                            }),
-                            std::sync::atomic::Ordering::Relaxed,
-                        );
                     }
                     GroupActorMessage::Shutdown(reply) => {
                         let _ = reply.send(());
@@ -665,8 +608,6 @@ async fn actor_loop(
                     #[cfg(test)]
                     GroupActorMessage::TestForceConsumerKind => {
                         group = Group::new_consumer(group.group_id.clone());
-                        live_kind
-                            .store(LIVE_KIND_CONSUMER, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -687,7 +628,6 @@ async fn actor_loop(
                     // members → flip back to classic in place.
                     if let Err(e) = maybe_downgrade(
                         &mut group, &config, &*metadata, &*offsets_log, &coordinator,
-                        &live_kind,
                     ).await {
                         tracing::warn!(
                             group_id = %gid, error = %e,
@@ -866,7 +806,6 @@ async fn maybe_downgrade(
     metadata: &dyn MetadataProvider,
     offsets_log: &dyn OffsetsLog,
     coordinator: &super::GroupCoordinator,
-    live_kind: &std::sync::atomic::AtomicU8,
 ) -> Result<bool, crate::error::BrokerError> {
     let Some(state) = group.as_consumer() else {
         return Ok(false);
@@ -918,7 +857,6 @@ async fn maybe_downgrade(
     offsets_log.append(batch).await?;
     coordinator.mark_classic_after_downgrade(&group_id);
     *group.kind_mut() = GroupKind::Classic(classic);
-    live_kind.store(LIVE_KIND_CLASSIC, std::sync::atomic::Ordering::Relaxed);
     Ok(true)
 }
 
@@ -2381,19 +2319,19 @@ mod tests {
         assert!(committed.get(&("t".to_string(), 0)).unwrap().offset == 42);
 
         // Classic offset-commit validate: a simple consumer (no member/instance)
-        // is allowed.
+        // is allowed. `ValidateCommit` dispatches on the live (classic) kind.
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
-            .send(GroupActorMessage::ClassicValidateCommit {
+            .send(GroupActorMessage::ValidateCommit {
                 member_id: String::new(),
                 group_instance_id: None,
-                generation_id: -1,
+                generation_or_epoch: -1,
                 reply: tx,
             })
             .await
             .unwrap();
-        assert!(rx.await.unwrap().is_none());
+        assert!(rx.await.unwrap() == Ok(()));
 
         // Classic Heartbeat for an unknown member on an empty group.
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -3156,6 +3094,51 @@ mod tests {
         rx.await.unwrap()
     }
 
+    /// A classic member leaves the group (v3 single-member leave list).
+    async fn classic_leave(handle: &GroupActorHandle, member_id: &str) -> Vec<MemberResponse> {
+        use crabka_protocol::owned::leave_group_request::MemberIdentity;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ClassicLeave {
+                req: LeaveGroupRequest {
+                    group_id: "g".into(),
+                    members: vec![MemberIdentity {
+                        member_id: member_id.into(),
+                        group_instance_id: None,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+                version: 3,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
+    /// Validate an offset commit against the group's LIVE kind via the single
+    /// `ValidateCommit` message.
+    async fn validate_commit(
+        handle: &GroupActorHandle,
+        member_id: &str,
+        generation_or_epoch: i32,
+    ) -> Result<(), i16> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        handle
+            .tx
+            .send(GroupActorMessage::ValidateCommit {
+                member_id: member_id.into(),
+                group_instance_id: None,
+                generation_or_epoch,
+                reply: tx,
+            })
+            .await
+            .unwrap();
+        rx.await.unwrap()
+    }
+
     /// Round-trip the kind-agnostic committed-offset store.
     async fn fetch_committed(
         handle: &GroupActorHandle,
@@ -3366,15 +3349,16 @@ mod tests {
     /// a group SPAWNED as a consumer group (its first RPC was a native
     /// `ConsumerGroupHeartbeat`, so `handle.kind == Consumer`) that later hosts a
     /// classic member and then DOWNGRADES in place when the last native member
-    /// leaves. The handle's spawn-time `kind` stays `Consumer` and is now stale;
-    /// `handle.live_kind()` must report the LIVE `Classic`.
+    /// leaves. The handle's spawn-time `kind` stays `Consumer` and is now stale.
     ///
-    /// The defect: `offset_commit::validate` pre-dispatched on `handle.kind`, so
-    /// a downgraded classic member's offset commit was routed to the next-gen
-    /// `OffsetValidate` path and rejected with `UNKNOWN_MEMBER_ID` (the group is
-    /// no longer consumer-kind, so `group.as_consumer()` is `None`). With the fix
-    /// it dispatches on `live_kind()` → the classic `ClassicValidateCommit`
-    /// path, which finds the re-expressed classic member and accepts the commit.
+    /// The defect: `offset_commit::validate` pre-dispatched on a per-handle kind
+    /// mirror, so a downgraded classic member's offset commit was at risk of
+    /// being routed to the next-gen epoch path (`group.as_consumer()` is now
+    /// `None`, so it would reject with `UNKNOWN_MEMBER_ID`). With the
+    /// single-source-of-truth fix the one `ValidateCommit` message dispatches on
+    /// the actor's LIVE `group.kind` — now classic — and `classic_ops::
+    /// validate_commit` finds the re-expressed classic member and accepts the
+    /// commit (`Ok(())`).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn spawned_consumer_group_downgrade_allows_classic_offset_commit() {
         use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
@@ -3388,7 +3372,6 @@ mod tests {
             handle.kind == GroupKindTag::Consumer,
             "the group must be spawned consumer-kind"
         );
-        assert!(handle.live_kind() == GroupKindTag::Consumer);
 
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
         assert!(up.error_code == codes::NONE);
@@ -3401,10 +3384,10 @@ mod tests {
         // The native consumer member leaves (member_epoch -1). It was the only
         // native member and a hosted classic member remains → DOWNGRADE in
         // place. The group is now live-Classic but the handle was spawned
-        // Consumer. `maybe_downgrade` runs inside the Heartbeat handler AFTER
-        // the reply is sent, so we must round-trip one more message (the
-        // `classic_inspect` below) to be sure the in-place flip has completed
-        // before reading `live_kind()`.
+        // Consumer (its `kind` field stays stale). `maybe_downgrade` runs inside
+        // the Heartbeat handler AFTER the reply is sent, so we round-trip one
+        // more message (the `classic_inspect` below) to be sure the in-place
+        // flip has completed before validating.
         let leave = consumer_heartbeat(&handle, &native, -1, None).await;
         assert!(leave.error_code == codes::NONE);
 
@@ -3414,63 +3397,145 @@ mod tests {
         // downgrade completed (only a classic-kind group answers it; the actor
         // processes it strictly after the leave's `maybe_downgrade`).
         let view = classic_inspect(&handle).await;
-
-        // The handle's spawn-time `kind` is stale; the LIVE kind is now Classic.
+        // The handle's spawn-time `kind` is unchanged (and stale) — validation
+        // must NOT consult it.
         assert!(
             handle.kind == GroupKindTag::Consumer,
             "spawn-time kind unchanged"
         );
-        assert!(
-            handle.live_kind() == GroupKindTag::Classic,
-            "live_kind must reflect the in-place downgrade to classic"
-        );
-
         assert!(
             view.members.iter().any(|m| m.member_id == "m-classic"),
             "the hosted classic member must survive the downgrade"
         );
         let generation = view.generation_id;
 
-        // Prove the fix at the routing boundary `offset_commit::validate` uses.
-        //
-        // (a) The CORRECT (live-kind Classic) path — `ClassicValidateCommit` —
-        //     accepts the downgraded classic member's commit: None (no error).
+        // Prove the fix at the routing boundary `offset_commit::validate` uses:
+        // the single `ValidateCommit` message dispatches on the actor's LIVE
+        // `group.kind` (now classic) and accepts the downgraded classic member's
+        // commit (`Ok(())`). Pre-refactor, a handle-side mirror could route this
+        // to the consumer epoch path and reject with `UNKNOWN_MEMBER_ID`.
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
             .tx
-            .send(GroupActorMessage::ClassicValidateCommit {
+            .send(GroupActorMessage::ValidateCommit {
                 member_id: "m-classic".into(),
                 group_instance_id: None,
-                generation_id: generation,
+                generation_or_epoch: generation,
                 reply: tx,
             })
             .await
             .unwrap();
-        let classic_result = rx.await.unwrap();
+        let result = rx.await.unwrap();
         assert!(
-            classic_result.is_none(),
-            "the classic validate-commit path must accept the downgraded member (got {classic_result:?})"
+            result == Ok(()),
+            "ValidateCommit must dispatch on the live (classic) kind and accept \
+             the downgraded member (got {result:?})"
+        );
+    }
+
+    /// Regression (user-requested): a group that downgraded in place becomes
+    /// deletable. Spawn a CONSUMER group (first RPC a `ConsumerGroupHeartbeat`),
+    /// host a classic member, then downgrade (the native consumer leaves). The
+    /// handle's spawn-time `kind` is stale `Consumer`, but `delete_group` now
+    /// dispatches on `ClassicInspect`'s live-kind reply — the downgraded group
+    /// answers as classic, so a non-empty group reports `NonEmpty` (NOT
+    /// `NotFound`), proving delete sees it as classic. Pre-refactor the stale
+    /// `handle.kind == Consumer` gate short-circuited to `NotFound`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn downgraded_group_is_deletable_once_empty() {
+        use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
+        let (coord, _log) =
+            make_coordinator_with_topic_policy("t", 2, ConsumerGroupMigrationPolicy::Bidirectional);
+
+        // SPAWN consumer-kind; host a classic member; downgrade.
+        let handle = coord.get_or_create_consumer("g");
+        assert!(handle.kind == GroupKindTag::Consumer);
+        let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
+        assert!(up.error_code == codes::NONE);
+        let native = up.member_id.expect("native member id");
+        let join = classic_join(&handle, "m-classic", "t").await;
+        assert!(join.error_code == codes::NONE);
+        let leave = consumer_heartbeat(&handle, &native, -1, None).await;
+        assert!(leave.error_code == codes::NONE);
+
+        // Barrier: only a classic-kind group answers `ClassicInspect`, so this
+        // round-trip guarantees the downgrade completed. The lone hosted classic
+        // member keeps it non-empty.
+        let view = classic_inspect(&handle).await;
+        assert!(view.members.iter().any(|m| m.member_id == "m-classic"));
+
+        // The spawn-time kind is the stale `Consumer`; delete must not consult
+        // it. A non-empty downgraded (live-classic) group reports `NonEmpty`,
+        // NOT `NotFound` — proving delete sees it as classic.
+        assert!(handle.kind == GroupKindTag::Consumer);
+        assert!(
+            coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::NonEmpty),
+            "a downgraded non-empty group must report NonEmpty (seen as classic), \
+             not the stale-handle.kind NotFound"
         );
 
-        // (b) The STALE (spawn-kind Consumer) path — `OffsetValidate` — rejects
-        //     the same member with UNKNOWN_MEMBER_ID, because the live group is
-        //     no longer consumer-kind. This is exactly the rejection the bug
-        //     surfaced; dispatching on `live_kind()` avoids it.
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        handle
-            .tx
-            .send(GroupActorMessage::OffsetValidate {
-                member_id: "m-classic".into(),
-                member_epoch: generation,
-                reply: tx,
-            })
-            .await
-            .unwrap();
-        let stale_result = rx.await.unwrap();
+        // Drain the last hosted classic member so the group is empty, then it
+        // must be deletable.
+        let resp = classic_leave(&handle, "m-classic").await;
+        assert!(!resp.is_empty());
+        let view = classic_inspect(&handle).await;
         assert!(
-            stale_result == Err(codes::UNKNOWN_MEMBER_ID),
-            "the stale next-gen path rejects the downgraded classic member — \
-             dispatching on live_kind is what makes the commit succeed (got {stale_result:?})"
+            view.members.is_empty(),
+            "the group must be empty after the classic member leaves"
+        );
+        assert!(
+            coord.delete_group("g").await == Ok(()),
+            "an empty downgraded group must be deletable"
+        );
+    }
+
+    /// Regression (user-requested): an UPGRADED group runs the consumer epoch
+    /// fence on a native consumer member's commit. A classic group upgrades (a
+    /// native consumer heartbeats in), so the handle's spawn-time `kind` is the
+    /// stale `Classic`. `ValidateCommit` for that native member must dispatch on
+    /// the LIVE (consumer) kind and apply the epoch fence: a STALE epoch (<
+    /// current) → `STALE_MEMBER_EPOCH`, a FENCED epoch (> current) →
+    /// `FENCED_MEMBER_EPOCH`. Pre-refactor a spawned-Classic upgraded group sent
+    /// the classic validate path and SKIPPED the epoch check.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upgraded_group_fences_stale_native_consumer_commit() {
+        use crate::coordinator::unified::config::ConsumerGroupMigrationPolicy;
+        let (coord, _log) =
+            make_coordinator_with_topic_policy("t", 2, ConsumerGroupMigrationPolicy::Bidirectional);
+
+        // SPAWN classic-kind via a seeded classic member, then UPGRADE by having
+        // a native consumer heartbeat in. The handle's spawn-time `kind` stays
+        // the stale `Classic`.
+        let handle = seed_classic_member(&coord, "m1", "t", None);
+        assert!(handle.kind == GroupKindTag::Classic);
+        let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
+        assert!(up.error_code == codes::NONE);
+        let native = up.member_id.expect("native member id");
+        let current_epoch = up.member_epoch;
+
+        // The handle's spawn-time kind is the stale `Classic`; validation must
+        // not consult it — it must run the consumer epoch fence.
+        assert!(handle.kind == GroupKindTag::Classic);
+
+        // STALE epoch (< current) → STALE_MEMBER_EPOCH.
+        let stale = validate_commit(&handle, &native, current_epoch - 1).await;
+        assert!(
+            stale == Err(codes::STALE_MEMBER_EPOCH),
+            "an upgraded group must run the consumer epoch fence (stale); got {stale:?}"
+        );
+
+        // FENCED epoch (> current) → FENCED_MEMBER_EPOCH.
+        let fenced = validate_commit(&handle, &native, current_epoch + 1).await;
+        assert!(
+            fenced == Err(codes::FENCED_MEMBER_EPOCH),
+            "an upgraded group must run the consumer epoch fence (fenced); got {fenced:?}"
+        );
+
+        // The current epoch is accepted.
+        let ok = validate_commit(&handle, &native, current_epoch).await;
+        assert!(
+            ok == Ok(()),
+            "the current epoch must be accepted; got {ok:?}"
         );
     }
 }

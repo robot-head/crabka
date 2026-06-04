@@ -122,9 +122,12 @@ pub(crate) async fn handle(
     //    classic group's current generation_id.
     //    TODO(KIP-1319 v4+): implement per-member epoch tracking and
     //    surface STALE_MEMBER_EPOCH (113) when supplied epoch < current.
-    // LIVE kind, not the spawn-time hint: a KIP-848 migration can flip the
-    // group's protocol in place after spawn.
-    if version >= 3 && req.generation_id >= 0 && handle.live_kind() == GroupKindTag::Classic {
+    // `ClassicInspect` dispatches on the actor's LIVE `group.kind`: it replies
+    // ONLY for a classic-kind group, so the `&& let Ok(view) = rx.await` guard
+    // skips the generation check for a consumer-kind group (including an
+    // UPGRADED one) without consulting the stale spawn-time `handle.kind`. A
+    // KIP-848 migration can flip the group's protocol in place after spawn.
+    if version >= 3 && req.generation_id >= 0 {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if handle
             .tx

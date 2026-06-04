@@ -485,13 +485,12 @@ impl GroupCoordinator {
     /// live members; `NotFound` if unknown / consumer.
     pub async fn delete_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
         let handle = self.find(group_id).ok_or(DeleteGroupError::NotFound)?;
-        // LIVE kind: a group that downgraded in place is now classic and must be
-        // deletable; an upgraded group is consumer and keeps the existing
-        // NotFound-for-non-classic behavior. The spawn-time `handle.kind` is
-        // stale across a KIP-848 flip.
-        if handle.live_kind() != GroupKindTag::Classic {
-            return Err(DeleteGroupError::NotFound);
-        }
+        // `ClassicInspect` replies ONLY when the actor's LIVE group is classic;
+        // a consumer-kind group drops the sender, so `rx.await` errors and we
+        // map that to `NotFound`. This single source of truth handles the
+        // KIP-848 flip cases: a group that downgraded in place is now classic
+        // and becomes deletable, while an upgraded (consumer) group is reported
+        // `NotFound` — without consulting the stale spawn-time `handle.kind`.
         let (tx, rx) = oneshot::channel();
         handle
             .tx
