@@ -701,6 +701,71 @@ fn dsl_count_no_logging_omits_changelog() {
     );
 }
 
+/// `KTable::filter` tombstone propagates to a downstream materialized store.
+///
+/// Topology: `table("in")` → `filter(v != "drop")` → `map_values_materialized(identity)`.
+/// After "k"="keep" is written, the downstream "view" store holds "keep".
+/// After "k"="drop" is written (fails the filter), the filter emits a tombstone;
+/// `map_values_materialized` must delete "k" from "view".
+#[test]
+fn dsl_ktable_filter_tombstone_propagates_downstream() {
+    let b = StreamsBuilder::new();
+    b.table(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("src"),
+    )
+    .filter(
+        |_k: &String, v: &String| v != "drop",
+        Materialized::with(StringSerde, StringSerde).as_store("filt"),
+    )
+    .map_values_materialized(
+        |v: &String| v.clone(),
+        Materialized::with(StringSerde, StringSerde).as_store("view"),
+    );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // 1. "k" = "keep" → present in the downstream materialized "view" store.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "keep".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.get_key_value_store::<String, String>("view")
+            .unwrap()
+            .get(&"k".to_string()),
+        Some("keep".to_string())
+    );
+
+    // 2. update "k" to a value that FAILS the filter → tombstone must DELETE "k"
+    //    from BOTH the filter store and the downstream "view" store.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "drop".to_string(),
+        1,
+    );
+    assert_eq!(
+        d.get_key_value_store::<String, String>("filt")
+            .unwrap()
+            .get(&"k".to_string()),
+        None,
+        "filter store must not hold the key after tombstone"
+    );
+    assert_eq!(
+        d.get_key_value_store::<String, String>("view")
+            .unwrap()
+            .get(&"k".to_string()),
+        None,
+        "downstream view store must delete the key when tombstone propagates"
+    );
+}
+
 /// `StreamsBuilder::table` materializes a source topic into a `KTable`, and
 /// `map_values` rewrites + re-materializes it. Exercises the table source +
 /// table map-values execution paths end-to-end through `to_stream`.
