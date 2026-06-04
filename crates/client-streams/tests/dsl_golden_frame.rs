@@ -24,3 +24,17 @@ fn stateless_chain_matches_jvm() {
     let wire = b.build("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "stateless_chain");
 }
+
+#[test]
+fn count_matches_jvm() {
+    use crabka_client_streams::{Grouped, I64Serde, Materialized};
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .select_key(|k: &String, _v: &String| k.clone())
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .count(Materialized::with(StringSerde, I64Serde)) // UNNAMED → store = KSTREAM-AGGREGATE-STATE-STORE-0000000002
+        .to_stream()
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "count");
+}

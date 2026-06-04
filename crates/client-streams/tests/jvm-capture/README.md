@@ -119,7 +119,8 @@ exactly what the real client sends.
 The JVM emits `replication_factor: -1` (the Streams `replication.factor` default) on every
 `TopicInfo` (changelog and repartition), and `partitions: 0` (the wire default, since the
 DSL doesn't pre-size these topics — the broker fills them in). The fixtures reflect this
-faithfully. Crabka's current `topology/wire.rs` defaults `replication_factor` to `0`; the
-downstream golden/encoder tasks (4-T8 onward) must align the encoder to emit `-1` (or set
-the replication factor) and to include the `topic_configs` the JVM attaches, to match these
-fixtures.
+faithfully. As of 4-T8, `topology/wire.rs` aligns the encoder to the JVM: every internal
+`TopicInfo` is emitted with `replication_factor: -1` and the sorted `topic_configs` the JVM
+attaches per kind (repartition: `cleanup.policy=delete`, `message.timestamp.type=CreateTime`,
+`retention.ms=-1`, `segment.bytes=52428800`; KV-store changelog: `cleanup.policy=compact`,
+`message.timestamp.type=CreateTime`), so the `count` fixture byte-matches.

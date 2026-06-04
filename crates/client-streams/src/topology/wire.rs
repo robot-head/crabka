@@ -1,6 +1,7 @@
 //! `GroupTopics` + `application_id` → the byte-exact `StreamsGroupHeartbeat`
 //! wire `Topology`. Every ordering rule here matches the JVM 4.x client.
 
+use crabka_protocol::owned::common::streams_group_heartbeat_request::key_value::KeyValue;
 use crabka_protocol::owned::common::streams_group_heartbeat_request::topic_info::TopicInfo;
 use crabka_protocol::owned::streams_group_heartbeat_request::{
     CopartitionGroup, Subtopology, Topology,
@@ -8,6 +9,44 @@ use crabka_protocol::owned::streams_group_heartbeat_request::{
 use serde::Serialize;
 
 use super::grouping::GroupTopics;
+
+/// `replication_factor` the JVM client sends for every internal topic: `-1`
+/// means "use the broker's `replication.factor` default" (KIP-1071 / the
+/// `StreamsGroupHeartbeat` `TopicInfo` convention).
+const INTERNAL_TOPIC_DEFAULT_RF: i16 = -1;
+
+/// Topic configs the JVM 4.x client attaches to a **repartition** topic, sorted
+/// by key (the wire array order the fixture pins).
+fn repartition_topic_configs() -> Vec<KeyValue> {
+    topic_configs([
+        ("cleanup.policy", "delete"),
+        ("message.timestamp.type", "CreateTime"),
+        ("retention.ms", "-1"),
+        ("segment.bytes", "52428800"),
+    ])
+}
+
+/// Topic configs the JVM 4.x client attaches to a key/value-store **changelog**
+/// topic, sorted by key.
+fn changelog_topic_configs() -> Vec<KeyValue> {
+    topic_configs([
+        ("cleanup.policy", "compact"),
+        ("message.timestamp.type", "CreateTime"),
+    ])
+}
+
+/// Build the `KeyValue` config array from `(key, value)` pairs (already in
+/// sorted order at the call site).
+fn topic_configs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<KeyValue> {
+    pairs
+        .into_iter()
+        .map(|(key, value)| KeyValue {
+            key: key.to_string(),
+            value: value.to_string(),
+            ..Default::default()
+        })
+        .collect()
+}
 
 /// Build the wire `Topology` (epoch 0, sorted subtopologies + topic arrays).
 pub(crate) fn to_wire(groups: &[GroupTopics], application_id: &str) -> Topology {
@@ -35,7 +74,8 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
         .map(|name| TopicInfo {
             name: name.clone(),
             partitions: 0,
-            replication_factor: 0,
+            replication_factor: INTERNAL_TOPIC_DEFAULT_RF,
+            topic_configs: repartition_topic_configs(),
             ..Default::default()
         })
         .collect();
@@ -47,7 +87,8 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
         .map(|store| TopicInfo {
             name: format!("{app}-{store}-changelog"),
             partitions: 0,
-            replication_factor: 0,
+            replication_factor: INTERNAL_TOPIC_DEFAULT_RF,
+            topic_configs: changelog_topic_configs(),
             ..Default::default()
         })
         .collect();
@@ -324,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn changelog_topics_named_and_zero_partitions() {
+    fn changelog_topics_named_zero_partitions_default_rf_and_configs() {
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
@@ -336,6 +377,50 @@ mod tests {
         check!(cl.len() == 1);
         check!(cl[0].name == "my-app-store-changelog");
         check!(cl[0].partitions == 0);
+        // JVM-faithful internal-topic encoding: RF = -1 (broker default) and the
+        // sorted KV-store changelog configs.
+        check!(cl[0].replication_factor == -1);
+        let configs: Vec<(&str, &str)> = cl[0]
+            .topic_configs
+            .iter()
+            .map(|kv| (kv.key.as_str(), kv.value.as_str()))
+            .collect();
+        check!(
+            configs
+                == vec![
+                    ("cleanup.policy", "compact"),
+                    ("message.timestamp.type", "CreateTime"),
+                ]
+        );
+    }
+
+    #[test]
+    fn repartition_source_topics_carry_default_rf_and_sorted_configs() {
+        let groups = vec![GroupTopics {
+            id: "1".into(),
+            repartition_source_topics: vec!["my-app-store-repartition".into()],
+            ..Default::default()
+        }];
+        let topo = to_wire(&groups, "my-app");
+        let rp = &topo.subtopologies[0].repartition_source_topics;
+        check!(rp.len() == 1);
+        check!(rp[0].name == "my-app-store-repartition");
+        check!(rp[0].partitions == 0);
+        check!(rp[0].replication_factor == -1);
+        let configs: Vec<(&str, &str)> = rp[0]
+            .topic_configs
+            .iter()
+            .map(|kv| (kv.key.as_str(), kv.value.as_str()))
+            .collect();
+        check!(
+            configs
+                == vec![
+                    ("cleanup.policy", "delete"),
+                    ("message.timestamp.type", "CreateTime"),
+                    ("retention.ms", "-1"),
+                    ("segment.bytes", "52428800"),
+                ]
+        );
     }
 
     #[test]
