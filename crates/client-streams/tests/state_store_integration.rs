@@ -10,7 +10,8 @@ use std::time::Duration;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_streams::{
-    I64Serde, KafkaStreams, Processor, ProcessorContext, Record, StringSerde, Topology,
+    Consumed, I64Serde, KafkaStreams, Processor, ProcessorContext, Produced, Record, StringSerde,
+    Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
@@ -81,14 +82,19 @@ impl Processor<String, String, String, i64> for Counter {
 
 fn counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let mut topo = Topology::new();
-    topo.add_source("src", ["stream-in"], StringSerde, StringSerde);
-    topo.add_state_store("counts", StringSerde, I64Serde, ["c"]);
-    topo.add_processor(
-        "c",
-        || Box::new(Counter) as Box<dyn Processor<String, String, String, i64>>,
-        ["src"],
+    topo.add_source(
+        "src",
+        ["stream-in"],
+        Consumed::with(StringSerde, StringSerde),
     );
-    topo.add_sink("out", "stream-out", ["c"], StringSerde, I64Serde);
+    topo.add_state_store("counts", StringSerde, I64Serde, ["c"]);
+    topo.add_processor("c", || Counter, ["src"]);
+    topo.add_sink(
+        "out",
+        "stream-out",
+        ["c"],
+        Produced::with(StringSerde, I64Serde),
+    );
     topo.build(app_id).unwrap()
 }
 

@@ -77,7 +77,8 @@
 //!
 //! ```
 //! use crabka_client_streams::{
-//!     I64Serde, Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver,
+//!     Consumed, I64Serde, Processor, ProcessorContext, Produced, Record, StringSerde, Topology,
+//!     TopologyTestDriver,
 //! };
 //!
 //! struct Counter;
@@ -91,25 +92,21 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! topo.add_source("src", ["in"], StringSerde, StringSerde);
+//! topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
 //! topo.add_state_store("counts", StringSerde, I64Serde, ["c"]);
-//! topo.add_processor(
-//!     "c",
-//!     || Box::new(Counter) as Box<dyn Processor<String, String, String, i64>>,
-//!     ["src"],
-//! );
-//! topo.add_sink("out", "out", ["c"], StringSerde, I64Serde);
+//! topo.add_processor("c", || Counter, ["src"]);
+//! topo.add_sink("out", "out", ["c"], Produced::with(StringSerde, I64Serde));
 //! let built = topo.build("app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
-//! driver.pipe_input("in", &StringSerde, &StringSerde, None, "a".to_string(), 0);
-//! driver.pipe_input("in", &StringSerde, &StringSerde, None, "a".to_string(), 1);
+//! driver.pipe_input("in", Consumed::with(StringSerde, StringSerde), None, "a".to_string(), 0);
+//! driver.pipe_input("in", Consumed::with(StringSerde, StringSerde), None, "a".to_string(), 1);
 //! assert_eq!(
-//!     driver.read_output("out", &StringSerde, &I64Serde),
+//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
 //!     Some((Some("a".to_string()), 1_i64)),
 //! );
 //! assert_eq!(
-//!     driver.read_output("out", &StringSerde, &I64Serde),
+//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
 //!     Some((Some("a".to_string()), 2_i64)),
 //! );
 //! let store = driver.get_key_value_store::<String, i64>("counts").unwrap();

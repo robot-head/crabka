@@ -215,11 +215,13 @@ mod tests {
             timestamp: 5,
         };
         let children = [1usize];
+        let mut stores = crate::store::registry::StoreRegistry::default();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
             output: &mut output,
             record_ctx: &rc,
+            stores: &mut stores,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         boxed.init(&mut ctx); // forwards to Upper's default no-op

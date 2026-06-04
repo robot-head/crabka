@@ -295,19 +295,33 @@ mod tests {
             }
         }
         let mut t = Topology::new();
-        t.add_source("src", ["in"], StringSerde, StringSerde);
+        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
         t.add_state_store("counts", StringSerde, I64Serde, ["c"]);
-        t.add_processor(
-            "c",
-            || Box::new(Counter) as Box<dyn Processor<String, String, String, i64>>,
-            ["src"],
-        );
-        t.add_sink("out", "out", ["c"], StringSerde, I64Serde);
+        t.add_processor("c", || Counter, ["src"]);
+        t.add_sink("out", "out", ["c"], Produced::with(StringSerde, I64Serde));
         let mut d = TopologyTestDriver::new(&t.build("app").unwrap()).unwrap();
-        d.pipe_input("in", &StringSerde, &StringSerde, None, "a".to_string(), 0);
-        d.pipe_input("in", &StringSerde, &StringSerde, None, "a".to_string(), 1);
-        check!(d.read_output("out", &StringSerde, &I64Serde) == Some((Some("a".to_string()), 1)));
-        check!(d.read_output("out", &StringSerde, &I64Serde) == Some((Some("a".to_string()), 2)));
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            None,
+            "a".to_string(),
+            0,
+        );
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            None,
+            "a".to_string(),
+            1,
+        );
+        check!(
+            d.read_output("out", Produced::with(StringSerde, I64Serde))
+                == Some((Some("a".to_string()), 1))
+        );
+        check!(
+            d.read_output("out", Produced::with(StringSerde, I64Serde))
+                == Some((Some("a".to_string()), 2))
+        );
         let store = d.get_key_value_store::<String, i64>("counts").unwrap();
         check!(store.get(&"a".to_string()) == Some(2));
     }
