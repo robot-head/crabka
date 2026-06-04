@@ -1,0 +1,45 @@
+{
+  "epoch": 0,
+  "subtopologies": [
+    {
+      "subtopology_id": "0",
+      "source_topics": ["in"],
+      "source_topic_regex": [],
+      "repartition_sink_topics": ["app-KSTREAM-AGGREGATE-STATE-STORE-0000000002-repartition"],
+      "repartition_source_topics": [],
+      "state_changelog_topics": [],
+      "copartition_groups": []
+    },
+    {
+      "subtopology_id": "1",
+      "source_topics": [],
+      "source_topic_regex": [],
+      "repartition_sink_topics": [],
+      "repartition_source_topics": [
+        {
+          "name": "app-KSTREAM-AGGREGATE-STATE-STORE-0000000002-repartition",
+          "partitions": 0,
+          "replication_factor": -1,
+          "topic_configs": [
+            { "key": "cleanup.policy", "value": "delete" },
+            { "key": "message.timestamp.type", "value": "CreateTime" },
+            { "key": "retention.ms", "value": "-1" },
+            { "key": "segment.bytes", "value": "52428800" }
+          ]
+        }
+      ],
+      "state_changelog_topics": [
+        {
+          "name": "app-KSTREAM-AGGREGATE-STATE-STORE-0000000002-changelog",
+          "partitions": 0,
+          "replication_factor": -1,
+          "topic_configs": [
+            { "key": "cleanup.policy", "value": "compact" },
+            { "key": "message.timestamp.type", "value": "CreateTime" }
+          ]
+        }
+      ],
+      "copartition_groups": []
+    }
+  ]
+}
