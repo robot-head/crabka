@@ -231,9 +231,17 @@ mod tests {
         }
     }
 
+    type SentRecord = (
+        String,
+        Option<i32>,
+        Option<bytes::Bytes>,
+        Option<bytes::Bytes>,
+    );
+
     #[derive(Default)]
     struct CollectProducer {
-        sent: StdMutex<Vec<(String, Option<bytes::Bytes>)>>,
+        /// (topic, partition, key, value)
+        sent: StdMutex<Vec<SentRecord>>,
         flushes: StdMutex<u32>,
     }
 
@@ -242,10 +250,14 @@ mod tests {
         async fn send(
             &self,
             topic: &str,
-            _k: Option<bytes::Bytes>,
+            partition: Option<i32>,
+            k: Option<bytes::Bytes>,
             v: Option<bytes::Bytes>,
         ) -> Result<(), crate::StreamsClientError> {
-            self.sent.lock().unwrap().push((topic.to_string(), v));
+            self.sent
+                .lock()
+                .unwrap()
+                .push((topic.to_string(), partition, k, v));
             Ok(())
         }
 
@@ -345,7 +357,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|(t, v)| t == "out" && v.as_deref() == Some(b"HI".as_ref()))
+                .any(|(t, _p, _k, v)| t == "out" && v.as_deref() == Some(b"HI".as_ref()))
         );
         check!(
             store_c
@@ -415,7 +427,8 @@ mod tests {
         let sent = producer_c.sent.lock().unwrap();
         check!(
             sent.iter()
-                .any(|(t, v)| t == "out" && v.as_deref() == Some(8i64.to_be_bytes().as_ref())),
+                .any(|(t, _p, _k, v)| t == "out"
+                    && v.as_deref() == Some(8i64.to_be_bytes().as_ref())),
             "after restore with N=7, processing 'a' must emit count = 8"
         );
     }

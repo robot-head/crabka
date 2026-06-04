@@ -16,7 +16,6 @@ pub(crate) struct StreamTask {
     subtopology_id: String,
     graph: Graph,
     /// The co-partitioned partition index for all source + changelog topics.
-    #[allow(dead_code)]
     partition: i32,
     positions: HashMap<(String, i32), i64>,
     pending: HashMap<(String, i32), i64>,
@@ -49,7 +48,6 @@ impl StreamTask {
     }
 
     /// Call `Processor::init` on every node in the graph.
-    #[allow(dead_code)]
     pub fn init(&mut self) -> Result<(), StreamsClientError> {
         self.graph
             .init_processors()
@@ -57,14 +55,12 @@ impl StreamTask {
     }
 
     /// Call `Processor::close` on every node in the graph.
-    #[allow(dead_code)]
     pub fn close_processors(&mut self) {
         self.graph.close_processors();
     }
 
     /// Restore each store from its changelog topic (reads from offset 0 until
     /// an empty batch). Changelog logging is disabled for the duration.
-    #[allow(dead_code)]
     pub async fn restore(&mut self, fetcher: &dyn RecordFetcher) -> Result<(), StreamsClientError> {
         self.graph.set_logging(false);
         let names = self.graph.stores.names();
@@ -140,13 +136,20 @@ impl StreamTask {
                     )
                     .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
                 for out in self.graph.take_output() {
-                    self.producer.send(&out.topic, out.key, out.value).await?;
+                    // Sink / repartition output: key-hash routing (partition = None).
+                    self.producer
+                        .send(&out.topic, None, out.key, out.value)
+                        .await?;
                 }
             }
             // Drain changelog entries AFTER all sink output for this partition
             // but BEFORE the flush/commit barrier (at-least-once).
+            // Changelog sends are pinned to self.partition so restore() can
+            // read them back by fetching only the task partition.
             for (cl_topic, key, value) in self.graph.drain_changelogs() {
-                self.producer.send(&cl_topic, Some(key), value).await?;
+                self.producer
+                    .send(&cl_topic, Some(self.partition), Some(key), value)
+                    .await?;
             }
             let next = batch.next_offset(offset);
             self.positions.insert((topic.clone(), partition), next);
@@ -295,9 +298,17 @@ mod tests {
         }
     }
 
+    type SentRecord = (
+        String,
+        Option<i32>,
+        Option<bytes::Bytes>,
+        Option<bytes::Bytes>,
+    );
+
     #[derive(Default)]
     struct CollectProducer {
-        sent: StdMutex<Vec<(String, Option<bytes::Bytes>)>>,
+        /// (topic, partition, key, value)
+        sent: StdMutex<Vec<SentRecord>>,
         flushes: StdMutex<u32>,
     }
 
@@ -306,10 +317,14 @@ mod tests {
         async fn send(
             &self,
             topic: &str,
-            _k: Option<bytes::Bytes>,
+            partition: Option<i32>,
+            k: Option<bytes::Bytes>,
             v: Option<bytes::Bytes>,
         ) -> Result<(), crate::StreamsClientError> {
-            self.sent.lock().unwrap().push((topic.to_string(), v));
+            self.sent
+                .lock()
+                .unwrap()
+                .push((topic.to_string(), partition, k, v));
             Ok(())
         }
 
@@ -388,7 +403,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|(t, v)| t == "out" && v.as_deref() == Some(b"HI".as_ref()))
+                .any(|(t, _p, _k, v)| t == "out" && v.as_deref() == Some(b"HI".as_ref()))
         );
         check!(*producer.flushes.lock().unwrap() >= 1);
         check!(store.committed.lock().unwrap().get(&("in".to_string(), 0)) == Some(&1)); // next offset after offset 0
@@ -427,7 +442,7 @@ mod tests {
 
         {
             let sent_a = producer_a.sent.lock().unwrap();
-            let out_topics: Vec<&str> = sent_a.iter().map(|(t, _)| t.as_str()).collect();
+            let out_topics: Vec<&str> = sent_a.iter().map(|(t, _p, _k, _v)| t.as_str()).collect();
             check!(
                 out_topics.contains(&"out"),
                 "sink record must be produced to 'out'"
@@ -494,8 +509,72 @@ mod tests {
         check!(
             sent_b
                 .iter()
-                .any(|(t, v)| t == "out" && v.as_deref() == Some(6i64.to_be_bytes().as_ref())),
+                .any(|(t, _p, _k, v)| t == "out"
+                    && v.as_deref() == Some(6i64.to_be_bytes().as_ref())),
             "after restore with N=5, processing 'a' must emit count = 6"
+        );
+    }
+
+    /// Regression test: changelog sends must be pinned to the task partition
+    /// (matching the JVM `RecordCollector` behaviour). Sink sends must keep
+    /// key-hash routing (partition == None).
+    ///
+    /// Uses a non-zero task partition (2) so the test is discriminating:
+    /// a bug that passes `None` will fail the changelog assertion, and
+    /// a bug that passes `Some(2)` for sink output will fail the sink assertion.
+    #[tokio::test]
+    async fn changelog_sends_pin_task_partition() {
+        const TASK_PARTITION: i32 = 2;
+
+        let producer = std::sync::Arc::new(CollectProducer::default());
+        let store = std::sync::Arc::new(MemStore::default());
+        let fetcher = ScriptedFetcher::new(vec![(
+            ("in".to_string(), TASK_PARTITION, 0),
+            FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: None,
+                    value: Some("x".into()),
+                    timestamp: -1,
+                }],
+            },
+        )]);
+
+        let mut task = StreamTask::new(
+            "0".into(),
+            stateful_built().instantiate().unwrap(),
+            vec![TopicPartition {
+                topic: "in".into(),
+                partition: TASK_PARTITION,
+            }],
+            std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
+            std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+        );
+        task.init().unwrap();
+        task.process_once(&fetcher).await.unwrap();
+
+        let sent = producer.sent.lock().unwrap();
+
+        // Sink record (topic "out") must use key-hash routing: partition == None.
+        let sink_rec = sent
+            .iter()
+            .find(|(t, _p, _k, _v)| t == "out")
+            .expect("sink record must be produced to 'out'");
+        check!(
+            sink_rec.1.is_none(),
+            "sink send must use key-hash routing (partition None), got {:?}",
+            sink_rec.1
+        );
+
+        // Changelog record must be pinned to the task partition.
+        let cl_rec = sent
+            .iter()
+            .find(|(t, _p, _k, _v)| t == "app-counts-changelog")
+            .expect("changelog record must be produced to 'app-counts-changelog'");
+        check!(
+            cl_rec.1 == Some(TASK_PARTITION),
+            "changelog send must be pinned to task partition {TASK_PARTITION}, got {:?}",
+            cl_rec.1
         );
     }
 }

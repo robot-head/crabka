@@ -44,10 +44,17 @@ pub trait RecordFetcher: Send + Sync + 'static {
 
 #[async_trait::async_trait]
 pub trait RecordProducer: Send + Sync + 'static {
-    /// Enqueue a record to `topic` (producer default partitioner).
+    /// Enqueue a record to `topic`.
+    ///
+    /// `partition`:
+    /// - `None`  → use the producer's key-hash partitioner (correct for sink /
+    ///   repartition topics).
+    /// - `Some(p)` → pin to partition `p` (required for changelog topics so that
+    ///   [`StreamTask::restore`] can read back the record from the task partition).
     async fn send(
         &self,
         topic: &str,
+        partition: Option<i32>,
         key: Option<Bytes>,
         value: Option<Bytes>,
     ) -> Result<(), StreamsClientError>;

@@ -96,7 +96,6 @@ impl Graph {
 
     /// Call `init` on every node in index order. Nodes that don't override
     /// `ErasedNode::init` (sink, source) get the default no-op.
-    #[allow(dead_code)]
     pub fn init_processors(&mut self) -> Result<(), ProcessorError> {
         let n = self.nodes.len();
         for idx in 0..n {
@@ -123,7 +122,6 @@ impl Graph {
     }
 
     /// Call `close` on every node (in index order).
-    #[allow(dead_code)]
     pub fn close_processors(&mut self) {
         for node in &mut self.nodes {
             node.close();
@@ -131,7 +129,6 @@ impl Graph {
     }
 
     /// Drain every store's changelog buffer → `(changelog_topic, key, value)`.
-    #[allow(dead_code)]
     pub fn drain_changelogs(&mut self) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>)> {
         let mut out = Vec::new();
         for name in self.stores.names() {
@@ -147,7 +144,6 @@ impl Graph {
 
     /// Restore one changelog record into a named store (logging-off path is
     /// the caller's responsibility).
-    #[allow(dead_code)]
     pub fn restore_apply(
         &mut self,
         store_name: &str,
@@ -161,7 +157,6 @@ impl Graph {
 
     /// Toggle changelog logging on every store (off during restore, on during
     /// processing).
-    #[allow(dead_code)]
     pub fn set_logging(&mut self, on: bool) {
         for name in self.stores.names() {
             if let Some(s) = self.stores.get_mut(&name) {

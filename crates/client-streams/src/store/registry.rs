@@ -11,7 +11,6 @@ pub(crate) struct StoreRegistry {
     stores: HashMap<String, Box<dyn StateStore>>,
 }
 
-#[allow(dead_code)]
 impl StoreRegistry {
     pub fn insert(&mut self, store: Box<dyn StateStore>) {
         self.stores.insert(store.name().to_string(), store);
@@ -40,10 +39,6 @@ impl StoreRegistry {
     /// available on the returned `&mut dyn StateStore`.
     pub fn get_mut(&mut self, name: &str) -> Option<&mut dyn StateStore> {
         self.stores.get_mut(name).map(std::convert::AsMut::as_mut)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.stores.is_empty()
     }
 }
 
