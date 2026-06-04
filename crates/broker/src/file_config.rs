@@ -1316,6 +1316,37 @@ protocol = "Plaintext"
     }
 
     #[test]
+    fn apply_to_maps_connection_caps() {
+        use crate::config::BrokerConfig;
+
+        let src = r"
+max_connections = 100
+max_connections_per_ip = 8
+";
+        let file: FileConfig = toml::from_str(src).unwrap();
+        assert!(file.max_connections == Some(100));
+        assert!(file.max_connections_per_ip == Some(8));
+
+        let mut cfg = BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        assert!(cfg.max_connections == 100);
+        assert!(cfg.max_connections_per_ip == 8);
+    }
+
+    #[test]
+    fn apply_to_omitted_connection_caps_keep_default_unlimited() {
+        use crate::config::BrokerConfig;
+
+        let file: FileConfig = toml::from_str("broker_id = 0").unwrap();
+        assert!(file.max_connections == None);
+        let mut cfg = BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        // Omitted → unchanged from the (unlimited) BrokerConfig default.
+        assert!(cfg.max_connections == usize::MAX);
+        assert!(cfg.max_connections_per_ip == usize::MAX);
+    }
+
+    #[test]
     fn apply_to_does_not_clobber_non_default_broker_id() {
         use crate::config::BrokerConfig;
 
