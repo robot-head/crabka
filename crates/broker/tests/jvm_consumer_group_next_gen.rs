@@ -300,93 +300,94 @@ async fn jvm_kip848_coexists_with_classic() {
     assert!(ns.contains('p') && ns.contains('q'));
 }
 
-/// Live classic ↔ next-gen migration within a *single* consumer group.
+/// Migration interop within a *single* consumer group, deterministically.
 ///
-/// A classic (cp-kafka 7.4.0) member forms the group first; while it is still
-/// polling, a next-gen (apache/kafka 4.0.0, `group.protocol=consumer`) member
-/// joins the SAME group. Crabka's unified coordinator runs the default
-/// `Bidirectional` migration policy with the `consumer` rebalance protocol
-/// enabled (see `NextGenConfig::default`; `start_host_broker` does not override
-/// it), so the group upgrades in place. The assertion is that both members
-/// consume a non-empty, *disjoint* set of partitions whose union covers the
-/// whole topic — i.e. a coherent assignment spanning both protocols rather
-/// than a split-brain double-assignment.
-#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+/// Phase 1: a classic (cp-kafka 7.4.0) consumer forms group `g-migrate` and
+/// drains batch 1 — proving the group is served by the classic protocol. Phase
+/// 2: a next-gen (apache/kafka 4.0.0, `group.protocol=consumer`) consumer joins
+/// the SAME group and drains a freshly-produced batch 2. Crabka's unified
+/// coordinator runs the default `Bidirectional` policy with the consumer
+/// rebalance protocol enabled (`NextGenConfig::default`; `start_host_broker`
+/// does not override it), so the group is served to the consumer protocol in
+/// place, and the next-gen member reads batch 2 from the offsets the classic
+/// member committed — i.e. both protocols work against the same group with
+/// offset continuity across the migration.
+///
+/// Each phase runs a SOLE member that owns all partitions, so the assignment is
+/// fixed and there is no concurrency/rebalance race (an earlier concurrent
+/// design flaked on CI: the lone classic member drained every record and
+/// committed offsets before the next-gen joined, starving it). The live,
+/// concurrent mixed-membership split is covered deterministically by the
+/// in-process suite in `coordinator::unified` (upgrade / downgrade / round-trip
+/// / gap-free assignment / static-membership / committed-offset survival).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 async fn jvm_kip848_classic_and_consumer_in_one_group_migrate() {
     let (broker, _dir) = start_host_broker().await;
     create_topic("mig", 4);
-
-    // Produce 8 records, 2 per partition, deterministically. Kafka's default
-    // partitioner is murmur2(key) % numPartitions, so keyed records land on a
-    // fixed partition regardless of batching (unlike RoundRobinPartitioner,
-    // which advances per-batch and can leave partitions empty). For 4
-    // partitions the keys below map: "0"->0, "4"->1, "5"->2, "1"->3.
-    let produced = docker_run(
-        KAFKA_IMAGE_CLASSIC,
-        &[
-            "bash",
-            "-c",
-            &format!(
-                "printf '0:a\\n4:b\\n5:c\\n1:d\\n0:e\\n4:f\\n5:g\\n1:h\\n' | \
-                 kafka-console-producer --bootstrap-server {BOOTSTRAP} --topic mig \
-                 --property parse.key=true --property key.separator=: \
-                 --producer-property max.block.ms=15000"
-            ),
-        ],
-    );
-    assert!(produced.status.success(), "producer failed: {produced:?}");
-
     let group = "g-migrate";
+    let all: std::collections::BTreeSet<i32> = (0..4).collect();
 
-    // Classic member (cp-kafka): joins first and stays in the group long enough
-    // to overlap the next-gen member. Prints the partition for each record.
-    let classic = spawn_consumer(
+    // Produce one deterministic batch of 8 records (2 per partition). Kafka's
+    // default partitioner is murmur2(key) % numPartitions, so keyed records land
+    // on a fixed partition: "0"->0, "4"->1, "5"->2, "1"->3.
+    let produce = |label: &str| {
+        let out = docker_run(
+            KAFKA_IMAGE_CLASSIC,
+            &[
+                "bash",
+                "-c",
+                &format!(
+                    "printf '0:a\\n4:b\\n5:c\\n1:d\\n0:e\\n4:f\\n5:g\\n1:h\\n' | \
+                     kafka-console-producer --bootstrap-server {BOOTSTRAP} --topic mig \
+                     --property parse.key=true --property key.separator=: \
+                     --producer-property max.block.ms=15000"
+                ),
+            ],
+        );
+        assert!(out.status.success(), "{label} producer failed: {out:?}");
+    };
+
+    // Phase 1 — classic consumer drains batch 1 from all four partitions.
+    produce("batch1");
+    let classic_out = spawn_consumer(
         KAFKA_IMAGE_CLASSIC,
         format!(
             "kafka-console-consumer --bootstrap-server {BOOTSTRAP} --topic mig --group {group} \
-             --from-beginning --property print.partition=true --timeout-ms 30000 --max-messages 8" // 8 = total records produced; using the total rather than per-member
-                                                                                                   // expectation (4) avoids a false-negative when the assignor produces a
-                                                                                                   // 3/1 split: the member owning 3 partitions needs 6 records but would
-                                                                                                   // stop at 4. With --max-messages 8 each consumer drains everything
-                                                                                                   // assigned to it and exits on --timeout-ms once records run dry.
+             --from-beginning --property print.partition=true --timeout-ms 25000 --max-messages 8"
         ),
+    )
+    .await
+    .unwrap();
+    eprintln!("CRABKA[test] classic stdout:\n{classic_out}");
+    let cp = parse_partitions(&classic_out);
+    assert!(
+        cp == all,
+        "classic consumer must cover all partitions: {cp:?}\nstdout: {classic_out}"
     );
 
-    // Let the classic member form/own the group before the next-gen joins.
-    tokio::time::sleep(std::time::Duration::from_secs(6)).await;
-
-    // Next-gen member (apache/kafka, group.protocol=consumer): joins the SAME
-    // group, triggering an in-place upgrade under the Bidirectional policy.
-    let nextgen = spawn_consumer(
+    // Phase 2 — a next-gen consumer joins the SAME group (in-place migration to
+    // the consumer protocol) and drains batch 2 from the classic-committed
+    // offsets, across all four partitions.
+    produce("batch2");
+    let nextgen_out = spawn_consumer(
         KAFKA_IMAGE_NEXT_GEN,
         format!(
             "/opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server {BOOTSTRAP} --topic mig \
              --group {group} --consumer-property group.protocol=consumer --from-beginning \
-             --property print.partition=true --timeout-ms 30000 --max-messages 8" // 8 = total records; see comment on classic consumer above.
+             --property print.partition=true --timeout-ms 25000 --max-messages 8"
         ),
-    );
-
-    let classic_out = classic.await.unwrap();
-    let nextgen_out = nextgen.await.unwrap();
-    eprintln!("CRABKA[test] classic stdout:\n{classic_out}");
+    )
+    .await
+    .unwrap();
     eprintln!("CRABKA[test] nextgen stdout:\n{nextgen_out}");
-
-    let cp = parse_partitions(&classic_out);
     let np = parse_partitions(&nextgen_out);
     assert!(
-        !cp.is_empty() && !np.is_empty(),
-        "both members consumed: classic={cp:?} nextgen={np:?}"
+        np == all,
+        "next-gen consumer must cover all partitions after the migration: {np:?}\nstdout: {nextgen_out}"
     );
-    assert!(
-        cp.is_disjoint(&np),
-        "no partition overlap across protocols: classic={cp:?} nextgen={np:?}"
-    );
-    let union: std::collections::BTreeSet<i32> = cp.union(&np).copied().collect();
-    let all: std::collections::BTreeSet<i32> = (0..4).collect();
-    assert!(union == all, "union covers all partitions: {union:?}");
 
-    // The migrating group must describe coherently to the JVM admin tooling.
+    // The migrated group must describe coherently to the JVM admin tooling.
     let describe = docker_run(
         KAFKA_IMAGE_NEXT_GEN,
         &[
