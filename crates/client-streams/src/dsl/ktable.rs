@@ -16,6 +16,7 @@ use crate::dsl::builder::InternalStreamsBuilder;
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kstream::KStream;
 use crate::dsl::names;
+use crate::dsl::processors::change::Change;
 use crate::dsl::processors::table::{
     KTableFilterProcessor, KTableMapValuesProcessor, KTableMapValuesViewProcessor,
     KTableToStreamProcessor,
@@ -67,8 +68,10 @@ where
             vec![parent_id],
         );
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
-            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
-            let h = state.topology.add_processor::<K, V, K, V, _, _, _>(
+            // Parent (a KTable node) forwards Change<V>; to_stream extracts new.
+            let parent =
+                NodeHandle::<K, Change<V>>::from_name(state.handle_name[&parent_id].clone());
+            let h = state.topology.add_processor::<K, Change<V>, K, V, _, _, _>(
                 name.clone(),
                 || KTableToStreamProcessor { _pd: PhantomData },
                 [parent],
@@ -99,15 +102,19 @@ where
         );
         let f2 = f.clone();
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
-            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
-            let h = state.topology.add_processor::<K, V, K, V2, _, _, _>(
-                name.clone(),
-                move || KTableMapValuesViewProcessor {
-                    f: f2.clone(),
-                    _pd: PhantomData,
-                },
-                [parent],
-            );
+            // Parent forwards Change<V>; the view maps both sides to Change<V2>.
+            let parent =
+                NodeHandle::<K, Change<V>>::from_name(state.handle_name[&parent_id].clone());
+            let h = state
+                .topology
+                .add_processor::<K, Change<V>, K, Change<V2>, _, _, _>(
+                    name.clone(),
+                    move || KTableMapValuesViewProcessor {
+                        f: f2.clone(),
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
@@ -146,17 +153,21 @@ where
         let f2 = f.clone();
         let store_for_thunk = store_name.clone();
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
-            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+            // Parent forwards Change<V>; materialized map maps both sides to V2.
+            let parent =
+                NodeHandle::<K, Change<V>>::from_name(state.handle_name[&parent_id].clone());
             let store_for_proc = store_for_thunk.clone();
-            let h = state.topology.add_processor::<K, V, K, V2, _, _, _>(
-                name.clone(),
-                move || KTableMapValuesProcessor {
-                    f: f2.clone(),
-                    store_name: store_for_proc.clone(),
-                    _pd: PhantomData,
-                },
-                [parent],
-            );
+            let h = state
+                .topology
+                .add_processor::<K, Change<V>, K, Change<V2>, _, _, _>(
+                    name.clone(),
+                    move || KTableMapValuesProcessor {
+                        f: f2.clone(),
+                        store_name: store_for_proc.clone(),
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
             state.topology.add_state_store::<K, V2, KS, VS>(
                 store_for_thunk.clone(),
                 key_serde.clone(),
@@ -170,8 +181,9 @@ where
     }
 
     /// `filter`: keep rows matching `predicate`, materializing the filtered view.
-    /// Non-matching rows are removed from the store and not forwarded (tombstone
-    /// propagation via `Change<V>` is deferred — see the processor module doc).
+    /// A row that previously matched but stops matching is removed from the store
+    /// and forwarded as a `Change<V>` tombstone so downstream views drop it (see
+    /// the processor module doc).
     #[must_use]
     pub fn filter<KS, VS, P>(
         &self,
@@ -202,17 +214,22 @@ where
         let p2 = predicate.clone();
         let store_for_thunk = store_name.clone();
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
-            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+            // Parent forwards Change<V>; filter re-applies the predicate to both
+            // sides and forwards Change<V> (emitting tombstones).
+            let parent =
+                NodeHandle::<K, Change<V>>::from_name(state.handle_name[&parent_id].clone());
             let store_for_proc = store_for_thunk.clone();
-            let h = state.topology.add_processor::<K, V, K, V, _, _, _>(
-                name.clone(),
-                move || KTableFilterProcessor {
-                    predicate: p2.clone(),
-                    store_name: store_for_proc.clone(),
-                    _pd: PhantomData,
-                },
-                [parent],
-            );
+            let h = state
+                .topology
+                .add_processor::<K, Change<V>, K, Change<V>, _, _, _>(
+                    name.clone(),
+                    move || KTableFilterProcessor {
+                        predicate: p2.clone(),
+                        store_name: store_for_proc.clone(),
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
             state.topology.add_state_store::<K, V, KS, VS>(
                 store_for_thunk.clone(),
                 key_serde.clone(),

@@ -1,18 +1,26 @@
 //! `KTable` `Processor` impls over a #3 `KeyValueStore`.
 //!
-//! ## KTable.filter tombstone simplification (first slice)
+//! ## Change<old,new> propagation
 //!
-//! Full `KTable` semantics require propagating a `Change<V>` (old, new) so
-//! downstream nodes can detect tombstones. In this slice `VOut = V` (no
-//! wrapper), so `KTableFilterProcessor` takes the simpler approach:
+//! Every `KTable` node forwards a `Record<K, Change<V>>` change-stream so
+//! downstream nodes can detect tombstones (`Change::new == None`). The
+//! materialized **state stores still hold `V`** (the current value); only the
+//! inter-node forwarded value is wrapped in `Change<V>`, which keeps the
+//! changelog + wire topology byte-unchanged.
 //!
-//! - Matching rows → `store.put(key, value); forward(record)`.
-//! - Non-matching rows → `store.delete(&key)` to keep the materialized view
-//!   correct; **no forward** (the record is dropped). Full tombstone
-//!   propagation via `Change<V>` is deferred to #4c.
+//! - [`KTableSourceProcessor`]: `V` in → `Change<V>` out (reads the prior store
+//!   value as `old`).
+//! - [`KTableToStreamProcessor`]: `Change<V>` in → `V` out (extracts `new`,
+//!   dropping tombstones — `toStream` produces a plain `KStream`).
+//! - [`KTableMapValuesProcessor`] / [`KTableMapValuesViewProcessor`]:
+//!   `Change<V>` in → `Change<V2>` out (`map` both sides).
+//! - [`KTableFilterProcessor`]: `Change<V>` in → `Change<V>` out — re-applies
+//!   the predicate to both sides and **emits tombstones** for rows that stop
+//!   matching.
 
 use std::marker::PhantomData;
 
+use crate::dsl::processors::change::Change;
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
 
@@ -21,53 +29,63 @@ type Marker<T> = PhantomData<fn() -> T>;
 
 // ── KTableSourceProcessor ────────────────────────────────────────────────────
 
-/// Materializes incoming records into a `KeyValueStore`, then forwards them
-/// unchanged as a change-stream. Backs `KTable` created from a source topic.
+/// Materializes incoming records into a `KeyValueStore`, then forwards a
+/// `Change<V>` (prior store value as `old`, incoming value as `new`). Backs
+/// `KTable` created from a source topic.
 #[allow(dead_code)]
 pub(crate) struct KTableSourceProcessor<K, V> {
     pub store_name: String,
     pub _pd: Marker<(K, V)>,
 }
 
-impl<K, V> Processor<K, V, K, V> for KTableSourceProcessor<K, V>
+impl<K, V> Processor<K, V, K, Change<V>> for KTableSourceProcessor<K, V>
 where
     K: std::any::Any + Send + Clone,
     V: std::any::Any + Send + Clone,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V>, r: Record<K, V>) {
+    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
         let key = r.key.expect("KTable source requires a non-null key");
         let store = ctx
             .get_state_store::<K, V>(&self.store_name)
             .expect("KTable source store not found");
+        let old = store.get(&key);
         store.put(key.clone(), r.value.clone());
-        ctx.forward(Record::new(Some(key), r.value, r.timestamp));
+        ctx.forward(Record::new(
+            Some(key),
+            Change::update(old, r.value),
+            r.timestamp,
+        ));
     }
 }
 
 // ── KTableToStreamProcessor ──────────────────────────────────────────────────
 
-/// Converts a `KTable` change-stream back to a `KStream` by forwarding every
-/// record unchanged.
+/// Converts a `KTable` change-stream back to a `KStream` by extracting the
+/// `new` value of each `Change<V>`. Tombstones (`new == None`) are dropped — a
+/// `KStream` has no notion of a deletion record.
 #[allow(dead_code)]
 pub(crate) struct KTableToStreamProcessor<K, V> {
     pub _pd: Marker<(K, V)>,
 }
 
-impl<K, V> Processor<K, V, K, V> for KTableToStreamProcessor<K, V>
+impl<K, V> Processor<K, Change<V>, K, V> for KTableToStreamProcessor<K, V>
 where
     K: std::any::Any + Send + Clone,
     V: std::any::Any + Send + Clone,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V>, r: Record<K, V>) {
-        ctx.forward(r);
+    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V>, r: Record<K, Change<V>>) {
+        if let Some(new) = r.value.new {
+            ctx.forward(Record::new(r.key, new, r.timestamp));
+        }
     }
 }
 
 // ── KTableMapValuesProcessor ─────────────────────────────────────────────────
 
-/// Applies a value-mapping function, writes the new value into the store, and
-/// forwards the rewritten record. Used by the **materialized** `map_values`
-/// form (`map_values_materialized`).
+/// Applies a value-mapping function to both sides of the incoming `Change<V>`,
+/// reconciles the materialized store with the mapped `new` (put / delete on
+/// tombstone), and forwards the mapped `Change<V2>`. Used by the
+/// **materialized** `map_values` form (`map_values_materialized`).
 #[allow(dead_code)]
 pub(crate) struct KTableMapValuesProcessor<K, V, V2, F> {
     pub f: F,
@@ -75,53 +93,74 @@ pub(crate) struct KTableMapValuesProcessor<K, V, V2, F> {
     pub _pd: Marker<(K, V, V2)>,
 }
 
-impl<K, V, V2, F> Processor<K, V, K, V2> for KTableMapValuesProcessor<K, V, V2, F>
+impl<K, V, V2, F> Processor<K, Change<V>, K, Change<V2>> for KTableMapValuesProcessor<K, V, V2, F>
 where
     K: std::any::Any + Send + Clone,
     V: 'static,
     V2: std::any::Any + Send + Clone,
     F: Fn(&V) -> V2 + Send + 'static,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V2>, r: Record<K, V>) {
+    fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, K, Change<V2>>,
+        r: Record<K, Change<V>>,
+    ) {
         let key = r.key.expect("KTable map_values requires a non-null key");
-        let new_value = (self.f)(&r.value);
+        let mapped = r.value.map(|v| (self.f)(v));
         let store = ctx
             .get_state_store::<K, V2>(&self.store_name)
             .expect("KTable map_values store not found");
-        store.put(key.clone(), new_value.clone());
-        ctx.forward(Record::new(Some(key), new_value, r.timestamp));
+        match &mapped.new {
+            Some(nv) => {
+                store.put(key.clone(), nv.clone());
+            }
+            None => {
+                store.delete(&key);
+            }
+        }
+        ctx.forward(Record::new(Some(key), mapped, r.timestamp));
     }
 }
 
 // ── KTableMapValuesViewProcessor ─────────────────────────────────────────────
 
-/// Applies a value-mapping function and forwards the rewritten record **without
-/// materializing** a store. Backs the bare `KTable::map_values` form (the JVM's
-/// non-materialized `mapValues`, which produces no changelog topic).
+/// Applies a value-mapping function to both sides of the incoming `Change<V>`
+/// and forwards the mapped `Change<V2>` **without materializing** a store. Backs
+/// the bare `KTable::map_values` form (the JVM's non-materialized `mapValues`,
+/// which produces no changelog topic).
 #[allow(dead_code)]
 pub(crate) struct KTableMapValuesViewProcessor<K, V, V2, F> {
     pub f: F,
     pub _pd: Marker<(K, V, V2)>,
 }
 
-impl<K, V, V2, F> Processor<K, V, K, V2> for KTableMapValuesViewProcessor<K, V, V2, F>
+impl<K, V, V2, F> Processor<K, Change<V>, K, Change<V2>>
+    for KTableMapValuesViewProcessor<K, V, V2, F>
 where
     K: std::any::Any + Send + Clone,
     V: 'static,
     V2: std::any::Any + Send + Clone,
     F: Fn(&V) -> V2 + Send + 'static,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V2>, r: Record<K, V>) {
-        let key = r.key.expect("KTable map_values requires a non-null key");
-        let new_value = (self.f)(&r.value);
-        ctx.forward(Record::new(Some(key), new_value, r.timestamp));
+    fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, K, Change<V2>>,
+        r: Record<K, Change<V>>,
+    ) {
+        ctx.forward(Record::new(
+            r.key,
+            r.value.map(|v| (self.f)(v)),
+            r.timestamp,
+        ));
     }
 }
 
 // ── KTableFilterProcessor ────────────────────────────────────────────────────
 
-/// Keeps rows matching the predicate in the store and forwards them; drops
-/// non-matching rows from the store without forwarding (see module doc).
+/// Re-applies the predicate to both sides of the incoming `Change<V>`,
+/// reconciles the materialized store with the surviving `new`, and forwards a
+/// `Change<V>`. A row that previously matched but no longer does forwards a
+/// tombstone (`new == None`) so downstream `KTable` views can delete it.
 #[allow(dead_code)]
 pub(crate) struct KTableFilterProcessor<K, V, P> {
     pub predicate: P,
@@ -129,27 +168,44 @@ pub(crate) struct KTableFilterProcessor<K, V, P> {
     pub _pd: Marker<(K, V)>,
 }
 
-impl<K, V, P> Processor<K, V, K, V> for KTableFilterProcessor<K, V, P>
+impl<K, V, P> Processor<K, Change<V>, K, Change<V>> for KTableFilterProcessor<K, V, P>
 where
     K: std::any::Any + Send + Clone,
     V: std::any::Any + Send + Clone,
     P: Fn(&K, &V) -> bool + Send + 'static,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V>, r: Record<K, V>) {
+    fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, K, Change<V>>,
+        r: Record<K, Change<V>>,
+    ) {
         let key = r.key.expect("KTable filter requires a non-null key");
-        if (self.predicate)(&key, &r.value) {
-            let store = ctx
-                .get_state_store::<K, V>(&self.store_name)
-                .expect("KTable filter store not found");
-            store.put(key.clone(), r.value.clone());
-            ctx.forward(Record::new(Some(key), r.value, r.timestamp));
-        } else {
-            // Non-matching: remove from the materialized view, no forward.
-            // Full tombstone propagation via Change<V> is deferred to #4c.
-            let store = ctx
-                .get_state_store::<K, V>(&self.store_name)
-                .expect("KTable filter store not found");
-            store.delete(&key);
+        let pred = &self.predicate;
+        // A side that doesn't satisfy the predicate is treated as absent.
+        let old_p = r.value.old.filter(|v| pred(&key, v));
+        let new_p = r.value.new.filter(|v| pred(&key, v));
+        let store = ctx
+            .get_state_store::<K, V>(&self.store_name)
+            .expect("KTable filter store not found");
+        match &new_p {
+            Some(nv) => {
+                store.put(key.clone(), nv.clone());
+            }
+            None => {
+                store.delete(&key);
+            }
+        }
+        // Forward only when something changed on either side; a row that never
+        // matched (old & new both filtered out) produces no change record.
+        if new_p.is_some() || old_p.is_some() {
+            ctx.forward(Record::new(
+                Some(key),
+                Change {
+                    old: old_p,
+                    new: new_p,
+                },
+                r.timestamp,
+            ));
         }
     }
 }
@@ -209,12 +265,15 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
             };
-            let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(&mut ctx, Record::new(Some("k".into()), 42i64, 1));
         }
 
         let (_, rec) = buffer.pop_front().unwrap();
-        check!(*rec.value.downcast::<i64>().unwrap() == 42i64);
+        let change = rec.value.downcast::<Change<i64>>().unwrap();
+        // First record for "k": no prior store value → old None, new 42.
+        check!(change.old.is_none());
+        check!(change.new == Some(42i64));
         check!(
             stores
                 .get_kv::<String, i64>("tbl")
@@ -225,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn ktable_to_stream_forwards_unchanged() {
+    fn ktable_to_stream_extracts_new_and_drops_tombstones() {
         let mut stores = make_stores();
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -234,6 +293,7 @@ mod tests {
 
         let mut proc = KTableToStreamProcessor::<String, i64> { _pd: PhantomData };
 
+        // Update record: the `new` value is extracted and forwarded as plain V.
         {
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
@@ -243,11 +303,30 @@ mod tests {
                 stores: &mut stores,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
-            proc.process(&mut ctx, Record::new(Some("k".into()), 7i64, 5));
+            proc.process(
+                &mut ctx,
+                Record::new(Some("k".into()), Change::update(Some(1), 7i64), 5),
+            );
         }
-
         let (_, rec) = buffer.pop_front().unwrap();
         check!(*rec.value.downcast::<i64>().unwrap() == 7i64);
+
+        // Tombstone record: dropped — a KStream has no deletion record.
+        {
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
+            proc.process(
+                &mut ctx,
+                Record::new(Some("k".into()), Change::tombstone(Some(7i64)), 6),
+            );
+        }
+        check!(buffer.is_empty(), "tombstone must not reach the KStream");
     }
 
     #[test]
@@ -279,6 +358,7 @@ mod tests {
             "mv-changelog".into(),
         )));
 
+        // Update: both sides map; the mapped `new` materializes.
         {
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
@@ -287,18 +367,49 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores2,
             };
-            let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
-            proc.process(&mut ctx, Record::new(Some("k".into()), 9i64, 0));
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
+            proc.process(
+                &mut ctx,
+                Record::new(Some("k".into()), Change::update(Some(8i64), 9i64), 0),
+            );
         }
 
         let (_, rec) = buffer.pop_front().unwrap();
-        check!(*rec.value.downcast::<String>().unwrap() == "9");
+        let change = rec.value.downcast::<Change<String>>().unwrap();
+        check!(change.old == Some("8".to_string()));
+        check!(change.new == Some("9".to_string()));
         check!(
             stores2
                 .get_kv::<String, String>("mv")
                 .unwrap()
                 .get(&"k".to_string())
                 == Some("9".to_string())
+        );
+
+        // Tombstone: mapped `new` is None → the store entry is deleted.
+        {
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores2,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
+            proc.process(
+                &mut ctx,
+                Record::new(Some("k".into()), Change::tombstone(Some(9i64)), 1),
+            );
+        }
+        let (_, rec) = buffer.pop_front().unwrap();
+        let change = rec.value.downcast::<Change<String>>().unwrap();
+        check!(change.new.is_none());
+        check!(
+            stores2
+                .get_kv::<String, String>("mv")
+                .unwrap()
+                .get(&"k".to_string())
+                .is_none()
         );
     }
 
@@ -325,18 +436,23 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
             };
-            let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
-            proc.process(&mut ctx, Record::new(Some("k".into()), 9i64, 0));
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
+            proc.process(
+                &mut ctx,
+                Record::new(Some("k".into()), Change::update(Some(8i64), 9i64), 0),
+            );
         }
 
         let (_, rec) = buffer.pop_front().unwrap();
-        check!(*rec.value.downcast::<String>().unwrap() == "9");
+        let change = rec.value.downcast::<Change<String>>().unwrap();
+        check!(change.old == Some("8".to_string()));
+        check!(change.new == Some("9".to_string()));
         // No store was created or required.
         check!(stores.names().is_empty());
     }
 
     #[test]
-    fn ktable_filter_matching_materializes_and_forwards() {
+    fn ktable_filter_materializes_matches_and_emits_tombstones() {
         let mut stores = make_stores();
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -355,7 +471,7 @@ mod tests {
             _pd: PhantomData,
         };
 
-        // Matching record — should be stored and forwarded.
+        // Matching record (old None → new 42) — stored and forwarded as an update.
         {
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
@@ -364,11 +480,16 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
             };
-            let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
-            proc.process(&mut ctx, Record::new(Some("a".into()), 42i64, 1));
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            proc.process(
+                &mut ctx,
+                Record::new(Some("a".into()), Change::update(None, 42i64), 1),
+            );
         }
         let (_, rec) = buffer.pop_front().unwrap();
-        check!(*rec.value.downcast::<i64>().unwrap() == 42i64);
+        let change = rec.value.downcast::<Change<i64>>().unwrap();
+        check!(change.old.is_none());
+        check!(change.new == Some(42i64));
         check!(
             stores
                 .get_kv::<String, i64>("tbl")
@@ -377,7 +498,9 @@ mod tests {
                 == Some(42)
         );
 
-        // Non-matching record — should delete "b" from the store, no forward.
+        // A row that previously matched (old 99) but no longer does (new 5) must
+        // delete from the store AND forward a TOMBSTONE so downstream views drop
+        // it. old_p survives the predicate (99 > 10); new_p is filtered out.
         {
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
@@ -386,16 +509,42 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
             };
-            let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
-            proc.process(&mut ctx, Record::new(Some("b".into()), 5i64, 2));
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            proc.process(
+                &mut ctx,
+                Record::new(Some("b".into()), Change::update(Some(99i64), 5i64), 2),
+            );
         }
-        check!(buffer.is_empty(), "non-matching row must not be forwarded");
+        let (_, rec) = buffer.pop_front().unwrap();
+        let change = rec.value.downcast::<Change<i64>>().unwrap();
+        check!(change.old == Some(99i64), "old side survived the predicate");
+        check!(change.new.is_none(), "new side filtered out → tombstone");
         check!(
             stores
                 .get_kv::<String, i64>("tbl")
                 .unwrap()
                 .get(&"b".to_string())
                 .is_none()
+        );
+
+        // A row that never matched (old & new both filtered out) → no forward.
+        {
+            let mut dispatch = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
+            proc.process(
+                &mut ctx,
+                Record::new(Some("c".into()), Change::update(Some(3i64), 4i64), 3),
+            );
+        }
+        check!(
+            buffer.is_empty(),
+            "never-matching row must not be forwarded"
         );
     }
 }

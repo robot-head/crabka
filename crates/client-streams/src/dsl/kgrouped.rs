@@ -227,16 +227,19 @@ where
         g.graph.nodes[agg_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&agg_parent].clone());
             let store_for_proc = store_for_thunk.clone();
-            let h = state.topology.add_processor::<K, V, K, VA, _, _, _>(
-                agg_name.clone(),
-                move || KStreamAggregateProcessor {
-                    store_name: store_for_proc.clone(),
-                    init: init.clone(),
-                    agg: agg.clone(),
-                    _pd: PhantomData,
-                },
-                [parent],
-            );
+            // The aggregate forwards Change<VA> (prior store value as old).
+            let h = state
+                .topology
+                .add_processor::<K, V, K, crate::dsl::processors::change::Change<VA>, _, _, _>(
+                    agg_name.clone(),
+                    move || KStreamAggregateProcessor {
+                        store_name: store_for_proc.clone(),
+                        init: init.clone(),
+                        agg: agg.clone(),
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
             // Honor `Materialized::with_logging(bool)`:
             // - logging=true  → standard add_state_store (changelog topic emitted)
             // - logging=false → add_state_store_no_changelog (store usable at
@@ -304,15 +307,18 @@ where
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&agg_parent].clone());
             let store_for_proc = store_for_thunk.clone();
             let reducer = reducer.clone();
-            let h = state.topology.add_processor::<K, V, K, V, _, _, _>(
-                red_name.clone(),
-                move || KStreamReduceProcessor {
-                    store_name: store_for_proc.clone(),
-                    reducer: reducer.clone(),
-                    _pd: PhantomData,
-                },
-                [parent],
-            );
+            // The reduce forwards Change<V> (prior store value as old).
+            let h = state
+                .topology
+                .add_processor::<K, V, K, crate::dsl::processors::change::Change<V>, _, _, _>(
+                    red_name.clone(),
+                    move || KStreamReduceProcessor {
+                        store_name: store_for_proc.clone(),
+                        reducer: reducer.clone(),
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
             // Honor `Materialized::with_logging(bool)` for reduce as well.
             if logging {
                 state.topology.add_state_store::<K, V, KS, VS>(
