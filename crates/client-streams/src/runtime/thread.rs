@@ -14,8 +14,6 @@ pub(crate) struct StreamThread {
     tasks: HashMap<(String, i32), StreamTask>,
 }
 
-// Methods used by KafkaStreams (Task 5); dead_code until then.
-#[allow(dead_code)]
 impl StreamThread {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
@@ -24,6 +22,7 @@ impl StreamThread {
         }
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn task_count(&self) -> usize {
         self.tasks.len()
@@ -104,7 +103,6 @@ impl StreamThread {
     }
 
     /// Commit + drop all tasks (on Fenced / shutdown).
-    #[allow(dead_code)]
     pub async fn close_all(&mut self) -> Result<(), StreamsClientError> {
         self.commit_all().await?;
         self.tasks.clear();

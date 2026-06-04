@@ -10,8 +10,9 @@ use crate::membership::TopicPartition;
 use crate::processor::graph::Graph;
 use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
 
-#[allow(dead_code)]
 pub(crate) struct StreamTask {
+    // Stored for logging / debugging; no non-debug caller at present.
+    #[allow(dead_code)]
     subtopology_id: String,
     graph: Graph,
     positions: HashMap<(String, i32), i64>,
@@ -21,7 +22,6 @@ pub(crate) struct StreamTask {
 }
 
 impl StreamTask {
-    #[allow(dead_code)]
     pub fn new(
         subtopology_id: String,
         graph: Graph,
@@ -43,15 +43,8 @@ impl StreamTask {
         }
     }
 
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn subtopology_id(&self) -> &str {
-        &self.subtopology_id
-    }
-
     /// Seek each assigned partition to its committed offset, or `earliest` if
     /// none (auto.offset.reset = earliest).
-    #[allow(dead_code)]
     pub async fn seek_to_start(&mut self) -> Result<(), StreamsClientError> {
         let keys: Vec<(String, i32)> = self.positions.keys().cloned().collect();
         for (topic, partition) in keys {
@@ -66,7 +59,6 @@ impl StreamTask {
 
     /// Fetch one batch per assigned partition; pipe through the graph; produce
     /// sink outputs; advance offsets.
-    #[allow(dead_code)]
     pub async fn process_once(
         &mut self,
         fetcher: &dyn RecordFetcher,
@@ -96,7 +88,6 @@ impl StreamTask {
     }
 
     /// At-least-once commit: flush producer THEN commit advanced source offsets.
-    #[allow(dead_code)]
     pub async fn commit(&mut self) -> Result<(), StreamsClientError> {
         self.producer.flush().await?;
         if self.pending.is_empty() {
