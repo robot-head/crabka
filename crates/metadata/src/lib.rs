@@ -40,7 +40,8 @@ pub use records::{
     BrokerConfigRecord, BrokerEndpoint, BrokerRegistrationRecord, ClientMetricsConfigRecord,
     ClientQuotaRecord, DelegationTokenRecord, DeleteDelegationTokenRecord,
     DeleteScramCredentialRecord, DeleteTopicRecord, FeatureLevelRecord, FeaturesEpochRecord,
-    KRaftVersionRecord, MetadataRecord, NodeId, PartitionRecord, QuotaEntity,
-    ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord, VotersRecord,
+    KRaftVersionRecord, MetadataRecord, NodeId, PartitionDirAssignmentRecord, PartitionRecord,
+    QuotaEntity, ScramCredentialRecord, TopicConfigRecord, TopicRecord, UnregisterBrokerRecord,
+    VotersRecord,
 };
 pub use voters::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};

@@ -79,6 +79,7 @@ fn admin_apis() -> Vec<ApiVersion> {
         v!(delete_groups_request),
         v!(incremental_alter_configs_request),
         v!(alter_partition_request),
+        v!(assign_replicas_to_dirs_request),
         v!(describe_cluster_request),
         v!(broker_heartbeat_request),
         // UnregisterBroker (KIP-185) — admin RPC to permanently drop a

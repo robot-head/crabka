@@ -30,6 +30,8 @@ pub(crate) async fn handle(
     let liveness = broker.liveness.clone();
     let controller = broker.controller.clone();
     let node_id = broker.config.node_id;
+    let metrics = broker.metrics.clone();
+    let recovery = broker.unclean_recovery.clone();
     // Check leadership: this broker is the controller leader iff the
     // watch channel reports a leader id equal to our own node_id.
     let is_leader = controller
@@ -91,6 +93,40 @@ pub(crate) async fn handle(
             false
         };
 
+        // KIP-112: a broker that reports offline log dirs is still alive, so
+        // the liveness `alive→dead` failover never fires. Map the reported
+        // offline dir UUIDs to the reporting broker's affected partitions and
+        // fail them over (elect from surviving alive ISR, drop the offline
+        // replica). Only the controller leader reaches here (NOT_CONTROLLER
+        // early-return above), and it's idempotent across repeated heartbeats.
+        //
+        // Validate the reporting broker id independently of `broker_id_u64`
+        // (which falls back to 0 for the liveness path): failing over the
+        // wrong broker on a malformed negative id would be harmful.
+        if !req.offline_log_dirs.is_empty()
+            && let Ok(reporting_broker) = u64::try_from(req.broker_id)
+        {
+            let offline: std::collections::HashSet<uuid::Uuid> = req
+                .offline_log_dirs
+                .iter()
+                .map(|u| uuid::Uuid::from_bytes(u.0))
+                .collect();
+            let recoveries =
+                failover_offline_dirs(&controller, reporting_broker, &offline, &liveness, &metrics)
+                    .await;
+            // Fire-and-forget: enqueue logs internally if the recovery manager is gone.
+            for (topic, partition, strategy) in recoveries {
+                recovery
+                    .enqueue(crate::unclean_recovery::RecoveryJob {
+                        topic,
+                        partition,
+                        strategy,
+                        reply: None,
+                    })
+                    .await;
+            }
+        }
+
         let resp = BrokerHeartbeatResponse {
             throttle_time_ms: 0,
             error_code: codes::NONE,
@@ -138,6 +174,30 @@ fn denied_response(version: i16) -> Result<Bytes, BrokerError> {
     let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
     resp.encode(&mut buf, version)?;
     Ok(buf.freeze())
+}
+
+/// Run the KIP-112 offline-dir failover for `broker`'s reported offline dirs:
+/// compute the partition changes, submit them, and return any offset-aware
+/// recovery jobs (KIP-966) for the caller to enqueue. Controller-leader only;
+/// the caller gates on leadership. Submit failure is logged, not propagated.
+pub(crate) async fn failover_offline_dirs(
+    controller: &std::sync::Arc<dyn crate::metadata_source::MetadataSource>,
+    broker: crabka_raft::NodeId,
+    offline: &std::collections::HashSet<uuid::Uuid>,
+    liveness: &crate::heartbeat::controller_state::ControllerLivenessState,
+    metrics: &crate::metrics::BrokerMetrics,
+) -> Vec<(String, i32, crate::config_keys::RecoveryStrategy)> {
+    let image = controller.current_image();
+    let plan = crate::leader_election::compute_offline_dir_failover_changes(
+        &image, broker, offline, liveness, metrics,
+    )
+    .await;
+    if !plan.changes.is_empty()
+        && let Err(e) = controller.submit_change(plan.changes).await
+    {
+        tracing::warn!(error = %e, "offline-dir failover submit_change failed");
+    }
+    plan.recoveries
 }
 
 /// Scan partitions where `shutting_down` is currently leader, submit a
@@ -202,6 +262,170 @@ async fn drain_leaderships_for_shutdown(
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_metadata::{MetadataRecord, PartitionRecord, TopicRecord};
+    use crabka_raft::{
+        AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
+        UpdateVoter,
+    };
+    use std::collections::BTreeSet;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::sync::watch;
+    use uuid::Uuid;
+
+    /// Minimal `MetadataSource` that captures `submit_change` calls for
+    /// inspection. Returns a fixed image; `watch_leader` always reports
+    /// `Some(1)` (this node is the leader).
+    struct MockSource {
+        leader_rx: watch::Receiver<Option<NodeId>>,
+        _leader_tx: watch::Sender<Option<NodeId>>,
+        image: Arc<MetadataImage>,
+        captured: Arc<Mutex<Vec<MetadataRecord>>>,
+    }
+
+    impl MockSource {
+        fn new(image: MetadataImage) -> (Self, Arc<Mutex<Vec<MetadataRecord>>>) {
+            let (tx, rx) = watch::channel(Some(1u64));
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let source = Self {
+                leader_rx: rx,
+                _leader_tx: tx,
+                image: Arc::new(image),
+                captured: captured.clone(),
+            };
+            (source, captured)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::metadata_source::MetadataSource for MockSource {
+        fn current_image(&self) -> Arc<MetadataImage> {
+            self.image.clone()
+        }
+        fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
+            unimplemented!()
+        }
+        fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
+            self.leader_rx.clone()
+        }
+        fn quorum_state(&self) -> QuorumState {
+            unimplemented!()
+        }
+        async fn submit_change(&self, records: Vec<MetadataRecord>) -> Result<(), RaftError> {
+            self.captured.lock().unwrap().extend(records);
+            Ok(())
+        }
+        async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
+            unimplemented!()
+        }
+        async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
+            unimplemented!()
+        }
+        fn controller_bound_addr(&self) -> SocketAddr {
+            unimplemented!()
+        }
+        fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
+            unimplemented!()
+        }
+        async fn trigger_snapshot(&self) -> Result<(), RaftError> {
+            unimplemented!()
+        }
+        async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
+            unimplemented!()
+        }
+        async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
+            unimplemented!()
+        }
+        async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
+            unimplemented!()
+        }
+        async fn cancel(&self) {
+            unimplemented!()
+        }
+    }
+
+    fn image_with_dir_partition(
+        leader: NodeId,
+        replicas: &[NodeId],
+        isr: &[NodeId],
+        dirs: &[Uuid],
+    ) -> MetadataImage {
+        let mut img = MetadataImage::new(Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id: Uuid::nil(),
+            partitions: 1,
+            replication_factor: i16::try_from(replicas.len()).unwrap(),
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader,
+            replicas: replicas.to_vec(),
+            isr: isr.to_vec(),
+            leader_epoch: 5,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: dirs.to_vec(),
+        }));
+        img
+    }
+
+    async fn liveness_with(alive: &[NodeId]) -> Arc<ControllerLivenessState> {
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        for &n in alive {
+            l.record_heartbeat(n).await;
+        }
+        Arc::new(l)
+    }
+
+    #[tokio::test]
+    async fn failover_offline_dirs_submits_change_for_offline_leader() {
+        let bad = Uuid::from_u128(0xBAD);
+        let good = Uuid::from_u128(0x600D);
+        // leader=1, replicas=[1,2], isr=[1,2]; broker 1's dir is `bad`.
+        let img = image_with_dir_partition(1, &[1, 2], &[1, 2], &[bad, good]);
+        let (source, captured) = MockSource::new(img);
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(source);
+        let liveness = liveness_with(&[1, 2]).await;
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let offline: std::collections::HashSet<Uuid> = [bad].into_iter().collect();
+
+        let recoveries = failover_offline_dirs(&controller, 1, &offline, &liveness, &metrics).await;
+
+        // Exactly one change must have been submitted (the new leader record).
+        let changes = captured.lock().unwrap();
+        assert!(changes.len() == 1);
+        let MetadataRecord::V1Partition(pr) = &changes[0] else {
+            panic!("expected V1Partition change")
+        };
+        // Broker 2 should be elected (broker 1's dir is offline).
+        assert!(pr.leader == 2);
+        assert!(pr.isr == vec![2]);
+        // No unclean recovery needed (broker 2 is alive and in ISR).
+        assert!(recoveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failover_offline_dirs_no_change_when_dir_healthy() {
+        let bad = Uuid::from_u128(0xBAD);
+        let good = Uuid::from_u128(0x600D);
+        // Both replicas are on `good` dir; reporting `bad` as offline is a no-op.
+        let img = image_with_dir_partition(1, &[1, 2], &[1, 2], &[good, good]);
+        let (source, captured) = MockSource::new(img);
+        let controller: Arc<dyn crate::metadata_source::MetadataSource> = Arc::new(source);
+        let liveness = liveness_with(&[1, 2]).await;
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let offline: std::collections::HashSet<Uuid> = [bad].into_iter().collect();
+
+        let recoveries = failover_offline_dirs(&controller, 1, &offline, &liveness, &metrics).await;
+
+        // No change submitted and no recovery needed.
+        let changes = captured.lock().unwrap();
+        assert!(changes.is_empty());
+        assert!(recoveries.is_empty());
+    }
 
     /// Empty ACLs + no super-users → every principal is denied
     /// `ClusterAction`, so the denied response carries

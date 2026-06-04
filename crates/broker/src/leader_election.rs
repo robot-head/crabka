@@ -82,6 +82,7 @@ pub(crate) async fn compute_failover_changes(
                     leader_epoch: pr.leader_epoch + 1,
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
+                    directories: pr.directories.clone(),
                 }));
             } else {
                 // ISR is empty after dropping the dead broker. How we
@@ -128,6 +129,7 @@ pub(crate) async fn compute_failover_changes(
                                 leader_epoch: pr.leader_epoch + 1,
                                 adding_replicas: pr.adding_replicas.clone(),
                                 removing_replicas: pr.removing_replicas.clone(),
+                                directories: pr.directories.clone(),
                             }));
                         } else {
                             warn!(
@@ -154,6 +156,128 @@ pub(crate) async fn compute_failover_changes(
                 leader_epoch: pr.leader_epoch,
                 adding_replicas: pr.adding_replicas.clone(),
                 removing_replicas: pr.removing_replicas.clone(),
+                directories: pr.directories.clone(),
+            }));
+        }
+    }
+    FailoverPlan {
+        changes,
+        recoveries,
+    }
+}
+
+/// Compute failover changes for partitions whose replica on `broker` lives
+/// on a now-offline log directory (`offline_uuids`). KIP-112: a broker stays
+/// alive after a disk failure, so the dead-broker scan never fires — this
+/// scan does, driven by the broker's `offline_log_dirs` heartbeat.
+///
+/// For each affected partition:
+/// - if `broker` is the leader, elect a new leader from the alive ISR minus
+///   `broker` (same clean / KIP-966 / KIP-841 policy as
+///   [`compute_failover_changes`]), drop `broker` from ISR, bump epoch;
+/// - if `broker` is a non-leader ISR member, drop it from ISR (no epoch bump).
+///
+/// Pure; idempotent (after the change `broker` is neither leader nor in ISR,
+/// so a repeat yields an empty plan).
+pub(crate) async fn compute_offline_dir_failover_changes(
+    image: &MetadataImage,
+    broker: NodeId,
+    offline_uuids: &std::collections::HashSet<uuid::Uuid>,
+    liveness: &ControllerLivenessState,
+    metrics: &crate::metrics::BrokerMetrics,
+) -> FailoverPlan {
+    let mut changes: Vec<MetadataRecord> = Vec::new();
+    let mut recoveries: Vec<(String, i32, RecoveryStrategy)> = Vec::new();
+    let alive = liveness.alive_snapshot().await;
+    for (_, pr) in image.all_partitions() {
+        let Some(slot) = pr.replicas.iter().position(|n| *n == broker) else {
+            continue;
+        };
+        let on_offline = pr
+            .directories
+            .get(slot)
+            .is_some_and(|d| offline_uuids.contains(d));
+        if !on_offline {
+            continue;
+        }
+        let mut alive_isr: Vec<NodeId> = Vec::with_capacity(pr.isr.len());
+        for n in &pr.isr {
+            if *n != broker && alive.contains(n) {
+                alive_isr.push(*n);
+            }
+        }
+        if pr.leader == broker {
+            if let Some(&new_leader) = alive_isr.first() {
+                changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                    topic: pr.topic.clone(),
+                    partition: pr.partition,
+                    leader: new_leader,
+                    replicas: pr.replicas.clone(),
+                    isr: alive_isr,
+                    leader_epoch: pr.leader_epoch + 1,
+                    adding_replicas: pr.adding_replicas.clone(),
+                    removing_replicas: pr.removing_replicas.clone(),
+                    directories: pr.directories.clone(),
+                }));
+            } else {
+                // ISR is empty after dropping the broker. Apply the same
+                // recovery policy as compute_failover_changes.
+                let strategy = resolve_recovery_strategy(image, &pr.topic);
+                match strategy {
+                    RecoveryStrategy::Balanced | RecoveryStrategy::Aggressive => {
+                        recoveries.push((pr.topic.clone(), pr.partition, strategy));
+                    }
+                    RecoveryStrategy::None if unclean_election_enabled(image, &pr.topic) => {
+                        let mut elected: Option<NodeId> = None;
+                        for &n in &pr.replicas {
+                            if n != broker && alive.contains(&n) {
+                                elected = Some(n);
+                                break;
+                            }
+                        }
+                        if let Some(new_leader) = elected {
+                            warn!(
+                                topic = %pr.topic, partition = pr.partition, leader = new_leader,
+                                "offline-dir unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
+                            );
+                            metrics.record_unclean_leader_election();
+                            changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                                topic: pr.topic.clone(),
+                                partition: pr.partition,
+                                leader: new_leader,
+                                replicas: pr.replicas.clone(),
+                                isr: vec![new_leader],
+                                leader_epoch: pr.leader_epoch + 1,
+                                adding_replicas: pr.adding_replicas.clone(),
+                                removing_replicas: pr.removing_replicas.clone(),
+                                directories: pr.directories.clone(),
+                            }));
+                        } else {
+                            warn!(
+                                topic = %pr.topic, partition = pr.partition,
+                                "offline-dir unclean leader election enabled but no alive replica; partition unavailable"
+                            );
+                        }
+                    }
+                    RecoveryStrategy::None => {
+                        warn!(
+                            topic = %pr.topic, partition = pr.partition,
+                            "offline dir on leader, no live ISR replica; partition unavailable"
+                        );
+                    }
+                }
+            }
+        } else if alive_isr.len() < pr.isr.len() {
+            changes.push(MetadataRecord::V1Partition(PartitionRecord {
+                topic: pr.topic.clone(),
+                partition: pr.partition,
+                leader: pr.leader,
+                replicas: pr.replicas.clone(),
+                isr: alive_isr,
+                leader_epoch: pr.leader_epoch,
+                adding_replicas: pr.adding_replicas.clone(),
+                removing_replicas: pr.removing_replicas.clone(),
+                directories: pr.directories.clone(),
             }));
         }
     }
@@ -294,6 +418,7 @@ pub(crate) async fn select_replacement_leader_for_shutdown(
         leader_epoch: pr.leader_epoch + 1,
         adding_replicas: pr.adding_replicas.clone(),
         removing_replicas: pr.removing_replicas.clone(),
+        directories: pr.directories.clone(),
     })
 }
 
@@ -336,6 +461,7 @@ pub(crate) async fn select_new_leader_for_partition(
                 leader_epoch: pr.leader_epoch + 1,
                 adding_replicas: pr.adding_replicas.clone(),
                 removing_replicas: pr.removing_replicas.clone(),
+                directories: pr.directories.clone(),
             })
         }
         ElectionType::Unclean => {
@@ -358,6 +484,7 @@ pub(crate) async fn select_new_leader_for_partition(
                         leader_epoch: pr.leader_epoch + 1,
                         adding_replicas: pr.adding_replicas.clone(),
                         removing_replicas: pr.removing_replicas.clone(),
+                        directories: pr.directories.clone(),
                     });
                 }
             }
@@ -404,6 +531,7 @@ mod tests {
             leader_epoch: 5,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         img
     }
@@ -811,6 +939,278 @@ mod tests {
         assert!(
             pr.leader_epoch == 5,
             "non-leader-change must NOT bump leader_epoch"
+        );
+    }
+
+    // ── KIP-112: compute_offline_dir_failover_changes ───────────────────────
+
+    fn img_with_dirs(
+        topic: &str,
+        leader: NodeId,
+        replicas: &[NodeId],
+        isr: &[NodeId],
+        dirs: &[uuid::Uuid],
+    ) -> MetadataImage {
+        let mut img = MetadataImage::new(uuid::Uuid::nil());
+        img.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: topic.into(),
+            topic_id: uuid::Uuid::nil(),
+            partitions: 1,
+            replication_factor: i16::try_from(replicas.len()).unwrap(),
+        }));
+        img.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: topic.into(),
+            partition: 0,
+            leader,
+            replicas: replicas.to_vec(),
+            isr: isr.to_vec(),
+            leader_epoch: 5,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: dirs.to_vec(),
+        }));
+        img
+    }
+
+    #[tokio::test]
+    async fn offline_dir_elects_alive_isr_member_when_leader_dir_failed() {
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2, 3], &[bad, good, good]);
+        let l = ControllerLivenessState::new(std::time::Duration::from_secs(10));
+        for n in [1u64, 2, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = super::compute_offline_dir_failover_changes(
+            &img,
+            1,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        let MetadataRecord::V1Partition(pr) = &plan.changes[0] else {
+            panic!()
+        };
+        assert!(pr.leader == 2);
+        assert!(pr.isr == vec![2, 3]);
+        assert!(pr.leader_epoch == 6);
+    }
+
+    #[tokio::test]
+    async fn offline_dir_leaves_healthy_dir_partition_untouched() {
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2, 3], &[good, good, good]);
+        let l = ControllerLivenessState::new(std::time::Duration::from_secs(10));
+        for n in [1u64, 2, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = super::compute_offline_dir_failover_changes(
+            &img,
+            1,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(plan.changes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn offline_dir_shrinks_isr_for_non_leader_replica() {
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2, 3], &[good, bad, good]);
+        let l = ControllerLivenessState::new(std::time::Duration::from_secs(10));
+        for n in [1u64, 2, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = super::compute_offline_dir_failover_changes(
+            &img,
+            2,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        let MetadataRecord::V1Partition(pr) = &plan.changes[0] else {
+            panic!()
+        };
+        assert!(pr.leader == 1);
+        assert!(pr.isr == vec![1, 3]);
+        assert!(pr.leader_epoch == 5);
+    }
+
+    #[tokio::test]
+    async fn offline_dir_idempotent_after_failover() {
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        // After failover: broker 1's dir is bad but broker 1 is no longer
+        // leader (broker 2 is), and broker 1 is not in ISR {2,3} either.
+        let img = img_with_dirs("t", 2, &[1, 2, 3], &[2, 3], &[bad, good, good]);
+        let l = ControllerLivenessState::new(std::time::Duration::from_secs(10));
+        for n in [1u64, 2, 3] {
+            l.record_heartbeat(n).await;
+        }
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = super::compute_offline_dir_failover_changes(
+            &img,
+            1,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(plan.changes.is_empty());
+    }
+
+    // ── KIP-112: compute_offline_dir_failover_changes empty-ISR branches ──────
+
+    use super::compute_offline_dir_failover_changes;
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_balanced_strategy_defers_to_urm() {
+        // Broker 1 is leader, its replica is on the bad dir, and the only other
+        // ISR member (broker 2) is NOT alive — alive_isr is empty.
+        // Topic sets unclean.recovery.strategy=Balanced.
+        // Expect: recoveries gets the entry, changes is empty.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        set_topic_config(&mut img, "t", UNCLEAN_RECOVERY_STRATEGY, "Balanced");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // Only broker 3 alive but it's NOT in the ISR — alive_isr = empty.
+        l.record_heartbeat(3).await;
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = compute_offline_dir_failover_changes(
+            &img,
+            1,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(
+            plan.changes.is_empty(),
+            "Balanced strategy must not make an immediate change; got {:?}",
+            plan.changes
+        );
+        assert!(
+            plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Balanced)],
+            "Balanced strategy must enqueue a recovery job; got {:?}",
+            plan.recoveries
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_aggressive_strategy_defers_to_urm() {
+        // Same as above but with Aggressive strategy.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        set_topic_config(&mut img, "t", UNCLEAN_RECOVERY_STRATEGY, "Aggressive");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // broker 2 is not alive, broker 3 is alive but not in ISR.
+        l.record_heartbeat(3).await;
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = compute_offline_dir_failover_changes(
+            &img,
+            1,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(plan.changes.is_empty());
+        assert!(
+            plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Aggressive)],
+            "Aggressive strategy must enqueue a recovery job; got {:?}",
+            plan.recoveries
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_unclean_enabled_elects_out_of_isr_replica() {
+        // Broker 1 is leader on bad dir, broker 2 (the only ISR peer) is dead,
+        // broker 3 is alive and out-of-ISR.
+        // unclean.leader.election.enable=true → elect broker 3, singleton ISR,
+        // bump unclean_leader_elections_total.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // broker 3 alive, broker 2 dead (no heartbeat).
+        l.record_heartbeat(3).await;
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let plan = compute_offline_dir_failover_changes(&img, 1, &offline, &l, &metrics).await;
+        assert!(plan.recoveries.is_empty());
+        let pr = one_partition_change(&plan.changes);
+        assert!(
+            pr.leader == 3,
+            "must elect broker 3 (only alive out-of-ISR)"
+        );
+        assert!(pr.isr == vec![3], "unclean election installs singleton ISR");
+        assert!(pr.leader_epoch == 6, "epoch must bump");
+        assert!(
+            metrics.unclean_leader_elections_total.get() == 1,
+            "unclean counter must be bumped exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_no_unclean_leaves_partition_unavailable() {
+        // Broker 1 is leader on bad dir, broker 2 dead, broker 3 alive but
+        // not in ISR.  No recovery strategy, no unclean flag → no change.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        l.record_heartbeat(3).await; // only 3 alive, but not in ISR
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let plan = compute_offline_dir_failover_changes(
+            &img,
+            1,
+            &offline,
+            &l,
+            &crate::metrics::BrokerMetrics::new(),
+        )
+        .await;
+        assert!(
+            plan.changes.is_empty(),
+            "default-off must not emit any change; got {:?}",
+            plan.changes
+        );
+        assert!(plan.recoveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn offline_dir_empty_isr_unclean_enabled_no_alive_replica_stays_unavailable() {
+        // Broker 1 is leader on bad dir, ALL brokers are dead.
+        // unclean enabled but no alive replica → no change.
+        let bad = uuid::Uuid::from_u128(0xDEAD);
+        let good = uuid::Uuid::from_u128(0x1);
+        let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
+        set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
+        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        // No heartbeats — nobody alive.
+        let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
+        let metrics = crate::metrics::BrokerMetrics::new();
+        let plan = compute_offline_dir_failover_changes(&img, 1, &offline, &l, &metrics).await;
+        assert!(
+            plan.changes.is_empty(),
+            "no alive replica → no election; got {:?}",
+            plan.changes
+        );
+        assert!(plan.recoveries.is_empty());
+        assert!(
+            metrics.unclean_leader_elections_total.get() == 0,
+            "no election means no counter bump"
         );
     }
 

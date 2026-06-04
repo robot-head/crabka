@@ -207,6 +207,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
         }
 
@@ -314,6 +315,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
         }
         // Config (apiKey 4), topic scope.

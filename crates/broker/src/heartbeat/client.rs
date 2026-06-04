@@ -33,6 +33,55 @@ pub(crate) struct Config {
     /// `should_shut_down=true`. The caller of `controlled_shutdown`
     /// awaits this flag.
     pub should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    /// Per-log-dir health registry; offline dirs are reported to the
+    /// controller as `offline_log_dirs` UUIDs each heartbeat (KIP-858).
+    pub log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// Stable per-log-dir UUIDs, to translate offline dir paths → ids.
+    pub log_dir_ids: crate::log_dir_id::LogDirIds,
+    /// All configured log dirs; when every one is offline the broker
+    /// self-shuts-down (KIP-112).
+    pub all_log_dirs: Vec<std::path::PathBuf>,
+    /// Cancelled on all-dirs-offline to stop replication/materialization
+    /// against dead disks before teardown.
+    pub supervisor_shutdown: tokio_util::sync::CancellationToken,
+}
+
+/// UUIDs of the currently-offline log dirs, for the heartbeat's `offline_log_dirs`.
+fn offline_dir_uuids(
+    status: &crate::log_dir_status::LogDirRegistry,
+    ids: &crate::log_dir_id::LogDirIds,
+) -> Vec<crabka_protocol::primitives::uuid::Uuid> {
+    status
+        .offline()
+        .into_iter()
+        .filter_map(|(path, _reason)| ids.id_for(&path))
+        .map(|u| crabka_protocol::primitives::uuid::Uuid(*u.as_bytes()))
+        .collect()
+}
+
+/// True when every configured log dir is offline (→ broker self-shutdown).
+fn all_dirs_offline(
+    all_log_dirs: &[std::path::PathBuf],
+    status: &crate::log_dir_status::LogDirRegistry,
+) -> bool {
+    !all_log_dirs.is_empty() && all_log_dirs.iter().all(|d| status.is_offline(d))
+}
+
+/// Returns `true` when every configured log dir is currently offline.
+fn all_log_dirs_offline(cfg: &Config) -> bool {
+    all_dirs_offline(&cfg.all_log_dirs, &cfg.log_dir_status)
+}
+
+/// Trigger the KIP-112 self-shutdown: latch `should_shutdown` and cancel
+/// the supervisor. Called from every early-exit path so the check is not
+/// accidentally skipped when the controller is temporarily unreachable.
+fn trigger_all_dirs_offline_shutdown(cfg: &mut Config, reason: &str) {
+    tracing::error!(
+        reason,
+        "all log dirs offline — initiating broker self-shutdown (KIP-112)"
+    );
+    let _ = cfg.should_shutdown.send(true);
+    cfg.supervisor_shutdown.cancel();
 }
 
 pub(crate) async fn run(mut cfg: Config) {
@@ -41,6 +90,12 @@ pub(crate) async fn run(mut cfg: Config) {
         tokio::select! {
             _ = tick.tick() => {},
             () = cfg.shutdown.cancelled() => return,
+        }
+        // KIP-112 check: even if we cannot reach the controller, self-shutdown
+        // must fire as long as every log dir is offline.
+        if all_log_dirs_offline(&cfg) {
+            trigger_all_dirs_offline_shutdown(&mut cfg, "detected before controller resolution");
+            return;
         }
         // Resolve current controller leader's listen address from
         // the metadata image (via brokers() iteration), or skip this
@@ -85,6 +140,7 @@ pub(crate) async fn run(mut cfg: Config) {
             continue;
         };
         let want_shut_down = *cfg.want_shutdown.borrow_and_update();
+        let offline_log_dirs = offline_dir_uuids(&cfg.log_dir_status, &cfg.log_dir_ids);
         let resp = client
             .send(BrokerHeartbeatRequest {
                 broker_id: cfg.broker_id,
@@ -92,6 +148,7 @@ pub(crate) async fn run(mut cfg: Config) {
                 current_metadata_offset: 0,
                 want_fence: false,
                 want_shut_down,
+                offline_log_dirs,
                 ..Default::default()
             })
             .await;
@@ -106,5 +163,64 @@ pub(crate) async fn run(mut cfg: Config) {
             }
             Err(e) => warn!(error = %e, "heartbeat send failed"),
         }
+
+        // KIP-112: re-check after the heartbeat round-trip. This covers the
+        // window where dirs went offline *during* the connect/send. The
+        // top-of-tick check already handles dirs that were offline before
+        // leader resolution; this one handles the same-tick race.
+        if all_log_dirs_offline(&cfg) {
+            trigger_all_dirs_offline_shutdown(&mut cfg, "detected after heartbeat send");
+            // Returning stops heartbeats; if shutdown drags, the controller's
+            // session timeout fences this broker independently.
+            return;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+    use tempfile::tempdir;
+
+    #[test]
+    fn offline_dir_uuids_maps_offline_paths() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let paths = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+        let ids = crate::log_dir_id::LogDirIds::resolve(&paths);
+        let status = crate::log_dir_status::LogDirRegistry::probe(&paths);
+
+        // Initially no dirs are offline.
+        assert!(offline_dir_uuids(&status, &ids).is_empty());
+
+        // Mark dir `a` as offline.
+        status.mark_offline(a.path(), "test");
+        let result = offline_dir_uuids(&status, &ids);
+        assert!(result.len() == 1);
+        let expected_id = ids.id_for(a.path()).unwrap();
+        assert!(result[0].0 == *expected_id.as_bytes());
+    }
+
+    #[test]
+    fn all_dirs_offline_true_only_when_every_dir_offline() {
+        let a = tempdir().unwrap();
+        let b = tempdir().unwrap();
+        let paths = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+        let status = crate::log_dir_status::LogDirRegistry::probe(&paths);
+
+        // Empty all_log_dirs: always false.
+        assert!(!all_dirs_offline(&[], &status));
+
+        // No dirs offline yet.
+        assert!(!all_dirs_offline(&paths, &status));
+
+        // Only `a` offline: still false.
+        status.mark_offline(a.path(), "disk error");
+        assert!(!all_dirs_offline(&paths, &status));
+
+        // Both offline: true.
+        status.mark_offline(b.path(), "disk error");
+        assert!(all_dirs_offline(&paths, &status));
     }
 }

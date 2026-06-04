@@ -395,15 +395,18 @@ pub fn to_kraft_records(
 /// The engine/snapshot framing entrypoint: translate one [`MetadataRecord`] to
 /// the KIP-631 value byte blobs to put on the log — one per fanned-out record
 /// (most records yield one; a `V1TopicConfig` yields one per key ± tombstones,
-/// a `V1DeleteAccessControlEntry` one per matched ACL), each enveloped at
-/// apiVersion 0. Yields an empty `Vec` when a record fans out to nothing (an
-/// empty config clear with no prior keys, or a delete-ACL filter matching
-/// nothing) — callers treat an all-empty batch as a committed no-op.
+/// a `V1DeleteAccessControlEntry` one per matched ACL). [`PartitionRecord`] is
+/// enveloped at apiVersion 1 so its KIP-858 `directories` survive; every other
+/// modeled record frames at apiVersion 0. Yields an empty `Vec` when a record
+/// fans out to nothing (an empty config clear with no prior keys, or a
+/// delete-ACL filter matching nothing) — callers treat an all-empty batch as a
+/// committed no-op.
 ///
-/// apiVersion 0 is the "defaulted KIP-631 framing" of Slice 3d-2: the core
-/// fields Crabka populates all exist at v0; the higher-version KIP-631 extras
-/// (broker incarnation/epoch, partition ELR, …) stay defaulted. Slice 6 lifts
-/// the version for cross-impl JVM fidelity.
+/// apiVersion 0 is the "defaulted KIP-631 framing": the core fields Crabka
+/// populates all exist at v0; the remaining higher-version KIP-631 extras
+/// (broker incarnation/epoch, partition ELR, …) stay defaulted.
+/// [`PartitionRecord`] is the one exception, lifted to v1 to carry per-replica
+/// directory ids.
 ///
 /// # Errors
 /// Propagates [`to_kraft_records`] errors, plus [`TranslateError::Encode`] if
@@ -415,7 +418,13 @@ pub fn to_kraft_values(
     to_kraft_records(rec, image)?
         .iter()
         .map(|kr| {
-            kr.encode_value(0)
+            let version: i16 = match kr {
+                // KIP-858: directories field only present at v1+.
+                KraftMetadataRecord::Partition(_) => 1,
+                // All other modeled record types frame at the defaulted v0.
+                _ => 0,
+            };
+            kr.encode_value(version)
                 .map_err(|e| TranslateError::Encode(e.to_string()))
         })
         .collect()
@@ -623,6 +632,19 @@ fn to_kraft_iter(
         MetadataRecord::V1FeaturesEpoch(_) => {
             vec![wincode_carrier(rec, PRIVATE_FEATURES_EPOCH_KEY)?]
         }
+        // KIP-858 directory-assignment delta. `PartitionChangeRecord` is not
+        // modeled in Crabka. It must stay a DELTA end-to-end: the apply path
+        // re-decodes committed KRaft values (`from_kraft_value`) and applies
+        // the decoded record, so materializing this into a full
+        // `PartitionRecord` here would decode back as a full-replace
+        // `V1Partition` and clobber any reassignment / ISR change committed
+        // between this record's encode and its apply. Instead it rides a
+        // Crabka-private `Unknown` carrier (like `V1ClientMetricsConfig` /
+        // `V1FeaturesEpoch`), so it decodes back to `V1PartitionDirAssignment`
+        // and applies as a one-slot merge — genuinely order-independent.
+        MetadataRecord::V1PartitionDirAssignment(_) => {
+            vec![wincode_carrier(rec, PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY)?]
+        }
         // ----- no KIP-631 metadata counterpart -----
         MetadataRecord::V1Voters(_) => {
             return Err(TranslateError::NoCounterpart("V1Voters"));
@@ -640,6 +662,9 @@ fn to_kraft_iter(
 /// round-trip carriers.
 const PRIVATE_CLIENT_METRICS_KEY: u32 = 1000;
 const PRIVATE_FEATURES_EPOCH_KEY: u32 = 1001;
+/// KIP-858 directory-assignment delta carried verbatim so it stays a
+/// one-slot merge on apply (never a full-`PartitionRecord` replace).
+const PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY: u32 = 1002;
 
 /// Wrap a wincode-serialized `MetadataRecord` in an `Unknown` KIP-631 envelope
 /// under a Crabka-private apiKey, so it round-trips byte-faithfully through the
@@ -717,6 +742,8 @@ fn partition_to_kraft(
             detail: format!("leader {} exceeds i32", p.leader),
         })?,
         leader_epoch: p.leader_epoch,
+        // KIP-858: per-replica log-directory assignment, carried at KRaft v1+.
+        directories: p.directories.iter().map(|u| to_kuuid(*u)).collect(),
         ..Default::default()
     })
 }
@@ -862,7 +889,9 @@ pub fn from_kraft(
         // Crabka-private carriers (see `wincode_carrier`): decode the verbatim
         // wincode body back to the original record.
         KraftMetadataRecord::Unknown { api_key, body, .. }
-            if *api_key == PRIVATE_CLIENT_METRICS_KEY || *api_key == PRIVATE_FEATURES_EPOCH_KEY =>
+            if *api_key == PRIVATE_CLIENT_METRICS_KEY
+                || *api_key == PRIVATE_FEATURES_EPOCH_KEY
+                || *api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY =>
         {
             <serde_wincode::SerdeCompat<MetadataRecord>>::deserialize(body)
                 .map_err(|e| TranslateError::Decode(e.to_string()))
@@ -955,6 +984,8 @@ fn partition_from_kraft(
         leader_epoch: p.leader_epoch,
         adding_replicas: cast(&p.adding_replicas),
         removing_replicas: cast(&p.removing_replicas),
+        // KIP-858: per-replica log-directory assignment, present at KRaft v1+.
+        directories: p.directories.iter().map(|u| from_kuuid(*u)).collect(),
     })
 }
 
@@ -1074,7 +1105,7 @@ mod tests {
     use crate::acl::AclEntryFilter;
     use crate::records::{
         ClientMetricsConfigRecord, DeleteDelegationTokenRecord, FeaturesEpochRecord,
-        KRaftVersionRecord, VotersRecord,
+        KRaftVersionRecord, PartitionDirAssignmentRecord, VotersRecord,
     };
     use assert2::assert;
 
@@ -1388,6 +1419,28 @@ mod tests {
     }
 
     #[test]
+    fn partition_dir_assignment_round_trips_via_private_carrier() {
+        // KIP-858 dir-assignment delta must STAY a delta through the KRaft log:
+        // it rides a Crabka-private `Unknown` carrier so it decodes back to
+        // `V1PartitionDirAssignment` and applies as a one-slot merge, rather
+        // than materializing to a full `PartitionRecord` that would clobber a
+        // concurrent reassignment on apply.
+        let rec = MetadataRecord::V1PartitionDirAssignment(PartitionDirAssignmentRecord {
+            topic: "t".into(),
+            partition: 0,
+            replica: 2,
+            directory: uuid::Uuid::from_u128(0xAB),
+        });
+        let k = to_kraft(&rec, &img()).unwrap();
+        assert!(matches!(
+            k,
+            crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
+                if api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY
+        ));
+        round_trip(&rec, &img());
+    }
+
+    #[test]
     fn voters_and_kraft_version_have_no_counterpart() {
         let v = MetadataRecord::V1Voters(VotersRecord {
             voters: crate::voters::VoterSet::default(),
@@ -1419,6 +1472,7 @@ mod tests {
             leader_epoch: 0,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         });
         image.apply(&part);
         for rec in [&topic, &part] {
@@ -1556,6 +1610,37 @@ mod tests {
     }
 
     #[test]
+    fn partition_record_directories_survive_kraft_round_trip() {
+        use crate::{MetadataImage, MetadataRecord, PartitionRecord, TopicRecord};
+        let topic_id = uuid::Uuid::from_u128(0x11);
+        let mut image = MetadataImage::new(uuid::Uuid::nil());
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "t".into(),
+            topic_id,
+            partitions: 1,
+            replication_factor: 2,
+        }));
+        let rec = MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1, 2],
+            isr: vec![1, 2],
+            leader_epoch: 4,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![uuid::Uuid::from_u128(0xAA), uuid::Uuid::from_u128(0xBB)],
+        });
+        let values = super::to_kraft_values(&rec, &image).expect("encode");
+        assert!(values.len() == 1);
+        let decoded = super::from_kraft_value(&values[0], &image).expect("decode");
+        assert!(
+            decoded == rec,
+            "directories must survive the KRaft round trip"
+        );
+    }
+
+    #[test]
     fn image_derives_partition_count_from_partitions_map() {
         let mut image = img();
         image.apply(&MetadataRecord::V1Topic(TopicRecord {
@@ -1574,6 +1659,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
         }
         assert!(image.topic_partition_count("t") == 3);

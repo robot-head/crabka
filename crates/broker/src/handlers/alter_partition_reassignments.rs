@@ -111,6 +111,8 @@ fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, (i16, St
     } else {
         (pr.leader, 0)
     };
+    let new_directories =
+        crate::reassignment::remap_directories(&pr.replicas, &pr.directories, &reverted_replicas);
     Ok(Some(PartitionRecord {
         topic: pr.topic.clone(),
         partition: pr.partition,
@@ -120,6 +122,7 @@ fn cancel_path(pr: &PartitionRecord) -> Result<Option<PartitionRecord>, (i16, St
         leader_epoch: pr.leader_epoch + epoch_bump,
         adding_replicas: vec![],
         removing_replicas: vec![],
+        directories: new_directories,
     }))
 }
 
@@ -150,6 +153,8 @@ fn start_path(pr: &PartitionRecord, target: &[i32]) -> Option<PartitionRecord> {
     for n in &new {
         new_replicas.push(*n);
     }
+    let new_directories =
+        crate::reassignment::remap_directories(&pr.replicas, &pr.directories, &new_replicas);
     Some(PartitionRecord {
         topic: pr.topic.clone(),
         partition: pr.partition,
@@ -159,6 +164,7 @@ fn start_path(pr: &PartitionRecord, target: &[i32]) -> Option<PartitionRecord> {
         leader_epoch: pr.leader_epoch,
         adding_replicas: new,
         removing_replicas: old,
+        directories: new_directories,
     })
 }
 
@@ -363,6 +369,7 @@ mod tests {
             leader_epoch: 5,
             adding_replicas: adding.to_vec(),
             removing_replicas: removing.to_vec(),
+            directories: vec![],
         }));
         img
     }

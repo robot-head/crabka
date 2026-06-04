@@ -753,6 +753,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
         leader_epoch: pr.leader_epoch + 1,
         adding_replicas: vec![],
         removing_replicas: vec![],
+        directories: vec![],
     });
     c1.submit_metadata_record_for_test(forged)
         .await
@@ -783,6 +784,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
         leader_epoch: pr.leader_epoch + 2,
         adding_replicas: vec![],
         removing_replicas: vec![],
+        directories: vec![],
     });
     c1.submit_metadata_record_for_test(restore)
         .await

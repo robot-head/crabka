@@ -221,8 +221,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = Broker::start(config).await?;
     tracing::info!(addr = %handle.listen_addr(), "crabka-broker listening");
 
-    tokio::signal::ctrl_c().await?;
-    tracing::info!("shutdown signal received");
+    let mut shutdown_rx = handle.should_shutdown_rx();
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => {
+            r?;
+            tracing::info!("shutdown signal received");
+        }
+        () = async {
+            // Wait until the self-shutdown flag flips true.
+            loop {
+                // Check first in case the flag was already set before we subscribed.
+                if *shutdown_rx.borrow_and_update() { break; }
+                if shutdown_rx.changed().await.is_err() { break; }
+            }
+        } => {
+            tracing::error!("self-shutdown triggered (all log dirs offline); stopping broker");
+        }
+    }
     handle.shutdown().await;
     tracing::info!("crabka-broker stopped");
     telemetry.shutdown();

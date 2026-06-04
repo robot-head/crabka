@@ -19,6 +19,28 @@ use tracing::{debug, info, warn};
 
 use crate::heartbeat::controller_state::ControllerLivenessState;
 
+/// Remap a partition's `directories` vector onto a new `replicas` ordering
+/// (KIP-455 reassignment changes replica membership/order). `directories`
+/// is index-parallel to `replicas`; a verbatim clone after the replica set
+/// changes would misalign the slots and break KIP-112 offline-dir failover.
+/// Surviving replicas keep their dir UUID; newly-added replicas get
+/// `Uuid::nil()` (UNASSIGNED) until they report via `AssignReplicasToDirs`.
+pub(crate) fn remap_directories(
+    old_replicas: &[NodeId],
+    old_directories: &[uuid::Uuid],
+    new_replicas: &[NodeId],
+) -> Vec<uuid::Uuid> {
+    let old: std::collections::HashMap<NodeId, uuid::Uuid> = old_replicas
+        .iter()
+        .copied()
+        .zip(old_directories.iter().copied())
+        .collect();
+    new_replicas
+        .iter()
+        .map(|n| old.get(n).copied().unwrap_or_else(uuid::Uuid::nil))
+        .collect()
+}
+
 /// Minimal trait for the controller surface this task needs. Lets unit
 /// tests inject a mock without spinning up real raft.
 #[async_trait]
@@ -107,6 +129,7 @@ pub(crate) async fn compute_reassignment_progress(
                     isr: pr.isr.clone(),
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
+                    directories: pr.directories.clone(),
                 }));
             }
             // Whether or not we found a leader, don't also try to complete this tick.
@@ -119,6 +142,7 @@ pub(crate) async fn compute_reassignment_progress(
             .filter(|n| target.contains(n))
             .copied()
             .collect();
+        let new_directories = remap_directories(&pr.replicas, &pr.directories, &target);
         updates.push(MetadataRecord::V1Partition(PartitionRecord {
             topic: pr.topic.clone(),
             partition: pr.partition,
@@ -128,6 +152,7 @@ pub(crate) async fn compute_reassignment_progress(
             isr: new_isr,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: new_directories,
         }));
     }
     updates
@@ -176,6 +201,7 @@ mod tests {
             leader_epoch: 5,
             adding_replicas: adding.to_vec(),
             removing_replicas: removing.to_vec(),
+            directories: vec![],
         }));
         Arc::new(img)
     }
@@ -193,6 +219,87 @@ mod tests {
             MetadataRecord::V1Partition(p) => p,
             _ => panic!("expected V1Partition"),
         }
+    }
+
+    #[test]
+    fn remap_directories_preserves_slot_alignment_on_replica_removal() {
+        let da = uuid::Uuid::from_u128(0xA);
+        let db = uuid::Uuid::from_u128(0xB);
+        let dc = uuid::Uuid::from_u128(0xC);
+        // replicas [1,2,3] dirs [dA,dB,dC]; reassignment removes broker 2.
+        let new = remap_directories(&[1, 2, 3], &[da, db, dc], &[1, 3]);
+        // broker 1 keeps dA at slot 0; broker 3 keeps dC at slot 1 (NOT dB).
+        assert!(new == vec![da, dc]);
+    }
+
+    #[test]
+    fn remap_directories_assigns_nil_to_new_replica() {
+        let da = uuid::Uuid::from_u128(0xA);
+        // replicas [1] dirs [dA]; add broker 2 (no dir yet).
+        let new = remap_directories(&[1], &[da], &[1, 2]);
+        assert!(new == vec![da, uuid::Uuid::nil()]);
+    }
+
+    /// Build an image with explicit directories, to test that
+    /// `compute_reassignment_progress` keeps directories aligned after
+    /// completion removes a replica from the set.
+    fn img_with_dirs(
+        replicas: &[NodeId],
+        isr: &[NodeId],
+        adding: &[NodeId],
+        removing: &[NodeId],
+        leader: NodeId,
+        directories: &[Uuid],
+    ) -> Arc<MetadataImage> {
+        let mut image = MetadataImage::new(Uuid::nil());
+        for n in 1..=6 {
+            image.apply(&MetadataRecord::V1BrokerRegistration(
+                BrokerRegistrationRecord {
+                    node_id: n,
+                    broker_epoch: 0,
+                    host: String::new(),
+                    port: 0,
+                    rack: None,
+                    endpoints: vec![],
+                },
+            ));
+        }
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "foo".into(),
+            topic_id: Uuid::nil(),
+            partitions: 1,
+            replication_factor: i16::try_from(replicas.len()).expect("replication factor fits i16"),
+        }));
+        image.apply(&MetadataRecord::V1Partition(PartitionRecord {
+            topic: "foo".into(),
+            partition: 0,
+            leader,
+            replicas: replicas.to_vec(),
+            isr: isr.to_vec(),
+            leader_epoch: 5,
+            adding_replicas: adding.to_vec(),
+            removing_replicas: removing.to_vec(),
+            directories: directories.to_vec(),
+        }));
+        Arc::new(image)
+    }
+
+    #[tokio::test]
+    async fn completion_preserves_directory_slot_alignment() {
+        // replicas=[1,2,3], adding=[3], removing=[2], all in ISR.
+        // directories=[dA, dB, dC] — slot 0→broker1, 1→broker2, 2→broker3.
+        // After completion target=[1,3]; expected dirs=[dA, dC].
+        let da = Uuid::from_u128(0xA);
+        let db = Uuid::from_u128(0xB);
+        let dc = Uuid::from_u128(0xC);
+        let image = img_with_dirs(&[1, 2, 3], &[1, 2, 3], &[3], &[2], 1, &[da, db, dc]);
+        let l = liveness(&[1, 2, 3]).await;
+        let updates = compute_reassignment_progress(&image, &l).await;
+        assert!(updates.len() == 1);
+        let pr = first_partition(&updates[0]);
+        assert!(pr.replicas == vec![1, 3]);
+        // Slot 0 → broker 1 → dA; slot 1 → broker 3 → dC (NOT dB).
+        assert!(pr.directories == vec![da, dc]);
     }
 
     #[tokio::test]
@@ -282,6 +389,7 @@ mod tests {
                 leader_epoch: 5,
                 adding_replicas: vec![3],
                 removing_replicas: vec![2],
+                directories: vec![],
             }));
         }
         let img = Arc::new(img_inner);

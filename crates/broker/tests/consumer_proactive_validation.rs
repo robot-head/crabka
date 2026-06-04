@@ -314,6 +314,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         leader_epoch: pr0.leader_epoch + 1,
         adding_replicas: vec![],
         removing_replicas: vec![],
+        directories: vec![],
     });
     broker
         .submit_metadata_record_for_test(forged)

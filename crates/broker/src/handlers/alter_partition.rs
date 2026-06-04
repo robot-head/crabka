@@ -229,6 +229,7 @@ fn handle_partition(
         leader_epoch: part_rec.leader_epoch,
         adding_replicas: part_rec.adding_replicas.clone(),
         removing_replicas: part_rec.removing_replicas.clone(),
+        directories: part_rec.directories.clone(),
     }));
 
     RespPartitionData {
@@ -339,6 +340,7 @@ mod tests {
             leader_epoch: 5,
             adding_replicas: vec![],
             removing_replicas: vec![],
+            directories: vec![],
         }));
         for &(id, ep) in epochs {
             image.apply(&reg(id, ep));

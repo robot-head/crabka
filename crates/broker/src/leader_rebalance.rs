@@ -167,6 +167,7 @@ mod tests {
                 leader_epoch: 5,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
             p += 1;
         }
@@ -181,6 +182,7 @@ mod tests {
                 leader_epoch: 5,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
             p += 1;
         }

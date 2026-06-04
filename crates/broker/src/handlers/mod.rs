@@ -57,6 +57,7 @@ pub(crate) mod alter_partition_reassignments;
 pub(crate) mod alter_replica_log_dirs;
 pub(crate) mod alter_user_scram_credentials;
 pub(crate) mod api_versions;
+pub(crate) mod assign_replicas_to_dirs;
 // KIP-430: authorized-operations bitfield helper used by metadata,
 // describe_cluster, describe_groups when the request opts in.
 pub(crate) mod authorized_operations;
@@ -255,6 +256,7 @@ pub(crate) fn build_table() -> HandlerTable {
     // 42 (DeleteGroups) intercepted inline — see comment above.
     // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
     // 56 (AlterPartition) intercepted inline — Cluster ClusterAction ACL.
+    t.register(73, assign_replicas_to_dirs::handle);
     // FetchSnapshot (api_key 59, KIP-630) — controller-snapshot byte-range
     // fetch. Plain 4-arg signature: no per-connection ACL context needed.
     t.register(59, fetch_snapshot::handle);

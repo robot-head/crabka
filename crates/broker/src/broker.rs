@@ -124,6 +124,10 @@ pub struct Broker {
     /// [`crate::log_dir_status::LogDirRegistry::is_offline`] before
     /// touching the dir.
     pub(crate) log_dir_status: crate::log_dir_status::LogDirRegistry,
+    /// KIP-858: stable UUID per configured log.dir, minted + persisted at
+    /// startup. Shared with the heartbeat client (`offline_log_dirs` UUID list)
+    /// and the assignment reporter (`AssignReplicasToDirs` handler).
+    pub(crate) log_dir_ids: crate::log_dir_id::LogDirIds,
     /// KIP-714 client-metrics receiver: subscription manager + Prometheus
     /// collector + OTLP forwarder. Shared so the push handler (Task 15)
     /// and the scrape path both touch the same instance.
@@ -736,6 +740,18 @@ impl BrokerHandle {
             .load(std::sync::atomic::Ordering::Acquire)
     }
 
+    /// Test-only: flip a configured log dir offline at runtime, simulating a
+    /// live fsync failure, without real EIO injection (unreliable
+    /// cross-platform). Drives the KIP-112 offline path.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn test_mark_log_dir_offline(&self, dir: &std::path::Path) -> bool {
+        self._broker
+            .log_dir_status
+            .mark_offline(dir, "test-injected storage failure")
+    }
+
     /// Rebuild the TLS server config from the cert/key paths
     /// in `BrokerConfig::tls_config` *right now*, bypassing the
     /// periodic mtime watcher. New TLS handshakes after this call see
@@ -767,6 +783,16 @@ impl BrokerHandle {
         dynamic
             .reload_from(tls_cfg)
             .map_err(|e| BrokerError::Tls(e.to_string()))
+    }
+
+    /// Subscribe to the self-shutdown signal. Flips `true` when the broker
+    /// decides to stop on its own — today: all log dirs went offline
+    /// (KIP-112). The embedding application should call
+    /// [`Self::shutdown`] (or `controlled_shutdown`) when this fires.
+    #[must_use]
+    #[allow(clippy::used_underscore_binding)]
+    pub fn should_shutdown_rx(&self) -> tokio::sync::watch::Receiver<bool> {
+        self._broker.should_shutdown.subscribe()
     }
 
     /// Request a graceful, controlled shutdown of this broker.
@@ -1449,6 +1475,11 @@ impl Broker {
         //    `KAFKA_STORAGE_ERROR` and JBOD placement skips it.
         let log_dir_status = crate::log_dir_status::LogDirRegistry::probe(&config.all_log_dirs());
 
+        // KIP-858: resolve a stable UUID per configured log.dir (minting +
+        // persisting for any extra JBOD dir that lacks one). Shared with the
+        // heartbeat client (offline_log_dirs) and the assignment reporter.
+        let log_dir_ids = crate::log_dir_id::LogDirIds::resolve(&config.all_log_dirs());
+
         // 4. Scan + recover partitions on disk. Partition state is still
         //    a local-disk concern; the metadata image is sourced from
         //    `controller.current_image()` whenever a handler needs it.
@@ -1599,6 +1630,7 @@ impl Broker {
         // the startup probe flagged unwritable.
         let supervisor = crate::replicator_supervisor::ReplicatorSupervisor::new(
             config.node_id,
+            config.broker_id,
             controller.clone(),
             partitions.clone(),
             log_dir_status.online_subset(&config.all_log_dirs()),
@@ -1613,6 +1645,7 @@ impl Broker {
             throttle_state.clone(),
             log_dir_status.clone(),
             metrics.clone(),
+            log_dir_ids.clone(),
         );
         let supervisor_handle = supervisor.spawn();
 
@@ -1642,6 +1675,10 @@ impl Broker {
                 inter_broker_listener_name: config.inter_broker_listener_name.clone(),
                 want_shutdown: want_shutdown_rx,
                 should_shutdown: should_shutdown_tx.clone(),
+                log_dir_status: log_dir_status.clone(),
+                log_dir_ids: log_dir_ids.clone(),
+                all_log_dirs: config.all_log_dirs(),
+                supervisor_shutdown: supervisor_shutdown.clone(),
             },
         ));
 
@@ -2419,6 +2456,7 @@ impl Broker {
             should_shutdown: should_shutdown_tx,
             remote_reader,
             log_dir_status,
+            log_dir_ids,
             client_metrics,
             #[cfg(any(test, feature = "test-helpers"))]
             offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2902,6 +2940,7 @@ mod tests {
                 leader_epoch: 0,
                 adding_replicas: vec![],
                 removing_replicas: vec![],
+                directories: vec![],
             }));
         }
 
