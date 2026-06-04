@@ -109,6 +109,7 @@ mod error;
 pub mod membership;
 pub mod processor;
 pub mod runtime;
+pub mod store;
 pub mod test_driver;
 pub mod topology;
 
@@ -122,5 +123,6 @@ pub use processor::{
     Produced, Record, RecordContext, Serde, SerdeError, StringSerde,
 };
 pub use runtime::{KafkaStreams, KafkaStreamsState};
+pub use store::{KeyValueStore, StateStore};
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, Topology, TopologyError};
