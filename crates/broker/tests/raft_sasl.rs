@@ -254,6 +254,77 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
     b1.shutdown().await;
 }
 
+// H-1: authentication is not authorization. Here both brokers present
+// *valid, matching* SASL credentials (so the SASL handshake succeeds), but
+// the controller listener is gated by a `SimpleAclAuthorizer` with NO
+// super-users and NO ACLs — so the authenticated principal is DENIED
+// `CLUSTER_ACTION` on `Cluster("kafka-cluster")`. The handshake therefore
+// drops the connection *after* authentication, and the two single-voter
+// clusters can never exchange controller RPCs to merge. b1 must still see
+// only itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn controller_listener_sasl_denies_unauthorized_principal() {
+    init_tracing();
+    let (ctrl_addrs, [ctrl_l1, ctrl_l2]) = reserve_ctrl_listeners().await;
+
+    let dir1 = TempDir::new().unwrap();
+    let dir2 = TempDir::new().unwrap();
+
+    // Single-voter standalone bootstraps with MATCHING creds (auth succeeds)
+    // — same structure as the mismatched-creds test, but the failure mode
+    // here is authorization, not authentication.
+    let mut c1 = sasl_broker_config(
+        0,
+        data_listen_addr(),
+        ListenerProtocol::SaslPlaintext,
+        ctrl_addrs[0],
+        &[(1, ctrl_addrs[0])],
+        dir1.path(),
+        BootstrapMode::Bootstrap,
+        "broker",
+        "secret",
+    );
+    let mut c2 = sasl_broker_config(
+        1,
+        data_listen_addr(),
+        ListenerProtocol::SaslPlaintext,
+        ctrl_addrs[1],
+        &[(2, ctrl_addrs[1])],
+        dir2.path(),
+        BootstrapMode::Bootstrap,
+        "broker",
+        "secret",
+    );
+    // Deny-by-default authorizer: empty super-user set, no ACLs ⇒ every
+    // principal (including the authenticated inter-broker one) is denied.
+    c1.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+        std::collections::HashSet::new(),
+    ));
+    c2.authorizer = std::sync::Arc::new(crabka_broker::authorizer::SimpleAclAuthorizer::new(
+        std::collections::HashSet::new(),
+    ));
+
+    let b1 = Broker::start_with_controller_listener(c1, Some(ctrl_l1))
+        .await
+        .expect("start b1");
+    let b2 = Broker::start_with_controller_listener(c2, Some(ctrl_l2))
+        .await
+        .expect("start b2");
+
+    // Authentication succeeds but CLUSTER_ACTION is denied, so the
+    // controller listener drops every cross-broker connection: the clusters
+    // never merge.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        b1.broker_count().await < 2,
+        "unauthorized principal must not be able to drive controller RPCs"
+    );
+    let _ = &b2;
+
+    b2.shutdown().await;
+    b1.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn controller_listener_plaintext_legacy_path_unchanged() {
     // Default `controller_listener_protocol = Plaintext` — no

@@ -18,6 +18,11 @@ pub enum Event {
     /// A peer asks us for our vote.
     ReceiveVoteRequest {
         from: NodeId,
+        /// The recipient this Vote is addressed to (the wire top-level
+        /// `voterId`). KIP-595 / Kafka's `KafkaRaftClient` validates that an
+        /// incoming Vote targets this node before considering the grant; a
+        /// request addressed to a different voter is rejected.
+        voter_id: NodeId,
         candidate_epoch: LeaderEpoch,
         candidate: NodeId,
         candidate_log_end: LogEnd,

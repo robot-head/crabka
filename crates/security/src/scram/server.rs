@@ -150,9 +150,29 @@ impl ScramServerExchange {
                 proof_b64 = Some(v);
             }
         }
-        let (Some(_cb), Some(_nonce), Some(proof_b64)) = (channel_binding, nonce, proof_b64) else {
+        let (Some(cb), Some(nonce), Some(proof_b64)) = (channel_binding, nonce, proof_b64) else {
             return StepResult::Failed(AuthError::MalformedMessage);
         };
+
+        // RFC 5802 §5.1: the client-final `r=` (combined nonce) must
+        // equal the nonce the server issued in server-first
+        // (client-first-nonce + server-nonce). server-first is
+        // `r={combined_nonce},s=...,i=...`, so the expected value is the
+        // `r=` attribute up to the first comma.
+        let expected_nonce = server_first
+            .strip_prefix("r=")
+            .and_then(|rest| rest.split(',').next())
+            .unwrap_or_default();
+        if nonce != expected_nonce {
+            return StepResult::Failed(AuthError::MalformedMessage);
+        }
+
+        // RFC 5802 §5.1: with no channel binding, the GS2 header is
+        // `n,,` and `c=` must equal its base64 encoding (`"biws"`).
+        if cb != B64.encode(b"n,,") {
+            return StepResult::Failed(AuthError::MalformedMessage);
+        }
+
         let expected_proof_len = scram_hash_len(self.credential.mechanism);
         let proof = match B64.decode(proof_b64) {
             Ok(b) if b.len() == expected_proof_len => b,

@@ -114,6 +114,7 @@ impl QuorumStateMachine {
         match event {
             Event::ReceiveVoteRequest {
                 from,
+                voter_id,
                 candidate_epoch,
                 candidate,
                 candidate_log_end,
@@ -121,6 +122,7 @@ impl QuorumStateMachine {
             } => self.handle_vote_request(
                 log,
                 from,
+                voter_id,
                 candidate_epoch,
                 candidate,
                 candidate_log_end,
@@ -284,6 +286,22 @@ impl QuorumStateMachine {
         leader_epoch: LeaderEpoch,
         now: SimInstant,
     ) -> Vec<Action> {
+        // KIP-595 / leadership-hijack defense: only adopt a leader that belongs
+        // to our current applied voter set. A peer with network access must not
+        // be able to install an arbitrary `leader_id` we will then fetch from
+        // and replicate metadata from. Guard on a NON-EMPTY voter set so a
+        // bootstrapping node that has not yet learned its voters is unaffected
+        // (it has no basis to reject), and so KIP-853 add/remove-voter — which
+        // legitimately changes the set — is honored by reading the *current*
+        // voter set rather than a stale view.
+        if !self.state.voters.is_empty() && !self.state.voters.contains(leader_id) {
+            tracing::warn!(
+                rejected_leader = leader_id,
+                leader_epoch,
+                "rejecting BeginQuorumEpoch from non-voter leader (not in current voter set)"
+            );
+            return Vec::new();
+        }
         // Accept a strictly-higher epoch, or an equal epoch only if we do not
         // already know a leader for it (one leader per epoch). Otherwise ignore.
         let accept = leader_epoch > self.state.leader_epoch
@@ -517,6 +535,7 @@ impl QuorumStateMachine {
         &mut self,
         log: &dyn LogView,
         from: NodeId,
+        voter_id: NodeId,
         candidate_epoch: LeaderEpoch,
         candidate: NodeId,
         cand_log: LogEnd,
@@ -524,6 +543,34 @@ impl QuorumStateMachine {
         now: SimInstant,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
+        // Recipient-targeting check (KIP-595 / `KafkaRaftClient`): a Vote carries
+        // the id of the voter it is addressed to. If it targets a different node
+        // (a stale/misrouted/forged request), ignore it silently — do not even
+        // reply, exactly as the JVM does. Only enforce once the addressing field
+        // is meaningful: a `-1`/unset `voter_id` (decoded as 0) and the
+        // bootstrap case where we have no voter set yet are not rejected here.
+        if voter_id != self.me && voter_id != 0 {
+            tracing::warn!(
+                addressed_to = voter_id,
+                me = self.me,
+                "ignoring Vote addressed to a different voter"
+            );
+            return Vec::new();
+        }
+        // Leadership-hijack defense: only consider a vote from a candidate that
+        // belongs to our current applied voter set. Guarded on a NON-EMPTY voter
+        // set so a bootstrapping node is unaffected, and read from the current
+        // set so KIP-853 reconfiguration is honored. A non-voter candidate is
+        // ignored (no reply), mirroring the JVM which drops votes from replicas
+        // it does not recognize as voters.
+        if !self.state.voters.is_empty() && !self.state.voters.contains(candidate) {
+            tracing::warn!(
+                candidate,
+                candidate_epoch,
+                "ignoring Vote from non-voter candidate (not in current voter set)"
+            );
+            return Vec::new();
+        }
         // Fenced: candidate is behind our epoch.
         if candidate_epoch < self.state.leader_epoch {
             actions.push(Action::ReplyVote {
@@ -676,6 +723,7 @@ mod tests {
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
                 from: 2,
+                voter_id: 1,
                 candidate_epoch: 1,
                 candidate: 2,
                 candidate_log_end: LogEnd {
@@ -708,6 +756,7 @@ mod tests {
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
                 from: 2,
+                voter_id: 1,
                 candidate_epoch: 2,
                 candidate: 2,
                 candidate_log_end: LogEnd {
@@ -736,6 +785,7 @@ mod tests {
         m.on_event(
             Event::ReceiveVoteRequest {
                 from: 2,
+                voter_id: 1,
                 candidate_epoch: 1,
                 candidate: 2,
                 candidate_log_end: LogEnd {
@@ -762,6 +812,7 @@ mod tests {
         m.on_event(
             Event::ReceiveVoteRequest {
                 from: 2,
+                voter_id: 1,
                 candidate_epoch: 1,
                 candidate: 2,
                 candidate_log_end: LogEnd {
@@ -777,6 +828,7 @@ mod tests {
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
                 from: 3,
+                voter_id: 1,
                 candidate_epoch: 1,
                 candidate: 3,
                 candidate_log_end: LogEnd {
@@ -809,6 +861,7 @@ mod tests {
         let actions = m.on_event(
             Event::ReceiveVoteRequest {
                 from: 2,
+                voter_id: 1,
                 candidate_epoch: 3,
                 candidate: 2,
                 candidate_log_end: LogEnd {
@@ -1276,6 +1329,146 @@ mod tests {
         } else {
             panic!("expected Candidate");
         }
+    }
+
+    #[test]
+    fn begin_quorum_epoch_from_non_voter_leader_rejected() {
+        // C-2: a BeginQuorumEpoch claiming a leader_id that is not in our
+        // (non-empty) voter set must NOT be adopted — no leader installed, no
+        // role transition, no actions.
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        let actions = m.on_event(
+            Event::ReceiveBeginQuorumEpoch {
+                leader_id: 99, // not a voter
+                leader_epoch: 4,
+            },
+            &log,
+            SimInstant(10),
+        );
+        assert!(actions.is_empty());
+        assert!(m.quorum_state().leader_id.is_none());
+        assert!(m.quorum_state().leader_epoch == 0); // epoch not advanced
+        assert!(!matches!(m.role(), Role::Follower { .. }));
+    }
+
+    #[test]
+    fn begin_quorum_epoch_from_voter_leader_still_accepted() {
+        // C-2 must not break the legitimate path: a voter leader is adopted.
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        let actions = m.on_event(
+            Event::ReceiveBeginQuorumEpoch {
+                leader_id: 2, // a real voter
+                leader_epoch: 4,
+            },
+            &log,
+            SimInstant(10),
+        );
+        assert!(matches!(m.role(), Role::Follower { leader_id: 2, .. }));
+        assert!(m.quorum_state().leader_id == Some(2));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, Action::SendFetch { leader_id: 2 }))
+        );
+    }
+
+    #[test]
+    fn vote_from_non_voter_candidate_not_granted() {
+        // C-2: a Vote whose candidate is not in our (non-empty) voter set is
+        // ignored — no reply, no vote recorded.
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        let actions = m.on_event(
+            Event::ReceiveVoteRequest {
+                from: 99,
+                voter_id: 1, // addressed to us
+                candidate_epoch: 1,
+                candidate: 99, // not a voter
+                candidate_log_end: LogEnd {
+                    last_epoch: 1,
+                    last_offset: 5,
+                },
+                pre_vote: false,
+            },
+            &log,
+            SimInstant(0),
+        );
+        assert!(actions.is_empty());
+        assert!(m.quorum_state().voted_key.is_none());
+    }
+
+    #[test]
+    fn vote_addressed_to_other_voter_rejected() {
+        // C-2: a Vote addressed (voter_id) to a different node than us is
+        // ignored, even if the candidate is a legitimate voter.
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        let actions = m.on_event(
+            Event::ReceiveVoteRequest {
+                from: 2,
+                voter_id: 3, // addressed to node 3, not us (node 1)
+                candidate_epoch: 1,
+                candidate: 2,
+                candidate_log_end: LogEnd {
+                    last_epoch: 1,
+                    last_offset: 5,
+                },
+                pre_vote: false,
+            },
+            &log,
+            SimInstant(0),
+        );
+        assert!(actions.is_empty());
+        assert!(m.quorum_state().voted_key.is_none());
+    }
+
+    #[test]
+    fn vote_from_voter_addressed_to_us_still_granted() {
+        // C-2 must not break the legitimate path: a voter candidate addressing
+        // us is still granted.
+        let mut m = machine(1, &[1, 2, 3]);
+        let log = FakeLog {
+            end: 5,
+            last_epoch: 1,
+        };
+        let actions = m.on_event(
+            Event::ReceiveVoteRequest {
+                from: 2,
+                voter_id: 1, // addressed to us
+                candidate_epoch: 1,
+                candidate: 2,
+                candidate_log_end: LogEnd {
+                    last_epoch: 1,
+                    last_offset: 5,
+                },
+                pre_vote: false,
+            },
+            &log,
+            SimInstant(0),
+        );
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            Action::ReplyVote {
+                to: 2,
+                granted: true,
+                ..
+            }
+        )));
+        assert!(m.quorum_state().voted_key.map(|k| k.id) == Some(2));
     }
 
     #[test]

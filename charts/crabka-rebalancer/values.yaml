@@ -77,6 +77,20 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
+
 service:
   type: ClusterIP
   port: 9300

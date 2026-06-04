@@ -11,14 +11,15 @@
 //! (-4) sentinels are resolved against the local log.
 
 use bytes::{Bytes, BytesMut};
-use futures_util::future::BoxFuture;
 
+use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::owned::list_offsets_request::ListOffsetsRequest;
 use crabka_protocol::owned::list_offsets_response::{
     ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
 };
 use crabka_protocol::{Decode, Encode};
 
+use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
 use crate::error::BrokerError;
@@ -29,22 +30,53 @@ const MAX_TIMESTAMP: i64 = -3; // KIP-734
 const EARLIEST_LOCAL: i64 = -4; // KIP-405
 
 #[allow(clippy::too_many_lines)]
-pub(crate) fn handle(
+pub(crate) async fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
     req_bytes: &[u8],
-) -> BoxFuture<'static, Result<Bytes, BrokerError>> {
-    let req_bytes = req_bytes.to_vec();
+    ctx: &crate::handlers::RequestContext<'_>,
+) -> Result<Bytes, BrokerError> {
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
     let remote_reader = broker.remote_reader.clone();
-    Box::pin(async move {
-        let mut cur: &[u8] = &req_bytes;
+    {
+        let mut cur: &[u8] = req_bytes;
         let req = ListOffsetsRequest::decode(&mut cur, version)?;
+
+        // ── ACL preamble ────────────────────────────────────────────
+        // Per-topic `Describe` on `Topic(name)`. A denied topic gets
+        // `TOPIC_AUTHORIZATION_FAILED (29)` on every partition row it
+        // requested; authorized topics proceed unchanged.
+        let acl_image = controller.current_image();
 
         let mut topics_out: Vec<ListOffsetsTopicResponse> = Vec::with_capacity(req.topics.len());
         for topic in req.topics {
+            if topic_describe_denied(
+                broker.config.authorizer.as_ref(),
+                &acl_image,
+                ctx.principal,
+                ctx.peer,
+                &topic.name,
+            ) {
+                let parts_out = topic
+                    .partitions
+                    .iter()
+                    .map(|part| ListOffsetsPartitionResponse {
+                        partition_index: part.partition_index,
+                        error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                        timestamp: -1,
+                        offset: -1,
+                        ..Default::default()
+                    })
+                    .collect();
+                topics_out.push(ListOffsetsTopicResponse {
+                    name: topic.name,
+                    partitions: parts_out,
+                    ..Default::default()
+                });
+                continue;
+            }
             let mut parts_out: Vec<ListOffsetsPartitionResponse> =
                 Vec::with_capacity(topic.partitions.len());
             for part in topic.partitions {
@@ -173,5 +205,81 @@ pub(crate) fn handle(
         let mut buf = BytesMut::with_capacity(resp.encoded_len(version));
         resp.encode(&mut buf, version)?;
         Ok(buf.freeze())
-    })
+    }
+}
+
+/// `Describe` on `Topic(name)` gate. Returns `true` when denied.
+fn topic_describe_denied(
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &crabka_metadata::MetadataImage,
+    principal: &crabka_security::Principal,
+    host: &std::net::SocketAddr,
+    topic: &str,
+) -> bool {
+    authorizer.authorize(
+        image,
+        &AuthorizationRequest {
+            principal,
+            host,
+            resource_type: ResourceType::Topic,
+            resource_name: topic,
+            operation: AclOperation::Describe,
+        },
+    ) == AuthorizationResult::Deny
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use assert2::assert;
+
+    #[test]
+    fn topic_describe_denied_yields_topic_authorization_failed_rows() {
+        use crabka_protocol::owned::list_offsets_response::{
+            self, ListOffsetsPartitionResponse, ListOffsetsResponse, ListOffsetsTopicResponse,
+        };
+
+        let authorizer =
+            crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new());
+        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
+        let principal = crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        };
+        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
+
+        assert!(topic_describe_denied(
+            &authorizer,
+            &image,
+            &principal,
+            &peer,
+            "t"
+        ));
+
+        // The denied-topic shape the handler emits: every partition row
+        // carries TOPIC_AUTHORIZATION_FAILED.
+        let resp = ListOffsetsResponse {
+            throttle_time_ms: 0,
+            topics: vec![ListOffsetsTopicResponse {
+                name: "t".into(),
+                partitions: vec![ListOffsetsPartitionResponse {
+                    partition_index: 0,
+                    error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                    timestamp: -1,
+                    offset: -1,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut buf = BytesMut::with_capacity(resp.encoded_len(list_offsets_response::MAX_VERSION));
+        resp.encode(&mut buf, list_offsets_response::MAX_VERSION)
+            .expect("encode");
+        let mut cur: &[u8] = &buf;
+        let decoded =
+            ListOffsetsResponse::decode(&mut cur, list_offsets_response::MAX_VERSION).unwrap();
+        assert!(decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+    }
 }

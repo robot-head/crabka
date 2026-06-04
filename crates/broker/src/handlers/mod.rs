@@ -231,46 +231,44 @@ pub(crate) fn build_table() -> HandlerTable {
     // so the handler can receive the per-connection
     // principal + peer `SocketAddr` for `Write` on `TransactionalId` +
     // `Read` on `Group` + per-topic `Read` on `Topic` ACL enforcement.
-    t.register(2, list_offsets::handle);
-    t.register(10, find_coordinator::handle);
-    t.register(12, heartbeat::handle);
-    t.register(13, leave_group::handle);
-    t.register(14, sync_group::handle);
+    // 2 (ListOffsets) intercepted inline — per-topic Describe ACL.
+    // 10 (FindCoordinator) intercepted inline — per-key Group/TransactionalId
+    // Describe ACL.
+    // 12 (Heartbeat) intercepted inline — Group Read ACL.
+    // 13 (LeaveGroup) intercepted inline — Group Read ACL.
+    // 14 (SyncGroup) intercepted inline — Group Read ACL.
     // 15 (DescribeGroups) intercepted inline — see comment above.
     // 16 (ListGroups) intercepted inline — see comment above.
     t.register(18, api_versions::handle);
     // 21 (DeleteRecords) intercepted inline — see comment above.
     // 22 (InitProducerId) intercepted inline — see comment above.
-    t.register(23, offset_for_leader_epoch::handle);
+    // 23 (OffsetForLeaderEpoch) intercepted inline — per-topic Describe ACL.
     // 24 (AddPartitionsToTxn) intercepted inline — see comment above.
     t.register(25, crate::txn::handlers::add_offset_commits_to_txn::handle);
     // 26 (EndTxn) intercepted inline — see comment above.
     t.register(27, crate::txn::handlers::write_txn_markers::handle);
     // 28 (TxnOffsetCommit) intercepted inline — see comment above.
-    t.register(32, describe_configs::handle);
+    // 32 (DescribeConfigs) intercepted inline — per-resource DescribeConfigs ACL.
     // 33 (AlterConfigs) intercepted inline — see comment above.
-    t.register(35, describe_log_dirs::handle);
+    // 35 (DescribeLogDirs) intercepted inline — Cluster Describe ACL.
     // 37 (CreatePartitions) intercepted inline — see comment above.
     // 42 (DeleteGroups) intercepted inline — see comment above.
     // 44 (IncrementalAlterConfigs) intercepted inline — see comment above.
-    t.register(56, alter_partition::handle);
+    // 56 (AlterPartition) intercepted inline — Cluster ClusterAction ACL.
     // FetchSnapshot (api_key 59, KIP-630) — controller-snapshot byte-range
     // fetch. Plain 4-arg signature: no per-connection ACL context needed.
     t.register(59, fetch_snapshot::handle);
     // 60 (DescribeCluster) intercepted inline — see comment above.
-    t.register(63, broker_heartbeat::handle);
-    // GetReplicaLogInfo (93, KIP-966) — inter-broker RPC the controller's
-    // unclean recovery manager uses to read each replica's LEO + leader epoch.
-    t.register(93, get_replica_log_info::handle);
-    t.register(68, consumer_group_heartbeat::handle);
+    // 63 (BrokerHeartbeat) intercepted inline — Cluster ClusterAction ACL.
+    // 93 (GetReplicaLogInfo, KIP-966) intercepted inline — Cluster
+    // ClusterAction ACL. Inter-broker RPC the controller's unclean recovery
+    // manager uses to read each replica's LEO + leader epoch.
+    // 68 (ConsumerGroupHeartbeat) intercepted inline — Group Read ACL.
     t.register(69, consumer_group_describe::handle);
-    // KIP-932 ShareGroupHeartbeat (api_key 76). Plain 4-arg handler:
-    // share-group membership needs no per-connection ACL context.
-    t.register(76, share_group_heartbeat::handle);
-    // KIP-1071 StreamsGroupHeartbeat (88) / StreamsGroupDescribe (89). Plain
-    // 4-arg handlers; the streams protocol needs no per-connection ACL context
-    // yet (per-group Describe ACL is a future slice).
-    t.register(88, streams_group_heartbeat::handle);
+    // 76 (ShareGroupHeartbeat, KIP-932) intercepted inline — Group Read ACL.
+    // 88 (StreamsGroupHeartbeat, KIP-1071) intercepted inline — Group Read ACL.
+    // StreamsGroupDescribe (89) stays a plain 4-arg handler (per-group Describe
+    // ACL is a future slice).
     t.register(89, streams_group_describe::handle);
     // KIP-932 share-state persister RPCs (api keys 83–87). Inter-broker
     // handlers, gated per-partition on local share-state leadership.

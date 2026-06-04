@@ -60,11 +60,68 @@ pub struct BrokerRaftHandshake {
     pub enabled_sasl_mechanisms: Vec<SaslMechanism>,
     pub protocol: ListenerProtocol,
     pub controller: ControllerHandleArc,
+    /// Authorizer used to gate controller RPCs after authentication
+    /// (H-1). Authentication proves *who* the peer is; this enforces that
+    /// the authenticated principal is allowed to drive controller/raft
+    /// RPCs (`CLUSTER_ACTION` on `Cluster("kafka-cluster")`). With the
+    /// default [`AllowAllAuthorizer`], every principal is allowed, so
+    /// dev/single-node is unaffected; `SimpleAclAuthorizer` grants
+    /// super-users.
+    pub authorizer: Arc<dyn crate::authorizer::Authorizer>,
 }
 
 /// Initial per-connection auth state for an unauthenticated SASL peer.
 fn pre_auth_state() -> ConnectionAuth {
     ConnectionAuth::Anonymous
+}
+
+impl BrokerRaftHandshake {
+    /// H-1: authorize an authenticated controller-listener peer for
+    /// controller/raft RPCs. Authentication established *who* the peer is;
+    /// this enforces that the principal holds `CLUSTER_ACTION` on
+    /// `Cluster("kafka-cluster")` — the same gate the inter-broker
+    /// control-plane RPCs (`BrokerHeartbeat`, etc.) use — evaluated against
+    /// the controller's *current* metadata image so ACL changes take
+    /// effect for new connections. On Deny the connection is dropped.
+    fn authorize_cluster_action(
+        &self,
+        principal: &crabka_security::Principal,
+        peer: &std::net::SocketAddr,
+    ) -> Result<(), RaftHandshakeError> {
+        use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
+        use crabka_metadata::{AclOperation, ResourceType};
+
+        // The image is reached through the late-bound controller handle
+        // (the same cell used for SCRAM lookup). If it is not yet wired the
+        // controller cannot be operating, so fail closed.
+        let controller = self.controller.get().ok_or_else(|| {
+            RaftHandshakeError::Sasl(
+                "controller handle not initialised for CLUSTER_ACTION authorization".into(),
+            )
+        })?;
+        let image = controller.current_image();
+        let decision = self.authorizer.authorize(
+            &image,
+            &AuthorizationRequest {
+                principal,
+                host: peer,
+                resource_type: ResourceType::Cluster,
+                resource_name: "kafka-cluster",
+                operation: AclOperation::ClusterAction,
+            },
+        );
+        if decision == AuthorizationResult::Deny {
+            tracing::warn!(
+                principal = %principal.name,
+                peer = %peer,
+                "denying controller-listener peer: principal lacks CLUSTER_ACTION on kafka-cluster"
+            );
+            return Err(RaftHandshakeError::Sasl(
+                "principal not authorized for CLUSTER_ACTION on the controller listener".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -73,6 +130,12 @@ impl RaftListenerHandshake for BrokerRaftHandshake {
         &self,
         stream: TcpStream,
     ) -> Result<Box<dyn DuplexStream>, RaftHandshakeError> {
+        // Capture the peer address before the stream is consumed by TLS
+        // termination — it is the `host` of the authorization request.
+        let peer = stream
+            .peer_addr()
+            .map_err(|e| RaftHandshakeError::Tls(e.to_string()))?;
+
         // 1. TLS termination (if the listener protocol requires it).
         let mut stream: Box<dyn DuplexStream> = if self.protocol.requires_tls() {
             let acceptor = self.tls_acceptor.clone().ok_or_else(|| {
@@ -88,8 +151,17 @@ impl RaftListenerHandshake for BrokerRaftHandshake {
         };
 
         // 2. SASL termination (if the listener protocol requires it).
+        //    The SASL exchange authenticates the peer and yields its
+        //    `Principal`; H-1 then authorizes that principal for
+        //    controller RPCs before the connection is handed to the raft
+        //    engine. A non-SASL listener (Plaintext is short-circuited to
+        //    `None` upstream, so here that's TLS-only `Ssl`) has no
+        //    authenticated identity to authorize at this layer — we do not
+        //    extract an mTLS client-cert principal here — so the
+        //    CLUSTER_ACTION gate is skipped for it (an unusual config).
         if self.protocol.requires_sasl() {
-            run_inbound_sasl(&mut *stream, self).await?;
+            let principal = run_inbound_sasl(&mut *stream, self).await?;
+            self.authorize_cluster_action(&principal, &peer)?;
         }
         Ok(stream)
     }
@@ -101,12 +173,13 @@ impl RaftListenerHandshake for BrokerRaftHandshake {
 /// Loop invariant: every iteration reads exactly one Kafka request frame
 /// and writes exactly one response frame. The `auth` state machine
 /// (`network::auth::ConnectionAuth`) carries continuation state across
-/// SCRAM rounds. Returns `Ok(())` once `auth.is_authenticated()` and
+/// SCRAM rounds. Returns the authenticated [`Principal`] once
+/// `auth.is_authenticated()` (so `upgrade` can authorize it) and
 /// `Err(...)` if the peer sent an unexpected frame or auth failed.
 async fn run_inbound_sasl(
     stream: &mut dyn DuplexStream,
     cfg: &BrokerRaftHandshake,
-) -> Result<(), RaftHandshakeError> {
+) -> Result<crabka_security::Principal, RaftHandshakeError> {
     let mut auth = pre_auth_state();
     loop {
         let (api_key, api_version, corr_id, body) = read_kafka_request(stream).await?;
@@ -185,7 +258,14 @@ async fn run_inbound_sasl(
                     )));
                 }
                 if auth.is_authenticated() {
-                    return Ok(());
+                    // Hand the authenticated principal back to `upgrade` for
+                    // the CLUSTER_ACTION authorization gate (H-1).
+                    let principal = auth.principal().cloned().ok_or_else(|| {
+                        RaftHandshakeError::Sasl(
+                            "authenticated connection missing principal".into(),
+                        )
+                    })?;
+                    return Ok(principal);
                 }
                 // SCRAM second round: loop and read the next
                 // SaslAuthenticate frame. Sanity-check we're still
@@ -381,6 +461,7 @@ mod tests {
             enabled_sasl_mechanisms: vec![],
             protocol: ListenerProtocol::Plaintext,
             controller: Arc::new(OnceCell::new()),
+            authorizer: Arc::new(crate::authorizer::AllowAllAuthorizer),
         };
         // `upgrade(TcpStream)` requires a real TCP socket, so we
         // exercise the short-circuit predicates directly here. The full

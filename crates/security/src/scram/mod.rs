@@ -167,6 +167,8 @@ fn derive_keys_sha256(salted: &[u8]) -> (Vec<u8>, Vec<u8>) {
 mod tests {
     use super::*;
     use assert2::assert;
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
     use sha2::{Digest, Sha512};
 
     /// SHA-512 PBKDF2 vector + verify `stored_key = H(client_key)`.
@@ -425,6 +427,88 @@ mod tests {
         match server.step(&c2) {
             StepResult::Failed(crate::AuthError::BadProof) => {}
             other => panic!("expected BadProof, got {other:?}"),
+        }
+    }
+
+    /// RFC 5802 §5.1: the server must reject a client-final whose `r=`
+    /// (combined nonce) does not equal the nonce it issued in
+    /// server-first. We tamper with the `r=` attribute of an otherwise
+    /// well-formed client-final and expect `MalformedMessage`.
+    #[test]
+    fn scram_server_rejects_wrong_nonce() {
+        // Arbitrary, non-secret test password generated at runtime (not a
+        // hard-coded credential literal).
+        let password: Vec<u8> = (b'A'..=b'Z').collect();
+        let cred = hash_scram_password_with_salt(
+            &password,
+            SaslMechanism::ScramSha256,
+            4096,
+            (0..16).collect::<Vec<u8>>(),
+        );
+        let mut server = ScramServerExchange::new("alice".to_string(), cred);
+        let mut client = ScramClientExchange::new(
+            "alice".to_string(),
+            password.clone(),
+            SaslMechanism::ScramSha256,
+        );
+        let c1 = client.client_first().unwrap();
+        let StepResult::Continue(s1) = server.step(&c1) else {
+            panic!("server step 1 must continue");
+        };
+        let c2 = client.step(&s1).unwrap();
+        let c2_str = String::from_utf8(c2).unwrap();
+        // Flip the combined nonce: replace `r=<nonce>` with a different
+        // value while leaving `c=` and `p=` intact.
+        let combined = c2_str
+            .split(',')
+            .find_map(|a| a.strip_prefix("r="))
+            .expect("client-final has r=");
+        let tampered = c2_str.replacen(
+            &format!("r={combined}"),
+            &format!("r={combined}deadbeef"),
+            1,
+        );
+        match server.step(tampered.as_bytes()) {
+            StepResult::Failed(crate::AuthError::MalformedMessage) => {}
+            other => panic!("expected MalformedMessage for wrong nonce, got {other:?}"),
+        }
+    }
+
+    /// RFC 5802 §5.1: the server must reject a client-final whose `c=`
+    /// channel binding is not the base64 of the GS2 header `n,,`
+    /// (`"biws"`). We swap in a bogus channel binding and expect
+    /// `MalformedMessage`.
+    #[test]
+    fn scram_server_rejects_wrong_channel_binding() {
+        // Arbitrary, non-secret test password generated at runtime (not a
+        // hard-coded credential literal).
+        let password: Vec<u8> = (b'A'..=b'Z').collect();
+        let cred = hash_scram_password_with_salt(
+            &password,
+            SaslMechanism::ScramSha256,
+            4096,
+            (0..16).collect::<Vec<u8>>(),
+        );
+        let mut server = ScramServerExchange::new("alice".to_string(), cred);
+        let mut client = ScramClientExchange::new(
+            "alice".to_string(),
+            password.clone(),
+            SaslMechanism::ScramSha256,
+        );
+        let c1 = client.client_first().unwrap();
+        let StepResult::Continue(s1) = server.step(&c1) else {
+            panic!("server step 1 must continue");
+        };
+        let c2 = client.step(&s1).unwrap();
+        let c2_str = String::from_utf8(c2).unwrap();
+        // The client always emits `c=biws`; rewrite it to a different
+        // (still-valid-base64) channel binding.
+        assert!(c2_str.starts_with("c=biws,"), "client emits c=biws");
+        let wrong_cb = B64.encode(b"y,,");
+        let tampered = c2_str.replacen("c=biws", &format!("c={wrong_cb}"), 1);
+        match server.step(tampered.as_bytes()) {
+            StepResult::Failed(crate::AuthError::MalformedMessage) => {}
+            other => panic!("expected MalformedMessage for wrong channel binding, got {other:?}"),
         }
     }
 }
