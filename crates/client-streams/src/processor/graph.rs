@@ -16,7 +16,6 @@ type DeserializeFn =
 
 /// A source: which topic it reads, a closure that deserializes `(key,value,ts)`
 /// into an erased record, and the node indices it feeds.
-#[allow(dead_code)] // used by builder (Task 7+)
 pub(crate) struct GraphSource {
     pub topic: String,
     pub deserialize: DeserializeFn,
@@ -24,7 +23,6 @@ pub(crate) struct GraphSource {
 }
 
 /// One subtopology's runnable graph at a single partition.
-#[allow(dead_code)] // used by builder/runtime (Task 7+)
 pub(crate) struct Graph {
     pub nodes: Vec<Box<dyn ErasedNode>>,
     pub children: Vec<Vec<usize>>,
@@ -35,7 +33,7 @@ pub(crate) struct Graph {
 impl Graph {
     /// Feed one record arriving on `topic`; runs the graph to completion,
     /// appending sink outputs to `self.output`. Unknown topics are ignored.
-    #[allow(dead_code)] // used by TopologyTestDriver (Task 8+)
+    #[allow(dead_code)] // called from builder tests; Task 8 TopologyTestDriver uses this
     pub fn pipe(
         &mut self,
         topic: &str,
@@ -87,7 +85,7 @@ impl Graph {
         Ok(())
     }
 
-    #[allow(dead_code)] // used by TopologyTestDriver (Task 8+)
+    #[allow(dead_code)] // called from builder tests; Task 8 TopologyTestDriver uses this
     pub fn take_output(&mut self) -> Vec<OutputRecord> {
         std::mem::take(&mut self.output)
     }

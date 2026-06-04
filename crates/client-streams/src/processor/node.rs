@@ -31,7 +31,7 @@ use super::serde::Serde;
 /// **not** implement this trait because sources are entered via their own
 /// `deserialize` method — they are never the target of a `forward` from a
 /// parent node.
-#[allow(dead_code)] // used by graph driver (Task 6+) and builder (Task 7+)
+#[allow(dead_code)] // type-query methods used by future graph introspection; process() is used now
 pub(crate) trait ErasedNode: Send {
     /// Human-readable name (from the topology builder).
     fn name(&self) -> &str;
@@ -62,13 +62,11 @@ pub(crate) trait ErasedNode: Send {
 
 /// Wraps a user [`Processor`] and handles type-erasure at both the input
 /// (downcast) and output (`ProcessorContext::forward` re-boxes).
-#[allow(dead_code)] // used by the graph driver (Task 6+)
 pub(crate) struct ProcessorNode<KIn, VIn, KOut, VOut> {
     name: String,
     inner: Box<dyn Processor<KIn, VIn, KOut, VOut>>,
 }
 
-#[allow(dead_code)] // used by graph driver (Task 6+)
 impl<KIn, VIn, KOut, VOut> ProcessorNode<KIn, VIn, KOut, VOut>
 where
     KIn: Any + Send,
@@ -155,7 +153,6 @@ where
 
 /// Deserializes an [`ErasedRecord`] and pushes the resulting bytes to
 /// `Dispatch::output`. This is a terminal node — it has no children.
-#[allow(dead_code)] // used by the graph driver (Task 6+)
 pub(crate) struct SinkNode<K, V, KS, VS> {
     name: String,
     topic: String,
@@ -164,7 +161,6 @@ pub(crate) struct SinkNode<K, V, KS, VS> {
     _pd: std::marker::PhantomData<fn(K, V)>,
 }
 
-#[allow(dead_code)] // used by graph driver (Task 6+)
 impl<K, V, KS, VS> SinkNode<K, V, KS, VS>
 where
     K: Any + Send,
@@ -259,7 +255,6 @@ where
 /// Deserializes raw bytes from an input topic into a boxed `ErasedRecord`.
 /// The graph driver calls `deserialize` directly — `SourceNode` does **not**
 /// implement `ErasedNode` because it is never the target of a `forward`.
-#[allow(dead_code)] // used by the graph driver (Task 6+)
 pub(crate) struct SourceNode<K, V, KS, VS> {
     name: String,
     key_serde: KS,
@@ -267,7 +262,6 @@ pub(crate) struct SourceNode<K, V, KS, VS> {
     _pd: std::marker::PhantomData<fn(K, V)>,
 }
 
-#[allow(dead_code)] // used by graph driver (Task 6+)
 impl<K, V, KS, VS> SourceNode<K, V, KS, VS>
 where
     K: Any + Send + Clone,
@@ -321,7 +315,7 @@ where
     }
 
     /// The `TypeId` pair `(K, V)` this source produces.
-    #[allow(clippy::unused_self)]
+    #[allow(dead_code, clippy::unused_self)]
     pub(crate) fn output_kv(&self) -> (TypeId, TypeId) {
         (TypeId::of::<K>(), TypeId::of::<V>())
     }

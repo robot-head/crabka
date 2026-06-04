@@ -8,8 +8,19 @@ use crabka_client_streams::Topology;
 fn single_source_sink_matches_jvm_fixture() {
     // The Rust topology MUST mirror the Java PAPI app the fixture was captured from.
     let mut topo = Topology::new();
-    topo.add_source("src", ["streams-input"]);
-    topo.add_sink("snk", "streams-output", ["src"]);
+    topo.add_source(
+        "src",
+        ["streams-input"],
+        crabka_client_streams::BytesSerde,
+        crabka_client_streams::BytesSerde,
+    );
+    topo.add_sink(
+        "snk",
+        "streams-output",
+        ["src"],
+        crabka_client_streams::BytesSerde,
+        crabka_client_streams::BytesSerde,
+    );
     let wire = topo.build("streams-app").unwrap().to_wire();
 
     // Assert the JVM-derived shape (mirrors single_source_sink.topology.json).

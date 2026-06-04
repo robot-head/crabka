@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod erased;
+pub(crate) mod factory;
 pub(crate) mod graph;
 pub(crate) mod node;
 pub mod record;
