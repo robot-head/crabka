@@ -496,3 +496,69 @@ async fn unthrottled_ip_unaffected() {
         "expected fast unthrottled connect, got {elapsed:?}"
     );
 }
+
+/// Start a single-broker PLAINTEXT cluster with explicit connection caps
+/// (`max.connections` / `max.connections.per.ip`). Returns `(handle, _dir, addr)`.
+async fn start_single_broker_plaintext_with_conn_caps(
+    max_connections: usize,
+    max_connections_per_ip: usize,
+) -> (BrokerHandle, TempDir, SocketAddr) {
+    let log_dir = tempfile::tempdir().unwrap();
+    let mut cfg = crabka_broker::BrokerConfig::for_tests(log_dir.path().to_path_buf());
+    cfg.max_connections = max_connections;
+    cfg.max_connections_per_ip = max_connections_per_ip;
+    let handle = Broker::start(cfg).await.expect("broker must start");
+    let addr = handle.listen_addr();
+    (handle, log_dir, addr)
+}
+
+/// M-2: a per-IP connection cap refuses connections beyond the limit, and the
+/// slot is freed once an existing connection closes (`ConnectionGuard::drop`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn max_connections_per_ip_refuses_excess_and_frees_on_close() {
+    use crabka_protocol::Encode;
+    use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+
+    let (_handle, _dir, addr) = start_single_broker_plaintext_with_conn_caps(usize::MAX, 1).await;
+
+    let av_body = {
+        let mut b = BytesMut::new();
+        ApiVersionsRequest::default()
+            .encode(&mut b, 0)
+            .expect("encode ApiVersions");
+        b.to_vec()
+    };
+
+    // Connection 1: within the per-IP cap (0 -> 1). A successful round-trip
+    // proves the broker accepted it; keep the stream open to hold the slot.
+    let mut c1 = TcpStream::connect(addr).await.expect("connect c1");
+    round_trip(&mut c1, 18, 0, 1, false, &av_body)
+        .await
+        .expect("c1 ApiVersions succeeds (within cap)");
+
+    // Connection 2 from the same IP exceeds the per-IP cap. The broker accepts
+    // the socket then immediately drops it (no handler spawned), so the
+    // request round-trip fails (peer closed the connection).
+    let mut c2 = TcpStream::connect(addr).await.expect("tcp connect c2");
+    let c2_result = round_trip(&mut c2, 18, 0, 1, false, &av_body).await;
+    assert!(
+        c2_result.is_err(),
+        "c2 must be refused while c1 holds the only per-IP slot, got {c2_result:?}"
+    );
+
+    // Closing c1 frees the slot. The decrement happens when the c1 handler task
+    // observes the close, so retry briefly until a fresh connection succeeds.
+    drop(c1);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let mut c3 = TcpStream::connect(addr).await.expect("connect c3");
+        if round_trip(&mut c3, 18, 0, 1, false, &av_body).await.is_ok() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "per-IP slot was not freed after c1 closed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}

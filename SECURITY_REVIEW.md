@@ -40,45 +40,42 @@ dangerous-primitive sweeps.
 
 ---
 
-## Remediation status (this PR)
+## Remediation status
 
-The crabka-specific findings — those where crabka deviates from Apache Kafka's
-security model, as opposed to shared hazard classes or upstream-dependency
-issues — are **fixed in this branch**:
+**All findings are now remediated** across three PRs: the crabka-specific
+authz/correctness fixes, the shared decode-path DoS hardening, and the
+remaining hardening/config/dependency items.
 
 | ID  | Status | Notes |
 |-----|--------|-------|
 | C-1 | ✅ Mitigated | `CLUSTER_ACTION` is now authorized in the controller handshake (H-1) and the engine validates voters (C-2); a prominent startup **warning** is emitted when the controller listener runs PLAINTEXT. Plaintext is still *permitted* (matches Kafka's quickstart posture and avoids breaking single-node/dev) — operators must enable TLS/SASL to fully close the unauthenticated-peer vector. |
 | C-2 | ✅ Fixed | Engine rejects a `BeginQuorumEpoch` leader / `Vote` candidate not in the current voter set and a `Vote` addressed to another `voter_id`. Guarded on a non-empty voter set; full raft simulation suite (formation/leadership/KIP-853 reconfig) stays green. |
+| C-3 | ✅ Fixed | `crabka_compression::decompress` takes a `max_output` cap (enforced via `Read::take`, `CompressionError::TooLarge` on overflow); record decode derives the cap from the compressed size (≤100×, 16 MiB floor, 1 GiB ceiling). Per-codec bomb tests added. |
 | H-1 | ✅ Fixed | `BrokerRaftHandshake` authorizes `CLUSTER_ACTION` on `Cluster` after SASL auth and drops the connection on Deny. |
 | H-2 | ✅ Fixed | `AlterPartition`, `BrokerHeartbeat`, `GetReplicaLogInfo` now require `CLUSTER_ACTION`. |
 | H-3 | ✅ Fixed | `matching_acls` treats LITERAL `"*"` as `WILDCARD_RESOURCE`. |
+| H-4 | ✅ Fixed | `get_array_len` / `get_nullable_array_len` reject a declared length greater than the remaining buffer, bounding `Vec::with_capacity(n)` in every generated decoder. |
+| H-5 | ✅ Fixed | Record `header_count` / `records_count` pre-allocation clamped by the available bytes. |
 | M-1 | ✅ Fixed | `Describe`/`DescribeConfigs`/`Read`-on-Group gates added to ListOffsets, OffsetForLeaderEpoch, DescribeConfigs, DescribeLogDirs, the group-membership APIs, and FindCoordinator. |
+| M-2 | ✅ Fixed | Kafka-compatible `max.connections` / `max.connections.per.ip` caps (RAII connection-counter guard; close-on-exceed) and the IPv6 connection-rate-quota bypass fixed (quota lookup generalized to `IpAddr`). |
+| M-3 | ✅ Fixed | Raft snapshot-fetch buffer bounded by a declared-`size` ceiling (`MAX_SNAPSHOT_BYTES` = 1 GiB) plus a chunk-overshoot guard. |
 | M-4 | ✅ Fixed | Rebalancer Helm chart now ships the hardened pod/container `securityContext`. |
 | L-1 | ✅ Fixed | SCRAM server verifies the client-final `r=` nonce and `c=` channel binding. |
+| L-2 | ✅ Fixed | OAuth `IntrospectionValidator` now honors an optional `expected_audience` (reuses `audience_contains`), mirroring the signed-JWS path. |
 | L-3 | ✅ Fixed | Redacting `Debug` for `S3Config` / `FileRemoteStorageS3Config`. |
 | L-4 | ✅ Fixed | Leader-epoch checkpoint no longer pre-sizes from the untrusted file count. |
 | L-5 | ✅ Fixed | `KafkaRebalance.spec.endpoint` validated against a cluster-internal DNS allow-list. |
-
-**Not addressed here** (shared hazard classes Kafka also faces, or upstream
-dependency issues — tracked for follow-up):
-
-- **C-3 / H-4 / H-5** (decompression-bomb + unbounded decode allocations): a
-  general Kafka-protocol hazard class. Kafka gates decompression behind
-  `Write` authz and bounds via `message.max.bytes`; the fix here (output cap +
-  bounding `get_array_len` / record-count pre-allocation) is a focused,
-  high-value follow-up that touches the hot decode path and warrants its own
-  benchmarked change.
-- **M-2** (connection cap / IPv6 rate-limit), **M-3** (raft snapshot buffer
-  bound), **L-2** (OAuth introspection audience), **L-6** (OPA fail-open
-  default), **L-7** (`rsa` RUSTSEC) — smaller hardening / config / dependency
-  items.
+| L-6 | ✅ Fixed | OPA authorizer documented as security-sensitive and confirmed fail-**closed** by default (`allow_on_error` defaults to `false`, matching the upstream OPA Kafka plugin). |
+| L-7 | ✅ Mitigated | `RUSTSEC-2023-0071` (`rsa` Marvin attack) is a transitive dep via `sspi`/`picky`; our GSSAPI path performs no RSA private-key operations, and there is no fixed upstream release. Accepted with justification in `deny.toml`'s advisory ignore list. |
 
 > **Verification note:** All fixes pass their crate's unit/integration tests,
 > clippy (pedantic-deny), and rustfmt; the raft simulation suite verifies C-2
-> against in-process multi-node formation/leadership/reconfiguration. The
+> and M-3 against in-process multi-node formation/leadership/reconfiguration and
+> snapshot transfer. Two residual operational caveats remain: (1) the
 > controller-authz changes (C-1/C-2/H-1) should additionally be validated
-> against a real multi-broker cluster before being relied upon in production.
+> against a real multi-broker cluster before being relied upon in production,
+> and (2) C-1 leaves a PLAINTEXT controller listener permitted-but-warned —
+> enabling TLS/SASL on it is what fully closes the unauthenticated-peer vector.
 
 ---
 

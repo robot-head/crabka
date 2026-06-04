@@ -71,13 +71,16 @@ pub fn lookup_quota_with_key(
 ///   1. (ip = `Some(peer_ip)`) — specific
 ///   2. (ip = None)            — default
 ///
+/// Accepts both IPv4 and IPv6 peers: Kafka keys IP quotas by the IP's
+/// string form for either family, so the same two-priority match applies.
+///
 /// Disjoint from `lookup_quota` (which checks `("user", *)` and
 /// `("client-id", *)` candidates only). Used by KIP-612
 /// `connection_creation_rate` enforcement.
 #[must_use]
 pub fn lookup_ip_quota(
     image: &MetadataImage,
-    peer_ip: &std::net::Ipv4Addr,
+    peer_ip: std::net::IpAddr,
     quota_key: &str,
 ) -> Option<f64> {
     lookup_ip_quota_with_key(image, peer_ip, quota_key).map(|(_, v)| v)
@@ -86,7 +89,7 @@ pub fn lookup_ip_quota(
 #[must_use]
 pub fn lookup_ip_quota_with_key(
     image: &MetadataImage,
-    peer_ip: &std::net::Ipv4Addr,
+    peer_ip: std::net::IpAddr,
     quota_key: &str,
 ) -> Option<(EntityKey, f64)> {
     let candidates: [EntityKey; 2] = [
@@ -243,15 +246,15 @@ mod tests {
             "connection_creation_rate",
             1.0,
         )]);
-        let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
-        assert!(lookup_ip_quota(&img, &ip, "connection_creation_rate") == Some(1.0));
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(1.0));
     }
 
     #[test]
     fn ip_default_fallback() {
         let img = img_with_ip(vec![rec_ip(None, "connection_creation_rate", 2.0)]);
-        let ip: std::net::Ipv4Addr = "10.0.0.7".parse().unwrap();
-        assert!(lookup_ip_quota(&img, &ip, "connection_creation_rate") == Some(2.0));
+        let ip: std::net::IpAddr = "10.0.0.7".parse().unwrap();
+        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(2.0));
     }
 
     #[test]
@@ -260,14 +263,32 @@ mod tests {
             rec_ip(None, "connection_creation_rate", 8.0),
             rec_ip(Some("127.0.0.1"), "connection_creation_rate", 1.0),
         ]);
-        let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
-        assert!(lookup_ip_quota(&img, &ip, "connection_creation_rate") == Some(1.0));
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(1.0));
     }
 
     #[test]
     fn ip_no_match_returns_none() {
         let img = img_with_ip(vec![]);
-        let ip: std::net::Ipv4Addr = "127.0.0.1".parse().unwrap();
-        assert!(lookup_ip_quota(&img, &ip, "connection_creation_rate").is_none());
+        let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate").is_none());
+    }
+
+    #[test]
+    fn ipv6_specific_match() {
+        // KIP-612: the connection-creation-rate quota must resolve for an
+        // IPv6 peer keyed by its canonical string form, not just IPv4.
+        let img = img_with_ip(vec![rec_ip(Some("::1"), "connection_creation_rate", 3.0)]);
+        let ip: std::net::IpAddr = "::1".parse().unwrap();
+        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(3.0));
+    }
+
+    #[test]
+    fn ipv6_default_fallback() {
+        // An IPv6 peer with no specific entry falls back to the (ip=None)
+        // default, proving IPv6 is no longer skipped by the quota path.
+        let img = img_with_ip(vec![rec_ip(None, "connection_creation_rate", 5.0)]);
+        let ip: std::net::IpAddr = "2001:db8::42".parse().unwrap();
+        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(5.0));
     }
 }

@@ -376,6 +376,19 @@ pub struct BrokerConfig {
     /// (default 1000).
     pub max_incremental_fetch_session_cache_slots: usize,
 
+    /// Maximum number of live broker connections across all listeners.
+    /// New connections accepted past this ceiling are closed immediately
+    /// (Kafka silently drops them). Matches Apache Kafka's
+    /// `max.connections`; default `usize::MAX` (unlimited, mirroring
+    /// Kafka's `Integer.MAX_VALUE`).
+    pub max_connections: usize,
+
+    /// Maximum number of live connections from any single client IP.
+    /// Connections past this per-IP ceiling are closed immediately.
+    /// Matches Apache Kafka's `max.connections.per.ip`; default
+    /// `usize::MAX` (unlimited).
+    pub max_connections_per_ip: usize,
+
     /// Partition disk-usage scan cadence, in seconds. `0`
     /// disables the scanner entirely (no background task spawned).
     /// Production default: 60s. The scanner walks every known
@@ -636,6 +649,11 @@ impl BrokerConfig {
             // The dedicated 43e integration test enables it explicitly.
             partition_disk_scan_interval_secs: 0,
             max_incremental_fetch_session_cache_slots: 1000,
+            // Connection caps unlimited by default (Kafka's
+            // Integer.MAX_VALUE); the enforcement path treats usize::MAX
+            // as "no cap" and never increments the per-IP map.
+            max_connections: usize::MAX,
+            max_connections_per_ip: usize::MAX,
             // Tests opt into delegation tokens by setting
             // `delegation_token_secret_key`; default off keeps the
             // four DT RPCs returning DELEGATION_TOKEN_AUTH_DISABLED.
@@ -893,6 +911,10 @@ impl Default for BrokerConfig {
             metrics_listen_addr: None,
             partition_disk_scan_interval_secs: 60,
             max_incremental_fetch_session_cache_slots: 1000,
+            // Connection caps unlimited by default, matching Kafka's
+            // max.connections / max.connections.per.ip (Integer.MAX_VALUE).
+            max_connections: usize::MAX,
+            max_connections_per_ip: usize::MAX,
             // Master key off by default. Operators flip this on
             // via `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var or the
             // `[delegation_token] secret_key` TOML stanza.

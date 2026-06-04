@@ -37,10 +37,26 @@ const OPA_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// HTTP client, decision cache, and a captured `tokio::runtime::Handle`
 /// so the synchronous [`Authorizer::authorize`] entry point can call
 /// `reqwest`'s async API via `block_in_place`.
+///
+/// # Security
+///
+/// The [`allow_on_error`](Self::allow_on_error) knob is
+/// **security-sensitive**. When it is `true`, any OPA outage (timeout,
+/// 5xx, unparseable response) causes [`error_decision`](Self::error_decision)
+/// to return `Allow` — i.e. an unreachable policy server authorizes
+/// *every* request (fail-open). The default is `false` (fail-closed),
+/// matching the upstream Open Policy Agent Kafka plugin's
+/// `allow.on.error = false`. Only enable fail-open in environments where
+/// briefly over-permitting is strictly preferable to blocking on an OPA
+/// outage.
 pub struct OpaAuthorizer {
     super_users: HashSet<String>,
     http_client: reqwest::Client,
     url: String,
+    /// **Security-sensitive.** `true` ⇒ OPA errors authorize the request
+    /// (fail-open); an OPA outage then authorizes every request. The
+    /// secure default (and the upstream OPA Kafka plugin default) is
+    /// `false` (fail-closed).
     allow_on_error: bool,
     cache: Mutex<LruCache<CacheKey, CachedDecision>>,
     expire_after_ms: i64,
@@ -191,8 +207,11 @@ impl OpaAuthorizer {
     }
 
     /// What to return when OPA is unreachable / returned garbage.
-    /// Fail-open (`allow_on_error = true`) is for environments where
-    /// blocking on OPA outage is worse than briefly over-permitting.
+    /// Fail-closed (`allow_on_error = false`, the default) denies — the
+    /// secure behavior. Fail-open (`allow_on_error = true`) is
+    /// **security-sensitive**: it authorizes every request for the
+    /// duration of an OPA outage, and is only for environments where
+    /// blocking on that outage is strictly worse than over-permitting.
     fn error_decision(&self) -> AuthorizationResult {
         if self.allow_on_error {
             AuthorizationResult::Allow

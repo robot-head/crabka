@@ -58,6 +58,20 @@ pub struct FileConfig {
     #[serde(default)]
     pub replica_selector: Option<String>,
     pub inter_broker_listener_name: Option<String>,
+
+    /// Maximum number of live broker connections across all listeners
+    /// (Kafka `max.connections`). Connections accepted past this ceiling
+    /// are closed immediately. Absent leaves the `BrokerConfig` default
+    /// `usize::MAX` (unlimited), matching Kafka's `Integer.MAX_VALUE`.
+    #[serde(default)]
+    pub max_connections: Option<usize>,
+
+    /// Maximum number of live connections from any single client IP
+    /// (Kafka `max.connections.per.ip`). Absent leaves the `BrokerConfig`
+    /// default `usize::MAX` (unlimited).
+    #[serde(default)]
+    pub max_connections_per_ip: Option<usize>,
+
     #[serde(default)]
     pub listeners: Vec<FileListener>,
     #[serde(default)]
@@ -278,8 +292,11 @@ pub struct FileOpaConfig {
     /// OPA decision endpoint URL — must include the data-API path,
     /// e.g. `http://opa:8181/v1/data/kafka/authz/allow`.
     pub url: String,
-    /// Permit the operation when the OPA call fails (timeout, 5xx,
-    /// parse error). Default `false` (fail-closed).
+    /// **Security-sensitive.** Permit the operation when the OPA call
+    /// fails (timeout, 5xx, parse error). When `true`, an OPA outage
+    /// authorizes *every* request (fail-open). Default `false`
+    /// (fail-closed) — omitting this field denies on error, matching the
+    /// upstream Open Policy Agent Kafka plugin's `allow.on.error = false`.
     #[serde(default)]
     pub allow_on_error: bool,
     /// LRU cache capacity, in entries. Default `50_000`.
@@ -625,6 +642,16 @@ impl FileConfig {
         if let Some(name) = self.inter_broker_listener_name {
             cfg.inter_broker_listener_name = name;
         }
+        if let Some(max) = self.max_connections
+            && cfg.max_connections == defaults.max_connections
+        {
+            cfg.max_connections = max;
+        }
+        if let Some(max) = self.max_connections_per_ip
+            && cfg.max_connections_per_ip == defaults.max_connections_per_ip
+        {
+            cfg.max_connections_per_ip = max;
+        }
         // `[server_properties]` is intentionally ignored.
         if let Some(proto) = self.controller_listener_protocol
             && cfg.controller_listener_protocol == defaults.controller_listener_protocol
@@ -798,6 +825,7 @@ impl FileConfig {
                         custom_claim_check: custom_claim_check_compiled.clone(),
                         call_userinfo: oauth.userinfo_endpoint_uri.is_some(),
                         allowable_clock_skew_ms: oauth.allowable_clock_skew_ms.unwrap_or(30_000),
+                        expected_audience: oauth.expected_audience.clone(),
                         // Claims mapping.
                         fallback_user_name_claim: oauth.fallback_user_name_claim.clone(),
                         fallback_user_name_prefix: oauth.fallback_user_name_prefix.clone(),
@@ -1285,6 +1313,37 @@ protocol = "Plaintext"
         assert!(cfg.listeners[0].name == "PLAIN");
         assert!(cfg.listeners[0].advertised == "demo-0:9092");
         assert!(cfg.inter_broker_listener_name == "PLAIN");
+    }
+
+    #[test]
+    fn apply_to_maps_connection_caps() {
+        use crate::config::BrokerConfig;
+
+        let src = r"
+max_connections = 100
+max_connections_per_ip = 8
+";
+        let file: FileConfig = toml::from_str(src).unwrap();
+        assert!(file.max_connections == Some(100));
+        assert!(file.max_connections_per_ip == Some(8));
+
+        let mut cfg = BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        assert!(cfg.max_connections == 100);
+        assert!(cfg.max_connections_per_ip == 8);
+    }
+
+    #[test]
+    fn apply_to_omitted_connection_caps_keep_default_unlimited() {
+        use crate::config::BrokerConfig;
+
+        let file: FileConfig = toml::from_str("broker_id = 0").unwrap();
+        assert!(file.max_connections == None);
+        let mut cfg = BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        // Omitted → unchanged from the (unlimited) BrokerConfig default.
+        assert!(cfg.max_connections == usize::MAX);
+        assert!(cfg.max_connections_per_ip == usize::MAX);
     }
 
     #[test]
@@ -1962,6 +2021,50 @@ expire_after_ms = 60000
             assert!(
                 cfg.authorizer.authorize(&img, &req) == AuthorizationResult::Allow,
                 "OPA super-user bypass must short-circuit before any HTTP call"
+            );
+        });
+    }
+
+    #[test]
+    fn opa_allow_on_error_defaults_to_fail_closed_when_omitted() {
+        // L-6: omitting `allow_on_error` must default to fail-closed
+        // (false), matching the upstream OPA Kafka plugin.
+        let toml = r#"
+url = "http://opa.invalid:8181/v1/data/k/a"
+maximum_cache_size = 100
+expire_after_ms = 60000
+"#;
+        let opa: FileOpaConfig = toml::from_str(toml).unwrap();
+        assert!(!opa.allow_on_error, "allow_on_error must default to false");
+
+        // And the built authorizer must Deny on OPA error (fail-closed).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use crate::authorizer::{AuthorizationRequest, AuthorizationResult, Authorizer};
+            use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+
+            let auth = crate::authorizer::opa::OpaAuthorizer::new(
+                std::collections::HashSet::new(),
+                // Unresolvable host → every call errors.
+                "http://opa.invalid:8181/v1/data/k/a".to_string(),
+                opa.allow_on_error,
+                opa.maximum_cache_size,
+                opa.expire_after_ms,
+            )
+            .unwrap();
+            let img = MetadataImage::new(uuid::Uuid::nil());
+            let p = test_principal("alice");
+            let host: std::net::SocketAddr = "127.0.0.1:9092".parse().unwrap();
+            let req = AuthorizationRequest {
+                principal: &p,
+                host: &host,
+                resource_type: ResourceType::Topic,
+                resource_name: "t",
+                operation: AclOperation::Read,
+            };
+            assert!(
+                auth.authorize(&img, &req) == AuthorizationResult::Deny,
+                "OPA outage with default allow_on_error must fail closed (Deny)"
             );
         });
     }

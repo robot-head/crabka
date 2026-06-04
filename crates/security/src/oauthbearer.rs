@@ -692,6 +692,11 @@ pub struct IntrospectionValidator {
     /// Clock-skew tolerance for `exp`/`iat`/`nbf` checks on
     /// introspection-response timestamps (when present).
     pub allowable_clock_skew_ms: i64,
+    /// When set, the introspection-response `aud` claim (RFC 7662 §2.2) must
+    /// contain this value. Defaults to `None` (no audience restriction).
+    /// Prevents a token minted for another resource server of the same `IdP`,
+    /// which still introspects as `active: true`, from authenticating here.
+    pub expected_audience: Option<String>,
     /// Alternate principal claim. See [`UnsecuredJwsValidator`].
     pub fallback_user_name_claim: Option<String>,
     /// Prepended to the principal name only on fallback.
@@ -722,6 +727,16 @@ impl IntrospectionValidator {
             .await
             .map_err(|e| AuthError::IntrospectionTransport(e.to_string()))?;
         if claims.get("active").and_then(Value::as_bool) != Some(true) {
+            return Err(AuthError::InvalidToken);
+        }
+        // Audience restriction. When configured, the introspection-response
+        // `aud` claim (RFC 7662 §2.2) must contain the expected value, mirroring
+        // the signed-JWS path. Guards against an `IdP` that serves multiple
+        // resource servers handing out a token that introspects as active here
+        // but was minted for a different audience.
+        if let Some(expected) = &self.expected_audience
+            && !audience_contains(&claims, expected)
+        {
             return Err(AuthError::InvalidToken);
         }
         check_temporal_claims(&claims, now_ms, self.allowable_clock_skew_ms)?;
@@ -1709,6 +1724,7 @@ mod introspection_tests {
             custom_claim_check: None,
             call_userinfo: false,
             allowable_clock_skew_ms: 30_000,
+            expected_audience: None,
             fallback_user_name_claim: None,
             fallback_user_name_prefix: None,
             groups_claim: None,
@@ -1807,6 +1823,70 @@ mod introspection_tests {
         v.custom_claim_check = Some(parse_jp("$.scope[?@ == 'kafka.admin']"));
         let outcome = v.validate("tok", NOW_MS).await.expect("valid");
         assert!(outcome.principal.name == "alice");
+    }
+
+    // ---- IntrospectionValidator expected_audience --------------
+
+    #[tokio::test]
+    async fn introspection_honors_audience_string_and_array() {
+        // Matching string `aud`.
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "a", "exp": NOW_MS/1000 + 60, "aud": "kafka"})),
+        );
+        let mut v = validator(mock.clone());
+        v.expected_audience = Some("kafka".to_string());
+        assert!(v.validate("tok", NOW_MS).await.is_ok());
+
+        // Matching value inside an `aud` array.
+        let mock2 = MockIntrospectionClient::arc();
+        mock2.set_introspect(
+            "tok",
+            Ok(json!({
+                "active": true, "sub": "a", "exp": NOW_MS/1000 + 60,
+                "aud": ["other", "kafka"],
+            })),
+        );
+        let mut v2 = validator(mock2.clone());
+        v2.expected_audience = Some("kafka".to_string());
+        assert!(v2.validate("tok", NOW_MS).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn introspection_rejects_non_matching_audience() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "a", "exp": NOW_MS/1000 + 60, "aud": "web"})),
+        );
+        let mut v = validator(mock.clone());
+        v.expected_audience = Some("kafka".to_string());
+        assert!(v.validate("tok", NOW_MS).await == Err(AuthError::InvalidToken));
+    }
+
+    #[tokio::test]
+    async fn introspection_rejects_missing_audience_when_expected() {
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "a", "exp": NOW_MS/1000 + 60})),
+        );
+        let mut v = validator(mock.clone());
+        v.expected_audience = Some("kafka".to_string());
+        assert!(v.validate("tok", NOW_MS).await == Err(AuthError::InvalidToken));
+    }
+
+    #[tokio::test]
+    async fn introspection_ignores_audience_when_unset() {
+        // Default (expected_audience == None): any `aud` is accepted.
+        let mock = MockIntrospectionClient::arc();
+        mock.set_introspect(
+            "tok",
+            Ok(json!({"active": true, "sub": "a", "exp": NOW_MS/1000 + 60, "aud": "web"})),
+        );
+        let v = validator(mock.clone());
+        assert!(v.validate("tok", NOW_MS).await.is_ok());
     }
 
     #[tokio::test]
