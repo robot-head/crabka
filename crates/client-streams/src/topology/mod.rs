@@ -6,3 +6,4 @@ mod node;
 mod wire;
 
 pub use builder::{BuiltTopology, NodeHandle, Topology, TopologyError};
+pub use wire::{WireCopartitionGroup, WireKeyValue, WireSubtopology, WireTopicInfo, WireTopology};

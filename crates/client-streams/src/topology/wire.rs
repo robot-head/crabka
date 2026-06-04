@@ -5,6 +5,7 @@ use crabka_protocol::owned::common::streams_group_heartbeat_request::topic_info:
 use crabka_protocol::owned::streams_group_heartbeat_request::{
     CopartitionGroup, Subtopology, Topology,
 };
+use serde::Serialize;
 
 use super::grouping::GroupTopics;
 
@@ -64,6 +65,125 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Serializable view of the wire `Topology`
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// A serde-serializable view of the `StreamsGroupHeartbeat` wire `Topology`,
+/// used to assert byte-exact interop against captured JVM fixtures.
+///
+/// The protocol `Topology` is auto-generated (and carries `unknown_tagged_fields`
+/// that the JVM JSON fixtures omit), so we project it onto these flat structs
+/// whose `serde(rename_all)`-free `snake_case` field names match the captured
+/// fixture shape exactly. Field *order* is irrelevant — fixtures are compared as
+/// `serde_json::Value` (a key-sorted map), and topic/subtopology array order is
+/// already fixed by [`to_wire`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireTopology {
+    pub epoch: i32,
+    pub subtopologies: Vec<WireSubtopology>,
+}
+
+/// One subtopology in a [`WireTopology`] (fixture-shaped).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireSubtopology {
+    pub subtopology_id: String,
+    pub source_topics: Vec<String>,
+    pub source_topic_regex: Vec<String>,
+    pub repartition_sink_topics: Vec<String>,
+    pub repartition_source_topics: Vec<WireTopicInfo>,
+    pub state_changelog_topics: Vec<WireTopicInfo>,
+    pub copartition_groups: Vec<WireCopartitionGroup>,
+}
+
+/// An internal-topic descriptor (repartition source / state changelog).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireTopicInfo {
+    pub name: String,
+    pub partitions: i32,
+    pub replication_factor: i16,
+    pub topic_configs: Vec<WireKeyValue>,
+}
+
+/// A topic-config key/value pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireKeyValue {
+    pub key: String,
+    pub value: String,
+}
+
+/// A copartition group: `int16` indices into the sorted source / repartition
+/// arrays.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireCopartitionGroup {
+    pub source_topics: Vec<i16>,
+    pub source_topic_regex: Vec<i16>,
+    pub repartition_source_topics: Vec<i16>,
+}
+
+impl From<&Topology> for WireTopology {
+    fn from(t: &Topology) -> Self {
+        WireTopology {
+            epoch: t.epoch,
+            subtopologies: t.subtopologies.iter().map(WireSubtopology::from).collect(),
+        }
+    }
+}
+
+impl From<&Subtopology> for WireSubtopology {
+    fn from(s: &Subtopology) -> Self {
+        WireSubtopology {
+            subtopology_id: s.subtopology_id.clone(),
+            source_topics: s.source_topics.clone(),
+            source_topic_regex: s.source_topic_regex.clone(),
+            repartition_sink_topics: s.repartition_sink_topics.clone(),
+            repartition_source_topics: s
+                .repartition_source_topics
+                .iter()
+                .map(WireTopicInfo::from)
+                .collect(),
+            state_changelog_topics: s
+                .state_changelog_topics
+                .iter()
+                .map(WireTopicInfo::from)
+                .collect(),
+            copartition_groups: s
+                .copartition_groups
+                .iter()
+                .map(WireCopartitionGroup::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<&TopicInfo> for WireTopicInfo {
+    fn from(t: &TopicInfo) -> Self {
+        WireTopicInfo {
+            name: t.name.clone(),
+            partitions: t.partitions,
+            replication_factor: t.replication_factor,
+            topic_configs: t
+                .topic_configs
+                .iter()
+                .map(|kv| WireKeyValue {
+                    key: kv.key.clone(),
+                    value: kv.value.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<&CopartitionGroup> for WireCopartitionGroup {
+    fn from(c: &CopartitionGroup) -> Self {
+        WireCopartitionGroup {
+            source_topics: c.source_topics.clone(),
+            source_topic_regex: c.source_topic_regex.clone(),
+            repartition_source_topics: c.repartition_source_topics.clone(),
+        }
+    }
+}
+
 /// Encode a copartition group as `int16` indices into the sorted `sources` /
 /// `repartition` arrays. Exposed (and unit-tested) so the byte-exact encoding is
 /// covered even though the #1 builder emits no copartition groups.
@@ -97,6 +217,70 @@ mod tests {
     use super::*;
     use crate::topology::grouping::GroupTopics;
     use assert2::check;
+
+    #[test]
+    fn wire_topology_serializes_to_fixture_shape_with_topic_info() {
+        use crabka_protocol::owned::common::streams_group_heartbeat_request::key_value::KeyValue;
+        // A subtopology whose changelog topic carries a config: exercises the
+        // TopicInfo + KeyValue serde projection the stateless fixture omits.
+        let proto = Topology {
+            epoch: 0,
+            subtopologies: vec![Subtopology {
+                subtopology_id: "0".into(),
+                source_topics: vec!["in".into()],
+                state_changelog_topics: vec![TopicInfo {
+                    name: "app-store-changelog".into(),
+                    partitions: 0,
+                    replication_factor: -1,
+                    topic_configs: vec![KeyValue {
+                        key: "cleanup.policy".into(),
+                        value: "compact".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let view = WireTopology::from(&proto);
+        let json = serde_json::to_value(&view).unwrap();
+        // No `unknown_tagged_fields` leaks into the JSON, and the nested config
+        // maps to `{key, value}`.
+        check!(
+            json["subtopologies"][0]["state_changelog_topics"][0]["name"] == "app-store-changelog"
+        );
+        check!(json["subtopologies"][0]["state_changelog_topics"][0]["replication_factor"] == -1);
+        check!(
+            json["subtopologies"][0]["state_changelog_topics"][0]["topic_configs"][0]["key"]
+                == "cleanup.policy"
+        );
+        check!(
+            json["subtopologies"][0]
+                .get("unknown_tagged_fields")
+                .is_none()
+        );
+        check!(
+            json["subtopologies"][0]["state_changelog_topics"][0]
+                .get("unknown_tagged_fields")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn wire_copartition_group_projects_indices() {
+        let proto = CopartitionGroup {
+            source_topics: vec![0, 2],
+            source_topic_regex: Vec::new(),
+            repartition_source_topics: vec![1],
+            ..Default::default()
+        };
+        let view = WireCopartitionGroup::from(&proto);
+        check!(view.source_topics == vec![0i16, 2i16]);
+        check!(view.repartition_source_topics == vec![1i16]);
+        let json = serde_json::to_value(&view).unwrap();
+        check!(json.get("unknown_tagged_fields").is_none());
+    }
 
     #[test]
     fn epoch_is_zero_and_source_topics_sorted() {

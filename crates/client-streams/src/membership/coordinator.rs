@@ -118,7 +118,7 @@ async fn heartbeat_once<T: HeartbeatTransport>(
     let epoch = *state.member_epoch.lock().await;
     let owned = state.owned_active.lock().await.clone();
     let topology = if rejoining || epoch == 0 {
-        Some(state.topology.to_wire())
+        Some(state.topology.to_wire_request())
     } else {
         None
     };

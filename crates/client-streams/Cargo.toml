@@ -20,6 +20,7 @@ crabka-client-producer = { version = "0.2", path = "../client-producer" }
 async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
@@ -29,5 +30,6 @@ tracing = { workspace = true }
 [dev-dependencies]
 assert2 = { workspace = true }
 crabka-broker = { version = "0.2", path = "../broker", features = ["test-helpers"] }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

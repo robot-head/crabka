@@ -73,7 +73,7 @@ impl StreamsMembership {
                     process_id: Some(process_id.clone()),
                     instance_id: instance_id.clone(),
                     rebalance_timeout_ms,
-                    topology: Some(topology.to_wire()),
+                    topology: Some(topology.to_wire_request()),
                     ..Default::default()
                 })
                 .await?;

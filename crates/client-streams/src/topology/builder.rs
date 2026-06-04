@@ -497,9 +497,16 @@ impl std::fmt::Debug for BuiltTopology {
 }
 
 impl BuiltTopology {
-    /// The wire `Topology` to send in the join heartbeat.
+    /// The wire `Topology` as a serde-serializable view, for golden-frame
+    /// interop assertions against captured JVM fixtures.
     #[must_use]
-    pub fn to_wire(&self) -> WireTopology {
+    pub fn to_wire(&self) -> super::wire::WireTopology {
+        super::wire::WireTopology::from(&self.wire)
+    }
+
+    /// The raw protocol `Topology` to send in the `StreamsGroupHeartbeat` join.
+    #[must_use]
+    pub(crate) fn to_wire_request(&self) -> WireTopology {
         self.wire.clone()
     }
 
