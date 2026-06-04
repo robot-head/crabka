@@ -25,7 +25,7 @@
 //! let mut membership = StreamsMembership::builder()
 //!     .bootstrap("localhost:9092")
 //!     .group_id("my-application-id")
-//!     .topology(built)
+//!     .topology(std::sync::Arc::new(built))
 //!     .build()
 //!     .await?;
 //!

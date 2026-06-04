@@ -85,7 +85,7 @@ async fn member_joins_converges_and_leaves() {
     let mut membership = StreamsMembership::builder()
         .bootstrap(&bootstrap)
         .group_id("streams-app")
-        .topology(built)
+        .topology(std::sync::Arc::new(built))
         .rebalance_timeout(Duration::from_secs(30))
         .build()
         .await
@@ -152,7 +152,7 @@ async fn missing_source_topic_reports_not_ready() {
     let mut membership = StreamsMembership::builder()
         .bootstrap(&bootstrap)
         .group_id("streams-missing-app")
-        .topology(built)
+        .topology(std::sync::Arc::new(built))
         .build()
         .await
         .expect("join");

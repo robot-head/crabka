@@ -22,7 +22,6 @@ use super::status::map_status;
 use super::types::{StreamsAssignment, StreamsEvent};
 use crate::error::StreamsClientError;
 use crate::membership::assignment::resolve;
-use crate::topology::BuiltTopology;
 
 const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 
@@ -44,7 +43,7 @@ impl StreamsMembership {
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-streams".to_string())] client_id: String,
         #[builder(into)] group_id: String,
-        topology: BuiltTopology,
+        topology: std::sync::Arc<crate::topology::BuiltTopology>,
         #[builder(into)] process_id: Option<String>,
         #[builder(into)] instance_id: Option<String>,
         #[builder(default = Duration::from_secs(30))] rebalance_timeout: Duration,
@@ -64,7 +63,6 @@ impl StreamsMembership {
             .build()
             .await?;
 
-        let topology = Arc::new(topology);
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let join = loop {
             let resp = client
