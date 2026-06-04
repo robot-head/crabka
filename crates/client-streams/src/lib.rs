@@ -47,6 +47,7 @@
 mod error;
 pub mod membership;
 pub mod processor;
+pub mod test_driver;
 pub mod topology;
 
 pub use error::StreamsClientError;
@@ -58,4 +59,5 @@ pub use processor::{
     BytesSerde, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier, Record,
     RecordContext, Serde, SerdeError, StringSerde,
 };
+pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, Topology, TopologyError};
