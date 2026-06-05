@@ -166,6 +166,20 @@ impl StoreState {
         self.by_id.get(&id).cloned()
     }
 
+    /// A subject's versions as ordered `(type, schema)` pairs (ascending
+    /// version). Empty if the subject is unknown. Used by the compatibility
+    /// engine for transitive checks.
+    #[must_use]
+    pub fn versions_schemas(&self, subject: &str) -> Vec<(SchemaType, String)> {
+        let Some(entries) = self.subjects.get(subject) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter_map(|e| self.by_id.get(&e.id).cloned())
+            .collect()
+    }
+
     /// Lookup an already-registered schema under a subject (POST /subjects/{s}).
     #[must_use]
     pub fn find_under_subject(
@@ -255,6 +269,19 @@ mod tests {
         // a fresh register of the same schema is now idempotent against replayed state
         let r = s.register("av-value", SchemaType::Avro, &av("A")).unwrap();
         assert_eq!((r.id, r.version), (1, 1));
+    }
+
+    #[test]
+    fn versions_schemas_returns_ordered_pairs() {
+        let mut s = StoreState::default();
+        s.register("av-value", SchemaType::Avro, &av("A")).unwrap();
+        s.register("av-value", SchemaType::Avro, &av("B")).unwrap();
+        let vs = s.versions_schemas("av-value");
+        assert_eq!(vs.len(), 2);
+        assert!(matches!(vs[0].0, SchemaType::Avro));
+        assert!(vs[0].1.contains("\"A\""));
+        assert!(vs[1].1.contains("\"B\""));
+        assert!(s.versions_schemas("missing").is_empty());
     }
 
     #[test]
