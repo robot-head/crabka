@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use prost_reflect::prost_types::descriptor_proto::ReservedRange;
 use prost_reflect::prost_types::field_descriptor_proto::Type as FieldType;
 use prost_reflect::prost_types::{
     DescriptorProto, FieldDescriptorProto, FileDescriptorProto, OneofDescriptorProto,
@@ -24,6 +25,9 @@ pub enum Kind {
     OneofFieldMovedOut,
     OneofAdded,
     OneofRemoved,
+    // Reserved rules (Task 3)
+    ReservedNumberAdded,
+    ReservedNameAdded,
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +88,17 @@ fn compare_message(
                 kind: Kind::FieldRemoved,
                 path: fpath,
             }),
-            Some(uf) => compare_field(&fpath, of, uf, out),
+            Some(uf) => {
+                // Map fields: both sides are maps → compare their entry key/value fields
+                // directly; skip normal label/type checks (the outer field is always
+                // `repeated Message` for both sides, so those checks are noise).
+                let orig_entry = find_map_entry(orig, of);
+                let upd_entry = find_map_entry(upd, uf);
+                match (orig_entry, upd_entry) {
+                    (Some(oe), Some(ue)) => compare_map_entries(&fpath, oe, ue, out),
+                    _ => compare_field(&fpath, of, uf, out),
+                }
+            }
         }
     }
     for num in upd_f.keys() {
@@ -97,20 +111,22 @@ fn compare_message(
     }
     // Compare real oneof declarations (synthetic proto3_optional oneofs are named
     // with a leading underscore by protoc; filter them out by name).
-    let orig_real_oneofs: Vec<&OneofDescriptorProto> = orig
+    let orig_real: Vec<OneofDescriptorProto> = orig
         .oneof_decl
         .iter()
         .filter(|o| !o.name().starts_with('_'))
+        .cloned()
         .collect();
-    let upd_real_oneofs: Vec<&OneofDescriptorProto> = upd
+    let upd_real: Vec<OneofDescriptorProto> = upd
         .oneof_decl
         .iter()
         .filter(|o| !o.name().starts_with('_'))
+        .cloned()
         .collect();
-    // Collect into vecs to pass as slices
-    let orig_real: Vec<OneofDescriptorProto> = orig_real_oneofs.into_iter().cloned().collect();
-    let upd_real: Vec<OneofDescriptorProto> = upd_real_oneofs.into_iter().cloned().collect();
     compare_oneofs(path, &orig_real, &upd_real, out);
+    // Reserved ranges and names (Task 3)
+    compare_reserved(path, &orig.reserved_range, &upd.reserved_range, out);
+    compare_reserved_names(path, &orig.reserved_name, &upd.reserved_name, out);
 }
 
 fn compare_field(
@@ -194,6 +210,113 @@ fn compare_oneofs(
                 path: join(prefix, name),
             });
         }
+    }
+}
+
+/// Returns the synthetic map-entry `DescriptorProto` for `field` if it is a
+/// map field inside `containing`.  A map field has `type == Message` and its
+/// `type_name` leaf matches a nested type whose `options.map_entry == Some(true)`.
+fn find_map_entry<'a>(
+    containing: &'a DescriptorProto,
+    field: &FieldDescriptorProto,
+) -> Option<&'a DescriptorProto> {
+    if field.r#type() != FieldType::Message {
+        return None;
+    }
+    let type_name = field.type_name.as_deref()?;
+    // The type_name is a fully-qualified path like ".pkg.Outer.MEntry"; we only
+    // need the leaf (last component) to match against `nested_type` names.
+    let leaf = type_name.rsplit('.').next()?;
+    containing.nested_type.iter().find(|nt| {
+        nt.name.as_deref() == Some(leaf)
+            && nt.options.as_ref().and_then(|o| o.map_entry) == Some(true)
+    })
+}
+
+/// Compare two map entry descriptors (key=#1, value=#2) field-by-field.
+fn compare_map_entries(
+    path: &str,
+    orig_entry: &DescriptorProto,
+    upd_entry: &DescriptorProto,
+    out: &mut Vec<Difference>,
+) {
+    let orig_f: BTreeMap<i32, &FieldDescriptorProto> =
+        orig_entry.field.iter().map(|f| (f.number(), f)).collect();
+    let upd_f: BTreeMap<i32, &FieldDescriptorProto> =
+        upd_entry.field.iter().map(|f| (f.number(), f)).collect();
+    // Compare key (#1) and value (#2) types using normal scalar/kind checks.
+    for num in [1i32, 2i32] {
+        if let (Some(of), Some(uf)) = (orig_f.get(&num), upd_f.get(&num)) {
+            let sub = if num == 1 { "key" } else { "value" };
+            let fpath = format!("{path}.{sub}");
+            // Only compare types — map entries have no meaningful label difference.
+            let (ot, ut) = (of.r#type(), uf.r#type());
+            if ot != ut {
+                if is_scalar(ot) && is_scalar(ut) {
+                    out.push(Difference {
+                        kind: Kind::FieldScalarKindChanged {
+                            compatible_group: same_group(ot, ut),
+                        },
+                        path: fpath,
+                    });
+                } else {
+                    out.push(Difference {
+                        kind: Kind::FieldKindChanged,
+                        path: fpath,
+                    });
+                }
+            } else if matches!(ot, FieldType::Message | FieldType::Enum)
+                && of.type_name != uf.type_name
+            {
+                out.push(Difference {
+                    kind: Kind::FieldNamedTypeChanged,
+                    path: fpath,
+                });
+            }
+        }
+    }
+}
+
+fn compare_reserved(
+    path: &str,
+    orig: &[ReservedRange],
+    upd: &[ReservedRange],
+    out: &mut Vec<Difference>,
+) {
+    // Collect all numbers covered by orig ranges
+    let orig_nums: BTreeSet<i32> = orig
+        .iter()
+        .flat_map(|r| {
+            let start = r.start.unwrap_or(0);
+            let end = r.end.unwrap_or(0);
+            start..end
+        })
+        .collect();
+    let upd_nums: BTreeSet<i32> = upd
+        .iter()
+        .flat_map(|r| {
+            let start = r.start.unwrap_or(0);
+            let end = r.end.unwrap_or(0);
+            start..end
+        })
+        .collect();
+    // Numbers newly reserved in upd but not in orig
+    for num in upd_nums.difference(&orig_nums) {
+        out.push(Difference {
+            kind: Kind::ReservedNumberAdded,
+            path: format!("{path}.reserved#{num}"),
+        });
+    }
+}
+
+fn compare_reserved_names(path: &str, orig: &[String], upd: &[String], out: &mut Vec<Difference>) {
+    let orig_set: BTreeSet<&str> = orig.iter().map(String::as_str).collect();
+    let upd_set: BTreeSet<&str> = upd.iter().map(String::as_str).collect();
+    for name in upd_set.difference(&orig_set) {
+        out.push(Difference {
+            kind: Kind::ReservedNameAdded,
+            path: format!("{path}.reserved_name#{name}"),
+        });
     }
 }
 

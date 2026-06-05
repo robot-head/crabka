@@ -237,4 +237,26 @@ mod tests {
             "proto3 optional is not a oneof migration"
         );
     }
+
+    // ── Task 3: reserved + map ────────────────────────────────────────────────
+
+    #[test]
+    fn reserving_a_number_is_compatible() {
+        let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
+        let r = "syntax = \"proto3\"; message U { reserved 2; int32 id = 1; }";
+        assert!(check(r, w).is_ok());
+    }
+
+    #[test]
+    fn map_value_type_change_across_group_is_incompatible() {
+        let w = "syntax = \"proto3\"; message U { map<string, int32> m = 1; }";
+        let r = "syntax = \"proto3\"; message U { map<string, string> m = 1; }";
+        assert!(check(r, w).is_err());
+    }
+
+    #[test]
+    fn identical_map_is_compatible() {
+        let s = "syntax = \"proto3\"; message U { map<string, int32> m = 1; }";
+        assert!(check(s, s).is_ok());
+    }
 }

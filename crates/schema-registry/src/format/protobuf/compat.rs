@@ -14,7 +14,10 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
         | Kind::MessageRemoved
         // Oneof rules (Task 2) — seed values, calibrated vs cp in Task 6.
         | Kind::OneofFieldMovedIn
-        | Kind::OneofAdded => true,
+        | Kind::OneofAdded
+        // Reserved rules (Task 3) — seed values.
+        | Kind::ReservedNumberAdded
+        | Kind::ReservedNameAdded => true,
         Kind::FieldScalarKindChanged { compatible_group } => *compatible_group,
         Kind::FieldKindChanged
         | Kind::FieldNamedTypeChanged
