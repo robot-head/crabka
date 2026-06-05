@@ -150,13 +150,15 @@
 //! records and drops tombstones from the output stream (full null-value output
 //! is deferred to a future slice).
 //!
-//! [`KStream::join`] and [`KStream::left_join`] join a stream against a
-//! **materialized** `KTable`: the stream side drives, and for each record the
+//! [`KStream::join_table`] and [`KStream::left_join_table`] join a stream against
+//! a **materialized** `KTable`: the stream side drives, and for each record the
 //! table store is looked up by key. An inner join emits only when the table has a
 //! matching entry; a left join always emits (with `None` as the table value when
 //! absent). The stream must be **copartitioned** with the table (same key serde
 //! and partition count); a key-changing stream must be `.repartition(..)`-ed
-//! before joining — the join itself inserts no implicit repartition.
+//! before joining — the join itself inserts no implicit repartition. (The plain
+//! [`KStream::join`]/[`KStream::left_join`] names are the windowed *stream-stream*
+//! join below — Rust can't overload by argument type as the JVM does.)
 //!
 //! [`KTable::join`], [`KTable::left_join`], and [`KTable::outer_join`] join two
 //! **materialized** `KTables`. Unlike the stream-table join, a change on *either*
