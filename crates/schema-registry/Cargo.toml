@@ -64,3 +64,6 @@ name = "capture_compat_fixtures"
 
 [[test]]
 name = "compat_conformance"
+
+[[test]]
+name = "capture_protobuf_fixtures"
