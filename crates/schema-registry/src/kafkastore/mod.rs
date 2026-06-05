@@ -69,6 +69,10 @@ impl KafkaStore {
         if let Some(existing) = self.store.read().find_under_subject(subject, ty, schema) {
             return Ok(existing);
         }
+        // Slice 2: enforce compatibility against existing versions per the
+        // subject's effective level. First version / NONE => no-op. Incompatible
+        // => SrError::Incompatible (409); nothing is persisted.
+        crate::compat::check_registration(&self.store.read(), subject, ty, schema)?;
         // Genuinely new under this subject: decide id/version on a throwaway
         // clone (the reader is the sole mutator of the live store).
         let reg = {
