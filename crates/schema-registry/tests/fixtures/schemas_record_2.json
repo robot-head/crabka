@@ -1,0 +1,4 @@
+{
+  "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"av-value\",\"version\":1,\"magic\":1}",
+  "value": "{\"subject\":\"av-value\",\"version\":1,\"id\":1,\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"User\\\",\\\"fields\\\":[{\\\"name\\\":\\\"id\\\",\\\"type\\\":\\\"int\\\"}]}\",\"deleted\":false}"
+}
