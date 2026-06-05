@@ -1,5 +1,6 @@
 //! Single-owner exactly-once dedup engine.
 
+pub mod membership;
 pub mod store;
 pub mod topic;
 
