@@ -3,5 +3,6 @@ pub mod api;
 pub(crate) mod byte;
 pub mod kv;
 pub(crate) mod registry;
+pub(crate) mod turso;
 pub use api::{KeyValueStore, StateStore};
 pub use kv::KeyValueBytesStore;
