@@ -274,7 +274,10 @@ async fn compatibility_endpoint() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     let app = rest::router(AppState { store });
 
-    // Valid Avro -> is_compatible: true
+    // Register a version first so the subject exists for the check.
+    register(&app, "av-value", AVRO_BODY).await;
+
+    // Same schema -> is_compatible: true
     let resp = post_raw(
         &app,
         "/compatibility/subjects/av-value/versions/latest",
@@ -335,6 +338,26 @@ async fn lookup_endpoint() {
 
     cancel.cancel();
     broker.shutdown().await;
+}
+
+// ── request builders (sync, for inline oneshot calls) ────────────────────────
+
+fn req_post(uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/vnd.schemaregistry.v1+json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn req_put(uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method("PUT")
+        .uri(uri)
+        .header("content-type", "application/vnd.schemaregistry.v1+json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
 }
 
 // ── version + error paths ────────────────────────────────────────────────────
@@ -411,6 +434,109 @@ async fn version_and_error_paths() {
     assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = body_json(resp).await;
     assert_eq!(body["error_code"], 42201);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+// ── compatibility enforcement on register ────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compat_enforced_on_register() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    let base = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}"#;
+    assert_eq!(
+        app.clone()
+            .oneshot(req_post("/subjects/s/versions", base))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // Adding a required field (no default) breaks BACKWARD — expect 409.
+    let bad = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\"}]}"}"#;
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/s/versions", bad))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert_eq!(body_json(r).await["error_code"], 409);
+
+    // Adding a field with a default is compatible.
+    let good = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\",\"default\":0}]}"}"#;
+    assert_eq!(
+        app.clone()
+            .oneshot(req_post("/subjects/s/versions", good))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn none_level_bypasses_enforcement() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    app.clone()
+        .oneshot(req_put("/config/s", r#"{"compatibility":"NONE"}"#))
+        .await
+        .unwrap();
+
+    let base = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}"#;
+    app.clone()
+        .oneshot(req_post("/subjects/s/versions", base))
+        .await
+        .unwrap();
+
+    // Incompatible schema is accepted when level is NONE.
+    let bad = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\"}]}"}"#;
+    assert_eq!(
+        app.clone()
+            .oneshot(req_post("/subjects/s/versions", bad))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn compatibility_endpoint_real_verdict() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    let base = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}"#;
+    app.clone()
+        .oneshot(req_post("/subjects/s/versions", base))
+        .await
+        .unwrap();
+
+    // Incompatible candidate: check endpoint returns is_compatible=false + messages.
+    let bad = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\"}]}"}"#;
+    let r = app
+        .clone()
+        .oneshot(req_post(
+            "/compatibility/subjects/s/versions/latest?verbose=true",
+            bad,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let b = body_json(r).await;
+    assert_eq!(b["is_compatible"], false);
+    assert!(!b["messages"].as_array().unwrap().is_empty());
 
     cancel.cancel();
     broker.shutdown().await;
