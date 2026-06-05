@@ -134,6 +134,41 @@ fn stream_table_join_matches_jvm() {
 }
 
 #[test]
+fn ktable_ktable_join_matches_jvm() {
+    use crabka_client_streams::{Materialized, StringSerde};
+    // Mirrors Capture.java `ktableKtableJoin()`:
+    //   table("a", Materialized.as("sa")).join(table("b", Materialized.as("sb")), (va,vb)->va+vb)
+    //     .toStream().to("out")
+    //
+    // Both table sources ("a","b"), the two join processors (JOINTHIS reads "sb",
+    // JOINOTHER reads "sa"), and the merge land in ONE subtopology: each join's
+    // `connect_processor_store` unions it with the store it reads, and the merge's
+    // predecessor edges union the rest. A copartition group binds "a" and "b" as the
+    // int16 indices [0, 1] into the sorted source_topics. Under optimization=all
+    // (`build_optimized`) REUSE_KTABLE_SOURCE_TOPICS makes each store's changelog its
+    // own source topic ("a"/"b"). The join result is unmaterialized — no result
+    // changelog.
+    let b = StreamsBuilder::new();
+    let ta = b.table::<String, String, _, _>(
+        "a",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sa"),
+    );
+    let tb = b.table::<String, String, _, _>(
+        "b",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sb"),
+    );
+    ta.join(&tb, |va: &String, vb: &String| format!("{va}{vb}"))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(ta);
+    drop(tb);
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "ktable_ktable_join");
+}
+
+#[test]
 fn repartition_merge_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     // The JVM `repartitionMerge()` app: one `selectKey` feeds TWO bare aggregations
