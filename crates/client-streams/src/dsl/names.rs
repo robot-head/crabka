@@ -37,6 +37,8 @@ pub(crate) const REDUCE_STORE: &str = "KSTREAM-REDUCE-STATE-STORE-";
 #[allow(dead_code)]
 pub(crate) const TABLE_SOURCE: &str = "KTABLE-SOURCE-";
 #[allow(dead_code)]
+pub(crate) const TOTABLE_STORE: &str = "KSTREAM-TOTABLE-STATE-STORE-";
+#[allow(dead_code)]
 pub(crate) const TABLE_TOSTREAM: &str = "KTABLE-TOSTREAM-";
 #[allow(dead_code)]
 pub(crate) const TABLE_MAPVALUES: &str = "KTABLE-MAPVALUES-";

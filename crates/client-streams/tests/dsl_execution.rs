@@ -809,3 +809,51 @@ fn dsl_table_map_values_executes() {
         Some(40)
     );
 }
+
+/// `to_table`: materialize a stream into a `KTable`, then back to a stream.
+///
+/// Each input record overwrites the prior value for its key in the store; the
+/// `KTable` change-stream forwards the new value, which `to_stream` extracts and
+/// sends to the sink. The materialized store holds the latest value per key.
+#[test]
+fn dsl_to_table_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .to_table(Materialized::with(StringSerde, StringSerde).as_store("store"))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "a".to_string(),
+        0,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "b".to_string(),
+        1,
+    );
+    // The table forwards each new value; to_stream extracts it to the sink.
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "a".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "b".to_string()))
+    );
+    // The store holds the latest value for the key.
+    assert_eq!(
+        d.get_key_value_store::<String, String>("store")
+            .unwrap()
+            .get(&"k".to_string()),
+        Some("b".to_string())
+    );
+}

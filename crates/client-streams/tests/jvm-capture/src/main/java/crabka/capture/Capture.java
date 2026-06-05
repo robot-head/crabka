@@ -70,8 +70,9 @@ public final class Capture {
         write(outDir, "repartition_merge", repartitionMerge());
         write(outDir, "table_reuse", tableReuse());
         write(outDir, "branch_merge", branchMerge());
+        write(outDir, "to_table", toTable());
 
-        System.out.println("Capture complete. Wrote 5 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 6 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -120,6 +121,21 @@ public final class Capture {
             .mapValues(v -> v)
             .toStream()
             .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 6. to_table: materialize a KStream into a KTable via {@code toTable}, then back to a
+     * stream and out. The key is unchanged through the source, so {@code toTable} must NOT
+     * insert a repartition; the materialized store gets an implicit
+     * {@code app-<store>-changelog}.
+     */
+    static Topology toTable() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in", Consumed.with(Serdes.String(), Serdes.String()))
+            .toTable(Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("store"))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
         return b.build(optimizedProps());
     }
 

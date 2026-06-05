@@ -58,6 +58,39 @@ where
     }
 }
 
+// ── KStreamToTableProcessor ──────────────────────────────────────────────────
+
+/// Materializes a `KStream` into a `KTable` (`KStream::to_table`): writes each
+/// incoming `V` into the store and forwards a `Change<V>` (prior store value as
+/// `old`, incoming value as `new`). Like [`KTableSourceProcessor`], but its input
+/// is a plain `KStream` value rather than a source-topic record — so it is the
+/// boundary where a stream becomes a changelog-backed table.
+#[allow(dead_code)]
+pub(crate) struct KStreamToTableProcessor<K, V> {
+    pub store_name: String,
+    pub _pd: Marker<(K, V)>,
+}
+
+impl<K, V> Processor<K, V, K, Change<V>> for KStreamToTableProcessor<K, V>
+where
+    K: std::any::Any + Send + Clone,
+    V: std::any::Any + Send + Clone,
+{
+    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
+        let key = r.key.expect("to_table requires a non-null key");
+        let store = ctx
+            .get_state_store::<K, V>(&self.store_name)
+            .expect("to_table store not found");
+        let old = store.get(&key);
+        store.put(key.clone(), r.value.clone());
+        ctx.forward(Record::new(
+            Some(key),
+            Change::update(old, r.value),
+            r.timestamp,
+        ));
+    }
+}
+
 // ── KTableToStreamProcessor ──────────────────────────────────────────────────
 
 /// Converts a `KTable` change-stream back to a `KStream` by extracting the
