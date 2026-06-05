@@ -5,24 +5,7 @@
 pub mod codec;
 pub mod config;
 pub mod consume;
-pub mod dedup {
-    //! Replaced in Task 12. Stub keeps `ProduceCore` compiling.
-    use crate::error::GatewayError;
-    use crate::types::{GatewayRecord, RecordOutcome};
-
-    pub struct DedupEngine;
-
-    impl DedupEngine {
-        #[allow(clippy::unused_async)]
-        pub async fn dedup_produce(
-            &self,
-            _rec: &GatewayRecord,
-            _value: bytes::Bytes,
-        ) -> Result<RecordOutcome, GatewayError> {
-            Err(GatewayError::Other("dedup not wired yet".into()))
-        }
-    }
-}
+pub mod dedup;
 pub mod error;
 pub mod handlers;
 pub mod health;
