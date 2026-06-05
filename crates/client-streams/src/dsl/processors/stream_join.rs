@@ -141,19 +141,19 @@ where
                 } else {
                     outer_value_right(&raw)
                 };
-                {
-                    let osr = ctx
-                        .get_state_store::<Bytes, Bytes>(&os)
-                        .expect("outer join store");
-                    osr.put(outer_key(t, self.side_left, &kb), tagged).await;
-                }
-                tracker.lock().expect("tracker lock").update_min(t);
+                let osr = ctx
+                    .get_state_store::<Bytes, Bytes>(&os)
+                    .expect("outer join store");
+                osr.put(outer_key(t, self.side_left, &kb), tagged).await;
             }
         }
 
         // 5) close-scan: emit this side's buffered records whose window has closed.
-        //    (Each processor emits only its OWN side here; the other side's closed
-        //    records emit when an other-side record next advances stream time.)
+        //    DIVERGENCE FROM JVM: the JVM flushes BOTH sides (time-ordered, wall-clock
+        //    throttled) on every record; we scan only our OWN side. With both sides
+        //    receiving traffic the emitted result set matches, but a record buffered on
+        //    a side that then goes silent stays unflushed until that side sees another
+        //    record (the JVM punctuator would flush it). Documented in the spec.
         let st = tracker.lock().expect("tracker lock").stream_time;
         let lookback = if self.side_left {
             self.after_ms

@@ -160,8 +160,6 @@ where
     /// Access a connected join-window store (retainDuplicates), typed. `None` if
     /// absent or the K/V types don't match. Fetch it per-record (do not hold
     /// across `process` calls).
-    // used by Phase B (stream-stream join processor)
-    #[allow(dead_code)]
     pub fn get_join_window_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,

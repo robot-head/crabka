@@ -2,10 +2,6 @@
 //! window-close emission). The shared store is a KV store keyed by
 //! `(timestamp, side, key)` (sorts by time) holding the unmatched left-or-right
 //! value; the `TimeTracker` is shared across both side processors.
-//!
-//! NOTE: These helpers are pub(crate) for use by Task C2 (emit-on-close). Until
-//! that wiring lands, some items appear dead to the non-test build.
-#![allow(dead_code)] // used by Task C2 (emit-on-close)
 
 use bytes::{BufMut, Bytes, BytesMut};
 
@@ -51,24 +47,19 @@ pub(crate) fn outer_value_decode(v: &[u8]) -> (bool, &[u8]) {
     (v[0] == 0, &v[1..])
 }
 
-/// Shared per-join stream-time tracker (the JVM `sharedTimeTracker`).
+/// Shared per-join stream-time tracker (the JVM `sharedTimeTracker`). We track
+/// only `stream_time`; the window-close test is per-buffered-entry (`entry_ts +
+/// lookback + grace < stream_time`), so the JVM's `minTime` early-exit optimization
+/// isn't needed.
 #[derive(Debug, Default)]
 pub(crate) struct TimeTracker {
     pub stream_time: i64,
-    pub min_time: i64,
 }
 
 impl TimeTracker {
     /// Advance stream time to `max(stream_time, ts)`.
     pub fn advance(&mut self, ts: i64) {
         self.stream_time = self.stream_time.max(ts);
-    }
-
-    /// Track the earliest buffered (unmatched) record timestamp.
-    pub fn update_min(&mut self, ts: i64) {
-        if self.min_time == 0 || ts < self.min_time {
-            self.min_time = ts;
-        }
     }
 }
 
@@ -96,14 +87,11 @@ mod tests {
     }
 
     #[test]
-    fn time_tracker_advances_and_tracks_min() {
+    fn time_tracker_advances_monotonically() {
         let mut t = TimeTracker::default();
         t.advance(5);
         t.advance(3);
         t.advance(9);
         assert_eq!(t.stream_time, 9);
-        t.update_min(7);
-        t.update_min(4);
-        assert_eq!(t.min_time, 4);
     }
 }

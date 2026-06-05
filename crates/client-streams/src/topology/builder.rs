@@ -486,11 +486,7 @@ impl Topology {
     /// derived from `before_ms + after_ms + grace_ms + 86_400_000`. Compaction is
     /// not applicable because the store retains duplicates.
     ///
-    /// # Note
-    /// `#[allow(dead_code)]` — used by Phase B (stream-stream join lowering).
-    ///
     /// [`add_window_store`]: Topology::add_window_store
-    #[allow(dead_code)] // used by Phase B
     #[allow(clippy::too_many_arguments)] // mirrors add_window_store + extra before_ms/after_ms split
     pub fn add_join_window_store<K, V, KS, VS>(
         &mut self,

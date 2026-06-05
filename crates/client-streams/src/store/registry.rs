@@ -49,8 +49,6 @@ impl StoreRegistry {
 
     /// Typed mutable access: downcast the erased store to the join-window store
     /// of the requested types. `None` if absent or the types don't match.
-    // used by Phase B (stream-stream join processor)
-    #[allow(dead_code)]
     pub fn get_join_window<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
