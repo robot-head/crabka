@@ -50,7 +50,7 @@ impl ParsedSchema for JsonSchema {
     }
 }
 
-fn canonicalize(v: &serde_json::Value) -> String {
+pub(crate) fn canonicalize(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -126,5 +126,50 @@ mod tests {
         let w = r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#;
         let r = r#"{"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]}"#;
         assert!(check(r, w).is_err());
+    }
+
+    // --- Task 2: enum / numeric / string / array / object-size constraints ---
+
+    #[test]
+    fn enum_changes_do_not_panic() {
+        let narrow = r#"{"enum":["a"]}"#;
+        let wide = r#"{"enum":["a","b"]}"#;
+        let _ = check(wide, narrow);
+        let _ = check(narrow, wide);
+    }
+
+    #[test]
+    fn maximum_lowered_is_incompatible() {
+        assert!(
+            check(
+                r#"{"type":"integer","maximum":10}"#,
+                r#"{"type":"integer","maximum":100}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn min_length_added_is_incompatible() {
+        assert!(check(r#"{"type":"string","minLength":3}"#, r#"{"type":"string"}"#).is_err());
+    }
+
+    #[test]
+    fn max_items_changes_do_not_panic() {
+        let _ = check(
+            r#"{"type":"array","maxItems":9}"#,
+            r#"{"type":"array","maxItems":3}"#,
+        );
+    }
+
+    #[test]
+    fn items_type_change_is_incompatible() {
+        assert!(
+            check(
+                r#"{"type":"array","items":{"type":"string"}}"#,
+                r#"{"type":"array","items":{"type":"integer"}}"#
+            )
+            .is_err()
+        );
     }
 }
