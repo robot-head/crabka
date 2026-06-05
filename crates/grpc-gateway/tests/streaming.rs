@@ -195,3 +195,47 @@ async fn subscribe_streams_records_then_commits() {
 
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streaming_wrappers_and_router_build() {
+    use connectrpc_axum::message::ConnectError as CErr;
+    use connectrpc_axum::message::ConnectRequest;
+
+    let (broker, bootstrap, _dir) = boot().await;
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: "wrap-topic".into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            10_000,
+        )
+        .await
+        .unwrap();
+    let state = state_for(&bootstrap).await;
+
+    // Router builds with both streaming methods registered (covers lib::router).
+    let _router = crabka_grpc_gateway::router(state.clone());
+
+    // send_stream wrapper → Ok with a StreamBody (covers the wrapper).
+    let send_input = futures_util::stream::iter(vec![Ok::<_, CErr>(pb::SendRequest {
+        records: vec![rec("wrap-topic", b"x")],
+        acks: 0,
+    })]);
+    let send_req = ConnectRequest(Streaming::new(Box::pin(send_input)));
+    let send_resp = streaming::send_stream(axum::Extension(state.clone()), send_req).await;
+    check!(send_resp.is_ok());
+
+    // subscribe wrapper → Ok (inner stream is lazy; not driven here).
+    let sub_input = futures_util::stream::iter(Vec::<Result<pb::SubscribeFrame, CErr>>::new());
+    let sub_req = ConnectRequest(Streaming::new(Box::pin(sub_input)));
+    let sub_resp = streaming::subscribe(axum::Extension(state.clone()), sub_req).await;
+    check!(sub_resp.is_ok());
+
+    broker.shutdown().await;
+}
