@@ -115,6 +115,33 @@ fn stream_stream_outer_join_matches_jvm() {
 }
 
 #[test]
+fn session_count_matches_jvm() {
+    use crabka_client_streams::{
+        Grouped, I64Serde, Materialized, SessionWindowedSerde, SessionWindows,
+    };
+    // Mirrors Capture.java `sessionCount()`:
+    //   stream("in").groupByKey().windowedBy(SessionWindows gap 60s).count().toStream().to("out")
+    //
+    // Session store (the third typed store), auto-named at the JVM aggregate-store
+    // counter position with the `count` name-burn; changelog cleanup.policy=
+    // compact,delete + retention.ms = gap 60s + 0 grace + 1 day. No selectKey → no
+    // repartition. The wire topology is the same shape as windowed_count (session
+    // vs time window is not wire-visible) — this pins the session lowering.
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(60_000))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
+        );
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "session_count");
+}
+
+#[test]
 fn count_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     let b = StreamsBuilder::new();
