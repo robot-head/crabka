@@ -2,6 +2,7 @@
 //! downcasts to. Serde + changelog-buffer logic over a pluggable `ByteKeyValueStore`.
 use std::any::Any;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::processor::serde::Serde;
@@ -56,11 +57,12 @@ impl<K: 'static, V: 'static> KeyValueBytesStore<K, V> {
     }
 }
 
-impl<K: 'static, V: 'static> StateStore for KeyValueBytesStore<K, V> {
+#[async_trait]
+impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, V> {
     fn name(&self) -> &str {
         &self.name
     }
-    fn flush(&mut self) {}
+    async fn flush(&mut self) {}
     fn close(&mut self) {}
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
@@ -71,11 +73,11 @@ impl<K: 'static, V: 'static> StateStore for KeyValueBytesStore<K, V> {
     fn take_changelog(&mut self) -> Vec<(Bytes, Option<Bytes>)> {
         std::mem::take(&mut self.changelog)
     }
-    fn apply_changelog(&mut self, key: Bytes, value: Option<Bytes>) {
+    async fn apply_changelog(&mut self, key: Bytes, value: Option<Bytes>) {
         match value {
-            Some(v) => self.backend.put(key, v),
+            Some(v) => self.backend.put(key, v).await,
             None => {
-                self.backend.delete(&key);
+                self.backend.delete(&key).await;
             }
         }
     }
@@ -84,26 +86,27 @@ impl<K: 'static, V: 'static> StateStore for KeyValueBytesStore<K, V> {
     }
 }
 
-impl<K: 'static, V: 'static> KeyValueStore<K, V> for KeyValueBytesStore<K, V> {
-    fn get(&self, key: &K) -> Option<V> {
+#[async_trait]
+impl<K: Send + Sync + 'static, V: Send + 'static> KeyValueStore<K, V> for KeyValueBytesStore<K, V> {
+    async fn get(&self, key: &K) -> Option<V> {
         let kb = self.key_serde.serialize(key);
-        self.backend.get(&kb).map(|vb| {
+        self.backend.get(&kb).await.map(|vb| {
             self.value_serde
                 .deserialize(&vb)
                 .expect("store value deserialize")
         })
     }
-    fn put(&mut self, key: K, value: V) {
+    async fn put(&mut self, key: K, value: V) {
         let kb = self.key_serde.serialize(&key);
         let vb = self.value_serde.serialize(&value);
-        self.backend.put(kb.clone(), vb.clone());
+        self.backend.put(kb.clone(), vb.clone()).await;
         if self.logging {
             self.changelog.push((kb, Some(vb)));
         }
     }
-    fn delete(&mut self, key: &K) -> Option<V> {
+    async fn delete(&mut self, key: &K) -> Option<V> {
         let kb = self.key_serde.serialize(key);
-        let prev = self.backend.delete(&kb).map(|vb| {
+        let prev = self.backend.delete(&kb).await.map(|vb| {
             self.value_serde
                 .deserialize(&vb)
                 .expect("store value deserialize")
@@ -130,30 +133,31 @@ mod tests {
         )
     }
 
-    #[test]
-    fn put_get_delete_and_changelog_buffer() {
+    #[tokio::test]
+    async fn put_get_delete_and_changelog_buffer() {
         let mut s = store();
-        s.put("a".into(), 1);
-        s.put("a".into(), 2);
-        check!(s.get(&"a".to_string()) == Some(2));
-        check!(s.delete(&"a".to_string()) == Some(2));
-        check!(s.get(&"a".to_string()) == None);
+        s.put("a".into(), 1).await;
+        s.put("a".into(), 2).await;
+        check!(s.get(&"a".to_string()).await == Some(2));
+        check!(s.delete(&"a".to_string()).await == Some(2));
+        check!(s.get(&"a".to_string()).await == None);
         let cl = s.take_changelog();
         check!(cl.len() == 3);
         check!(cl[2].1.is_none());
         check!(s.take_changelog().is_empty());
     }
 
-    #[test]
-    fn apply_changelog_restores_without_re_logging() {
+    #[tokio::test]
+    async fn apply_changelog_restores_without_re_logging() {
         let mut s = store();
         s.apply_changelog(
             b"k".to_vec().into(),
             Some(bytes::Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 7])),
-        );
-        check!(s.get(&"k".to_string()) == Some(7));
+        )
+        .await;
+        check!(s.get(&"k".to_string()).await == Some(7));
         check!(s.take_changelog().is_empty());
-        s.apply_changelog(b"k".to_vec().into(), None);
-        check!(s.get(&"k".to_string()) == None);
+        s.apply_changelog(b"k".to_vec().into(), None).await;
+        check!(s.get(&"k".to_string()).await == None);
     }
 }

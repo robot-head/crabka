@@ -342,8 +342,8 @@ impl Topology {
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
     where
-        K: 'static,
-        V: 'static,
+        K: Send + 'static,
+        V: Send + 'static,
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
@@ -368,8 +368,8 @@ impl Topology {
         changelog_topic: impl Into<String>,
     ) -> &mut Self
     where
-        K: 'static,
-        V: 'static,
+        K: Send + 'static,
+        V: Send + 'static,
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
@@ -391,8 +391,8 @@ impl Topology {
         changelog_override: Option<String>,
     ) -> &mut Self
     where
-        K: 'static,
-        V: 'static,
+        K: Send + 'static,
+        V: Send + 'static,
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
@@ -428,8 +428,8 @@ impl Topology {
         value_serde: VS,
     ) -> &mut Self
     where
-        K: 'static,
-        V: 'static,
+        K: Send + 'static,
+        V: Send + 'static,
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
@@ -782,10 +782,12 @@ mod tests {
     use crate::processor::record::Record;
     use crate::processor::serde::StringSerde;
     use assert2::check;
+    use async_trait::async_trait;
 
     struct Upper;
+    #[async_trait]
     impl Processor<String, String, String, String> for Upper {
-        fn process(
+        async fn process(
             &mut self,
             ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
@@ -905,7 +907,7 @@ mod tests {
         );
         let built = t.build("app").unwrap();
         let mut g = built.instantiate().unwrap();
-        g.pipe("in", Some(b"k"), b"hi", 0).unwrap();
+        pollster::block_on(g.pipe("in", Some(b"k"), b"hi", 0)).unwrap();
         let out = g.take_output();
         check!(out.len() == 1);
         check!(out[0].value.as_ref().unwrap().as_ref() == b"HI");
@@ -1044,7 +1046,7 @@ mod tests {
         check!(sinks == vec!["out".to_string(), "rp".to_string()]);
         // instantiate must succeed and pipe through the first subtopology
         let mut g = built.instantiate().unwrap();
-        g.pipe("in", None, b"hi", 0).unwrap();
+        pollster::block_on(g.pipe("in", None, b"hi", 0)).unwrap();
         let out1 = g.take_output();
         check!(out1.iter().any(|o| o.topic == "rp"));
     }
@@ -1053,15 +1055,19 @@ mod tests {
     fn instantiate_builds_stores_and_processes_statefully() {
         use crate::processor::serde::I64Serde;
         struct Counter;
+        #[async_trait]
         impl Processor<String, String, String, i64> for Counter {
-            fn process(
+            async fn process(
                 &mut self,
                 ctx: &mut ProcessorContext<'_, '_, String, i64>,
                 r: Record<String, String>,
             ) {
-                let s = ctx.get_state_store::<String, i64>("counts").unwrap();
-                let n = s.get(&r.value).unwrap_or(0) + 1;
-                s.put(r.value.clone(), n);
+                let n = {
+                    let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+                    let n = s.get(&r.value).await.unwrap_or(0) + 1;
+                    s.put(r.value.clone(), n).await;
+                    n
+                };
                 ctx.forward(Record::new(Some(r.value), n, r.timestamp));
             }
         }
@@ -1078,8 +1084,8 @@ mod tests {
                 .any(|c| c.name == "app-counts-changelog")
         }));
         let mut g = built.instantiate().unwrap();
-        g.pipe("in", None, b"x", 0).unwrap();
-        g.pipe("in", None, b"x", 1).unwrap();
+        pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
+        pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
         // After two "x" records the count should be 2 (i64 big-endian = [0,0,0,0,0,0,0,2])
         check!(
             g.take_output()

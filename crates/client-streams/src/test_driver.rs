@@ -28,7 +28,7 @@ impl TopologyTestDriver {
     pub fn new(built: &BuiltTopology) -> Result<Self, ProcessorError> {
         let source_topics: HashSet<String> = built.list_source_topics().into_iter().collect();
         let mut graph = built.instantiate()?;
-        graph.init_processors()?;
+        pollster::block_on(graph.init_processors())?;
         Ok(Self {
             graph,
             source_topics,
@@ -63,7 +63,7 @@ impl TopologyTestDriver {
         )]);
         while let Some((t, k, v, ts)) = queue.pop_front() {
             // run the graph for this topic; ignore unknown topics
-            let _ = self.graph.pipe(&t, k.as_deref(), &v, ts);
+            let _ = pollster::block_on(self.graph.pipe(&t, k.as_deref(), &v, ts));
             for out in self.graph.take_output() {
                 if self.source_topics.contains(&out.topic) {
                     // internal repartition topic feeding another subtopology → loop back
@@ -89,11 +89,23 @@ impl TopologyTestDriver {
 
     /// Inspect a state store's contents after piping (mirrors the JVM
     /// `TopologyTestDriver.getKeyValueStore`). Test-only; not for interactive queries.
-    pub fn get_key_value_store<K: 'static, V: 'static>(
+    pub fn get_key_value_store<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
     ) -> Option<&mut dyn crate::store::api::KeyValueStore<K, V>> {
         self.graph.stores.get_kv::<K, V>(name)
+    }
+
+    /// Test-only synchronous store read (`block_on` the async store). The store
+    /// API is async; this drives a single typed `get` to completion so sync
+    /// `#[test]` assertions can inspect materialized state.
+    pub fn store_get<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        store: &str,
+        key: &K,
+    ) -> Option<V> {
+        let s = self.graph.stores.get_kv::<K, V>(store)?;
+        pollster::block_on(s.get(key))
     }
 
     /// Pop + deserialize the next output record for `topic`.
@@ -129,22 +141,25 @@ mod tests {
     use crate::processor::serde::StringSerde;
     use crate::topology::Topology;
     use assert2::check;
+    use async_trait::async_trait;
 
     struct Upper;
+    #[async_trait]
     impl Processor<String, String, String, String> for Upper {
-        fn process(
+        async fn process(
             &mut self,
-            ctx: &mut ProcessorContext<String, String>,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
         ) {
             ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
         }
     }
     struct DropEmpty;
+    #[async_trait]
     impl Processor<String, String, String, String> for DropEmpty {
-        fn process(
+        async fn process(
             &mut self,
-            ctx: &mut ProcessorContext<String, String>,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
         ) {
             if !r.value.is_empty() {
@@ -153,10 +168,11 @@ mod tests {
         }
     }
     struct Identity;
+    #[async_trait]
     impl Processor<String, String, String, String> for Identity {
-        fn process(
+        async fn process(
             &mut self,
-            ctx: &mut ProcessorContext<String, String>,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
         ) {
             ctx.forward(r);
@@ -282,15 +298,19 @@ mod tests {
     fn stateful_count_and_store_inspection() {
         use crate::processor::serde::I64Serde;
         struct Counter;
+        #[async_trait]
         impl Processor<String, String, String, i64> for Counter {
-            fn process(
+            async fn process(
                 &mut self,
-                ctx: &mut ProcessorContext<String, i64>,
+                ctx: &mut ProcessorContext<'_, '_, String, i64>,
                 r: Record<String, String>,
             ) {
-                let s = ctx.get_state_store::<String, i64>("counts").unwrap();
-                let n = s.get(&r.value).unwrap_or(0) + 1;
-                s.put(r.value.clone(), n);
+                let n = {
+                    let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+                    let n = s.get(&r.value).await.unwrap_or(0) + 1;
+                    s.put(r.value.clone(), n).await;
+                    n
+                };
                 ctx.forward(Record::new(Some(r.value), n, r.timestamp));
             }
         }
@@ -322,7 +342,6 @@ mod tests {
             d.read_output("out", Produced::with(StringSerde, I64Serde))
                 == Some((Some("a".to_string()), 2))
         );
-        let store = d.get_key_value_store::<String, i64>("counts").unwrap();
-        check!(store.get(&"a".to_string()) == Some(2));
+        check!(d.store_get::<String, i64>("counts", &"a".to_string()) == Some(2));
     }
 }

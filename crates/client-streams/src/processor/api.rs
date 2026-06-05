@@ -4,6 +4,8 @@
 use std::any::Any;
 use std::marker::PhantomData;
 
+use async_trait::async_trait;
+
 use super::erased::{Dispatch, ErasedRecord};
 use super::record::{Record, RecordContext};
 
@@ -16,10 +18,15 @@ use super::record::{Record, RecordContext};
 /// shutdown — **by the runtime (`KafkaStreams`, sub-project #2b)**. The
 /// [`TopologyTestDriver`](crate::TopologyTestDriver) (#2a) does **not** yet
 /// invoke `init`/`close`; keep processors usable as-constructed for now.
-pub trait Processor<KIn, VIn, KOut, VOut>: Send + 'static {
-    fn init(&mut self, _ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {}
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, KOut, VOut>, record: Record<KIn, VIn>);
-    fn close(&mut self) {}
+#[async_trait]
+pub trait Processor<KIn: Send, VIn: Send, KOut: Send, VOut: Send>: Send + 'static {
+    async fn init(&mut self, _ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {}
+    async fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, KOut, VOut>,
+        record: Record<KIn, VIn>,
+    );
+    async fn close(&mut self) {}
 }
 
 /// A boxed processor is itself a [`Processor`], delegating to the inner value.
@@ -29,26 +36,27 @@ pub trait Processor<KIn, VIn, KOut, VOut>: Send + 'static {
 /// still satisfies the supplier blanket impl (which only requires the closure's
 /// return type to be *some* `Processor`). For the common case, return the
 /// concrete processor directly (`|| MyProc`) and skip the box entirely.
+#[async_trait]
 impl<KIn, VIn, KOut, VOut> Processor<KIn, VIn, KOut, VOut>
     for Box<dyn Processor<KIn, VIn, KOut, VOut>>
 where
-    KIn: 'static,
-    VIn: 'static,
-    KOut: 'static,
-    VOut: 'static,
+    KIn: Send + 'static,
+    VIn: Send + 'static,
+    KOut: Send + 'static,
+    VOut: Send + 'static,
 {
-    fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {
-        (**self).init(ctx);
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {
+        (**self).init(ctx).await;
     }
-    fn process(
+    async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, KOut, VOut>,
         record: Record<KIn, VIn>,
     ) {
-        (**self).process(ctx, record);
+        (**self).process(ctx, record).await;
     }
-    fn close(&mut self) {
-        (**self).close();
+    async fn close(&mut self) {
+        (**self).close().await;
     }
 }
 
@@ -66,6 +74,10 @@ pub trait ProcessorSupplier<KIn, VIn, KOut, VOut>: Send + Sync + 'static {
 impl<F, P, KIn, VIn, KOut, VOut> ProcessorSupplier<KIn, VIn, KOut, VOut> for F
 where
     F: Fn() -> P + Send + Sync + 'static,
+    KIn: Send,
+    VIn: Send,
+    KOut: Send,
+    VOut: Send,
     P: Processor<KIn, VIn, KOut, VOut>,
 {
     fn get(&self) -> Box<dyn Processor<KIn, VIn, KOut, VOut>> {
@@ -129,7 +141,7 @@ where
 
     /// Access a connected state store, typed. `None` if absent or the K/V types
     /// don't match. Fetch it per-record (do not hold across `process` calls).
-    pub fn get_state_store<K2: 'static, V2: 'static>(
+    pub fn get_state_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
     ) -> Option<&mut dyn crate::store::api::KeyValueStore<K2, V2>> {
@@ -152,8 +164,9 @@ mod tests {
     use std::collections::VecDeque;
 
     struct Upper;
+    #[async_trait]
     impl Processor<String, String, String, String> for Upper {
-        fn process(
+        async fn process(
             &mut self,
             ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
@@ -163,17 +176,18 @@ mod tests {
     }
 
     struct Noop;
+    #[async_trait]
     impl Processor<String, String, String, String> for Noop {
-        fn process(
+        async fn process(
             &mut self,
-            _ctx: &mut ProcessorContext<String, String>,
+            _ctx: &mut ProcessorContext<'_, '_, String, String>,
             _r: Record<String, String>,
         ) {
         }
     }
 
-    #[test]
-    fn forward_pushes_erased_record_to_each_child() {
+    #[tokio::test]
+    async fn forward_pushes_erased_record_to_each_child() {
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
         let rc = RecordContext {
@@ -192,15 +206,17 @@ mod tests {
             stores: &mut stores,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
-        Upper.process(&mut ctx, Record::new(Some("k".into()), "hi".into(), 5));
+        Upper
+            .process(&mut ctx, Record::new(Some("k".into()), "hi".into(), 5))
+            .await;
         check!(buffer.len() == 2);
         let (child, rec) = buffer.pop_front().unwrap();
         check!(child == 3);
         check!(*rec.value.downcast::<String>().unwrap() == "HI");
     }
 
-    #[test]
-    fn boxed_dyn_processor_delegates_init_process_close() {
+    #[tokio::test]
+    async fn boxed_dyn_processor_delegates_init_process_close() {
         // A `Box<dyn Processor>` is itself a `Processor`, forwarding every method
         // to the inner value. This is the runtime-dispatch path a
         // `ProcessorSupplier` closure takes when it returns `Box<dyn Processor<…>>`
@@ -224,16 +240,18 @@ mod tests {
             stores: &mut stores,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
-        boxed.init(&mut ctx); // forwards to Upper's default no-op
-        boxed.process(&mut ctx, Record::new(None, "hi".into(), 5)); // forwards → uppercases
-        boxed.close(); // forwards to Upper's default no-op
+        boxed.init(&mut ctx).await; // forwards to Upper's default no-op
+        boxed
+            .process(&mut ctx, Record::new(None, "hi".into(), 5))
+            .await; // forwards → uppercases
+        boxed.close().await; // forwards to Upper's default no-op
         check!(buffer.len() == 1);
         let (_child, rec) = buffer.pop_front().unwrap();
         check!(*rec.value.downcast::<String>().unwrap() == "HI");
     }
 
-    #[test]
-    fn default_init_and_close_are_noops_and_forward_with_no_children_drops() {
+    #[tokio::test]
+    async fn default_init_and_close_are_noops_and_forward_with_no_children_drops() {
         let mut p = Noop;
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
@@ -252,10 +270,10 @@ mod tests {
             stores: &mut stores,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
-        p.init(&mut ctx); // default no-op
+        p.init(&mut ctx).await; // default no-op
         check!(ctx.record_context().timestamp == 9);
         ctx.forward(Record::new(None, "x".to_string(), 0)); // no children → dropped, no panic
         check!(buffer.is_empty());
-        p.close(); // default no-op
+        p.close().await; // default no-op
     }
 }

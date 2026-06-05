@@ -35,7 +35,7 @@ pub(crate) struct Graph {
 impl Graph {
     /// Feed one record arriving on `topic`; runs the graph to completion,
     /// appending sink outputs to `self.output`. Unknown topics are ignored.
-    pub fn pipe(
+    pub async fn pipe(
         &mut self,
         topic: &str,
         key: Option<&[u8]>,
@@ -82,7 +82,7 @@ impl Graph {
                     record_ctx: &rc,
                     stores,
                 };
-                node.process(&mut d, rec)
+                node.process(&mut d, rec).await
             };
             self.children[idx] = children;
             res?;
@@ -96,7 +96,7 @@ impl Graph {
 
     /// Call `init` on every node in index order. Nodes that don't override
     /// `ErasedNode::init` (sink, source) get the default no-op.
-    pub fn init_processors(&mut self) -> Result<(), ProcessorError> {
+    pub async fn init_processors(&mut self) -> Result<(), ProcessorError> {
         let n = self.nodes.len();
         for idx in 0..n {
             let mut buffer = VecDeque::new();
@@ -116,7 +116,7 @@ impl Graph {
                 record_ctx: &rc,
                 stores,
             };
-            node.init(&mut d)?;
+            node.init(&mut d).await?;
         }
         Ok(())
     }
@@ -144,14 +144,14 @@ impl Graph {
 
     /// Restore one changelog record into a named store (logging-off path is
     /// the caller's responsibility).
-    pub fn restore_apply(
+    pub async fn restore_apply(
         &mut self,
         store_name: &str,
         key: bytes::Bytes,
         value: Option<bytes::Bytes>,
     ) {
         if let Some(store) = self.stores.get_mut(store_name) {
-            store.apply_changelog(key, value);
+            store.apply_changelog(key, value).await;
         }
     }
 
@@ -174,20 +174,22 @@ mod tests {
     use crate::processor::record::Record;
     use crate::processor::serde::StringSerde;
     use assert2::check;
+    use async_trait::async_trait;
 
     struct Upper;
+    #[async_trait]
     impl Processor<String, String, String, String> for Upper {
-        fn process(
+        async fn process(
             &mut self,
-            ctx: &mut ProcessorContext<String, String>,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
         ) {
             ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
         }
     }
 
-    #[test]
-    fn drives_source_processor_sink() {
+    #[tokio::test]
+    async fn drives_source_processor_sink() {
         // nodes: index 0 = processor "up", index 1 = sink "out"
         let up = Box::new(ProcessorNode::new("up".into(), &(|| Upper))) as Box<dyn ErasedNode>;
         let sink = Box::new(SinkNode::new(
@@ -209,15 +211,15 @@ mod tests {
             output: Vec::new(),
             stores: crate::store::registry::StoreRegistry::default(),
         };
-        graph.pipe("in", Some(b"k"), b"hi", 7).unwrap();
+        graph.pipe("in", Some(b"k"), b"hi", 7).await.unwrap();
         let out = graph.take_output();
         check!(out.len() == 1);
         check!(out[0].topic == "out-topic");
         check!(out[0].value.as_ref().unwrap().as_ref() == b"HI");
     }
 
-    #[test]
-    fn unknown_topic_is_ignored() {
+    #[tokio::test]
+    async fn unknown_topic_is_ignored() {
         let mut graph = Graph {
             nodes: vec![],
             children: vec![],
@@ -225,12 +227,12 @@ mod tests {
             output: Vec::new(),
             stores: crate::store::registry::StoreRegistry::default(),
         };
-        graph.pipe("nope", None, b"x", 0).unwrap();
+        graph.pipe("nope", None, b"x", 0).await.unwrap();
         check!(graph.take_output().is_empty());
     }
 
-    #[test]
-    fn stateful_processor_accumulates_via_store() {
+    #[tokio::test]
+    async fn stateful_processor_accumulates_via_store() {
         use crate::processor::api::{Processor, ProcessorContext};
         use crate::processor::node::{ProcessorNode, SinkNode, SourceNode};
         use crate::processor::record::Record;
@@ -239,17 +241,21 @@ mod tests {
         use crate::store::registry::StoreRegistry;
 
         struct Counter;
+        #[async_trait]
         impl Processor<String, String, String, i64> for Counter {
-            fn process(
+            async fn process(
                 &mut self,
                 ctx: &mut ProcessorContext<'_, '_, String, i64>,
                 r: Record<String, String>,
             ) {
-                let store = ctx
-                    .get_state_store::<String, i64>("counts")
-                    .expect("counts store not found");
-                let n = store.get(&r.value).unwrap_or(0) + 1;
-                store.put(r.value.clone(), n);
+                let n = {
+                    let store = ctx
+                        .get_state_store::<String, i64>("counts")
+                        .expect("counts store not found");
+                    let n = store.get(&r.value).await.unwrap_or(0) + 1;
+                    store.put(r.value.clone(), n).await;
+                    n
+                };
                 ctx.forward(Record::new(Some(r.value), n, r.timestamp));
             }
         }
@@ -289,8 +295,8 @@ mod tests {
         };
 
         // pipe "in"/"a" twice — counter should accumulate to 2
-        graph.pipe("in", Some(b"k"), b"a", 1).unwrap();
-        graph.pipe("in", Some(b"k"), b"a", 2).unwrap();
+        graph.pipe("in", Some(b"k"), b"a", 1).await.unwrap();
+        graph.pipe("in", Some(b"k"), b"a", 2).await.unwrap();
 
         let out = graph.take_output();
         check!(out.len() == 2);

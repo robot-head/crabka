@@ -16,6 +16,8 @@
 
 use std::any::{Any, type_name};
 
+use async_trait::async_trait;
+
 use super::api::{Processor, ProcessorContext, ProcessorSupplier};
 use super::erased::{Dispatch, ErasedRecord, OutputRecord, ProcessorError};
 use super::record::Record;
@@ -31,11 +33,12 @@ use super::serde::Serde;
 /// **not** implement this trait because sources are entered via their own
 /// `deserialize` method — they are never the target of a `forward` from a
 /// parent node.
+#[async_trait]
 pub(crate) trait ErasedNode: Send {
     /// Called once before the first record (e.g. to open stores). Default is
     /// a no-op so sink nodes don't need to implement it.
     #[allow(dead_code)]
-    fn init(&mut self, _dispatch: &mut Dispatch<'_>) -> Result<(), ProcessorError> {
+    async fn init(&mut self, _dispatch: &mut Dispatch<'_>) -> Result<(), ProcessorError> {
         Ok(())
     }
 
@@ -43,7 +46,7 @@ pub(crate) trait ErasedNode: Send {
     fn close(&mut self) {}
 
     /// Process one erased record: downcast, run inner logic, push results.
-    fn process(
+    async fn process(
         &mut self,
         dispatch: &mut Dispatch<'_>,
         record: ErasedRecord,
@@ -79,6 +82,7 @@ where
     }
 }
 
+#[async_trait]
 impl<KIn, VIn, KOut, VOut> ErasedNode for ProcessorNode<KIn, VIn, KOut, VOut>
 where
     KIn: Any + Send,
@@ -86,17 +90,19 @@ where
     KOut: Any + Send + Clone,
     VOut: Any + Send + Clone,
 {
-    fn init(&mut self, dispatch: &mut Dispatch<'_>) -> Result<(), ProcessorError> {
+    async fn init(&mut self, dispatch: &mut Dispatch<'_>) -> Result<(), ProcessorError> {
         let mut ctx = ProcessorContext::<'_, '_, KOut, VOut>::new(dispatch);
-        self.inner.init(&mut ctx);
+        self.inner.init(&mut ctx).await;
         Ok(())
     }
 
     fn close(&mut self) {
-        self.inner.close();
+        // `ErasedNode::close` is sync (called from the sync `Graph::close_processors`);
+        // the inner async no-op `Processor::close` is driven to completion here.
+        pollster::block_on(self.inner.close());
     }
 
-    fn process(
+    async fn process(
         &mut self,
         dispatch: &mut Dispatch<'_>,
         rec: ErasedRecord,
@@ -126,7 +132,7 @@ where
 
         let record = Record::new(key, value, rec.timestamp);
         let mut ctx = ProcessorContext::<'_, '_, KOut, VOut>::new(dispatch);
-        self.inner.process(&mut ctx, record);
+        self.inner.process(&mut ctx, record).await;
         Ok(())
     }
 }
@@ -163,6 +169,7 @@ where
     }
 }
 
+#[async_trait]
 impl<K, V, KS, VS> ErasedNode for SinkNode<K, V, KS, VS>
 where
     K: Any + Send,
@@ -170,7 +177,7 @@ where
     KS: Serde<K> + Send,
     VS: Serde<V> + Send,
 {
-    fn process(
+    async fn process(
         &mut self,
         dispatch: &mut Dispatch<'_>,
         rec: ErasedRecord,
@@ -294,8 +301,9 @@ mod tests {
     use std::collections::VecDeque;
 
     struct Upper;
+    #[async_trait]
     impl Processor<String, String, String, String> for Upper {
-        fn process(
+        async fn process(
             &mut self,
             ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
@@ -329,8 +337,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn processor_node_downcasts_runs_forwards() {
+    #[tokio::test]
+    async fn processor_node_downcasts_runs_forwards() {
         let mut node = ProcessorNode::new("upcase".into(), &(|| Upper));
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
@@ -343,13 +351,13 @@ mod tests {
             Box::new("hi".to_string()),
             1,
         );
-        node.process(&mut d, rec).unwrap();
+        node.process(&mut d, rec).await.unwrap();
         let (_c, out) = buffer.pop_front().unwrap();
         check!(*out.value.downcast::<String>().unwrap() == "HI");
     }
 
-    #[test]
-    fn processor_node_none_key_passes_through() {
+    #[tokio::test]
+    async fn processor_node_none_key_passes_through() {
         let mut node = ProcessorNode::new("upcase".into(), &(|| Upper));
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
@@ -358,14 +366,14 @@ mod tests {
         let mut stores = crate::store::registry::StoreRegistry::default();
         let mut d = make_dispatch(&mut buffer, &children, &mut output, &rc, &mut stores);
         let rec = ErasedRecord::new(None, Box::new("hi".to_string()), 1);
-        node.process(&mut d, rec).unwrap();
+        node.process(&mut d, rec).await.unwrap();
         let (_c, out) = buffer.pop_front().unwrap();
         check!(out.key.is_none());
         check!(*out.value.downcast::<String>().unwrap() == "HI");
     }
 
-    #[test]
-    fn processor_node_downcast_error() {
+    #[tokio::test]
+    async fn processor_node_downcast_error() {
         let mut node = ProcessorNode::new("p".into(), &(|| Upper));
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
@@ -374,11 +382,11 @@ mod tests {
         let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
         // value is i32, not String — must fail
         let bad = ErasedRecord::new(None, Box::new(7i32), 0);
-        check!(node.process(&mut d, bad).is_err());
+        check!(node.process(&mut d, bad).await.is_err());
     }
 
-    #[test]
-    fn sink_node_serializes_to_output() {
+    #[tokio::test]
+    async fn sink_node_serializes_to_output() {
         let mut node = SinkNode::new("out".into(), "out-topic".into(), StringSerde, StringSerde);
         let mut buffer = VecDeque::new();
         let mut output = Vec::new();
@@ -390,14 +398,14 @@ mod tests {
             Box::new("V".to_string()),
             1,
         );
-        node.process(&mut d, rec).unwrap();
+        node.process(&mut d, rec).await.unwrap();
         check!(output.len() == 1);
         check!(output[0].topic == "out-topic");
         check!(output[0].value.as_ref().unwrap().as_ref() == b"V");
     }
 
-    #[test]
-    fn sink_node_none_key_produces_none_key_bytes() {
+    #[tokio::test]
+    async fn sink_node_none_key_produces_none_key_bytes() {
         let mut node = SinkNode::new("s".into(), "out-topic".into(), StringSerde, StringSerde);
         let mut buffer = VecDeque::new();
         let mut output = Vec::new();
@@ -405,14 +413,14 @@ mod tests {
         let mut stores = crate::store::registry::StoreRegistry::default();
         let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
         let rec = ErasedRecord::new(None, Box::new("v".to_string()), 0);
-        node.process(&mut d, rec).unwrap();
+        node.process(&mut d, rec).await.unwrap();
         check!(output.len() == 1);
         check!(output[0].key.is_none());
         check!(output[0].value.as_ref().unwrap().as_ref() == b"v");
     }
 
-    #[test]
-    fn sink_node_downcast_error() {
+    #[tokio::test]
+    async fn sink_node_downcast_error() {
         let mut node = SinkNode::new("s".into(), "out".into(), StringSerde, StringSerde);
         let mut buffer = VecDeque::new();
         let mut output = Vec::new();
@@ -421,7 +429,7 @@ mod tests {
         let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
         // value is i32, not String — must fail
         let bad = ErasedRecord::new(None, Box::new(7i32), 0);
-        check!(node.process(&mut d, bad).is_err());
+        check!(node.process(&mut d, bad).await.is_err());
     }
 
     #[test]

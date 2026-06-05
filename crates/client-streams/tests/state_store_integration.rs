@@ -71,11 +71,19 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 /// Counts per-value occurrences and forwards `(value_as_key, count)`.
 struct Counter;
 
+#[async_trait::async_trait]
 impl Processor<String, String, String, i64> for Counter {
-    fn process(&mut self, ctx: &mut ProcessorContext<String, i64>, r: Record<String, String>) {
-        let store = ctx.get_state_store::<String, i64>("counts").unwrap();
-        let n = store.get(&r.value).unwrap_or(0) + 1;
-        store.put(r.value.clone(), n);
+    async fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, String, i64>,
+        r: Record<String, String>,
+    ) {
+        let n = {
+            let store = ctx.get_state_store::<String, i64>("counts").unwrap();
+            let n = store.get(&r.value).await.unwrap_or(0) + 1;
+            store.put(r.value.clone(), n).await;
+            n
+        };
         ctx.forward(Record::new(Some(r.value), n, r.timestamp));
     }
 }

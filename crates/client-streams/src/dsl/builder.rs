@@ -102,7 +102,7 @@ impl StreamsBuilder {
         materialized: crate::dsl::config::Materialized<KS, VS>,
     ) -> crate::dsl::ktable::KTable<K, V>
     where
-        K: std::any::Any + Send + Clone,
+        K: std::any::Any + Send + Sync + Clone,
         V: std::any::Any + Send + Clone,
         KS: Serde<K> + Clone + 'static,
         VS: Serde<V> + Clone + 'static,

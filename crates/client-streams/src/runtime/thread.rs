@@ -87,7 +87,7 @@ impl StreamThread {
             task.seek_to_start().await?;
             // Restore state stores from changelog, then initialise processors.
             task.restore(&*self.fetcher).await?;
-            task.init()?;
+            task.init().await?;
             self.tasks.insert(key, task);
         }
         Ok(())
@@ -135,10 +135,11 @@ mod tests {
     // ─── stateless Upper processor ────────────────────────────────────────────
 
     struct Upper;
+    #[async_trait::async_trait]
     impl Processor<String, String, String, String> for Upper {
-        fn process(
+        async fn process(
             &mut self,
-            ctx: &mut ProcessorContext<String, String>,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
         ) {
             ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
@@ -161,11 +162,19 @@ mod tests {
     // ─── stateful Counter processor ───────────────────────────────────────────
 
     struct Counter;
+    #[async_trait::async_trait]
     impl Processor<String, String, String, i64> for Counter {
-        fn process(&mut self, ctx: &mut ProcessorContext<String, i64>, r: Record<String, String>) {
-            let store = ctx.get_state_store::<String, i64>("counts").unwrap();
-            let n = store.get(&r.value).unwrap_or(0) + 1;
-            store.put(r.value.clone(), n);
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, i64>,
+            r: Record<String, String>,
+        ) {
+            let n = {
+                let store = ctx.get_state_store::<String, i64>("counts").unwrap();
+                let n = store.get(&r.value).await.unwrap_or(0) + 1;
+                store.put(r.value.clone(), n).await;
+                n
+            };
             ctx.forward(Record::new(Some(r.value), n, r.timestamp));
         }
     }

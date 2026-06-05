@@ -14,6 +14,8 @@
 
 use std::marker::PhantomData;
 
+use async_trait::async_trait;
+
 use crate::dsl::processors::change::Change;
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
@@ -82,24 +84,28 @@ pub(crate) struct KTableKTableJoinThisProcessor<K, VA, VB, VR, F> {
     pub _pd: Marker<(K, VA, VB, VR)>,
 }
 
+#[async_trait]
 impl<K, VA, VB, VR, F> Processor<K, Change<VA>, K, Change<VR>>
     for KTableKTableJoinThisProcessor<K, VA, VB, VR, F>
 where
-    K: std::any::Any + Send + Clone,
-    VA: 'static,
-    VB: 'static,
+    K: std::any::Any + Send + Sync + Clone,
+    VA: Send + 'static,
+    VB: Send + 'static,
     VR: std::any::Any + Send + Clone,
     F: Fn(Option<&VA>, Option<&VB>) -> VR + Send + 'static,
 {
-    fn process(
+    async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<VR>>,
         r: Record<K, Change<VA>>,
     ) {
         let key = r.key.expect("join key");
-        let b_cur = ctx
-            .get_state_store::<K, VB>(&self.other_store)
-            .and_then(|s| s.get(&key));
+        // `and_then(|s| s.get(..))` can't `.await`; do the lookup in a `match`,
+        // dropping the store borrow before `ctx.forward`.
+        let b_cur = match ctx.get_state_store::<K, VB>(&self.other_store) {
+            Some(s) => s.get(&key).await,
+            None => None,
+        };
         let old = result(
             self.kind,
             &self.joiner,
@@ -129,24 +135,28 @@ pub(crate) struct KTableKTableJoinOtherProcessor<K, VA, VB, VR, F> {
     pub _pd: Marker<(K, VA, VB, VR)>,
 }
 
+#[async_trait]
 impl<K, VA, VB, VR, F> Processor<K, Change<VB>, K, Change<VR>>
     for KTableKTableJoinOtherProcessor<K, VA, VB, VR, F>
 where
-    K: std::any::Any + Send + Clone,
-    VA: 'static,
-    VB: 'static,
+    K: std::any::Any + Send + Sync + Clone,
+    VA: Send + 'static,
+    VB: Send + 'static,
     VR: std::any::Any + Send + Clone,
     F: Fn(Option<&VA>, Option<&VB>) -> VR + Send + 'static,
 {
-    fn process(
+    async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<VR>>,
         r: Record<K, Change<VB>>,
     ) {
         let key = r.key.expect("join key");
-        let a_cur = ctx
-            .get_state_store::<K, VA>(&self.other_store)
-            .and_then(|s| s.get(&key));
+        // `and_then(|s| s.get(..))` can't `.await`; do the lookup in a `match`,
+        // dropping the store borrow before `ctx.forward`.
+        let a_cur = match ctx.get_state_store::<K, VA>(&self.other_store) {
+            Some(s) => s.get(&key).await,
+            None => None,
+        };
         let old = result(
             self.kind,
             &self.joiner,
@@ -187,7 +197,7 @@ mod tests {
     type StrJoiner = fn(Option<&String>, Option<&String>) -> String;
     type TestJoinProc = KTableKTableJoinThisProcessor<String, String, String, String, StrJoiner>;
 
-    fn make_stores_with_b(b_val: Option<(&str, &str)>) -> StoreRegistry {
+    async fn make_stores_with_b(b_val: Option<(&str, &str)>) -> StoreRegistry {
         let mut stores = StoreRegistry::default();
         let mut store = KeyValueBytesStore::<String, String>::in_memory(
             "b".into(),
@@ -196,7 +206,7 @@ mod tests {
             "b-cl".into(),
         );
         if let Some((k, v)) = b_val {
-            store.put(k.to_string(), v.to_string());
+            store.put(k.to_string(), v.to_string()).await;
         }
         stores.insert(Box::new(store));
         stores
@@ -232,9 +242,9 @@ mod tests {
 
     /// Inner join update: store `b["k"] = "B"`, process an insert of `"A"`.
     /// Should forward `Change { old: None, new: Some("AB") }`.
-    #[test]
-    fn inner_join_update_forwards_ab() {
-        let mut stores = make_stores_with_b(Some(("k", "B")));
+    #[tokio::test]
+    async fn inner_join_update_forwards_ab() {
+        let mut stores = make_stores_with_b(Some(("k", "B"))).await;
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
@@ -254,7 +264,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("k".into()), Change::update(None, "A".into()), 0),
-            );
+            )
+            .await;
         }
 
         let (_, rec) = buffer.pop_front().expect("expected forwarded record");
@@ -266,9 +277,9 @@ mod tests {
 
     /// Inner join tombstone: store `b["k"] = "B"`, process a delete of `"A"`.
     /// Should forward `Change { old: Some("AB"), new: None }`.
-    #[test]
-    fn inner_join_tombstone_forwards_old_ab_new_none() {
-        let mut stores = make_stores_with_b(Some(("k", "B")));
+    #[tokio::test]
+    async fn inner_join_tombstone_forwards_old_ab_new_none() {
+        let mut stores = make_stores_with_b(Some(("k", "B"))).await;
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
@@ -288,7 +299,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("k".into()), Change::tombstone(Some("A".into())), 1),
-            );
+            )
+            .await;
         }
 
         let (_, rec) = buffer.pop_front().expect("expected forwarded record");
@@ -300,9 +312,9 @@ mod tests {
 
     /// Inner join with empty store (no `"k"`): process an insert of `"A"`.
     /// Should NOT forward — inner requires both sides present.
-    #[test]
-    fn inner_join_empty_store_no_forward() {
-        let mut stores = make_stores_with_b(None);
+    #[tokio::test]
+    async fn inner_join_empty_store_no_forward() {
+        let mut stores = make_stores_with_b(None).await;
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
@@ -322,7 +334,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("k".into()), Change::update(None, "A".into()), 0),
-            );
+            )
+            .await;
         }
 
         check!(

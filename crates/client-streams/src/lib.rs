@@ -47,11 +47,13 @@
 //! Define a typed topology, then test it with the broker-free [`TopologyTestDriver`]:
 //!
 //! ```
+//! use async_trait::async_trait;
 //! use crabka_client_streams::{Consumed, Processor, ProcessorContext, Produced, Record, StringSerde, Topology, TopologyTestDriver};
 //!
 //! struct Upper;
+//! #[async_trait]
 //! impl Processor<String, String, String, String> for Upper {
-//!     fn process(&mut self, ctx: &mut ProcessorContext<String, String>, r: Record<String, String>) {
+//!     async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, String, String>, r: Record<String, String>) {
 //!         ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
 //!     }
 //! }
@@ -90,17 +92,22 @@
 //! inside `process` via [`ProcessorContext::get_state_store`].
 //!
 //! ```
+//! use async_trait::async_trait;
 //! use crabka_client_streams::{
 //!     Consumed, I64Serde, Processor, ProcessorContext, Produced, Record, StringSerde, Topology,
 //!     TopologyTestDriver,
 //! };
 //!
 //! struct Counter;
+//! #[async_trait]
 //! impl Processor<String, String, String, i64> for Counter {
-//!     fn process(&mut self, ctx: &mut ProcessorContext<String, i64>, r: Record<String, String>) {
-//!         let s = ctx.get_state_store::<String, i64>("counts").unwrap();
-//!         let n = s.get(&r.value).unwrap_or(0) + 1;
-//!         s.put(r.value.clone(), n);
+//!     async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>, r: Record<String, String>) {
+//!         let n = {
+//!             let s = ctx.get_state_store::<String, i64>("counts").unwrap();
+//!             let n = s.get(&r.value).await.unwrap_or(0) + 1;
+//!             s.put(r.value.clone(), n).await;
+//!             n
+//!         };
 //!         ctx.forward(Record::new(Some(r.value), n, r.timestamp));
 //!     }
 //! }
@@ -123,8 +130,7 @@
 //!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
 //!     Some((Some("a".to_string()), 2_i64)),
 //! );
-//! let store = driver.get_key_value_store::<String, i64>("counts").unwrap();
-//! assert_eq!(store.get(&"a".to_string()), Some(2_i64));
+//! assert_eq!(driver.store_get::<String, i64>("counts", &"a".to_string()), Some(2_i64));
 //! ```
 //!
 //! ## DSL (KStream/KTable)
@@ -204,9 +210,8 @@
 //! );
 //!
 //! // The materialized store holds the final count per key.
-//! let store = driver.get_key_value_store::<String, i64>("counts").unwrap();
-//! assert_eq!(store.get(&"a".to_string()), Some(2));
-//! assert_eq!(store.get(&"b".to_string()), Some(1));
+//! assert_eq!(driver.store_get::<String, i64>("counts", &"a".to_string()), Some(2));
+//! assert_eq!(driver.store_get::<String, i64>("counts", &"b".to_string()), Some(1));
 //! ```
 //!
 //! ## Running an app (`KafkaStreams`)
@@ -216,11 +221,13 @@
 //! produces to sink topics, and commits offsets (at-least-once):
 //!
 //! ```no_run
+//! use async_trait::async_trait;
 //! use crabka_client_streams::{Consumed, KafkaStreams, Processor, ProcessorContext, Produced, Record, StringSerde, Topology};
 //!
 //! struct Upper;
+//! #[async_trait]
 //! impl Processor<String, String, String, String> for Upper {
-//!     fn process(&mut self, ctx: &mut ProcessorContext<String, String>, r: Record<String, String>) {
+//!     async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, String, String>, r: Record<String, String>) {
 //!         ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
 //!     }
 //! }
