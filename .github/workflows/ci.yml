@@ -77,10 +77,15 @@ jobs:
       # `--exclude crabka-broker` skips the testcontainers-based JVM
       # acceptance tests (Docker-only); they run under the
       # `broker-jvm-acceptance` job below.
+      # `--exclude crabka-grpc-gateway` skips its Docker-gated `jvm_differential`
+      # test: with `--include-ignored` it would run here, but it advertises
+      # `host.docker.internal` (only set up in `broker-jvm-acceptance`), so it
+      # fails to connect. The gateway's coverage comes from the
+      # `grpc-gateway-integration` job's non-ignored tests.
       - name: JVM differential coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
+          cargo llvm-cov --workspace --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --exclude crabka-grpc-gateway --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
       - uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
