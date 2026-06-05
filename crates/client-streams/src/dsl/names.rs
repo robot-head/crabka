@@ -63,5 +63,9 @@ pub(crate) const KSTREAM_JOINOTHER: &str = "KSTREAM-JOINOTHER-";
 /// the lowering burns two to land the join processors — and thus the
 /// `<joinProcessorName>-store` window-store names — at the JVM indices.
 pub(crate) const KSTREAM_WINDOWED: &str = "KSTREAM-WINDOWED-";
+/// The shared outer-join KV store for KIP-633 left/outer window-close emission.
+/// Only minted for left/outer joins (inner topologies are byte-unchanged). The
+/// exact JVM index/naming is pinned by Task C4's golden capture.
+pub(crate) const KSTREAM_OUTERSHARED: &str = "KSTREAM-OUTERSHARED-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";

@@ -1660,3 +1660,151 @@ fn dsl_stream_stream_join_duplicates() {
         None
     );
 }
+
+// ---------------------------------------------------------------------------
+// Windowed KStream-KStream left/outer join (#4d-iii Phase C, KIP-633)
+// ---------------------------------------------------------------------------
+
+/// `KStream::left_join` (windowed left stream-stream join): an unmatched LEFT
+/// record is buffered and emitted as `joiner(a, None)` once its window closes
+/// (driven by a later left record advancing stream-time). A matched left record
+/// emits `joiner(a, Some(b))` and is NOT later re-emitted as a null.
+#[test]
+fn dsl_stream_stream_left_join_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    let b = StreamsBuilder::new();
+    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    left.left_join(
+        &right,
+        |a: &String, b: Option<&String>| format!("{a}{}", b.cloned().unwrap_or_default()),
+        JoinWindows::of(10),
+        StreamJoined::with(StringSerde, StringSerde, StringSerde),
+    )
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(left);
+    drop(right);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // Matched case: A("k1","a")@5 then B("k1","b")@8 ∈ [5-10,5+10] → "ab" once.
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k1".to_string()),
+        "a".to_string(),
+        5,
+    );
+    // No B yet, window still open → buffered, no output.
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k1".to_string()),
+        "b".to_string(),
+        8,
+    );
+    // The match fires AND deletes k1@5 from the outer buffer → no later null.
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k1".to_string()), "ab".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+
+    // Unmatched left: A("k2","x")@5 with no B → buffered (window 5+10 open at st=5).
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k2".to_string()),
+        "x".to_string(),
+        5,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+    // Later left A("k2","z")@100 advances stream-time past 5+after(10) → close-scan
+    // emits the buffered (x, None) = "x" at ts=5. (The k1@5 match was already
+    // removed, so it does NOT re-emit a null.)
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k2".to_string()),
+        "z".to_string(),
+        100,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k2".to_string()), "x".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// `KStream::outer_join` (windowed outer stream-stream join): an unmatched RIGHT
+/// record is buffered and emitted as `joiner(None, Some(b))` once its window
+/// closes (driven by a later right record advancing stream-time).
+#[test]
+fn dsl_stream_stream_outer_join_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    let b = StreamsBuilder::new();
+    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    left.outer_join(
+        &right,
+        |a: Option<&String>, b: Option<&String>| {
+            format!(
+                "{}{}",
+                a.cloned().unwrap_or_default(),
+                b.cloned().unwrap_or_default()
+            )
+        },
+        JoinWindows::of(10),
+        StreamJoined::with(StringSerde, StringSerde, StringSerde),
+    )
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(left);
+    drop(right);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // Unmatched right: B("k","b")@5 with no A → buffered (window 5+before(10) open).
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "b".to_string(),
+        5,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+    // Later right B("k","z")@100 advances stream-time past 5+before(10) → close-scan
+    // emits the buffered (None, b) = "b" at ts=5.
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "z".to_string(),
+        100,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "b".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}

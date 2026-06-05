@@ -11,6 +11,9 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use bytes::Bytes;
 
 use crate::dsl::builder::InternalStreamsBuilder;
 use crate::dsl::config::{Grouped, Materialized, StreamJoined};
@@ -20,12 +23,19 @@ use crate::dsl::ktable::KTable;
 use crate::dsl::names;
 use crate::dsl::processors::change::Change;
 use crate::dsl::processors::join::KStreamKTableJoinProcessor;
+use crate::dsl::processors::ktable_join::JoinKind;
+use crate::dsl::processors::outer_join_store::TimeTracker;
 use crate::dsl::processors::stateless;
 use crate::dsl::processors::stream_join::KStreamKStreamJoinProcessor;
 use crate::dsl::processors::table::KStreamToTableProcessor;
 use crate::dsl::windows::JoinWindows;
-use crate::processor::serde::{Produced, Serde};
+use crate::processor::serde::{BytesSerde, Produced, Serde};
 use crate::topology::NodeHandle;
+
+/// The shared outer-form joiner threaded into a windowed stream-stream join
+/// (`join`/`left_join`/`outer_join` all lift their user joiner to this shape).
+/// Each per-side processor wraps it so a match passes the present sides.
+type SharedOuterJoiner<V, V2, VO> = Arc<dyn Fn(Option<&V>, Option<&V2>) -> VO + Send + Sync>;
 
 pub struct KStream<K, V> {
     #[allow(dead_code)]
@@ -614,7 +624,6 @@ where
     /// [`JoinWindowStore`]: crate::store::join_window::JoinWindowStore
     /// [`KTable::join`]: crate::dsl::ktable::KTable::join
     #[must_use]
-    #[allow(clippy::too_many_lines)] // dual+merge lowering: 3 nodes, each with a typed thunk
     pub fn join<V2, VO, F, KS, V1S, V2S>(
         &self,
         other: &KStream<K, V2>,
@@ -626,6 +635,120 @@ where
         V2: Any + Send + Sync + Clone,
         VO: Any + Send + Clone,
         F: Fn(&V, &V2) -> VO + Clone + Send + Sync + 'static,
+        KS: Serde<K> + Clone + 'static,
+        V1S: Serde<V> + Clone + 'static,
+        V2S: Serde<V2> + Clone + 'static,
+        V: Send + Sync,
+    {
+        // Lift the inner joiner to the shared outer form: a match passes `Some`/`Some`
+        // (a null result never occurs for an inner join, so `expect` is unreachable).
+        let j =
+            move |a: Option<&V>, b: Option<&V2>| joiner(a.expect("inner a"), b.expect("inner b"));
+        self.join_impl::<V2, VO, KS, V1S, V2S>(
+            other,
+            Arc::new(j),
+            windows,
+            stream_joined,
+            JoinKind::inner(),
+        )
+    }
+
+    /// `leftJoin` (windowed left stream-stream join): every record on THIS (left)
+    /// stream that finds no match in the OTHER (right) window emits
+    /// `joiner(&this, None)` once that record's window closes (KIP-633,
+    /// stream-time-driven). Matched records emit `joiner(&this, Some(&other))` as in
+    /// the inner join. The right side never emits a non-join.
+    #[must_use]
+    pub fn left_join<V2, VO, F, KS, V1S, V2S>(
+        &self,
+        other: &KStream<K, V2>,
+        joiner: F,
+        windows: JoinWindows,
+        stream_joined: StreamJoined<KS, V1S, V2S>,
+    ) -> KStream<K, VO>
+    where
+        V2: Any + Send + Sync + Clone,
+        VO: Any + Send + Clone,
+        F: Fn(&V, Option<&V2>) -> VO + Clone + Send + Sync + 'static,
+        KS: Serde<K> + Clone + 'static,
+        V1S: Serde<V> + Clone + 'static,
+        V2S: Serde<V2> + Clone + 'static,
+        V: Send + Sync,
+    {
+        // Left form: the left (A) side may receive `None` for B; the A side is always
+        // present (the join never fires from a non-existent A).
+        let j = move |a: Option<&V>, b: Option<&V2>| joiner(a.expect("left a"), b);
+        self.join_impl::<V2, VO, KS, V1S, V2S>(
+            other,
+            Arc::new(j),
+            windows,
+            stream_joined,
+            JoinKind::left(),
+        )
+    }
+
+    /// `outerJoin` (windowed outer stream-stream join): every record on EITHER side
+    /// that finds no match emits `joiner(Some, None)` / `joiner(None, Some)` once its
+    /// window closes (KIP-633). Matched records emit `joiner(Some, Some)`.
+    #[must_use]
+    pub fn outer_join<V2, VO, F, KS, V1S, V2S>(
+        &self,
+        other: &KStream<K, V2>,
+        joiner: F,
+        windows: JoinWindows,
+        stream_joined: StreamJoined<KS, V1S, V2S>,
+    ) -> KStream<K, VO>
+    where
+        V2: Any + Send + Sync + Clone,
+        VO: Any + Send + Clone,
+        F: Fn(Option<&V>, Option<&V2>) -> VO + Clone + Send + Sync + 'static,
+        KS: Serde<K> + Clone + 'static,
+        V1S: Serde<V> + Clone + 'static,
+        V2S: Serde<V2> + Clone + 'static,
+        V: Send + Sync,
+    {
+        // The user joiner is already in outer form.
+        self.join_impl::<V2, VO, KS, V1S, V2S>(
+            other,
+            Arc::new(joiner),
+            windows,
+            stream_joined,
+            JoinKind::outer(),
+        )
+    }
+
+    /// Shared dual+merge lowering for inner/left/outer windowed stream-stream joins.
+    ///
+    /// `outer_joiner` is the shared outer-form joiner `Fn(Option<&V>, Option<&V2>) ->
+    /// VO`; each per-side processor wraps it so a match passes the present sides. The
+    /// `kind` drives which side emits non-joins: **THIS (A)** emits when B is not
+    /// required (`!kind.b_required` → left & outer), **OTHER (B)** emits when A is not
+    /// required (`!kind.a_required` → outer only).
+    ///
+    /// Lowers (mirroring [`KTable::join`]'s dual+merge) to a **THIS** processor fed by
+    /// this stream, an **OTHER** processor fed by `other`, and a **MERGE** node. Each
+    /// side puts into its own `retainDuplicates` join-window store and reads the
+    /// other's. For left/outer, one shared `KSTREAM-OUTERSHARED-` KV store buffers
+    /// unmatched records and a single shared [`TimeTracker`] (cloned into both
+    /// supplier closures) drives the window-close emission; both join processors
+    /// connect to that store. For inner the outer store/tracker are not created, so
+    /// the wire topology is byte-identical to the inner-only golden.
+    ///
+    /// [`KTable::join`]: crate::dsl::ktable::KTable::join
+    /// [`TimeTracker`]: crate::dsl::processors::outer_join_store::TimeTracker
+    #[allow(clippy::too_many_lines)] // dual+merge lowering: 3 nodes + shared outer store, each a typed thunk
+    #[allow(clippy::needless_pass_by_value)] // `outer_joiner` is consumed (cloned into both thunks)
+    fn join_impl<V2, VO, KS, V1S, V2S>(
+        &self,
+        other: &KStream<K, V2>,
+        outer_joiner: SharedOuterJoiner<V, V2, VO>,
+        windows: JoinWindows,
+        stream_joined: StreamJoined<KS, V1S, V2S>,
+        kind: JoinKind,
+    ) -> KStream<K, VO>
+    where
+        V2: Any + Send + Sync + Clone,
+        VO: Any + Send + Clone,
         KS: Serde<K> + Clone + 'static,
         V1S: Serde<V> + Clone + 'static,
         V2S: Serde<V2> + Clone + 'static,
@@ -648,6 +771,15 @@ where
         let after = windows.after_ms;
         let grace = windows.grace_ms;
 
+        // Which side emits non-joins: A emits when B is not required (left/outer);
+        // B emits when A is not required (outer). Inner: neither.
+        let this_emit = !kind.b_required;
+        let other_emit = !kind.a_required;
+        let has_outer = this_emit || other_emit;
+        // One shared stream-time tracker, cloned into both supplier closures (the
+        // supplier runs once per task, so both processors share the same instance).
+        let tracker: Arc<Mutex<TimeTracker>> = Arc::new(Mutex::new(TimeTracker::default()));
+
         let mut g = self.builder.borrow_mut();
         // Mint names to match the JVM 4.1 `KStreamImplJoin` counter sequence
         // (validated by the `stream_stream_join` golden, Task B4): the JVM first
@@ -663,6 +795,9 @@ where
         let this_store = format!("{join_this}-store");
         let other_store = format!("{join_other}-store");
         let merge = g.new_processor_name(names::MERGE);
+        // The shared outer-join KV store: minted AFTER merge and only for left/outer,
+        // so inner topologies are byte-unchanged. C4's golden pins the exact index.
+        let outer_store = has_outer.then(|| g.new_processor_name(names::KSTREAM_OUTERSHARED));
 
         // ── THIS side: fed by this stream; puts into `this_store`, reads `other_store`.
         let this_id = g.graph.add(
@@ -678,13 +813,22 @@ where
             let other_s = other_store.clone();
             let ks = key_serde.clone();
             let vs = value1_serde.clone();
-            let joiner_this = joiner.clone();
+            let outer_joiner_this = Arc::clone(&outer_joiner);
+            let outer_store_this = outer_store.clone();
+            let tracker_this = Arc::clone(&tracker);
+            let ks_proc = key_serde.clone();
+            let vs_proc = value1_serde.clone();
             g.graph.nodes[this_id].lower = Some(Box::new(move |state: &mut LowerState| {
                 let parent = NodeHandle::<K, V>::from_name(state.handle_name[&self_node].clone());
                 let own_for_proc = own.clone();
                 let other_for_proc = other_s.clone();
-                // THIS joiner: own=V (left), other=V2 (right) → user `joiner(a, b)`.
-                let jf = joiner_this.clone();
+                // THIS joiner: drains V (left); a match passes `Some(a)`, a null passes
+                // `None` for the OTHER (right) side.
+                let oj = Arc::clone(&outer_joiner_this);
+                let outer_store_proc = outer_store_this.clone();
+                let tracker_proc = Arc::clone(&tracker_this);
+                let ks_for_proc = ks_proc.clone();
+                let vs_for_proc = vs_proc.clone();
                 let h = state.topology.add_processor::<K, V, K, VO, _, _, _>(
                     join_this_name.clone(),
                     move || KStreamKStreamJoinProcessor {
@@ -693,10 +837,22 @@ where
                         fetch_before: before,
                         fetch_after: after,
                         joiner: {
-                            let jf = jf.clone();
-                            move |a: &V, b: &V2| jf(a, b)
+                            let oj = Arc::clone(&oj);
+                            move |a: &V, b: Option<&V2>| oj(Some(a), b)
                         },
                         side_left: true,
+                        emit_unmatched: this_emit,
+                        outer_store: outer_store_proc.clone(),
+                        tracker: outer_store_proc.as_ref().map(|_| Arc::clone(&tracker_proc)),
+                        key_serde: outer_store_proc
+                            .as_ref()
+                            .map(|_| Box::new(ks_for_proc.clone()) as Box<dyn Serde<K>>),
+                        value_serde: outer_store_proc
+                            .as_ref()
+                            .map(|_| Box::new(vs_for_proc.clone()) as Box<dyn Serde<V>>),
+                        before_ms: before,
+                        after_ms: after,
+                        grace_ms: grace,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -713,6 +869,18 @@ where
                 );
                 state.topology.connect_processor_store(h.name(), &own);
                 state.topology.connect_processor_store(h.name(), &other_s);
+                // For left/outer, register the shared outer KV store ONCE here and
+                // connect this processor to it. (The OTHER thunk only connects.)
+                if let Some(os) = &outer_store_this {
+                    state
+                        .topology
+                        .add_state_store::<Bytes, Bytes, BytesSerde, BytesSerde>(
+                            os.clone(),
+                            BytesSerde,
+                            BytesSerde,
+                            [h.name().to_string()],
+                        );
+                }
                 state.handle_name.insert(this_id, h.name().to_string());
             }));
         }
@@ -731,14 +899,23 @@ where
             let other_s = this_store.clone();
             let ks = key_serde.clone();
             let vs = value2_serde.clone();
-            let joiner_other = joiner.clone();
+            let outer_joiner_other = Arc::clone(&outer_joiner);
+            let outer_store_other = outer_store.clone();
+            let tracker_other = Arc::clone(&tracker);
+            let ks_proc = key_serde.clone();
+            let vs_proc = value2_serde.clone();
             g.graph.nodes[other_id].lower = Some(Box::new(move |state: &mut LowerState| {
                 let parent = NodeHandle::<K, V2>::from_name(state.handle_name[&other_node].clone());
                 let own_for_proc = own.clone();
                 let other_for_proc = other_s.clone();
-                // OTHER joiner: own=V2 (right), other=V (left) → SWAP args back to
-                // the user's `joiner(a=V, b=V2)` order.
-                let jf = joiner_other.clone();
+                // OTHER joiner: drains V2 (right); a match passes `Some(b)`, a null
+                // passes `None` for the THIS (left) side — preserving the user
+                // `joiner(a, b)` arg order.
+                let oj = Arc::clone(&outer_joiner_other);
+                let outer_store_proc = outer_store_other.clone();
+                let tracker_proc = Arc::clone(&tracker_other);
+                let ks_for_proc = ks_proc.clone();
+                let vs_for_proc = vs_proc.clone();
                 let h = state.topology.add_processor::<K, V2, K, VO, _, _, _>(
                     join_other_name.clone(),
                     move || KStreamKStreamJoinProcessor {
@@ -750,10 +927,22 @@ where
                         fetch_before: after,
                         fetch_after: before,
                         joiner: {
-                            let jf = jf.clone();
-                            move |b: &V2, a: &V| jf(a, b)
+                            let oj = Arc::clone(&oj);
+                            move |b: &V2, a: Option<&V>| oj(a, Some(b))
                         },
                         side_left: false,
+                        emit_unmatched: other_emit,
+                        outer_store: outer_store_proc.clone(),
+                        tracker: outer_store_proc.as_ref().map(|_| Arc::clone(&tracker_proc)),
+                        key_serde: outer_store_proc
+                            .as_ref()
+                            .map(|_| Box::new(ks_for_proc.clone()) as Box<dyn Serde<K>>),
+                        value_serde: outer_store_proc
+                            .as_ref()
+                            .map(|_| Box::new(vs_for_proc.clone()) as Box<dyn Serde<V2>>),
+                        before_ms: before,
+                        after_ms: after,
+                        grace_ms: grace,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -770,6 +959,11 @@ where
                 );
                 state.topology.connect_processor_store(h.name(), &own);
                 state.topology.connect_processor_store(h.name(), &other_s);
+                // For left/outer, connect this processor to the shared outer store
+                // (registered by the THIS thunk).
+                if let Some(os) = &outer_store_other {
+                    state.topology.connect_processor_store(h.name(), os);
+                }
                 state.handle_name.insert(other_id, h.name().to_string());
             }));
         }
