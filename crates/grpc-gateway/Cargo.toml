@@ -44,5 +44,7 @@ assert2 = { workspace = true }
 crabka-broker = { version = "0.2", path = "../broker", features = ["test-helpers"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+# `UnboundedReceiverStream` to drive the Subscribe control stream in tests/streaming.rs.
+tokio-stream = { workspace = true }
 # `ServiceExt::oneshot` to drive the health router in tests/wire.rs.
 tower = { workspace = true, features = ["util"] }

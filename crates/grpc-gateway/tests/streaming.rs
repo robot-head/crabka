@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use assert2::check;
+use bytes::Bytes;
 use connectrpc_axum::message::Streaming;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
@@ -118,6 +119,79 @@ async fn send_stream_produces_all_records() {
         }
     }
     check!(seen == 2);
+
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn subscribe_streams_records_then_commits() {
+    let (broker, bootstrap, _dir) = boot().await;
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: "sub-topic".into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            10_000,
+        )
+        .await
+        .unwrap();
+    let state = state_for(&bootstrap).await;
+
+    // Produce one record up front.
+    crabka_grpc_gateway::produce::ProduceCore::new(&bootstrap, "sub-prod", Arc::new(RawCodec))
+        .await
+        .unwrap()
+        .produce(crabka_grpc_gateway::types::GatewayRecord {
+            topic: "sub-topic".into(),
+            key: None,
+            value: Bytes::from_static(b"hello"),
+            headers: vec![],
+            partition: None,
+            timestamp_ms: None,
+            idempotency_key: None,
+        })
+        .await
+        .unwrap();
+
+    // Control stream: a Start frame (auto_commit), then stays open until dropped.
+    let start = pb::SubscribeFrame {
+        frame: Some(pb::subscribe_frame::Frame::Start(pb::SubscribeStart {
+            group_id: "sub-group".into(),
+            topics: vec!["sub-topic".into()],
+            auto_commit: true,
+        })),
+    };
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<
+        Result<pb::SubscribeFrame, connectrpc_axum::message::ConnectError>,
+    >();
+    tx.send(Ok(start)).unwrap();
+    let inbound = Streaming::new(Box::pin(
+        tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
+    ));
+
+    let mut out = Box::pin(streaming::subscribe_inner(inbound, state));
+    let mut got = None;
+    for _ in 0..20 {
+        match tokio::time::timeout(std::time::Duration::from_millis(600), out.next()).await {
+            Ok(Some(Ok(msg))) => {
+                got = Some(msg);
+                break;
+            }
+            Ok(Some(Err(e))) => panic!("subscribe error: {e:?}"),
+            Ok(None) => break,
+            Err(_) => {} // timed out this round; retry the poll
+        }
+    }
+    drop(tx); // close the control stream → subscription ends
+    let msg = got.expect("received an Inbound record");
+    check!(msg.topic == "sub-topic");
+    check!(msg.value == b"hello");
 
     broker.shutdown().await;
 }

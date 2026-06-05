@@ -23,6 +23,7 @@ pub fn router(state: std::sync::Arc<state::AppState>) -> axum::Router {
     pb::gateway_connect::GatewayServiceBuilder::<()>::new()
         .send(handlers::send)
         .send_stream(streaming::send_stream)
+        .subscribe(streaming::subscribe)
         .build()
         .layer(axum::Extension(state))
 }

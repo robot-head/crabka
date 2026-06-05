@@ -12,6 +12,7 @@ use connectrpc_axum::message::{
 };
 use futures_util::{Stream, StreamExt};
 
+use crate::consume::ConsumeSession;
 use crate::handlers::to_gateway_record;
 use crate::pb;
 use crate::state::AppState;
@@ -64,5 +65,94 @@ pub async fn send_stream(
 > {
     Ok(ConnectResponse::new(StreamBody::new(Box::pin(
         send_stream_inner(req.0, state),
+    ))))
+}
+
+/// Join a consumer group on the caller's behalf and stream records. The first
+/// frame MUST be `Start`; subsequent `Ack` frames commit offsets
+/// (at-least-once). With `auto_commit` the session commits after each non-empty
+/// poll. The subscription ends when the control stream closes or errors.
+pub fn subscribe_inner(
+    mut frames: Streaming<pb::SubscribeFrame>,
+    state: Arc<AppState>,
+) -> impl Stream<Item = Result<pb::Inbound, ConnectError>> {
+    async_stream::stream! {
+        // First frame must be Start.
+        let start = match frames.next().await {
+            Some(Ok(pb::SubscribeFrame { frame: Some(pb::subscribe_frame::Frame::Start(s)) })) => s,
+            Some(Ok(_)) => { yield Err(ConnectError::new_invalid_argument("first Subscribe frame must be Start")); return; }
+            Some(Err(e)) => { yield Err(e); return; }
+            None => return,
+        };
+
+        let client_id = format!("{}-sub", state.config.client_id);
+        let mut session = match ConsumeSession::new(&state.config.bootstrap, &start.group_id, &client_id, start.topics).await {
+            Ok(s) => s,
+            Err(e) => { yield Err(ConnectError::new_internal(e.to_string())); return; }
+        };
+        let auto_commit = start.auto_commit;
+
+        loop {
+            // BORROW NOTE: do NOT call session.commit() inside a select! arm —
+            // session.poll(..) holds a &mut borrow across the select. Instead set
+            // flags inside the select and commit AFTER it resolves.
+            let mut commit = false;
+            let mut stop = false;
+            let mut to_emit: Vec<pb::Inbound> = Vec::new();
+            tokio::select! {
+                frame = frames.next() => {
+                    match frame {
+                        Some(Ok(pb::SubscribeFrame { frame: Some(pb::subscribe_frame::Frame::Ack(_)) })) => commit = true,
+                        Some(Ok(_)) => {}
+                        Some(Err(e)) => { yield Err(e); stop = true; }
+                        None => stop = true,
+                    }
+                }
+                batch = session.poll(std::time::Duration::from_millis(500)) => {
+                    match batch {
+                        Ok(records) => {
+                            for r in records {
+                                to_emit.push(pb::Inbound {
+                                    topic: r.topic,
+                                    partition: r.partition,
+                                    offset: r.offset,
+                                    key: r.key.map(|b| b.to_vec()),
+                                    value: r.value.map(|b| b.to_vec()).unwrap_or_default(),
+                                    headers: std::collections::HashMap::new(),
+                                    timestamp_ms: r.timestamp,
+                                });
+                            }
+                            if !to_emit.is_empty() && auto_commit { commit = true; }
+                        }
+                        Err(e) => { yield Err(ConnectError::new_internal(e.to_string())); stop = true; }
+                    }
+                }
+            }
+            for msg in to_emit {
+                yield Ok(msg);
+            }
+            if commit
+                && let Err(e) = session.commit().await
+            {
+                yield Err(ConnectError::new_internal(e.to_string()));
+                break;
+            }
+            if stop { break; }
+        }
+    }
+}
+
+/// Bidi `Subscribe` Connect handler.
+pub async fn subscribe(
+    Extension(state): Extension<Arc<AppState>>,
+    req: ConnectRequest<Streaming<pb::SubscribeFrame>>,
+) -> Result<
+    ConnectResponse<
+        StreamBody<Pin<Box<dyn Stream<Item = Result<pb::Inbound, ConnectError>> + Send>>>,
+    >,
+    ConnectError,
+> {
+    Ok(ConnectResponse::new(StreamBody::new(Box::pin(
+        subscribe_inner(req.0, state),
     ))))
 }
