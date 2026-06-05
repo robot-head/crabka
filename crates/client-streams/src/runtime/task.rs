@@ -56,8 +56,8 @@ impl StreamTask {
     }
 
     /// Call `Processor::close` on every node in the graph.
-    pub fn close_processors(&mut self) {
-        self.graph.close_processors();
+    pub async fn close_processors(&mut self) {
+        self.graph.close_processors().await;
     }
 
     /// Restore each store from its changelog topic (reads from offset 0 until

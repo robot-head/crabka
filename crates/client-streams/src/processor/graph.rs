@@ -122,9 +122,9 @@ impl Graph {
     }
 
     /// Call `close` on every node (in index order).
-    pub fn close_processors(&mut self) {
+    pub async fn close_processors(&mut self) {
         for node in &mut self.nodes {
-            node.close();
+            node.close().await;
         }
     }
 

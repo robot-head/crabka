@@ -67,7 +67,7 @@ impl StreamThread {
             .collect();
         for k in to_remove {
             if let Some(mut t) = self.tasks.remove(&k) {
-                t.close_processors();
+                t.close_processors().await;
                 t.commit().await?;
             }
         }

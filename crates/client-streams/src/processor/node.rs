@@ -43,7 +43,7 @@ pub(crate) trait ErasedNode: Send {
     }
 
     /// Called once at task shutdown. Default is a no-op.
-    fn close(&mut self) {}
+    async fn close(&mut self) {}
 
     /// Process one erased record: downcast, run inner logic, push results.
     async fn process(
@@ -96,10 +96,8 @@ where
         Ok(())
     }
 
-    fn close(&mut self) {
-        // `ErasedNode::close` is sync (called from the sync `Graph::close_processors`);
-        // the inner async no-op `Processor::close` is driven to completion here.
-        pollster::block_on(self.inner.close());
+    async fn close(&mut self) {
+        self.inner.close().await;
     }
 
     async fn process(
