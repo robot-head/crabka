@@ -596,7 +596,7 @@ where
             ..
         } = materialized;
         let mut g = self.builder.borrow_mut();
-        let name = g.new_processor_name(names::TABLE_SOURCE);
+        let name = g.new_processor_name(names::TOTABLE);
         let id = g.graph.add(
             name.clone(),
             GraphNodeKind::Aggregate {

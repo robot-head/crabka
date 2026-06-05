@@ -84,8 +84,9 @@ null-value changelog entries).
   + `add_state_store(store_name, ks, vs, [name])`.
 - `KStreamToTableProcessor` — per record: `old = store.get(k)`, `store.put(k, v)`,
   forward `Change{old, new: Some(v)}`.
-- Store name: `Materialized.store_name` if set, else the JVM auto name
-  (`KSTREAM-TOTABLE-STATE-STORE-<id>` — **pinned by the captured fixture**);
+- Store name: `Materialized.store_name` if set (the `to_table` fixture uses an explicit
+  name), else the JVM auto name (`KSTREAM-TOTABLE-STATE-STORE-<id>`, matching the JVM
+  4.1 `KStreamImpl`/`InternalStreamsBuilder` naming);
   changelog `<app>-<store>-changelog`.
 - This is the only topology-changing piece → a **6th golden frame** (`to_table`).
 
