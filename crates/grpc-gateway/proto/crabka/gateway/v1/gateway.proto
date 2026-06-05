@@ -1,0 +1,44 @@
+syntax = "proto3";
+package crabka.gateway.v1;
+
+service Gateway {
+  rpc Send(SendRequest) returns (SendResponse);
+}
+
+enum Acks {
+  ACKS_ALL = 0;
+  ACKS_LEADER = 1;
+  ACKS_NONE = 2;
+}
+
+message Record {
+  string topic = 1;
+  optional bytes key = 2;
+  bytes value = 3;
+  map<string, bytes> headers = 4;
+  optional int32 partition = 5;
+  optional int64 timestamp_ms = 6;
+  optional string idempotency_key = 7;
+}
+
+message SendRequest {
+  repeated Record records = 1;
+  Acks acks = 2;
+}
+
+message ErrorInfo {
+  int32 code = 1;
+  string message = 2;
+  bool retriable = 3;
+}
+
+message RecordResult {
+  int32 partition = 1;
+  int64 offset = 2;
+  bool deduplicated = 3;
+  optional ErrorInfo error = 4;
+}
+
+message SendResponse {
+  repeated RecordResult results = 1;
+}
