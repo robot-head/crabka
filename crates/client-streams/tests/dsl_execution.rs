@@ -1169,3 +1169,290 @@ fn dsl_to_table_no_logging_omits_changelog() {
         Some("b".to_string())
     );
 }
+
+// ── Windowed aggregations (windowedBy) ──────────────────────────────────────
+
+/// `windowedBy(TimeWindows).count` (tumbling): per-window running count. A
+/// record at ts=12 falls into a new window `[10,20)`, so its count restarts.
+#[test]
+fn dsl_windowed_count_tumbling_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, Grouped, I64Serde, Materialized, Produced, StringSerde, TimeWindowedSerde,
+        TimeWindows, Window, Windowed,
+    };
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(10))
+        .count(Materialized::with(StringSerde, I64Serde).as_store("w"))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "x".to_string(),
+        3,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "x".to_string(),
+        7,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "x".to_string(),
+        12,
+    );
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 0, end: 10 }
+            }),
+            1
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 0, end: 10 }
+            }),
+            2
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 10, end: 20 }
+            }),
+            1
+        ))
+    );
+}
+
+/// `windowedBy(TimeWindows.advance_by)` (hopping): a record at ts=12 with a
+/// size-10/advance-5 window falls into both `[5,15)` and `[10,20)`, emitting
+/// one count per overlapping window.
+#[test]
+fn dsl_windowed_count_hopping_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, Grouped, I64Serde, Materialized, Produced, StringSerde, TimeWindowedSerde,
+        TimeWindows, Window, Windowed,
+    };
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(10).advance_by(5))
+        .count(Materialized::with(StringSerde, I64Serde).as_store("w"))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "x".to_string(),
+        12,
+    );
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    // windows_for(12) for size=10 advance=5 = [5, 10] → two emissions
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 5, end: 15 }
+            }),
+            1
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 10, end: 20 }
+            }),
+            1
+        ))
+    );
+}
+
+/// `windowedBy(TimeWindows).reduce`: concatenate string values within a window;
+/// the first value in a window seeds the accumulator, later values fold.
+#[test]
+fn dsl_windowed_reduce_executes() {
+    use crabka_client_streams::Materialized;
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, Grouped, Produced, StringSerde, TimeWindowedSerde, TimeWindows, Window, Windowed,
+    };
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(10))
+        .reduce(
+            |acc: &String, v: &String| format!("{acc}{v}"),
+            Materialized::with(StringSerde, StringSerde).as_store("w"),
+        )
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "1".to_string(),
+        3,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "2".to_string(),
+        7,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "9".to_string(),
+        12,
+    );
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde);
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 0, end: 10 }
+            }),
+            "1".to_string()
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 0, end: 10 }
+            }),
+            "12".to_string()
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 10, end: 20 }
+            }),
+            "9".to_string()
+        ))
+    );
+}
+
+/// `windowedBy(TimeWindows).aggregate`: general init+agg summing the integer
+/// values per window.
+#[test]
+fn dsl_windowed_aggregate_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{
+        Consumed, Grouped, I64Serde, Materialized, Produced, StringSerde, TimeWindowedSerde,
+        TimeWindows, Window, Windowed,
+    };
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, I64Serde))
+        .group_by_key(Grouped::with(StringSerde, I64Serde))
+        .windowed_by(TimeWindows::of_size(10))
+        .aggregate(
+            || 0i64,
+            |_k: &String, v: &i64, acc: i64| acc + *v,
+            Materialized::with(StringSerde, I64Serde).as_store("w"),
+        )
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Some("k".to_string()),
+        5i64,
+        3,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Some("k".to_string()),
+        7i64,
+        7,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, I64Serde),
+        Some("k".to_string()),
+        2i64,
+        12,
+    );
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 0, end: 10 }
+            }),
+            5
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 0, end: 10 }
+            }),
+            12
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", p()),
+        Some((
+            Some(Windowed {
+                key: "k".into(),
+                window: Window { start: 10, end: 20 }
+            }),
+            2
+        ))
+    );
+}

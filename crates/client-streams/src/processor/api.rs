@@ -148,6 +148,15 @@ where
         self.dispatch.stores.get_kv::<K2, V2>(name)
     }
 
+    /// Access a connected window store, typed. `None` if absent or the K/V types
+    /// don't match. Fetch it per-record (do not hold across `process` calls).
+    pub fn get_window_store<K2: Send + Sync + 'static, V2: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::window::WindowStore<K2, V2>> {
+        self.dispatch.stores.get_window::<K2, V2>(name)
+    }
+
     /// Metadata of the source record currently being processed.
     #[must_use]
     pub fn record_context(&self) -> &RecordContext {

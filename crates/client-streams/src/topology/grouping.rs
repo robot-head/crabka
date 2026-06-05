@@ -18,10 +18,12 @@ pub(crate) struct GroupTopics {
     /// Internal repartition topics this subtopology writes.
     pub repartition_sink_topics: Vec<String>,
     /// Stores whose changelog topics back this subtopology, as
-    /// `(store_name, changelog_override)`. When the override is `None` the wire
-    /// layer derives `<app>-<store>-changelog`; when `Some(topic)` (set by the
-    /// `REUSE_KTABLE_SOURCE_TOPICS` pass) that topic name is used verbatim.
-    pub changelog_stores: Vec<(String, Option<String>)>,
+    /// `(store_name, changelog_override, windowed_retention_ms)`. When the
+    /// override is `None` the wire layer derives `<app>-<store>-changelog`;
+    /// when `Some(topic)` (set by the `REUSE_KTABLE_SOURCE_TOPICS` pass) that
+    /// topic name is used verbatim. `windowed_retention_ms` is `Some(ms)` for
+    /// windowed stores and `None` for KV stores.
+    pub changelog_stores: Vec<(String, Option<String>, Option<i64>)>,
     /// Declared copartition groups whose member topics all read into this
     /// subtopology. Each is a list of member topic names; the wire layer maps
     /// them to `int16` indices into the sorted source/repartition arrays.
@@ -126,8 +128,11 @@ pub(crate) fn group_nodes(reg: &NodeRegistry) -> Vec<GroupTopics> {
             if let Some(&id) = root_to_id.get(&root)
                 && let Some(g) = groups.get_mut(&id)
             {
-                g.changelog_stores
-                    .push((store.name.clone(), store.changelog_override.clone()));
+                g.changelog_stores.push((
+                    store.name.clone(),
+                    store.changelog_override.clone(),
+                    store.windowed_retention_ms,
+                ));
             }
         }
     }
@@ -204,7 +209,7 @@ mod tests {
         let mut srcs = groups[0].source_topics.clone();
         srcs.sort();
         check!(srcs == vec!["a".to_string(), "b".to_string()]);
-        check!(groups[0].changelog_stores == vec![("store".to_string(), None)]);
+        check!(groups[0].changelog_stores == vec![("store".to_string(), None, None)]);
     }
 
     #[test]

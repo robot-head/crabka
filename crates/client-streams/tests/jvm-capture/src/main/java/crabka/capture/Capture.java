@@ -73,8 +73,9 @@ public final class Capture {
         write(outDir, "to_table", toTable());
         write(outDir, "stream_table_join", streamTableJoin());
         write(outDir, "ktable_ktable_join", ktableKtableJoin());
+        write(outDir, "windowed_count", windowedCount());
 
-        System.out.println("Capture complete. Wrote 8 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 9 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -85,6 +86,25 @@ public final class Capture {
         b.<String, String>stream("in")
             .mapValues(v -> v)
             .filter((k, v) -> true)
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 9. windowed_count: stream -> groupByKey -> windowedBy(TimeWindows 60s, no grace)
+     * -> count -> toStream -> to. The aggregate store is a window store, so its
+     * changelog gets cleanup.policy=compact,delete + retention.ms = size+grace+1day.
+     * No selectKey (no key change) → no repartition. The `count` path burns one
+     * store-name counter index for backward topology compatibility.
+     */
+    static Topology windowedCount() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .groupByKey()
+            .windowedBy(org.apache.kafka.streams.kstream.TimeWindows.ofSizeWithNoGrace(
+                java.time.Duration.ofSeconds(60)))
+            .count()
+            .toStream()
             .to("out");
         return b.build(optimizedProps());
     }

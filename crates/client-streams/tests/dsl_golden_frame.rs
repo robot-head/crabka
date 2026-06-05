@@ -26,6 +26,32 @@ fn stateless_chain_matches_jvm() {
 }
 
 #[test]
+fn windowed_count_matches_jvm() {
+    use crabka_client_streams::{Grouped, I64Serde, Materialized, TimeWindowedSerde, TimeWindows};
+    // Mirrors Capture.java `windowedCount()`:
+    //   stream("in").groupByKey().windowedBy(TimeWindows.ofSizeWithNoGrace(60s)).count()
+    //     .toStream().to("out")
+    //
+    // No selectKey → no key change → no repartition. The aggregate store is a
+    // WINDOW store (auto-named, with the `count` name-burn), so its changelog gets
+    // cleanup.policy=compact,delete + retention.ms = 60_000 + 0 + 86_400_000 =
+    // 86_460_000. Store lands at index 1 (source=0, store=1): the burn consumes a
+    // later (wire-invisible) index. UNNAMED store → KSTREAM-AGGREGATE-STATE-STORE-0000000001.
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(60_000))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "windowed_count");
+}
+
+#[test]
 fn count_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     let b = StreamsBuilder::new();
