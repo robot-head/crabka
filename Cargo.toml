@@ -122,6 +122,9 @@ parking_lot = "0.12"
 # an O(1) LRU with a non-zero capacity invariant; pair it with our own
 # TTL field on the value (no built-in expiry).
 lru = "0.18"
+# Schema Registry (crabka-schema-registry) — schema parsing + canonical form.
+apache-avro = "0.21"
+prost-reflect = "0.16"
 
 # Fork of sspi 0.21.0 carrying our SASL/GSSAPI Kerberos work (keytab client
 # credentials, integrity-only Wrap tokens, multi-SPN acceptor keys). Branched

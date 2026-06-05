@@ -235,6 +235,35 @@ jobs:
           flags: client-streams-integration
           fail_ci_if_error: true
 
+  # crabka-schema-registry integration: schema validation, REST conformance, and
+  # record-schema round-trips against an in-process broker (no Docker). The
+  # Docker binaries (`interop`, `capture_fixtures`) are #[ignore]'d and are
+  # excluded here — only the three non-Docker binaries run. The `unit` flag's
+  # `--lib --bins` walk never descends into `tests/` binaries, so this job
+  # provides the only line-level coverage for those paths.
+  schema-registry-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: schema-registry-integration
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Schema registry integration coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov -p crabka-schema-registry --test integration --test rest_conformance --test schemas_record --lcov --output-path coverage/schema-registry-integration.lcov -- --nocapture
+      - uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/schema-registry-integration.lcov
+          disable_search: true
+          flags: schema-registry-integration
+          fail_ci_if_error: true
+
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
   # reach back via the Docker bridge gateway (typically 172.17.0.1). See

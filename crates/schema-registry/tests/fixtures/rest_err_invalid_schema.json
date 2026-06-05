@@ -1,0 +1,4 @@
+{
+  "_body": "{\"error_code\":42201,\"message\":\"Invalid schema {subject=bad-value,version=0,id=-1,schemaType=AVRO,references=[],metadata=null,ruleSet=null,schema={ this is not valid avro} with refs [] of type AVRO, details: com.fasterxml.jackson.core.JsonParseException: Unexpected character ('t' (code 116)): was expecting double-quote to start field name\\n at [Source: (String)\\\"{ this is not valid avro\\\"; line: 1, column: 4]\"}",
+  "_http_status": 422
+}

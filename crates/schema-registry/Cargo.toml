@@ -1,0 +1,60 @@
+[package]
+name = "crabka-schema-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "Confluent Schema Registry-compatible REST service for Crabka (binary: crabka-schema-registry)"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crabka-schema-registry"
+path = "src/bin/schema-registry.rs"
+
+[dependencies]
+crabka-client-core = { version = "0.2", path = "../client-core" }
+crabka-client-admin = { version = "0.2", path = "../client-admin" }
+crabka-client-producer = { version = "0.2", path = "../client-producer" }
+crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
+axum = { workspace = true, features = ["query"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
+tokio-util = { workspace = true, features = ["rt"] }
+bytes.workspace = true
+hex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { workspace = true, features = ["env", "derive"] }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+apache-avro = { workspace = true }
+protox-parse = "0.9"
+prost-reflect = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+crabka-broker = { version = "0.2", path = "../broker", features = ["test-helpers"] }
+crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
+tempfile.workspace = true
+tower.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+testcontainers.workspace = true
+testcontainers-modules = { workspace = true }
+
+[[test]]
+name = "integration"
+
+[[test]]
+name = "interop"
+
+[[test]]
+name = "capture_fixtures"
+
+[[test]]
+name = "schemas_record"
