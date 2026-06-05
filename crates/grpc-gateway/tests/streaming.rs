@@ -188,7 +188,11 @@ async fn subscribe_streams_records_then_commits() {
             Err(_) => {} // timed out this round; retry the poll
         }
     }
-    drop(tx); // close the control stream → subscription ends
+    // The loop above already captured (and broke on) the first record, so this
+    // asserts on the already-received Inbound. Dropping the control stream just
+    // releases the session's resources — the test does not wait to observe the
+    // subscription closing.
+    drop(tx);
     let msg = got.expect("received an Inbound record");
     check!(msg.topic == "sub-topic");
     check!(msg.value == b"hello");

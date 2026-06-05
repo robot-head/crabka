@@ -69,9 +69,17 @@ pub async fn send_stream(
 }
 
 /// Join a consumer group on the caller's behalf and stream records. The first
-/// frame MUST be `Start`; subsequent `Ack` frames commit offsets
-/// (at-least-once). With `auto_commit` the session commits after each non-empty
-/// poll. The subscription ends when the control stream closes or errors.
+/// frame MUST be `Start`; subsequent `Ack` frames drive offset commits
+/// (at-least-once). The subscription ends when the control stream closes or
+/// errors.
+///
+/// Commit semantics: on `Ack`, the session commits its *current* consumed
+/// positions for all assigned partitions (the `Ack`'s `topic`/`partition`/
+/// `offset` fields are currently advisory — per-offset commit is a follow-up,
+/// pending an offset-specific commit API on the consumer). With `auto_commit`,
+/// the session commits after each non-empty poll (at enqueue, slightly weaker
+/// than on-receipt). For strict at-least-once, the caller should ack
+/// synchronously per received batch.
 pub fn subscribe_inner(
     mut frames: Streaming<pb::SubscribeFrame>,
     state: Arc<AppState>,
