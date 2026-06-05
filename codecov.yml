@@ -32,6 +32,11 @@ coverage:
 # from coverage entirely.
 ignore:
   - "crates/protocol/generated/**"
+  # Binary entrypoints are arg-parsing + client wiring + a serve loop — glue
+  # with no unit-testable logic. The gateway's main() is covered end-to-end by
+  # the (Docker-gated) jvm_differential test, not the integration suite, so
+  # holding its 60+ wiring lines to patch coverage just blocks new-crate PRs.
+  - "crates/grpc-gateway/src/bin/**"
 
 flags:
   unit:
