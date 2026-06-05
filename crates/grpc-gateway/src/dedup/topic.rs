@@ -32,6 +32,28 @@ pub async fn ensure_dedup_topic(
     create_with_rf(&mut admin, name, partitions, replication, &configs).await
 }
 
+/// Idempotently create the compacted, single-partition membership topic.
+/// `cleanup.policy=compact` (no delete) keeps one live record per node until a
+/// tombstone supersedes it. Single partition ⇒ all publishes are totally
+/// ordered, so the routing table's offset tiebreak is exact.
+pub async fn ensure_membership_topic(
+    bootstrap: &str,
+    name: &str,
+    replication: i16,
+) -> Result<(), GatewayError> {
+    let addrs: Vec<String> = bootstrap.split(',').map(|s| s.trim().to_string()).collect();
+    let mut admin = AdminClient::connect(&addrs)
+        .await
+        .map_err(|e| GatewayError::Other(format!("admin connect: {e}")))?;
+
+    let mut configs = BTreeMap::new();
+    configs.insert("cleanup.policy".to_string(), "compact".to_string());
+    configs.insert("min.cleanable.dirty.ratio".to_string(), "0.01".to_string());
+    configs.insert("segment.ms".to_string(), "60000".to_string());
+
+    create_with_rf(&mut admin, name, 1, replication, &configs).await
+}
+
 async fn create_with_rf(
     admin: &mut AdminClient,
     name: &str,

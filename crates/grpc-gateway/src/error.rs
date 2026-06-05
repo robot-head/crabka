@@ -14,6 +14,8 @@ pub enum GatewayError {
     Consumer(#[from] ConsumerError),
     #[error("dedup partition not owned by this replica or still warming up")]
     Unavailable,
+    #[error("forward to owner failed: {0}")]
+    Forward(String),
     #[error("dedup claim could not be (de)serialized: {0}")]
     Claim(#[from] serde_json::Error),
     #[error("{0}")]
