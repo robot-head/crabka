@@ -35,6 +35,7 @@ thiserror.workspace = true
 async-stream = { workspace = true }
 futures-util = { workspace = true }
 uuid = { workspace = true }
+tokio-util = { workspace = true }
 
 [build-dependencies]
 connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
@@ -48,3 +49,5 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time
 tokio-stream = { workspace = true }
 # `ServiceExt::oneshot` to drive the health router in tests/wire.rs.
 tower = { workspace = true, features = ["util"] }
+# `CancellationToken` to drive run_ownership in tests/integration_dedup.rs.
+tokio-util = { workspace = true }

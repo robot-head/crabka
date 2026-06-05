@@ -148,6 +148,65 @@ async fn duplicate_idempotency_key_produces_once() {
     broker.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
+    use crabka_grpc_gateway::dedup::store::{ClaimValue, DedupStore};
+    use crabka_grpc_gateway::dedup::topic::ensure_dedup_topic;
+    use tokio_util::sync::CancellationToken;
+
+    let (broker, bootstrap, _dir) = boot().await;
+    let topic = "__crabka_grpc_dedup";
+    ensure_dedup_topic(&bootstrap, topic, 4, 3_600_000, 1)
+        .await
+        .unwrap();
+
+    let writer = Arc::new(DedupStore::new(4));
+    writer
+        .write_claim(
+            &bootstrap,
+            "gw-own-writer",
+            topic,
+            "key-A",
+            &ClaimValue {
+                topic: "u".into(),
+                partition: 0,
+                offset: 9,
+            },
+        )
+        .await
+        .unwrap();
+
+    let store = Arc::new(DedupStore::new(4));
+    let token = CancellationToken::new();
+    let handle = tokio::spawn(store.clone().run_ownership(
+        bootstrap.clone(),
+        "gw-own".into(),
+        topic.to_string(),
+        "__crabka_grpc_gateway_dedup_owners".into(),
+        token.clone(),
+    ));
+
+    let mut warm = false;
+    for _ in 0..80 {
+        if store.has_warmed_once() {
+            warm = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+    assert!(warm, "store never warmed");
+    // Sole member owns all 4 partitions.
+    for p in 0..4u32 {
+        assert!(store.owns(p), "should own partition {p}");
+    }
+    // Map rebuilt from the topic.
+    assert_eq!(store.get("key-A").map(|c| c.offset), Some(9));
+
+    token.cancel();
+    let _ = handle.await;
+    broker.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_duplicates_produce_once() {
     use bytes::Bytes;
