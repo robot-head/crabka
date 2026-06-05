@@ -1,10 +1,19 @@
 //! JSON Schema: parse as JSON + well-formedness; canonical form = recursively
 //! key-sorted compact JSON (the dedup key). Compatibility is slice 2.
 
+mod compat;
+mod diff;
+
 use super::ParsedSchema;
 use crate::error::SrError;
 
 pub struct JsonSchema(serde_json::Value);
+
+impl JsonSchema {
+    pub(crate) fn value(&self) -> &serde_json::Value {
+        &self.0
+    }
+}
 
 pub fn parse(schema: &str) -> Result<JsonSchema, SrError> {
     let v: serde_json::Value = serde_json::from_str(schema)
@@ -17,9 +26,22 @@ pub fn parse(schema: &str) -> Result<JsonSchema, SrError> {
     Ok(JsonSchema(v))
 }
 
-/// Compatibility check. Permissive until slice 2b/2c implement the real rules.
-pub fn check(_reader: &str, _writer: &str) -> Result<(), Vec<String>> {
-    Ok(())
+/// Confluent JSON Schema compatibility: can a reader using `reader` read data
+/// written with `writer`? Diffs (original = writer, update = reader); rejects if
+/// any difference is backward-incompatible.
+pub fn check(reader: &str, writer: &str) -> Result<(), Vec<String>> {
+    let reader_s = parse(reader).map_err(|e| vec![format!("reader: {e}")])?;
+    let writer_s = parse(writer).map_err(|e| vec![format!("writer: {e}")])?;
+    let diffs = diff::compare(writer_s.value(), reader_s.value());
+    let incompatible: Vec<&diff::Difference> = diffs
+        .iter()
+        .filter(|d| !compat::is_backward_compatible(&d.kind))
+        .collect();
+    if incompatible.is_empty() {
+        Ok(())
+    } else {
+        Err(compat::messages(&incompatible))
+    }
 }
 
 impl ParsedSchema for JsonSchema {
@@ -61,11 +83,6 @@ mod tests {
     use crate::format::ParsedSchema;
 
     #[test]
-    fn check_is_permissive_for_now() {
-        assert!(check("anything", "anything else").is_ok());
-    }
-
-    #[test]
     fn parses_object_and_dedups_key_order() {
         let a = parse(
             r#"{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"string"}}}"#,
@@ -81,5 +98,33 @@ mod tests {
     #[test]
     fn rejects_non_json() {
         assert!(parse("not json").is_err());
+    }
+
+    #[test]
+    fn add_optional_property_open_model_is_compatible() {
+        let w = r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#;
+        let r = r#"{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"string"}}}"#;
+        assert!(check(r, w).is_ok());
+    }
+
+    #[test]
+    fn add_required_property_closed_model_is_incompatible() {
+        let w = r#"{"type":"object","additionalProperties":false,"properties":{"a":{"type":"integer"}}}"#;
+        let r = r#"{"type":"object","additionalProperties":false,"properties":{"a":{"type":"integer"},"b":{"type":"string"}},"required":["b"]}"#;
+        assert!(check(r, w).is_err());
+    }
+
+    #[test]
+    fn type_narrowed_is_incompatible() {
+        let w = r#"{"type":["string","null"]}"#;
+        let r = r#"{"type":"string"}"#;
+        assert!(check(r, w).is_err());
+    }
+
+    #[test]
+    fn required_added_is_incompatible() {
+        let w = r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#;
+        let r = r#"{"type":"object","properties":{"a":{"type":"integer"}},"required":["a"]}"#;
+        assert!(check(r, w).is_err());
     }
 }
