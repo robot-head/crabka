@@ -139,6 +139,20 @@ impl NodeRegistry {
         self.copartition_groups.push(topics);
     }
 
+    /// Connect an additional processor to an existing store.
+    ///
+    /// Mirrors `InternalTopologyBuilder.connectProcessorAndStateStores`: lets a
+    /// join processor read the joined table's store without being the original
+    /// owner. No-op if `processor` is already listed. No-op if `store` is not
+    /// found (callers ensure stores are registered before connecting).
+    pub fn connect_processor_store(&mut self, processor: &str, store: &str) {
+        if let Some(e) = self.stores.iter_mut().find(|e| e.name == store)
+            && !e.processors.iter().any(|p| p == processor)
+        {
+            e.processors.push(processor.to_string());
+        }
+    }
+
     /// Validate that every referenced predecessor exists. Call after all nodes
     /// are added, before grouping.
     pub fn validate_predecessors(&self) -> Result<(), TopologyError> {
