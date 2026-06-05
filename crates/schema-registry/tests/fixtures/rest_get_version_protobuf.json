@@ -1,0 +1,1 @@
+{"subject":"pb-value","version":1,"id":2,"schemaType":"PROTOBUF","schema":"syntax = \"proto3\";\n\nmessage User {\n  int32 id = 1;\n}\n"}

@@ -1,0 +1,130 @@
+//! `/subjects/*` endpoints.
+
+use axum::extract::{Path, State};
+use axum::response::Response;
+use serde::Deserialize;
+
+use crate::error::SrError;
+use crate::format::SchemaType;
+use crate::rest::{
+    AppState,
+    response::{ok_json, ok_raw},
+};
+
+#[derive(Deserialize)]
+struct RegisterBody {
+    schema: String,
+    #[serde(rename = "schemaType", default)]
+    schema_type: Option<String>,
+    #[serde(default)]
+    references: Vec<serde_json::Value>,
+}
+
+/// POST /subjects/{subject}/versions -> `{"id":N}`
+pub async fn register(
+    State(st): State<AppState>,
+    Path(subject): Path<String>,
+    body: String,
+) -> Result<Response, SrError> {
+    let req: RegisterBody =
+        serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
+    let _ = &req.references; // slice 1 ignores references
+    let ty = SchemaType::from_wire(req.schema_type.as_deref());
+    let reg = st.store.register(&subject, ty, &req.schema).await?;
+    Ok(ok_json(&serde_json::json!({ "id": reg.id })))
+}
+
+/// POST /subjects/{subject} -> `{subject,id,version,schema}` | 404
+pub async fn lookup(
+    State(st): State<AppState>,
+    Path(subject): Path<String>,
+    body: String,
+) -> Result<Response, SrError> {
+    let req: RegisterBody =
+        serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
+    let ty = SchemaType::from_wire(req.schema_type.as_deref());
+    let s = st.store.store.read();
+    if s.versions(&subject).is_none() {
+        return Err(SrError::SubjectNotFound(subject));
+    }
+    let Some(found) = s.find_under_subject(&subject, ty, &req.schema) else {
+        return Err(SrError::SchemaNotFound);
+    };
+    let (sty, schema) = s.schema_by_id(found.id).ok_or(SrError::SchemaNotFound)?;
+    let mut m = serde_json::Map::new();
+    m.insert("subject".into(), subject.into());
+    m.insert("id".into(), found.id.into());
+    m.insert("version".into(), found.version.into());
+    if let Some(t) = sty.wire_name() {
+        m.insert("schemaType".into(), t.into());
+    }
+    m.insert("schema".into(), schema.into());
+    Ok(ok_json(&serde_json::Value::Object(m)))
+}
+
+/// GET /subjects
+// axum requires async handlers even when the body is synchronous.
+#[allow(clippy::unused_async)]
+pub async fn list(State(st): State<AppState>) -> Response {
+    ok_json(&st.store.store.read().subjects())
+}
+
+/// GET /subjects/{subject}/versions
+pub async fn versions(
+    State(st): State<AppState>,
+    Path(subject): Path<String>,
+) -> Result<Response, SrError> {
+    let vs = st
+        .store
+        .store
+        .read()
+        .versions(&subject)
+        .ok_or_else(|| SrError::SubjectNotFound(subject.clone()))?;
+    Ok(ok_json(&vs))
+}
+
+fn parse_version(v: &str) -> Result<Option<i32>, SrError> {
+    if v == "latest" {
+        return Ok(None);
+    }
+    match v.parse::<i32>() {
+        Ok(n) if n >= 1 => Ok(Some(n)),
+        _ => Err(SrError::InvalidVersion(v.to_string())),
+    }
+}
+
+/// GET /subjects/{subject}/versions/{version}
+pub async fn get_version(
+    State(st): State<AppState>,
+    Path((subject, version)): Path<(String, String)>,
+) -> Result<Response, SrError> {
+    let want = parse_version(&version)?;
+    let s = st.store.store.read();
+    if s.versions(&subject).is_none() {
+        return Err(SrError::SubjectNotFound(subject));
+    }
+    let (id, ver, ty, schema) = s.version(&subject, want).ok_or(SrError::VersionNotFound)?;
+    let mut m = serde_json::Map::new();
+    m.insert("subject".into(), subject.into());
+    m.insert("version".into(), ver.into());
+    m.insert("id".into(), id.into());
+    if let Some(t) = ty.wire_name() {
+        m.insert("schemaType".into(), t.into());
+    }
+    m.insert("schema".into(), schema.into());
+    Ok(ok_json(&serde_json::Value::Object(m)))
+}
+
+/// GET /subjects/{subject}/versions/{version}/schema -> raw schema text
+pub async fn get_version_schema(
+    State(st): State<AppState>,
+    Path((subject, version)): Path<(String, String)>,
+) -> Result<Response, SrError> {
+    let want = parse_version(&version)?;
+    let s = st.store.store.read();
+    if s.versions(&subject).is_none() {
+        return Err(SrError::SubjectNotFound(subject));
+    }
+    let (_, _, _, schema) = s.version(&subject, want).ok_or(SrError::VersionNotFound)?;
+    Ok(ok_raw(schema))
+}
