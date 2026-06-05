@@ -405,7 +405,7 @@ impl Topology {
                 let changelog = changelog_override
                     .clone()
                     .unwrap_or_else(|| format!("{app_id}-{store_name}-changelog"));
-                Box::new(crate::store::memory::InMemoryKeyValueStore::<K, V>::new(
+                Box::new(crate::store::kv::KeyValueBytesStore::<K, V>::in_memory(
                     store_name.to_string(),
                     Box::new(key_serde.clone()),
                     Box::new(value_serde.clone()),
@@ -441,7 +441,7 @@ impl Topology {
             Box::new(move |_app_id: &str, store_name: &str| {
                 // No changelog: use an empty placeholder string; the store will
                 // never flush to a changelog topic at runtime.
-                Box::new(crate::store::memory::InMemoryKeyValueStore::<K, V>::new(
+                Box::new(crate::store::kv::KeyValueBytesStore::<K, V>::in_memory(
                     store_name.to_string(),
                     Box::new(key_serde.clone()),
                     Box::new(value_serde.clone()),

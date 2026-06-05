@@ -267,6 +267,6 @@ pub use processor::{
     Produced, Record, RecordContext, Serde, SerdeError, StringSerde,
 };
 pub use runtime::{KafkaStreams, KafkaStreamsState};
-pub use store::{InMemoryKeyValueStore, KeyValueStore, StateStore};
+pub use store::{KeyValueBytesStore, KeyValueStore, StateStore};
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, NodeHandle, Topology, TopologyError};

@@ -254,12 +254,12 @@ mod tests {
     use crate::processor::erased::{Dispatch, ErasedRecord};
     use crate::processor::record::RecordContext;
     use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::store::memory::InMemoryKeyValueStore;
+    use crate::store::kv::KeyValueBytesStore;
     use crate::store::registry::StoreRegistry;
 
     fn make_stores() -> StoreRegistry {
         let mut stores = StoreRegistry::default();
-        stores.insert(Box::new(InMemoryKeyValueStore::<String, i64>::new(
+        stores.insert(Box::new(KeyValueBytesStore::<String, i64>::in_memory(
             "tbl".into(),
             Box::new(StringSerde),
             Box::new(I64Serde),
@@ -365,7 +365,7 @@ mod tests {
     #[test]
     fn ktable_map_values_rewrites_and_materializes() {
         let mut stores = StoreRegistry::default();
-        stores.insert(Box::new(InMemoryKeyValueStore::<String, String>::new(
+        stores.insert(Box::new(KeyValueBytesStore::<String, String>::in_memory(
             "mv".into(),
             Box::new(StringSerde),
             Box::new(StringSerde),
@@ -384,7 +384,7 @@ mod tests {
 
         // Use a store with String values since the output type is String.
         let mut stores2 = StoreRegistry::default();
-        stores2.insert(Box::new(InMemoryKeyValueStore::<String, String>::new(
+        stores2.insert(Box::new(KeyValueBytesStore::<String, String>::in_memory(
             "mv".into(),
             Box::new(StringSerde),
             Box::new(StringSerde),

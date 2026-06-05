@@ -179,7 +179,7 @@ mod tests {
     use crate::processor::record::RecordContext;
     use crate::processor::serde::StringSerde;
     use crate::store::api::KeyValueStore;
-    use crate::store::memory::InMemoryKeyValueStore;
+    use crate::store::kv::KeyValueBytesStore;
     use crate::store::registry::StoreRegistry;
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -189,7 +189,7 @@ mod tests {
 
     fn make_stores_with_b(b_val: Option<(&str, &str)>) -> StoreRegistry {
         let mut stores = StoreRegistry::default();
-        let mut store = InMemoryKeyValueStore::<String, String>::new(
+        let mut store = KeyValueBytesStore::<String, String>::in_memory(
             "b".into(),
             Box::new(StringSerde),
             Box::new(StringSerde),

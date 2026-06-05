@@ -67,14 +67,14 @@ mod tests {
     use crate::processor::record::RecordContext;
     use crate::processor::serde::{I64Serde, StringSerde};
     use crate::store::api::KeyValueStore;
-    use crate::store::memory::InMemoryKeyValueStore;
+    use crate::store::kv::KeyValueBytesStore;
     use crate::store::registry::StoreRegistry;
 
-    /// Build a store registry with an `InMemoryKeyValueStore<String, i64>` named
+    /// Build a store registry with a `KeyValueBytesStore<String, i64>` named
     /// `"t"` pre-seeded with `("a", 10)`.
     fn make_stores() -> StoreRegistry {
         let mut stores = StoreRegistry::default();
-        let mut kv = InMemoryKeyValueStore::<String, i64>::new(
+        let mut kv = KeyValueBytesStore::<String, i64>::in_memory(
             "t".into(),
             Box::new(StringSerde),
             Box::new(I64Serde),

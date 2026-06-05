@@ -235,7 +235,7 @@ mod tests {
         use crate::processor::node::{ProcessorNode, SinkNode, SourceNode};
         use crate::processor::record::Record;
         use crate::processor::serde::{I64Serde, StringSerde};
-        use crate::store::memory::InMemoryKeyValueStore;
+        use crate::store::kv::KeyValueBytesStore;
         use crate::store::registry::StoreRegistry;
 
         struct Counter;
@@ -255,7 +255,7 @@ mod tests {
         }
 
         let mut stores = StoreRegistry::default();
-        stores.insert(Box::new(InMemoryKeyValueStore::<String, i64>::new(
+        stores.insert(Box::new(KeyValueBytesStore::<String, i64>::in_memory(
             "counts".into(),
             Box::new(StringSerde),
             Box::new(I64Serde),

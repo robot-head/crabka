@@ -113,14 +113,14 @@ mod tests {
     use crate::processor::erased::{Dispatch, ErasedRecord};
     use crate::processor::record::RecordContext;
     use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::store::memory::InMemoryKeyValueStore;
+    use crate::store::kv::KeyValueBytesStore;
     use crate::store::registry::StoreRegistry;
 
     #[test]
     fn count_aggregate_accumulates_via_store() {
-        // Build a StoreRegistry with an InMemoryKeyValueStore<String, i64>.
+        // Build a StoreRegistry with a KeyValueBytesStore<String, i64>.
         let mut stores = StoreRegistry::default();
-        stores.insert(Box::new(InMemoryKeyValueStore::<String, i64>::new(
+        stores.insert(Box::new(KeyValueBytesStore::<String, i64>::in_memory(
             "counts".into(),
             Box::new(StringSerde),
             Box::new(I64Serde),
