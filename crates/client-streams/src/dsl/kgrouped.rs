@@ -95,7 +95,7 @@ pub struct KGroupedStream<K, V> {
 
 impl<K, V> KGroupedStream<K, V>
 where
-    K: Any + Send + Clone,
+    K: Any + Send + Sync + Clone,
     V: Any + Send + Clone,
 {
     pub(crate) fn new(

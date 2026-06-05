@@ -20,6 +20,8 @@
 
 use std::marker::PhantomData;
 
+use async_trait::async_trait;
+
 use crate::dsl::processors::change::Change;
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
@@ -38,18 +40,22 @@ pub(crate) struct KTableSourceProcessor<K, V> {
     pub _pd: Marker<(K, V)>,
 }
 
+#[async_trait]
 impl<K, V> Processor<K, V, K, Change<V>> for KTableSourceProcessor<K, V>
 where
-    K: std::any::Any + Send + Clone,
+    K: std::any::Any + Send + Sync + Clone,
     V: std::any::Any + Send + Clone,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
+    async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
         let key = r.key.expect("KTable source requires a non-null key");
-        let store = ctx
-            .get_state_store::<K, V>(&self.store_name)
-            .expect("KTable source store not found");
-        let old = store.get(&key);
-        store.put(key.clone(), r.value.clone());
+        let old = {
+            let store = ctx
+                .get_state_store::<K, V>(&self.store_name)
+                .expect("KTable source store not found");
+            let old = store.get(&key).await;
+            store.put(key.clone(), r.value.clone()).await;
+            old
+        };
         ctx.forward(Record::new(
             Some(key),
             Change::update(old, r.value),
@@ -71,18 +77,22 @@ pub(crate) struct KStreamToTableProcessor<K, V> {
     pub _pd: Marker<(K, V)>,
 }
 
+#[async_trait]
 impl<K, V> Processor<K, V, K, Change<V>> for KStreamToTableProcessor<K, V>
 where
-    K: std::any::Any + Send + Clone,
+    K: std::any::Any + Send + Sync + Clone,
     V: std::any::Any + Send + Clone,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
+    async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
         let key = r.key.expect("to_table requires a non-null key");
-        let store = ctx
-            .get_state_store::<K, V>(&self.store_name)
-            .expect("to_table store not found");
-        let old = store.get(&key);
-        store.put(key.clone(), r.value.clone());
+        let old = {
+            let store = ctx
+                .get_state_store::<K, V>(&self.store_name)
+                .expect("to_table store not found");
+            let old = store.get(&key).await;
+            store.put(key.clone(), r.value.clone()).await;
+            old
+        };
         ctx.forward(Record::new(
             Some(key),
             Change::update(old, r.value),
@@ -101,12 +111,13 @@ pub(crate) struct KTableToStreamProcessor<K, V> {
     pub _pd: Marker<(K, V)>,
 }
 
+#[async_trait]
 impl<K, V> Processor<K, Change<V>, K, V> for KTableToStreamProcessor<K, V>
 where
-    K: std::any::Any + Send + Clone,
+    K: std::any::Any + Send + Sync + Clone,
     V: std::any::Any + Send + Clone,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V>, r: Record<K, Change<V>>) {
+    async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V>, r: Record<K, Change<V>>) {
         if let Some(new) = r.value.new {
             ctx.forward(Record::new(r.key, new, r.timestamp));
         }
@@ -126,29 +137,32 @@ pub(crate) struct KTableMapValuesProcessor<K, V, V2, F> {
     pub _pd: Marker<(K, V, V2)>,
 }
 
+#[async_trait]
 impl<K, V, V2, F> Processor<K, Change<V>, K, Change<V2>> for KTableMapValuesProcessor<K, V, V2, F>
 where
-    K: std::any::Any + Send + Clone,
-    V: 'static,
+    K: std::any::Any + Send + Sync + Clone,
+    V: Send + 'static,
     V2: std::any::Any + Send + Clone,
     F: Fn(&V) -> V2 + Send + 'static,
 {
-    fn process(
+    async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<V2>>,
         r: Record<K, Change<V>>,
     ) {
         let key = r.key.expect("KTable map_values requires a non-null key");
         let mapped = r.value.map(|v| (self.f)(v));
-        let store = ctx
-            .get_state_store::<K, V2>(&self.store_name)
-            .expect("KTable map_values store not found");
-        match &mapped.new {
-            Some(nv) => {
-                store.put(key.clone(), nv.clone());
-            }
-            None => {
-                store.delete(&key);
+        {
+            let store = ctx
+                .get_state_store::<K, V2>(&self.store_name)
+                .expect("KTable map_values store not found");
+            match &mapped.new {
+                Some(nv) => {
+                    store.put(key.clone(), nv.clone()).await;
+                }
+                None => {
+                    store.delete(&key).await;
+                }
             }
         }
         ctx.forward(Record::new(Some(key), mapped, r.timestamp));
@@ -167,15 +181,16 @@ pub(crate) struct KTableMapValuesViewProcessor<K, V, V2, F> {
     pub _pd: Marker<(K, V, V2)>,
 }
 
+#[async_trait]
 impl<K, V, V2, F> Processor<K, Change<V>, K, Change<V2>>
     for KTableMapValuesViewProcessor<K, V, V2, F>
 where
-    K: std::any::Any + Send + Clone,
-    V: 'static,
+    K: std::any::Any + Send + Sync + Clone,
+    V: Send + 'static,
     V2: std::any::Any + Send + Clone,
     F: Fn(&V) -> V2 + Send + 'static,
 {
-    fn process(
+    async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<V2>>,
         r: Record<K, Change<V>>,
@@ -201,13 +216,14 @@ pub(crate) struct KTableFilterProcessor<K, V, P> {
     pub _pd: Marker<(K, V)>,
 }
 
+#[async_trait]
 impl<K, V, P> Processor<K, Change<V>, K, Change<V>> for KTableFilterProcessor<K, V, P>
 where
-    K: std::any::Any + Send + Clone,
+    K: std::any::Any + Send + Sync + Clone,
     V: std::any::Any + Send + Clone,
     P: Fn(&K, &V) -> bool + Send + 'static,
 {
-    fn process(
+    async fn process(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, K, Change<V>>,
         r: Record<K, Change<V>>,
@@ -217,15 +233,17 @@ where
         // A side that doesn't satisfy the predicate is treated as absent.
         let old_p = r.value.old.filter(|v| pred(&key, v));
         let new_p = r.value.new.filter(|v| pred(&key, v));
-        let store = ctx
-            .get_state_store::<K, V>(&self.store_name)
-            .expect("KTable filter store not found");
-        match &new_p {
-            Some(nv) => {
-                store.put(key.clone(), nv.clone());
-            }
-            None => {
-                store.delete(&key);
+        {
+            let store = ctx
+                .get_state_store::<K, V>(&self.store_name)
+                .expect("KTable filter store not found");
+            match &new_p {
+                Some(nv) => {
+                    store.put(key.clone(), nv.clone()).await;
+                }
+                None => {
+                    store.delete(&key).await;
+                }
             }
         }
         // Forward only when something changed on either side; a row that never
@@ -254,12 +272,12 @@ mod tests {
     use crate::processor::erased::{Dispatch, ErasedRecord};
     use crate::processor::record::RecordContext;
     use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::store::memory::InMemoryKeyValueStore;
+    use crate::store::kv::KeyValueBytesStore;
     use crate::store::registry::StoreRegistry;
 
     fn make_stores() -> StoreRegistry {
         let mut stores = StoreRegistry::default();
-        stores.insert(Box::new(InMemoryKeyValueStore::<String, i64>::new(
+        stores.insert(Box::new(KeyValueBytesStore::<String, i64>::in_memory(
             "tbl".into(),
             Box::new(StringSerde),
             Box::new(I64Serde),
@@ -277,8 +295,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ktable_source_materializes_and_forwards() {
+    #[tokio::test]
+    async fn ktable_source_materializes_and_forwards() {
         let mut stores = make_stores();
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -299,7 +317,8 @@ mod tests {
                 stores: &mut stores,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
-            proc.process(&mut ctx, Record::new(Some("k".into()), 42i64, 1));
+            proc.process(&mut ctx, Record::new(Some("k".into()), 42i64, 1))
+                .await;
         }
 
         let (_, rec) = buffer.pop_front().unwrap();
@@ -312,12 +331,13 @@ mod tests {
                 .get_kv::<String, i64>("tbl")
                 .unwrap()
                 .get(&"k".to_string())
+                .await
                 == Some(42)
         );
     }
 
-    #[test]
-    fn ktable_to_stream_extracts_new_and_drops_tombstones() {
+    #[tokio::test]
+    async fn ktable_to_stream_extracts_new_and_drops_tombstones() {
         let mut stores = make_stores();
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -339,7 +359,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("k".into()), Change::update(Some(1), 7i64), 5),
-            );
+            )
+            .await;
         }
         let (_, rec) = buffer.pop_front().unwrap();
         check!(*rec.value.downcast::<i64>().unwrap() == 7i64);
@@ -357,15 +378,16 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("k".into()), Change::tombstone(Some(7i64)), 6),
-            );
+            )
+            .await;
         }
         check!(buffer.is_empty(), "tombstone must not reach the KStream");
     }
 
-    #[test]
-    fn ktable_map_values_rewrites_and_materializes() {
+    #[tokio::test]
+    async fn ktable_map_values_rewrites_and_materializes() {
         let mut stores = StoreRegistry::default();
-        stores.insert(Box::new(InMemoryKeyValueStore::<String, String>::new(
+        stores.insert(Box::new(KeyValueBytesStore::<String, String>::in_memory(
             "mv".into(),
             Box::new(StringSerde),
             Box::new(StringSerde),
@@ -384,7 +406,7 @@ mod tests {
 
         // Use a store with String values since the output type is String.
         let mut stores2 = StoreRegistry::default();
-        stores2.insert(Box::new(InMemoryKeyValueStore::<String, String>::new(
+        stores2.insert(Box::new(KeyValueBytesStore::<String, String>::in_memory(
             "mv".into(),
             Box::new(StringSerde),
             Box::new(StringSerde),
@@ -404,7 +426,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("k".into()), Change::update(Some(8i64), 9i64), 0),
-            );
+            )
+            .await;
         }
 
         let (_, rec) = buffer.pop_front().unwrap();
@@ -416,6 +439,7 @@ mod tests {
                 .get_kv::<String, String>("mv")
                 .unwrap()
                 .get(&"k".to_string())
+                .await
                 == Some("9".to_string())
         );
 
@@ -432,7 +456,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("k".into()), Change::tombstone(Some(9i64)), 1),
-            );
+            )
+            .await;
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<String>>().unwrap();
@@ -442,12 +467,13 @@ mod tests {
                 .get_kv::<String, String>("mv")
                 .unwrap()
                 .get(&"k".to_string())
+                .await
                 .is_none()
         );
     }
 
-    #[test]
-    fn ktable_map_values_view_rewrites_without_a_store() {
+    #[tokio::test]
+    async fn ktable_map_values_view_rewrites_without_a_store() {
         // The non-materialized map_values forwards the rewritten value and never
         // touches a store — exercise with an empty StoreRegistry.
         let mut stores = StoreRegistry::default();
@@ -473,7 +499,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("k".into()), Change::update(Some(8i64), 9i64), 0),
-            );
+            )
+            .await;
         }
 
         let (_, rec) = buffer.pop_front().unwrap();
@@ -484,8 +511,8 @@ mod tests {
         check!(stores.names().is_empty());
     }
 
-    #[test]
-    fn ktable_filter_materializes_matches_and_emits_tombstones() {
+    #[tokio::test]
+    async fn ktable_filter_materializes_matches_and_emits_tombstones() {
         let mut stores = make_stores();
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
@@ -496,7 +523,8 @@ mod tests {
         stores
             .get_kv::<String, i64>("tbl")
             .unwrap()
-            .put("b".into(), 99);
+            .put("b".into(), 99)
+            .await;
 
         let mut proc = KTableFilterProcessor::<String, i64, _> {
             predicate: |_k: &String, v: &i64| *v > 10,
@@ -517,7 +545,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("a".into()), Change::update(None, 42i64), 1),
-            );
+            )
+            .await;
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
@@ -528,6 +557,7 @@ mod tests {
                 .get_kv::<String, i64>("tbl")
                 .unwrap()
                 .get(&"a".to_string())
+                .await
                 == Some(42)
         );
 
@@ -546,7 +576,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("b".into()), Change::update(Some(99i64), 5i64), 2),
-            );
+            )
+            .await;
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
@@ -557,6 +588,7 @@ mod tests {
                 .get_kv::<String, i64>("tbl")
                 .unwrap()
                 .get(&"b".to_string())
+                .await
                 .is_none()
         );
 
@@ -573,7 +605,8 @@ mod tests {
             proc.process(
                 &mut ctx,
                 Record::new(Some("c".into()), Change::update(Some(3i64), 4i64), 3),
-            );
+            )
+            .await;
         }
         check!(
             buffer.is_empty(),

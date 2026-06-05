@@ -44,6 +44,7 @@ impl KafkaStreams {
         topology: BuiltTopology,
         #[builder(default = Duration::from_millis(200))] poll_interval: Duration,
         #[builder(default = Duration::from_secs(5))] commit_interval: Duration,
+        #[builder(default)] store_backend: crate::store::backend::StoreBackend,
     ) -> Result<Self, StreamsClientError> {
         let built = Arc::new(topology);
 
@@ -69,7 +70,7 @@ impl KafkaStreams {
         let topo_for_thread = Arc::clone(&built);
         let fetcher_for_thread = Arc::clone(&fetcher);
         let handle = tokio::spawn(async move {
-            let mut thread = StreamThread::new(fetcher_for_thread);
+            let mut thread = StreamThread::new(fetcher_for_thread, store_backend, application_id);
             let mut poll = tokio::time::interval(poll_interval);
             let mut commit = tokio::time::interval(commit_interval);
             loop {

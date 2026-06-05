@@ -66,8 +66,13 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 
 struct Upper;
 
+#[async_trait::async_trait]
 impl Processor<String, String, String, String> for Upper {
-    fn process(&mut self, ctx: &mut ProcessorContext<String, String>, r: Record<String, String>) {
+    async fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, String, String>,
+        r: Record<String, String>,
+    ) {
         ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
     }
 }

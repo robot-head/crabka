@@ -48,15 +48,16 @@ impl StreamTask {
     }
 
     /// Call `Processor::init` on every node in the graph.
-    pub fn init(&mut self) -> Result<(), StreamsClientError> {
+    pub async fn init(&mut self) -> Result<(), StreamsClientError> {
         self.graph
             .init_processors()
+            .await
             .map_err(|e| StreamsClientError::Runtime(e.to_string()))
     }
 
     /// Call `Processor::close` on every node in the graph.
-    pub fn close_processors(&mut self) {
-        self.graph.close_processors();
+    pub async fn close_processors(&mut self) {
+        self.graph.close_processors().await;
     }
 
     /// Restore each store from its changelog topic (reads from offset 0 until
@@ -79,11 +80,13 @@ impl StreamTask {
                 }
                 let mut advanced = false;
                 for rec in &batch.records {
-                    self.graph.restore_apply(
-                        &name,
-                        rec.key.clone().unwrap_or_default(),
-                        rec.value.clone(),
-                    );
+                    self.graph
+                        .restore_apply(
+                            &name,
+                            rec.key.clone().unwrap_or_default(),
+                            rec.value.clone(),
+                        )
+                        .await;
                     let next = rec.offset + 1;
                     if next > offset {
                         offset = next;
@@ -134,6 +137,7 @@ impl StreamTask {
                         rec.value.as_deref().unwrap_or(&[]),
                         rec.timestamp,
                     )
+                    .await
                     .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
                 for out in self.graph.take_output() {
                     // Sink / repartition output: key-hash routing (partition = None).
@@ -176,11 +180,11 @@ impl StreamTask {
 
     /// Test-only: typed read from a KV store by name.
     #[cfg(test)]
-    fn store_get_i64(&mut self, name: &str, key: &String) -> Option<i64> {
-        self.graph
-            .stores
-            .get_kv::<String, i64>(name)
-            .and_then(|s| s.get(key))
+    async fn store_get_i64(&mut self, name: &str, key: &String) -> Option<i64> {
+        match self.graph.stores.get_kv::<String, i64>(name) {
+            Some(s) => s.get(key).await,
+            None => None,
+        }
     }
 }
 
@@ -200,11 +204,19 @@ mod tests {
     // --- stateful topology helpers ---
 
     struct Counter;
+    #[async_trait::async_trait]
     impl Processor<String, String, String, i64> for Counter {
-        fn process(&mut self, ctx: &mut ProcessorContext<String, i64>, r: Record<String, String>) {
-            let store = ctx.get_state_store::<String, i64>("counts").unwrap();
-            let n = store.get(&r.value).unwrap_or(0) + 1;
-            store.put(r.value.clone(), n);
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, i64>,
+            r: Record<String, String>,
+        ) {
+            let n = {
+                let store = ctx.get_state_store::<String, i64>("counts").unwrap();
+                let n = store.get(&r.value).await.unwrap_or(0) + 1;
+                store.put(r.value.clone(), n).await;
+                n
+            };
             ctx.forward(Record::new(Some(r.value), n, r.timestamp));
         }
     }
@@ -252,10 +264,11 @@ mod tests {
     // ---
 
     struct Upper;
+    #[async_trait::async_trait]
     impl Processor<String, String, String, String> for Upper {
-        fn process(
+        async fn process(
             &mut self,
-            ctx: &mut ProcessorContext<String, String>,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
         ) {
             ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
@@ -379,7 +392,10 @@ mod tests {
         };
         let mut task = StreamTask::new(
             "0".into(),
-            built().instantiate().unwrap(),
+            built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
             vec![TopicPartition {
                 topic: "in".into(),
                 partition: 0,
@@ -421,7 +437,10 @@ mod tests {
         )]);
         let mut task_a = StreamTask::new(
             "0".into(),
-            stateful_built().instantiate().unwrap(),
+            stateful_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
             vec![TopicPartition {
                 topic: "in".into(),
                 partition: 0,
@@ -429,7 +448,7 @@ mod tests {
             std::sync::Arc::clone(&producer_a) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store_a) as std::sync::Arc<dyn OffsetStore>,
         );
-        task_a.init().unwrap();
+        task_a.init().await.unwrap();
         task_a.process_once(&fetcher_a).await.unwrap();
         task_a.commit().await.unwrap();
 
@@ -468,7 +487,10 @@ mod tests {
         )]);
         let mut task_b = StreamTask::new(
             "0".into(),
-            stateful_built().instantiate().unwrap(),
+            stateful_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
             vec![TopicPartition {
                 topic: "in".into(),
                 partition: 0,
@@ -480,7 +502,7 @@ mod tests {
 
         // Direct accessor: store should have "a" → 5 from changelog restore.
         check!(
-            task_b.store_get_i64("counts", &"a".to_string()) == Some(5),
+            task_b.store_get_i64("counts", &"a".to_string()).await == Some(5),
             "restore must seed the store with the changelog value"
         );
 
@@ -535,7 +557,10 @@ mod tests {
 
         let mut task = StreamTask::new(
             "0".into(),
-            stateful_built().instantiate().unwrap(),
+            stateful_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
             vec![TopicPartition {
                 topic: "in".into(),
                 partition: TASK_PARTITION,
@@ -543,7 +568,7 @@ mod tests {
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
         );
-        task.init().unwrap();
+        task.init().await.unwrap();
         task.process_once(&fetcher).await.unwrap();
 
         let sent = producer.sent.lock().unwrap();

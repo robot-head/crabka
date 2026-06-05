@@ -43,9 +43,7 @@ fn dsl_count_executes() {
         Some((Some("b".into()), 1))
     );
     assert_eq!(
-        d.get_key_value_store::<String, i64>("counts")
-            .unwrap()
-            .get(&"a".to_string()),
+        d.store_get::<String, i64>("counts", &"a".to_string()),
         Some(2)
     );
 }
@@ -91,9 +89,7 @@ fn dsl_count_with_repartition_executes() {
         Some((Some("y".into()), 1))
     );
     assert_eq!(
-        d.get_key_value_store::<String, i64>("counts")
-            .unwrap()
-            .get(&"x".to_string()),
+        d.store_get::<String, i64>("counts", &"x".to_string()),
         Some(2)
     );
 }
@@ -136,9 +132,7 @@ fn dsl_reduce_executes() {
         Some((Some("b".into()), "9".into()))
     );
     assert_eq!(
-        d.get_key_value_store::<String, String>("reduced")
-            .unwrap()
-            .get(&"a".to_string()),
+        d.store_get::<String, String>("reduced", &"a".to_string()),
         Some("12".to_string())
     );
 }
@@ -542,15 +536,11 @@ fn dsl_aggregate_executes() {
         Some((Some("a".into()), 7_i64))
     );
     assert_eq!(
-        d.get_key_value_store::<String, i64>("agg-store")
-            .unwrap()
-            .get(&"a".to_string()),
+        d.store_get::<String, i64>("agg-store", &"a".to_string()),
         Some(7)
     );
     assert_eq!(
-        d.get_key_value_store::<String, i64>("agg-store")
-            .unwrap()
-            .get(&"b".to_string()),
+        d.store_get::<String, i64>("agg-store", &"b".to_string()),
         Some(1)
     );
 }
@@ -602,15 +592,11 @@ fn dsl_ktable_filter_executes() {
     );
     // Matching key is in the filtered store; non-matching key is absent.
     assert_eq!(
-        d.get_key_value_store::<String, i64>("filtered-tbl")
-            .unwrap()
-            .get(&"a".to_string()),
+        d.store_get::<String, i64>("filtered-tbl", &"a".to_string()),
         Some(42)
     );
     assert!(
-        d.get_key_value_store::<String, i64>("filtered-tbl")
-            .unwrap()
-            .get(&"b".to_string())
+        d.store_get::<String, i64>("filtered-tbl", &"b".to_string())
             .is_none()
     );
 }
@@ -694,9 +680,7 @@ fn dsl_count_no_logging_omits_changelog() {
         );
     }
     assert_eq!(
-        d.get_key_value_store::<String, i64>("counts")
-            .unwrap()
-            .get(&"a".to_string()),
+        d.store_get::<String, i64>("counts", &"a".to_string()),
         Some(2)
     );
 }
@@ -735,9 +719,7 @@ fn dsl_ktable_filter_tombstone_propagates_downstream() {
         0,
     );
     assert_eq!(
-        d.get_key_value_store::<String, String>("view")
-            .unwrap()
-            .get(&"k".to_string()),
+        d.store_get::<String, String>("view", &"k".to_string()),
         Some("keep".to_string())
     );
 
@@ -751,16 +733,12 @@ fn dsl_ktable_filter_tombstone_propagates_downstream() {
         1,
     );
     assert_eq!(
-        d.get_key_value_store::<String, String>("filt")
-            .unwrap()
-            .get(&"k".to_string()),
+        d.store_get::<String, String>("filt", &"k".to_string()),
         None,
         "filter store must not hold the key after tombstone"
     );
     assert_eq!(
-        d.get_key_value_store::<String, String>("view")
-            .unwrap()
-            .get(&"k".to_string()),
+        d.store_get::<String, String>("view", &"k".to_string()),
         None,
         "downstream view store must delete the key when tombstone propagates"
     );
@@ -796,16 +774,9 @@ fn dsl_table_map_values_executes() {
         d.read_output("out", Produced::with(StringSerde, I64Serde)),
         Some((Some("k".into()), 40))
     );
+    assert_eq!(d.store_get::<String, i64>("tbl", &"k".to_string()), Some(4));
     assert_eq!(
-        d.get_key_value_store::<String, i64>("tbl")
-            .unwrap()
-            .get(&"k".to_string()),
-        Some(4)
-    );
-    assert_eq!(
-        d.get_key_value_store::<String, i64>("tbl-x10")
-            .unwrap()
-            .get(&"k".to_string()),
+        d.store_get::<String, i64>("tbl-x10", &"k".to_string()),
         Some(40)
     );
 }
@@ -851,9 +822,7 @@ fn dsl_to_table_executes() {
     );
     // The store holds the latest value for the key.
     assert_eq!(
-        d.get_key_value_store::<String, String>("store")
-            .unwrap()
-            .get(&"k".to_string()),
+        d.store_get::<String, String>("store", &"k".to_string()),
         Some("b".to_string())
     );
 }
@@ -1196,9 +1165,7 @@ fn dsl_to_table_no_logging_omits_changelog() {
         Some((Some("k".to_string()), "b".to_string()))
     );
     assert_eq!(
-        d.get_key_value_store::<String, String>("s")
-            .unwrap()
-            .get(&"k".to_string()),
+        d.store_get::<String, String>("s", &"k".to_string()),
         Some("b".to_string())
     );
 }

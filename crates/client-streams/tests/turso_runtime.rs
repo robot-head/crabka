@@ -1,8 +1,12 @@
-//! Broker integration test: stateful counting topology + restart-restore.
+//! Turso end-to-end + restart-restore integration test.
 //!
-//! Proves that a fresh `KafkaStreams` instance restores its `counts` store from
-//! the changelog so that counts continue from where the previous instance left
-//! off rather than resetting to zero.
+//! Proves the real runtime works with `StoreBackend::Turso`:
+//! - (a) state is read/written through a Turso-backed store during processing.
+//! - (b) on restart, the store rebuilds from the changelog into a fresh Turso DB
+//!   so counts resume from where the previous instance left off.
+//!
+//! Mirrors the harness in `state_store_integration.rs`, adding a `tempdir`-based
+//! `StoreBackend::Turso` to both `KafkaStreams` instances.
 #![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
@@ -10,8 +14,8 @@ use std::time::Duration;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_streams::{
-    Consumed, I64Serde, KafkaStreams, Processor, ProcessorContext, Produced, Record, StringSerde,
-    Topology,
+    Consumed, I64Serde, KafkaStreams, Processor, ProcessorContext, Produced, Record, StoreBackend,
+    StringSerde, Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
@@ -179,9 +183,17 @@ async fn collect_output_keyed(
 
 // ─── test ─────────────────────────────────────────────────────────────────────
 
+/// Assertion (a): e2e on Turso — state is read/written through a Turso-backed
+/// store; counts 1 and 2 for key "a" are produced correctly.
+///
+/// Assertion (b): restart-restore — after the first instance closes, a FRESH
+/// `KafkaStreams` with the SAME `state_dir` drops and recreates the table
+/// (empty), then replays the changelog into the empty Turso DB. Processing
+/// one more "a" must emit count 3 (not 1 from a cold start).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn stateful_count_and_restart_restore() {
-    let (broker, bootstrap, _dir) = boot().await;
+#[allow(clippy::too_many_lines)]
+async fn turso_stateful_count_and_restart_restore() {
+    let (broker, bootstrap, _broker_dir) = boot().await;
     let admin = Client::builder()
         .bootstrap(&bootstrap)
         .client_id("admin")
@@ -191,6 +203,9 @@ async fn stateful_count_and_restart_restore() {
     finalize_streams_version(&admin).await;
     create_topic(&admin, "stream-in", 1).await;
     create_topic(&admin, "stream-out", 1).await;
+
+    // Turso state dir — shared across both instances.
+    let turso_dir = tempfile::TempDir::new().unwrap();
 
     // ── 1. Produce ["a","a","b"] to stream-in ─────────────────────────────────
     let producer = crabka_client_producer::Producer::builder()
@@ -214,23 +229,26 @@ async fn stateful_count_and_restart_restore() {
     }
     producer.flush().await.unwrap();
 
-    // ── 2. Start counting KafkaStreams app ────────────────────────────────────
-    let app_id = "count-restart-app";
+    // ── 2. Start counting KafkaStreams app with Turso backend ─────────────────
+    let app_id = "turso-count-restart-app";
     let mut streams = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(counting_topology(app_id))
+        .store_backend(StoreBackend::Turso {
+            state_dir: turso_dir.path().to_path_buf(),
+        })
         .build()
         .await
         .unwrap();
 
-    // ── 3. Collect 3 output records from stream-out ───────────────────────────
+    // ── 3. Assertion (a): collect 3 output records — Turso e2e ───────────────
     let got = tokio::time::timeout(
         Duration::from_secs(30),
         collect_output_keyed(&admin, &bootstrap, "stream-out", 3, 0),
     )
     .await
-    .expect("counting streams produced 3 output records within 30s");
+    .expect("counting streams (Turso) produced 3 output records within 30s");
 
     // a→1, a→2, b→1 (in key-order within each key)
     let a_counts: Vec<i64> = got
@@ -243,14 +261,21 @@ async fn stateful_count_and_restart_restore() {
         .filter(|(k, _)| k == "b")
         .map(|(_, v)| *v)
         .collect();
-    assert_eq!(a_counts, vec![1, 2], "a counts must be [1, 2]; got {got:?}");
-    assert_eq!(b_counts, vec![1], "b count must be [1]; got {got:?}");
+    assert_eq!(
+        a_counts,
+        vec![1, 2],
+        "Turso e2e: a counts must be [1, 2]; got {got:?}"
+    );
+    assert_eq!(
+        b_counts,
+        vec![1],
+        "Turso e2e: b count must be [1]; got {got:?}"
+    );
 
     // ── 4. Close the first instance ───────────────────────────────────────────
     streams.close().await.unwrap();
 
-    // ── 5. Start a FRESH instance with the SAME application_id ───────────────
-    // Produce one more "a" to stream-in BEFORE starting so it's queued.
+    // ── 5. Queue one more "a" to stream-in BEFORE the fresh instance starts ──
     drop(
         producer
             .send(crabka_client_producer::ProducerRecord {
@@ -264,22 +289,28 @@ async fn stateful_count_and_restart_restore() {
     );
     producer.flush().await.unwrap();
 
+    // ── 6. Start a FRESH instance with the SAME application_id + SAME state_dir
+    // TursoBytes::open DROPs+CREATEs the table → empty store.
+    // The runtime's restore() replays the changelog into the fresh Turso DB.
     let mut streams2 = KafkaStreams::builder()
         .bootstrap(&bootstrap)
         .application_id(app_id)
         .topology(counting_topology(app_id))
+        .store_backend(StoreBackend::Turso {
+            state_dir: turso_dir.path().to_path_buf(),
+        })
         .build()
         .await
         .unwrap();
 
-    // ── 6. Collect the 4th output record (must be a→3, NOT a→1) ──────────────
+    // ── 7. Assertion (b): restart-restore — 4th output must be a→3, not a→1 ──
     // We already collected 3 records; start reading from offset 3.
     let got2 = tokio::time::timeout(
         Duration::from_secs(30),
         collect_output_keyed(&admin, &bootstrap, "stream-out", 1, 3),
     )
     .await
-    .expect("restarted streams produced output within 30s");
+    .expect("restarted streams (Turso) produced output within 30s");
 
     let a_restart = got2
         .iter()
@@ -290,7 +321,7 @@ async fn stateful_count_and_restart_restore() {
     assert_eq!(
         a_restart,
         Some(3),
-        "after restart-restore, 'a' count must be 3 (restore from changelog), \
+        "Turso restart-restore: 'a' count must be 3 (restored from changelog), \
          not 1 (cold start); got {got2:?}",
     );
 

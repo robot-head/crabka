@@ -11,6 +11,8 @@
 
 use std::marker::PhantomData;
 
+use async_trait::async_trait;
+
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
 
@@ -34,19 +36,23 @@ pub(crate) struct KStreamKTableJoinProcessor<K, V, VT, VO, F> {
     pub _pd: Marker<(K, V, VT, VO)>,
 }
 
+#[async_trait]
 impl<K, V, VT, VO, F> Processor<K, V, K, VO> for KStreamKTableJoinProcessor<K, V, VT, VO, F>
 where
-    K: std::any::Any + Send + Clone,
-    V: 'static,
-    VT: 'static,
+    K: std::any::Any + Send + Sync + Clone,
+    V: Send + 'static,
+    VT: Send + 'static,
     VO: std::any::Any + Send + Clone,
     F: Fn(&V, Option<&VT>) -> VO + Send + 'static,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, VO>, r: Record<K, V>) {
+    async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, VO>, r: Record<K, V>) {
         let key = r.key.expect("join requires a non-null key");
-        let vt = ctx
-            .get_state_store::<K, VT>(&self.table_store)
-            .and_then(|s| s.get(&key));
+        // `and_then(|s| s.get(..))` can't `.await`; do the lookup in a `match`,
+        // dropping the store borrow before `ctx.forward`.
+        let vt = match ctx.get_state_store::<K, VT>(&self.table_store) {
+            Some(s) => s.get(&key).await,
+            None => None,
+        };
         if vt.is_some() || self.emit_on_miss {
             let out = (self.joiner)(&r.value, vt.as_ref());
             ctx.forward(Record::new(Some(key), out, r.timestamp));
@@ -67,27 +73,27 @@ mod tests {
     use crate::processor::record::RecordContext;
     use crate::processor::serde::{I64Serde, StringSerde};
     use crate::store::api::KeyValueStore;
-    use crate::store::memory::InMemoryKeyValueStore;
+    use crate::store::kv::KeyValueBytesStore;
     use crate::store::registry::StoreRegistry;
 
-    /// Build a store registry with an `InMemoryKeyValueStore<String, i64>` named
+    /// Build a store registry with a `KeyValueBytesStore<String, i64>` named
     /// `"t"` pre-seeded with `("a", 10)`.
-    fn make_stores() -> StoreRegistry {
+    async fn make_stores() -> StoreRegistry {
         let mut stores = StoreRegistry::default();
-        let mut kv = InMemoryKeyValueStore::<String, i64>::new(
+        let mut kv = KeyValueBytesStore::<String, i64>::in_memory(
             "t".into(),
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-t-changelog".into(),
         );
-        kv.put("a".to_string(), 10i64);
+        kv.put("a".to_string(), 10i64).await;
         stores.insert(Box::new(kv));
         stores
     }
 
     /// Process a single `(key, value)` record through `proc` and return the
     /// forwarded `i64` output, or `None` if nothing was forwarded.
-    fn run_one(
+    async fn run_one(
         proc: &mut KStreamKTableJoinProcessor<
             String,
             i64,
@@ -116,15 +122,16 @@ mod tests {
             stores,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
-        proc.process(&mut ctx, Record::new(Some(key.to_string()), value, 0));
+        proc.process(&mut ctx, Record::new(Some(key.to_string()), value, 0))
+            .await;
         buffer
             .pop_front()
             .map(|(_, rec)| *rec.value.downcast::<i64>().unwrap())
     }
 
-    #[test]
-    fn inner_join_hit_and_miss() {
-        let mut stores = make_stores();
+    #[tokio::test]
+    async fn inner_join_hit_and_miss() {
+        let mut stores = make_stores().await;
         let mut proc = KStreamKTableJoinProcessor {
             table_store: "t".into(),
             joiner: |v: &i64, vt: Option<&i64>| v + vt.copied().unwrap_or(0),
@@ -133,17 +140,17 @@ mod tests {
         };
 
         // hit: ("a", 1) — store has 10 → 1 + 10 = 11
-        let hit = run_one(&mut proc, &mut stores, "a", 1);
+        let hit = run_one(&mut proc, &mut stores, "a", 1).await;
         check!(hit == Some(11));
 
         // miss: ("b", 2) — store has no "b" → NOT forwarded
-        let miss = run_one(&mut proc, &mut stores, "b", 2);
+        let miss = run_one(&mut proc, &mut stores, "b", 2).await;
         check!(miss == None);
     }
 
-    #[test]
-    fn left_join_hit_and_miss() {
-        let mut stores = make_stores();
+    #[tokio::test]
+    async fn left_join_hit_and_miss() {
+        let mut stores = make_stores().await;
         let mut proc = KStreamKTableJoinProcessor {
             table_store: "t".into(),
             joiner: |v: &i64, vt: Option<&i64>| v + vt.copied().unwrap_or(0),
@@ -152,11 +159,11 @@ mod tests {
         };
 
         // hit: ("a", 1) → 1 + 10 = 11
-        let hit = run_one(&mut proc, &mut stores, "a", 1);
+        let hit = run_one(&mut proc, &mut stores, "a", 1).await;
         check!(hit == Some(11));
 
         // miss: ("b", 2) — no table entry → joiner gets None → 2 + 0 = 2
-        let miss = run_one(&mut proc, &mut stores, "b", 2);
+        let miss = run_one(&mut proc, &mut stores, "b", 2).await;
         check!(miss == Some(2));
     }
 }

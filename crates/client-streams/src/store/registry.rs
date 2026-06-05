@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::store::api::{KeyValueStore, StateStore};
-use crate::store::memory::InMemoryKeyValueStore;
+use crate::store::kv::KeyValueBytesStore;
 
 #[derive(Default)]
 pub(crate) struct StoreRegistry {
@@ -18,14 +18,14 @@ impl StoreRegistry {
 
     /// Typed mutable access: downcast the erased store to the in-memory KV store
     /// of the requested types. `None` if absent or the types don't match.
-    pub fn get_kv<K: 'static, V: 'static>(
+    pub fn get_kv<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,
     ) -> Option<&mut dyn KeyValueStore<K, V>> {
         let store = self.stores.get_mut(name)?;
         let concrete = store
             .as_any_mut()
-            .downcast_mut::<InMemoryKeyValueStore<K, V>>()?;
+            .downcast_mut::<KeyValueBytesStore<K, V>>()?;
         Some(concrete as &mut dyn KeyValueStore<K, V>)
     }
 
@@ -46,21 +46,21 @@ impl StoreRegistry {
 mod tests {
     use super::*;
     use crate::processor::serde::{I64Serde, StringSerde};
-    use crate::store::memory::InMemoryKeyValueStore;
+    use crate::store::kv::KeyValueBytesStore;
     use assert2::check;
 
-    #[test]
-    fn register_and_downcast_typed_store() {
+    #[tokio::test]
+    async fn register_and_downcast_typed_store() {
         let mut reg = StoreRegistry::default();
-        reg.insert(Box::new(InMemoryKeyValueStore::<String, i64>::new(
+        reg.insert(Box::new(KeyValueBytesStore::<String, i64>::in_memory(
             "counts".into(),
             Box::new(StringSerde),
             Box::new(I64Serde),
             "c-changelog".into(),
         )));
         let s = reg.get_kv::<String, i64>("counts").unwrap();
-        s.put("x".into(), 5);
-        check!(s.get(&"x".to_string()) == Some(5));
+        s.put("x".into(), 5).await;
+        check!(s.get(&"x".to_string()).await == Some(5));
         // wrong types → None
         check!(reg.get_kv::<i64, i64>("counts").is_none());
         check!(reg.get_kv::<String, i64>("missing").is_none());

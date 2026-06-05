@@ -75,7 +75,7 @@ impl<K, V> KTable<K, V> {
 
 impl<K, V> KTable<K, V>
 where
-    K: Any + Send + Clone,
+    K: Any + Send + Sync + Clone,
     V: Any + Send + Clone,
 {
     /// `toStream`: view the table's change-stream as a `KStream`, forwarding

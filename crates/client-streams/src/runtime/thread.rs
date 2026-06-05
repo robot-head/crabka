@@ -14,13 +14,24 @@ pub(crate) struct StreamThread {
     tasks: HashMap<(String, i32), StreamTask>,
     /// Shared fetcher reference kept for restore (replaying changelog on task creation).
     fetcher: Arc<dyn RecordFetcher>,
+    /// Storage backend to use when instantiating new task graphs.
+    backend: crate::store::backend::StoreBackend,
+    /// Application ID passed to `instantiate` for changelog-name derivation and
+    /// backend path construction.
+    application_id: String,
 }
 
 impl StreamThread {
-    pub fn new(fetcher: Arc<dyn RecordFetcher>) -> Self {
+    pub fn new(
+        fetcher: Arc<dyn RecordFetcher>,
+        backend: crate::store::backend::StoreBackend,
+        application_id: String,
+    ) -> Self {
         Self {
             tasks: HashMap::new(),
             fetcher,
+            backend,
+            application_id,
         }
     }
 
@@ -56,7 +67,7 @@ impl StreamThread {
             .collect();
         for k in to_remove {
             if let Some(mut t) = self.tasks.remove(&k) {
-                t.close_processors();
+                t.close_processors().await;
                 t.commit().await?;
             }
         }
@@ -67,7 +78,8 @@ impl StreamThread {
                 continue;
             }
             let graph = topology
-                .instantiate()
+                .instantiate(&self.backend, &self.application_id)
+                .await
                 .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
             let sources: Vec<crate::membership::TopicPartition> = ta
                 .source_topic_partitions
@@ -87,7 +99,7 @@ impl StreamThread {
             task.seek_to_start().await?;
             // Restore state stores from changelog, then initialise processors.
             task.restore(&*self.fetcher).await?;
-            task.init()?;
+            task.init().await?;
             self.tasks.insert(key, task);
         }
         Ok(())
@@ -135,10 +147,11 @@ mod tests {
     // ─── stateless Upper processor ────────────────────────────────────────────
 
     struct Upper;
+    #[async_trait::async_trait]
     impl Processor<String, String, String, String> for Upper {
-        fn process(
+        async fn process(
             &mut self,
-            ctx: &mut ProcessorContext<String, String>,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
             r: Record<String, String>,
         ) {
             ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
@@ -161,11 +174,19 @@ mod tests {
     // ─── stateful Counter processor ───────────────────────────────────────────
 
     struct Counter;
+    #[async_trait::async_trait]
     impl Processor<String, String, String, i64> for Counter {
-        fn process(&mut self, ctx: &mut ProcessorContext<String, i64>, r: Record<String, String>) {
-            let store = ctx.get_state_store::<String, i64>("counts").unwrap();
-            let n = store.get(&r.value).unwrap_or(0) + 1;
-            store.put(r.value.clone(), n);
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, i64>,
+            r: Record<String, String>,
+        ) {
+            let n = {
+                let store = ctx.get_state_store::<String, i64>("counts").unwrap();
+                let n = store.get(&r.value).await.unwrap_or(0) + 1;
+                store.put(r.value.clone(), n).await;
+                n
+            };
             ctx.forward(Record::new(Some(r.value), n, r.timestamp));
         }
     }
@@ -328,7 +349,11 @@ mod tests {
         let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
         let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
         let built = built();
-        let mut thread = StreamThread::new(empty_fetcher());
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
         thread
             .apply_assignment(&assignment(), &built, &producer, &store)
             .await
@@ -398,7 +423,11 @@ mod tests {
         let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
         let built = stateful_built();
 
-        let mut thread = StreamThread::new(Arc::clone(&restore_fetcher));
+        let mut thread = StreamThread::new(
+            Arc::clone(&restore_fetcher),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
         thread
             .apply_assignment(&assignment(), &built, &producer, &store)
             .await

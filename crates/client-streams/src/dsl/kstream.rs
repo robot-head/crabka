@@ -78,7 +78,7 @@ impl<K, V> KStream<K, V> {
 
 impl<K, V> KStream<K, V>
 where
-    K: Any + Send + Clone,
+    K: Any + Send + Sync + Clone,
     V: Any + Send + Clone,
 {
     /// `mapValues`: transform each value, key unchanged. Not key-changing.
@@ -707,7 +707,7 @@ where
     pub fn group_by<K2, KS, VS, F>(&self, f: F, grouped: Grouped<KS, VS>) -> KGroupedStream<K2, V>
     where
         K: Default,
-        K2: Any + Send + Clone,
+        K2: Any + Send + Sync + Clone,
         KS: Serde<K2> + Clone + 'static,
         VS: Serde<V> + Clone + 'static,
         F: Fn(&K, &V) -> K2 + Clone + Send + Sync + 'static,
