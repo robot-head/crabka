@@ -11,6 +11,7 @@ pub mod handlers;
 pub mod health;
 pub mod produce;
 pub mod state;
+pub mod streaming;
 pub mod types;
 
 /// Build the Connect-RPC [`axum::Router`] for the Gateway service.
@@ -21,6 +22,7 @@ pub mod types;
 pub fn router(state: std::sync::Arc<state::AppState>) -> axum::Router {
     pb::gateway_connect::GatewayServiceBuilder::<()>::new()
         .send(handlers::send)
+        .send_stream(streaming::send_stream)
         .build()
         .layer(axum::Extension(state))
 }

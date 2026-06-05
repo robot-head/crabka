@@ -4,12 +4,27 @@
 use std::sync::Arc;
 
 use axum::Extension;
-use bytes::Bytes;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
 
 use crate::pb;
 use crate::state::AppState;
-use crate::types::GatewayRecord;
+
+/// Convert a wire [`pb::Record`] into the transport-agnostic [`GatewayRecord`].
+pub(crate) fn to_gateway_record(r: crate::pb::Record) -> crate::types::GatewayRecord {
+    crate::types::GatewayRecord {
+        topic: r.topic,
+        key: r.key.map(bytes::Bytes::from),
+        value: bytes::Bytes::from(r.value),
+        headers: r
+            .headers
+            .into_iter()
+            .map(|(k, v)| (k, bytes::Bytes::from(v)))
+            .collect(),
+        partition: r.partition,
+        timestamp_ms: r.timestamp_ms,
+        idempotency_key: r.idempotency_key,
+    }
+}
 
 pub async fn send(
     Extension(state): Extension<Arc<AppState>>,
@@ -21,19 +36,7 @@ pub async fn send(
     // requires anyway. Per-acks handling on the plain path is deferred.
     let mut results = Vec::with_capacity(msg.records.len());
     for r in msg.records {
-        let rec = GatewayRecord {
-            topic: r.topic,
-            key: r.key.map(Bytes::from),
-            value: Bytes::from(r.value),
-            headers: r
-                .headers
-                .into_iter()
-                .map(|(k, v)| (k, Bytes::from(v)))
-                .collect(),
-            partition: r.partition,
-            timestamp_ms: r.timestamp_ms,
-            idempotency_key: r.idempotency_key,
-        };
+        let rec = crate::handlers::to_gateway_record(r);
         let result = match state.produce.produce(rec).await {
             Ok(o) => pb::RecordResult {
                 partition: o.partition,
