@@ -14,13 +14,24 @@ pub(crate) struct StreamThread {
     tasks: HashMap<(String, i32), StreamTask>,
     /// Shared fetcher reference kept for restore (replaying changelog on task creation).
     fetcher: Arc<dyn RecordFetcher>,
+    /// Storage backend to use when instantiating new task graphs.
+    backend: crate::store::backend::StoreBackend,
+    /// Application ID passed to `instantiate` for changelog-name derivation and
+    /// backend path construction.
+    application_id: String,
 }
 
 impl StreamThread {
-    pub fn new(fetcher: Arc<dyn RecordFetcher>) -> Self {
+    pub fn new(
+        fetcher: Arc<dyn RecordFetcher>,
+        backend: crate::store::backend::StoreBackend,
+        application_id: String,
+    ) -> Self {
         Self {
             tasks: HashMap::new(),
             fetcher,
+            backend,
+            application_id,
         }
     }
 
@@ -67,7 +78,8 @@ impl StreamThread {
                 continue;
             }
             let graph = topology
-                .instantiate()
+                .instantiate(&self.backend, &self.application_id)
+                .await
                 .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
             let sources: Vec<crate::membership::TopicPartition> = ta
                 .source_topic_partitions
@@ -337,7 +349,11 @@ mod tests {
         let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
         let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
         let built = built();
-        let mut thread = StreamThread::new(empty_fetcher());
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
         thread
             .apply_assignment(&assignment(), &built, &producer, &store)
             .await
@@ -407,7 +423,11 @@ mod tests {
         let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
         let built = stateful_built();
 
-        let mut thread = StreamThread::new(Arc::clone(&restore_fetcher));
+        let mut thread = StreamThread::new(
+            Arc::clone(&restore_fetcher),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
         thread
             .apply_assignment(&assignment(), &built, &producer, &store)
             .await

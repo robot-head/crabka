@@ -392,7 +392,10 @@ mod tests {
         };
         let mut task = StreamTask::new(
             "0".into(),
-            built().instantiate().unwrap(),
+            built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
             vec![TopicPartition {
                 topic: "in".into(),
                 partition: 0,
@@ -434,7 +437,10 @@ mod tests {
         )]);
         let mut task_a = StreamTask::new(
             "0".into(),
-            stateful_built().instantiate().unwrap(),
+            stateful_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
             vec![TopicPartition {
                 topic: "in".into(),
                 partition: 0,
@@ -481,7 +487,10 @@ mod tests {
         )]);
         let mut task_b = StreamTask::new(
             "0".into(),
-            stateful_built().instantiate().unwrap(),
+            stateful_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
             vec![TopicPartition {
                 topic: "in".into(),
                 partition: 0,
@@ -548,7 +557,10 @@ mod tests {
 
         let mut task = StreamTask::new(
             "0".into(),
-            stateful_built().instantiate().unwrap(),
+            stateful_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
             vec![TopicPartition {
                 topic: "in".into(),
                 partition: TASK_PARTITION,

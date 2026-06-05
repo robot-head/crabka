@@ -21,7 +21,6 @@ pub(crate) struct TursoBytes {
 impl TursoBytes {
     /// Open (or create) the store DB at `path`. Clean-slate: the changelog is the
     /// source of truth, so restore replays into an empty table.
-    #[allow(dead_code)] // used by 4d-iv backend selection
     pub(crate) async fn open(path: &str) -> Self {
         let db = turso::Builder::new_local(path)
             .build()

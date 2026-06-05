@@ -5,11 +5,17 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, HashMap};
 use std::marker::PhantomData;
 
-/// Factory that builds a fresh erased [`StateStore`] given `(application_id, store_name)`.
-///
-/// The two `&str` arguments let the factory embed the correct changelog topic name
-/// (`<app_id>-<store_name>-changelog`) at construction time, matching the wire topology.
-type StoreFactory = Box<dyn Fn(&str, &str) -> Box<dyn crate::store::api::StateStore> + Send + Sync>;
+/// Factory that builds a fresh erased [`StateStore`] given the store name, pre-derived
+/// changelog topic, and an already-opened byte backend. The factory only owns the serdes.
+type StoreFactory = Box<
+    dyn Fn(
+            &str,
+            String,
+            Box<dyn crate::store::byte::ByteKeyValueStore>,
+        ) -> Box<dyn crate::store::api::StateStore>
+        + Send
+        + Sync,
+>;
 
 use crabka_protocol::owned::streams_group_heartbeat_request::Topology as WireTopology;
 
@@ -85,7 +91,9 @@ pub struct Topology {
     reg: NodeRegistry,
     error: Option<StoredError>,
     factories: HashMap<String, NodeFactory>,
-    store_factories: HashMap<String, StoreFactory>,
+    /// `(changelog_override, factory)` — override is `None` for the default
+    /// `<app_id>-<store_name>-changelog` derivation.
+    store_factories: HashMap<String, (Option<String>, StoreFactory)>,
 }
 
 impl std::fmt::Debug for Topology {
@@ -401,17 +409,22 @@ impl Topology {
         self.reg.add_store(&name, procs, changelog_override.clone());
         self.store_factories.insert(
             name,
-            Box::new(move |app_id: &str, store_name: &str| {
-                let changelog = changelog_override
-                    .clone()
-                    .unwrap_or_else(|| format!("{app_id}-{store_name}-changelog"));
-                Box::new(crate::store::kv::KeyValueBytesStore::<K, V>::in_memory(
-                    store_name.to_string(),
-                    Box::new(key_serde.clone()),
-                    Box::new(value_serde.clone()),
-                    changelog,
-                )) as Box<dyn crate::store::api::StateStore>
-            }),
+            (
+                changelog_override,
+                Box::new(
+                    move |store_name: &str,
+                          changelog: String,
+                          backend: Box<dyn crate::store::byte::ByteKeyValueStore>| {
+                        Box::new(crate::store::kv::KeyValueBytesStore::<K, V>::new(
+                            store_name.to_string(),
+                            backend,
+                            Box::new(key_serde.clone()),
+                            Box::new(value_serde.clone()),
+                            changelog,
+                        )) as Box<dyn crate::store::api::StateStore>
+                    },
+                ),
+            ),
         );
         self
     }
@@ -438,16 +451,23 @@ impl Topology {
         // so no changelog topic appears in the wire topology.
         self.store_factories.insert(
             name,
-            Box::new(move |_app_id: &str, store_name: &str| {
-                // No changelog: use an empty placeholder string; the store will
-                // never flush to a changelog topic at runtime.
-                Box::new(crate::store::kv::KeyValueBytesStore::<K, V>::in_memory(
-                    store_name.to_string(),
-                    Box::new(key_serde.clone()),
-                    Box::new(value_serde.clone()),
-                    String::new(),
-                )) as Box<dyn crate::store::api::StateStore>
-            }),
+            (
+                None, // no changelog
+                Box::new(
+                    move |store_name: &str,
+                          _changelog: String,
+                          backend: Box<dyn crate::store::byte::ByteKeyValueStore>| {
+                        // No changelog: pass empty string so the store never flushes.
+                        Box::new(crate::store::kv::KeyValueBytesStore::<K, V>::new(
+                            store_name.to_string(),
+                            backend,
+                            Box::new(key_serde.clone()),
+                            Box::new(value_serde.clone()),
+                            String::new(),
+                        )) as Box<dyn crate::store::api::StateStore>
+                    },
+                ),
+            ),
         );
         self
     }
@@ -608,7 +628,9 @@ pub struct BuiltTopology {
     application_id: String,
     factories: HashMap<String, NodeFactory>,
     node_specs: Vec<NodeSpec>,
-    store_factories: HashMap<String, StoreFactory>,
+    /// `(changelog_override, factory)` — override is `None` for the default
+    /// `<app_id>-<store_name>-changelog` derivation.
+    store_factories: HashMap<String, (Option<String>, StoreFactory)>,
 }
 
 impl std::fmt::Debug for BuiltTopology {
@@ -670,8 +692,13 @@ impl BuiltTopology {
 
     /// Instantiate a runnable [`Graph`] for this topology.
     ///
-    /// Each call produces an independent graph (its own processor instances).
-    pub(crate) fn instantiate(&self) -> Result<Graph, ProcessorError> {
+    /// Each call produces an independent graph (its own processor instances and
+    /// a fresh byte-store backend opened via `backend`).
+    pub(crate) async fn instantiate(
+        &self,
+        backend: &crate::store::backend::StoreBackend,
+        app_id: &str,
+    ) -> Result<Graph, ProcessorError> {
         // 1. Collect the processor/sink nodes in spec order and build a name→idx map.
         //    Sources are NOT in the nodes vec — they become GraphSources.
         let non_source: Vec<&NodeSpec> = self
@@ -757,8 +784,12 @@ impl BuiltTopology {
 
         // Build the per-task store registry from the typed factories.
         let mut store_registry = crate::store::registry::StoreRegistry::default();
-        for (store_name, factory) in &self.store_factories {
-            store_registry.insert(factory(&self.application_id, store_name));
+        for (store_name, (changelog_override, factory)) in &self.store_factories {
+            let changelog = changelog_override
+                .clone()
+                .unwrap_or_else(|| format!("{app_id}-{store_name}-changelog"));
+            let bytes = backend.open(app_id, store_name).await;
+            store_registry.insert(factory(store_name, changelog, bytes));
         }
 
         Ok(Graph {
@@ -906,7 +937,10 @@ mod tests {
             Produced::with(StringSerde, StringSerde),
         );
         let built = t.build("app").unwrap();
-        let mut g = built.instantiate().unwrap();
+        let mut g = pollster::block_on(
+            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
+        )
+        .unwrap();
         pollster::block_on(g.pipe("in", Some(b"k"), b"hi", 0)).unwrap();
         let out = g.take_output();
         check!(out.len() == 1);
@@ -1045,7 +1079,10 @@ mod tests {
         sinks.sort();
         check!(sinks == vec!["out".to_string(), "rp".to_string()]);
         // instantiate must succeed and pipe through the first subtopology
-        let mut g = built.instantiate().unwrap();
+        let mut g = pollster::block_on(
+            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
+        )
+        .unwrap();
         pollster::block_on(g.pipe("in", None, b"hi", 0)).unwrap();
         let out1 = g.take_output();
         check!(out1.iter().any(|o| o.topic == "rp"));
@@ -1083,7 +1120,10 @@ mod tests {
                 .iter()
                 .any(|c| c.name == "app-counts-changelog")
         }));
-        let mut g = built.instantiate().unwrap();
+        let mut g = pollster::block_on(
+            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
+        )
+        .unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 1)).unwrap();
         // After two "x" records the count should be 2 (i64 big-endian = [0,0,0,0,0,0,0,2])

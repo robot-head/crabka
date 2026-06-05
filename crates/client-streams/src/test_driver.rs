@@ -27,7 +27,9 @@ impl TopologyTestDriver {
     /// invalid (propagates `instantiate`'s error).
     pub fn new(built: &BuiltTopology) -> Result<Self, ProcessorError> {
         let source_topics: HashSet<String> = built.list_source_topics().into_iter().collect();
-        let mut graph = built.instantiate()?;
+        let mut graph = pollster::block_on(
+            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
+        )?;
         pollster::block_on(graph.init_processors())?;
         Ok(Self {
             graph,
