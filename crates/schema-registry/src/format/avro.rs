@@ -1,7 +1,7 @@
 //! Avro: parse + Parsing Canonical Form via `apache-avro`.
 
-use crate::error::SrError;
 use super::ParsedSchema;
+use crate::error::SrError;
 
 pub struct AvroSchema(apache_avro::Schema);
 

@@ -62,7 +62,10 @@ mod tests {
         assert_eq!(SchemaType::Protobuf.wire_name(), Some("PROTOBUF"));
         assert_eq!(SchemaType::Json.wire_name(), Some("JSON"));
         assert_eq!(SchemaType::from_wire(None), SchemaType::Avro);
-        assert_eq!(SchemaType::from_wire(Some("PROTOBUF")), SchemaType::Protobuf);
+        assert_eq!(
+            SchemaType::from_wire(Some("PROTOBUF")),
+            SchemaType::Protobuf
+        );
     }
 
     #[test]

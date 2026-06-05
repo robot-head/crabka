@@ -58,7 +58,10 @@ pub fn spawn(cfg: &RegistryConfig, topic_id: WireUuid, cancel: CancellationToken
             tracing::error!(%bootstrap, "store reader: bad bootstrap addr");
             return;
         };
-        let opts = ConnectionOptions { client_id, ..Default::default() };
+        let opts = ConnectionOptions {
+            client_id,
+            ..Default::default()
+        };
         let conn = match Connection::connect_with_options(addr, opts).await {
             Ok(c) => c,
             Err(e) => {
@@ -124,6 +127,9 @@ mod tests {
         apply_record(&store, SchemaRecord::Schema(k, v));
         apply_record(&store, SchemaRecord::Noop);
         assert_eq!(store.read().versions("av-value").unwrap(), vec![1]);
-        assert_eq!(store.read().schema_by_id(1).unwrap().1, "{\"type\":\"int\"}");
+        assert_eq!(
+            store.read().schema_by_id(1).unwrap().1,
+            "{\"type\":\"int\"}"
+        );
     }
 }

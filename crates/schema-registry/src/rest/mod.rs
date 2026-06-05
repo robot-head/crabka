@@ -8,8 +8,8 @@ pub mod subjects;
 
 use std::sync::Arc;
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 
 use crate::kafkastore::KafkaStore;
 
@@ -20,7 +20,10 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(|| async { response::ok_json(&serde_json::json!({})) }))
+        .route(
+            "/",
+            get(|| async { response::ok_json(&serde_json::json!({})) }),
+        )
         .route("/schemas/types", get(schemas::types))
         .route("/schemas/ids/{id}", get(schemas::get_by_id))
         .route("/subjects", get(subjects::list))
@@ -29,13 +32,19 @@ pub fn router(state: AppState) -> Router {
             "/subjects/{subject}/versions",
             get(subjects::versions).post(subjects::register),
         )
-        .route("/subjects/{subject}/versions/{version}", get(subjects::get_version))
+        .route(
+            "/subjects/{subject}/versions/{version}",
+            get(subjects::get_version),
+        )
         .route(
             "/subjects/{subject}/versions/{version}/schema",
             get(subjects::get_version_schema),
         )
         .route("/config", get(config::get_global).put(config::put_global))
-        .route("/config/{subject}", get(config::get_subject).put(config::put_subject))
+        .route(
+            "/config/{subject}",
+            get(config::get_subject).put(config::put_subject),
+        )
         .route(
             "/compatibility/subjects/{subject}/versions/{version}",
             post(compatibility::check),

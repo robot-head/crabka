@@ -1,6 +1,8 @@
 #![cfg(not(target_os = "windows"))]
 use crabka_schema_registry::format::SchemaType;
-use crabka_schema_registry::kafkastore::record::{encode_schema, SchemaKey, SchemaRecord, SchemaValue};
+use crabka_schema_registry::kafkastore::record::{
+    SchemaKey, SchemaRecord, SchemaValue, encode_schema,
+};
 
 fn fixture(name: &str) -> serde_json::Value {
     let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
@@ -17,7 +19,10 @@ fn schema_fixture_for(subject: &str) -> (String, String) {
         };
         let key: serde_json::Value = serde_json::from_str(key_str).unwrap();
         if key["keytype"] == "SCHEMA" && key["subject"] == subject {
-            return (key_str.to_string(), rec["value"].as_str().unwrap().to_string());
+            return (
+                key_str.to_string(),
+                rec["value"].as_str().unwrap().to_string(),
+            );
         }
     }
     panic!("no SCHEMA fixture for {subject}");
@@ -63,7 +68,10 @@ fn protobuf_value_has_schema_type() {
         v["schema"].as_str().unwrap(),
     );
     let ours: serde_json::Value = serde_json::from_slice(&our_val).unwrap();
-    assert_eq!(ours, v, "structural value match (incl. schemaType:PROTOBUF)");
+    assert_eq!(
+        ours, v,
+        "structural value match (incl. schemaType:PROTOBUF)"
+    );
 }
 
 #[test]
@@ -71,7 +79,10 @@ fn decode_handles_noop_and_schema_and_tombstone() {
     // NOOP fixture (record 0 or 1): value is null.
     let noop = fixture("schemas_record_0.json");
     let noop_key = noop["key"].as_str().unwrap().as_bytes();
-    assert!(matches!(SchemaRecord::decode(noop_key, None), SchemaRecord::Noop));
+    assert!(matches!(
+        SchemaRecord::decode(noop_key, None),
+        SchemaRecord::Noop
+    ));
     // SCHEMA decode round-trip.
     let (k, val) = schema_fixture_for("av-value");
     match SchemaRecord::decode(k.as_bytes(), Some(val.as_bytes())) {

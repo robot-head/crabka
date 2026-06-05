@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::error::SrError;
 use crate::format::{self, SchemaType};
-use crate::rest::{response::ok_json, AppState};
+use crate::rest::{AppState, response::ok_json};
 
 #[derive(Deserialize)]
 struct Body {

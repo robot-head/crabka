@@ -45,9 +45,9 @@ impl SrError {
             Self::SubjectNotFound(_) | Self::VersionNotFound | Self::SchemaNotFound => {
                 StatusCode::NOT_FOUND
             }
-            Self::InvalidSchema(_) | Self::InvalidVersion(_) | Self::InvalidCompatibilityLevel(_) => {
-                StatusCode::UNPROCESSABLE_ENTITY
-            }
+            Self::InvalidSchema(_)
+            | Self::InvalidVersion(_)
+            | Self::InvalidCompatibilityLevel(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Backend(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -55,7 +55,8 @@ impl SrError {
 
 impl IntoResponse for SrError {
     fn into_response(self) -> Response {
-        let body = serde_json::json!({ "error_code": self.error_code(), "message": self.to_string() });
+        let body =
+            serde_json::json!({ "error_code": self.error_code(), "message": self.to_string() });
         (
             self.http_status(),
             [("content-type", CONTENT_TYPE)],
@@ -68,17 +69,23 @@ impl IntoResponse for SrError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::response::IntoResponse;
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
 
     #[test]
     fn codes_map_to_status() {
-        assert_eq!(SrError::SubjectNotFound("s".into()).http_status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            SrError::SubjectNotFound("s".into()).http_status(),
+            StatusCode::NOT_FOUND
+        );
         assert_eq!(SrError::SubjectNotFound("s".into()).error_code(), 40401);
         assert_eq!(SrError::VersionNotFound.error_code(), 40402);
         assert_eq!(SrError::SchemaNotFound.error_code(), 40403);
         assert_eq!(SrError::InvalidSchema("bad".into()).error_code(), 42201);
-        assert_eq!(SrError::InvalidSchema("bad".into()).http_status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            SrError::InvalidSchema("bad".into()).http_status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
         assert_eq!(SrError::Backend("x".into()).error_code(), 50001);
     }
 
@@ -86,7 +93,9 @@ mod tests {
     async fn body_is_confluent_json() {
         let resp = SrError::SubjectNotFound("av-value".into()).into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error_code"], 40401);
         assert!(v["message"].as_str().unwrap().contains("av-value"));

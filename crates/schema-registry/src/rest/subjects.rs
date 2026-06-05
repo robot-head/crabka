@@ -7,8 +7,8 @@ use serde::Deserialize;
 use crate::error::SrError;
 use crate::format::SchemaType;
 use crate::rest::{
-    response::{ok_json, ok_raw},
     AppState,
+    response::{ok_json, ok_raw},
 };
 
 #[derive(Deserialize)]

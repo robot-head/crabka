@@ -2,8 +2,8 @@
 //! key = deterministic prost encoding of the descriptor (source-info cleared so
 //! formatting doesn't change the bytes). Confluent-exact canonical form is slice 2+.
 
-use crate::error::SrError;
 use super::ParsedSchema;
+use crate::error::SrError;
 
 use prost_reflect::prost::Message;
 use prost_reflect::prost_types::FileDescriptorProto;
@@ -23,7 +23,9 @@ impl ParsedSchema for ProtobufSchema {
         // affects the dedup key. Then prost-encode to bytes and hex-encode.
         // NOTE: this is a descriptor-bytes key, not Confluent canonical form
         // (which is slice 2+).
-        tracing::debug!("protobuf canonical_form: using descriptor-bytes key (not Confluent canonical form; slice 2+)");
+        tracing::debug!(
+            "protobuf canonical_form: using descriptor-bytes key (not Confluent canonical form; slice 2+)"
+        );
         let mut d = self.0.clone();
         d.source_code_info = None;
         d.name = None;

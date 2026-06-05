@@ -1,14 +1,14 @@
 //! JSON Schema: parse as JSON + well-formedness; canonical form = recursively
 //! key-sorted compact JSON (the dedup key). Compatibility is slice 2.
 
-use crate::error::SrError;
 use super::ParsedSchema;
+use crate::error::SrError;
 
 pub struct JsonSchema(serde_json::Value);
 
 pub fn parse(schema: &str) -> Result<JsonSchema, SrError> {
-    let v: serde_json::Value =
-        serde_json::from_str(schema).map_err(|e| SrError::InvalidSchema(format!("JSON Schema: {e}")))?;
+    let v: serde_json::Value = serde_json::from_str(schema)
+        .map_err(|e| SrError::InvalidSchema(format!("JSON Schema: {e}")))?;
     if !v.is_object() && !v.is_boolean() {
         return Err(SrError::InvalidSchema(
             "JSON Schema must be an object or boolean".into(),
@@ -41,7 +41,10 @@ fn canonicalize(v: &serde_json::Value) -> String {
             format!("{{{}}}", inner.join(","))
         }
         serde_json::Value::Array(a) => {
-            format!("[{}]", a.iter().map(canonicalize).collect::<Vec<_>>().join(","))
+            format!(
+                "[{}]",
+                a.iter().map(canonicalize).collect::<Vec<_>>().join(",")
+            )
         }
         other => serde_json::to_string(other).unwrap(),
     }
@@ -54,8 +57,14 @@ mod tests {
 
     #[test]
     fn parses_object_and_dedups_key_order() {
-        let a = parse(r#"{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"string"}}}"#).unwrap();
-        let b = parse(r#"{"properties":{"b":{"type":"string"},"a":{"type":"integer"}},"type":"object"}"#).unwrap();
+        let a = parse(
+            r#"{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"string"}}}"#,
+        )
+        .unwrap();
+        let b = parse(
+            r#"{"properties":{"b":{"type":"string"},"a":{"type":"integer"}},"type":"object"}"#,
+        )
+        .unwrap();
         assert_eq!(a.canonical_form(), b.canonical_form());
     }
 

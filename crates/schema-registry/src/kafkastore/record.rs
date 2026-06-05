@@ -146,7 +146,9 @@ pub fn encode_config(subject: Option<&str>, level: &str) -> (Vec<u8>, Vec<u8>) {
         subject: subject.map(str::to_string),
         magic: 0,
     };
-    let value = ConfigValue { compatibility_level: level.to_string() };
+    let value = ConfigValue {
+        compatibility_level: level.to_string(),
+    };
     (
         serde_json::to_vec(&key).expect("config key serialises"),
         serde_json::to_vec(&value).expect("config value serialises"),

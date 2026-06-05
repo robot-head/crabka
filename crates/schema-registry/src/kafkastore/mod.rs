@@ -8,7 +8,7 @@ pub mod writer;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::config::RegistryConfig;
@@ -37,7 +37,10 @@ impl KafkaStore {
     /// replay. Startup against a pre-existing log could briefly mis-assign ids
     /// until the reader catches up; proper high-watermark catch-up is a later
     /// (HA) slice.
-    pub async fn start(cfg: &RegistryConfig, cancel: CancellationToken) -> anyhow::Result<Arc<Self>> {
+    pub async fn start(
+        cfg: &RegistryConfig,
+        cancel: CancellationToken,
+    ) -> anyhow::Result<Arc<Self>> {
         let topic_id = topic::ensure_schemas_topic(cfg).await?;
         let r = reader::spawn(cfg, topic_id, cancel);
         let writer = writer::SchemaWriter::start(cfg).await?;
@@ -86,11 +89,7 @@ impl KafkaStore {
     }
 
     /// Persist + apply a per-subject compatibility level.
-    pub async fn set_subject_compat(
-        &self,
-        subject: &str,
-        level: String,
-    ) -> Result<(), SrError> {
+    pub async fn set_subject_compat(&self, subject: &str, level: String) -> Result<(), SrError> {
         self.set_compat(Some(subject), level).await
     }
 

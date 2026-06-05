@@ -4,15 +4,19 @@ use axum::extract::{Path, State};
 use axum::response::Response;
 
 use crate::error::SrError;
-use crate::rest::{response::ok_json, AppState};
+use crate::rest::{AppState, response::ok_json};
 
 /// GET /schemas/ids/{id}
 pub async fn get_by_id(
     State(st): State<AppState>,
     Path(id): Path<i32>,
 ) -> Result<Response, SrError> {
-    let (ty, schema) =
-        st.store.store.read().schema_by_id(id).ok_or(SrError::SchemaNotFound)?;
+    let (ty, schema) = st
+        .store
+        .store
+        .read()
+        .schema_by_id(id)
+        .ok_or(SrError::SchemaNotFound)?;
     let mut body = serde_json::Map::new();
     if let Some(t) = ty.wire_name() {
         body.insert("schemaType".into(), t.into());

@@ -65,8 +65,14 @@ impl StoreState {
         self.subjects
             .entry(subject.to_string())
             .or_default()
-            .push(VersionEntry { version: next_version, id });
-        Ok(Registered { id, version: next_version })
+            .push(VersionEntry {
+                version: next_version,
+                id,
+            });
+        Ok(Registered {
+            id,
+            version: next_version,
+        })
     }
 
     /// Fold a decoded SCHEMA record into state (reader replay). Idempotent.
@@ -76,25 +82,31 @@ impl StoreState {
         }
         let ty = SchemaType::from_wire(value.schema_type.as_deref());
         self.max_id = self.max_id.max(value.id);
-        self.by_id.entry(value.id).or_insert_with(|| (ty, value.schema.clone()));
+        self.by_id
+            .entry(value.id)
+            .or_insert_with(|| (ty, value.schema.clone()));
         if let Ok(p) = format::parse(ty, &value.schema) {
-            self.by_canonical.entry(p.canonical_form()).or_insert(value.id);
+            self.by_canonical
+                .entry(p.canonical_form())
+                .or_insert(value.id);
         }
         let entry = self.subjects.entry(value.subject.clone()).or_default();
         if !entry.iter().any(|v| v.version == value.version) {
-            entry.push(VersionEntry { version: value.version, id: value.id });
+            entry.push(VersionEntry {
+                version: value.version,
+                id: value.id,
+            });
             entry.sort_by_key(|v| v.version);
         }
     }
 
-    fn find_under_subject_canonical(
-        &self,
-        subject: &str,
-        canonical: &str,
-    ) -> Option<Registered> {
+    fn find_under_subject_canonical(&self, subject: &str, canonical: &str) -> Option<Registered> {
         let id = *self.by_canonical.get(canonical)?;
         let entry = self.subjects.get(subject)?.iter().find(|v| v.id == id)?;
-        Some(Registered { id, version: entry.version })
+        Some(Registered {
+            id,
+            version: entry.version,
+        })
     }
 
     pub fn set_global_compat(&mut self, level: String) {
@@ -122,7 +134,9 @@ impl StoreState {
 
     #[must_use]
     pub fn versions(&self, subject: &str) -> Option<Vec<i32>> {
-        self.subjects.get(subject).map(|vs| vs.iter().map(|v| v.version).collect())
+        self.subjects
+            .get(subject)
+            .map(|vs| vs.iter().map(|v| v.version).collect())
     }
 
     /// Returns `(id, version, schemaType, schema)` for a subject+version.
@@ -190,7 +204,9 @@ mod tests {
     fn same_schema_new_subject_reuses_global_id_fresh_version() {
         let mut s = StoreState::default();
         let r1 = s.register("av-value", SchemaType::Avro, &av("A")).unwrap();
-        let r2 = s.register("other-value", SchemaType::Avro, &av("A")).unwrap();
+        let r2 = s
+            .register("other-value", SchemaType::Avro, &av("A"))
+            .unwrap();
         assert_eq!(r1.id, r2.id);
         assert_eq!(r2.version, 1);
     }
@@ -208,7 +224,10 @@ mod tests {
     #[test]
     fn invalid_schema_rejected_even_under_none() {
         let mut s = StoreState::default();
-        assert!(s.register("av-value", SchemaType::Avro, "{not avro}").is_err());
+        assert!(
+            s.register("av-value", SchemaType::Avro, "{not avro}")
+                .is_err()
+        );
     }
 
     #[test]
