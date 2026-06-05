@@ -5,6 +5,7 @@ pub(crate) mod byte;
 pub mod join_window;
 pub mod kv;
 pub(crate) mod registry;
+pub(crate) mod session_schema;
 pub(crate) mod turso;
 pub mod window;
 pub(crate) mod window_schema;
