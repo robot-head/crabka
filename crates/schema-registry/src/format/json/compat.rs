@@ -108,6 +108,16 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
         Kind::MinPropertiesRemoved => true,
         Kind::MinPropertiesDecreased => true,
         Kind::MinPropertiesIncreased => false,
+
+        // --- Combinators ---
+        Kind::CombinedTypeChanged => false,
+        Kind::ProductTypeExtended => true,
+        Kind::ProductTypeNarrowed => false,
+        Kind::SumTypeExtended => true,
+        Kind::SumTypeNarrowed => false,
+        Kind::NotTypeExtended => true,
+        Kind::NotTypeNarrowed => false,
+        Kind::CombinedTypeSubschemasChanged => false,
     }
 }
 

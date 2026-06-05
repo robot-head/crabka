@@ -172,4 +172,22 @@ mod tests {
             .is_err()
         );
     }
+
+    // --- Task 3: combinators ---
+
+    #[test]
+    fn anyof_subschema_added_does_not_panic() {
+        let _ = check(
+            r#"{"anyOf":[{"type":"string"},{"type":"integer"}]}"#,
+            r#"{"anyOf":[{"type":"string"}]}"#,
+        );
+    }
+
+    #[test]
+    fn allof_subschema_added_does_not_panic() {
+        let _ = check(
+            r#"{"allOf":[{"type":"object"},{"required":["a"]}]}"#,
+            r#"{"allOf":[{"type":"object"}]}"#,
+        );
+    }
 }

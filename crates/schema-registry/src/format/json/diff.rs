@@ -79,6 +79,16 @@ pub enum Kind {
     MinPropertiesRemoved,
     MinPropertiesDecreased,
     MinPropertiesIncreased,
+    // --- Combinators ---
+    CombinedTypeChanged,
+    ProductTypeExtended,
+    ProductTypeNarrowed,
+    SumTypeExtended,
+    SumTypeNarrowed,
+    #[allow(dead_code)] // emitted by Task 6 calibration when not-schema is widened
+    NotTypeExtended,
+    NotTypeNarrowed,
+    CombinedTypeSubschemasChanged,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +147,7 @@ fn compare_schema(
     compare_string_constraints(path, orig, upd, out);
     compare_array_constraints(path, orig, upd, ctx, out);
     compare_object_size(path, orig, upd, out);
+    compare_combinators(path, orig, upd, ctx, out);
 }
 
 fn types_of(schema: &Value) -> BTreeSet<String> {
@@ -531,4 +542,106 @@ fn compare_object_size(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Diff
         Kind::MinPropertiesIncreased,
         false,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Combinators: allOf / anyOf / oneOf / not
+// ---------------------------------------------------------------------------
+
+fn combinator_keyword(schema: &Value) -> Option<&str> {
+    ["allOf", "anyOf", "oneOf", "not"]
+        .iter()
+        .copied()
+        .find(|kw| schema.get(kw).is_some())
+}
+
+fn canonicalize_subschemas(arr: &[Value]) -> BTreeSet<String> {
+    arr.iter().map(canonical_value).collect()
+}
+
+fn compare_combinators(
+    path: &str,
+    orig: &Value,
+    upd: &Value,
+    ctx: &mut Ctx<'_>,
+    out: &mut Vec<Difference>,
+) {
+    let ok = combinator_keyword(orig);
+    let uk = combinator_keyword(upd);
+
+    match (ok, uk) {
+        (None, None) => {}
+        (Some(ok), Some(uk)) if ok == uk => {
+            // same keyword — compare subschemas
+            let cpath = format!("{path}/{ok}");
+            match ok {
+                "not" => {
+                    let on = orig.get("not").unwrap();
+                    let un = upd.get("not").unwrap();
+                    // recurse for structural diff; report change if canonical differs
+                    let oc = canonical_value(on);
+                    let uc = canonical_value(un);
+                    if oc != uc {
+                        // emit a coarse-grained NotType* based on whether the
+                        // negated schema got wider (=> restriction on instances
+                        // is narrower) or narrower (restriction is stricter).
+                        // Since recursive diff direction is hard to infer here,
+                        // we emit NotTypeNarrowed as the conservative/safe guess
+                        // and let the combinator recurse to catch nested changes.
+                        out.push(d(Kind::NotTypeNarrowed, &cpath));
+                        compare_schema(&format!("{path}/not"), on, un, ctx, out);
+                    }
+                }
+                "allOf" => {
+                    let os = orig
+                        .get("allOf")
+                        .and_then(Value::as_array)
+                        .map_or(&[] as &[Value], Vec::as_slice);
+                    let us = upd
+                        .get("allOf")
+                        .and_then(Value::as_array)
+                        .map_or(&[] as &[Value], Vec::as_slice);
+                    let oss = canonicalize_subschemas(os);
+                    let uss = canonicalize_subschemas(us);
+                    if oss != uss {
+                        if uss.is_superset(&oss) {
+                            // allOf: more constraints = NARROWER
+                            out.push(d(Kind::ProductTypeNarrowed, &cpath));
+                        } else if oss.is_superset(&uss) {
+                            out.push(d(Kind::ProductTypeExtended, &cpath));
+                        } else {
+                            out.push(d(Kind::CombinedTypeSubschemasChanged, &cpath));
+                        }
+                    }
+                }
+                "anyOf" | "oneOf" => {
+                    let os = orig
+                        .get(ok)
+                        .and_then(Value::as_array)
+                        .map_or(&[] as &[Value], Vec::as_slice);
+                    let us = upd
+                        .get(uk)
+                        .and_then(Value::as_array)
+                        .map_or(&[] as &[Value], Vec::as_slice);
+                    let oss = canonicalize_subschemas(os);
+                    let uss = canonicalize_subschemas(us);
+                    if oss != uss {
+                        if uss.is_superset(&oss) {
+                            // anyOf/oneOf: more alternatives = WIDER
+                            out.push(d(Kind::SumTypeExtended, &cpath));
+                        } else if oss.is_superset(&uss) {
+                            out.push(d(Kind::SumTypeNarrowed, &cpath));
+                        } else {
+                            out.push(d(Kind::CombinedTypeSubschemasChanged, &cpath));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Different keywords or one absent → incompatible structural change
+        (Some(_) | None, Some(_)) | (Some(_), None) => {
+            out.push(d(Kind::CombinedTypeChanged, path));
+        }
+    }
 }
