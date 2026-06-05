@@ -16,6 +16,9 @@ pub async fn send(
     req: ConnectRequest<pb::SendRequest>,
 ) -> Result<ConnectResponse<pb::SendResponse>, ConnectError> {
     let msg = req.0;
+    // NOTE (P0–P2): `msg.acks` is accepted on the wire but not yet honored —
+    // every record is produced with acks=all, which the dedup/EOS path
+    // requires anyway. Per-acks handling on the plain path is deferred.
     let mut results = Vec::with_capacity(msg.records.len());
     for r in msg.records {
         let rec = GatewayRecord {

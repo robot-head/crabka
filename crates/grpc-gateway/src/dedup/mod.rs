@@ -104,6 +104,35 @@ impl DedupEngine {
             });
         }
 
+        // Run the transactional write. On ANY error, best-effort abort the
+        // in-flight transaction and drop the producer so the next call
+        // re-initializes from `Ready`; otherwise a single transient error
+        // would strand this partition's producer mid-transaction and brick
+        // every key that hashes to it until the process restarts.
+        match self.txn_write(&mut slot, rec, value, key, p).await {
+            Ok(outcome) => Ok(outcome),
+            Err(e) => {
+                if let Some(producer) = slot.as_ref() {
+                    let _ = producer.abort_transaction().await;
+                }
+                *slot = None;
+                Err(e)
+            }
+        }
+    }
+
+    /// The fallible begin→record→claim→commit sequence for one keyed record.
+    /// Factored out so `dedup_produce` can abort the transaction and reset the
+    /// producer slot on any error. The caller must hold `slot`'s lock and have
+    /// confirmed the key is not already claimed.
+    async fn txn_write(
+        &self,
+        slot: &mut Option<Producer>,
+        rec: &GatewayRecord,
+        value: Bytes,
+        key: &str,
+        p: u32,
+    ) -> Result<RecordOutcome, GatewayError> {
         // Lazily init the partition's transactional producer.
         if slot.is_none() {
             let txn_id = format!("{}-{}", self.txn_id_prefix, p);
