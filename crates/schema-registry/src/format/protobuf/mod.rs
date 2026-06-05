@@ -11,6 +11,9 @@
 //! in `by_id` so that the REST echo-back matches what cp-schema-registry
 //! would return.
 
+mod compat;
+mod diff;
+
 use std::fmt::Write as _;
 
 use super::ParsedSchema;
@@ -123,11 +126,28 @@ impl ProtobufSchema {
     pub fn normalized_form(&self) -> &str {
         &self.normalised
     }
+
+    pub(crate) fn descriptor(&self) -> &FileDescriptorProto {
+        &self.descriptor
+    }
 }
 
-/// Compatibility check. Permissive until slice 2b/2c implement the real rules.
-pub fn check(_reader: &str, _writer: &str) -> Result<(), Vec<String>> {
-    Ok(())
+/// Confluent Protobuf compatibility: can a reader using `reader` read data
+/// written with `writer`? Computes the structural diff (original = writer,
+/// update = reader) and rejects if any difference is backward-incompatible.
+pub fn check(reader: &str, writer: &str) -> Result<(), Vec<String>> {
+    let reader_d = parse(reader).map_err(|e| vec![format!("reader: {e}")])?;
+    let writer_d = parse(writer).map_err(|e| vec![format!("writer: {e}")])?;
+    let diffs = diff::compare(writer_d.descriptor(), reader_d.descriptor());
+    let incompatible: Vec<&diff::Difference> = diffs
+        .iter()
+        .filter(|d| !compat::is_backward_compatible(&d.kind))
+        .collect();
+    if incompatible.is_empty() {
+        Ok(())
+    } else {
+        Err(compat::messages(&incompatible))
+    }
 }
 
 impl ParsedSchema for ProtobufSchema {
@@ -153,11 +173,6 @@ mod tests {
     use super::*;
     use crate::format::ParsedSchema;
 
-    #[test]
-    fn check_is_permissive_for_now() {
-        assert!(check("anything", "anything else").is_ok());
-    }
-
     const P: &str = "syntax = \"proto3\"; message User { int32 id = 1; }";
 
     #[test]
@@ -170,5 +185,37 @@ mod tests {
     #[test]
     fn rejects_invalid_proto() {
         assert!(parse("this is not protobuf").is_err());
+    }
+
+    fn p(body: &str) -> String {
+        format!("syntax = \"proto3\"; message U {{ {body} }}")
+    }
+
+    #[test]
+    fn field_added_is_backward_compatible() {
+        assert!(check(&p("int32 id = 1; int32 x = 2;"), &p("int32 id = 1;")).is_ok());
+    }
+
+    #[test]
+    fn field_removed_is_backward_compatible() {
+        assert!(check(&p("int32 id = 1;"), &p("int32 id = 1; int32 x = 2;")).is_ok());
+    }
+
+    #[test]
+    fn scalar_change_within_group_ok_across_group_bad() {
+        assert!(check(&p("int64 id = 1;"), &p("int32 id = 1;")).is_ok());
+        assert!(check(&p("string id = 1;"), &p("int32 id = 1;")).is_err());
+    }
+
+    #[test]
+    fn label_change_is_incompatible() {
+        assert!(check(&p("repeated int32 id = 1;"), &p("int32 id = 1;")).is_err());
+    }
+
+    #[test]
+    fn kind_change_scalar_to_message_is_incompatible() {
+        let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
+        let r = "syntax = \"proto3\"; message M {} message U { M id = 1; }";
+        assert!(check(r, w).is_err());
     }
 }
