@@ -26,6 +26,8 @@ uuid = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
+turso = "0.6"
+pollster = "0.4"
 
 [dev-dependencies]
 assert2 = { workspace = true }
