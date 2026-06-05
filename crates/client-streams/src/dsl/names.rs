@@ -47,4 +47,6 @@ pub(crate) const TABLE_MAPVALUES: &str = "KTABLE-MAPVALUES-";
 #[allow(dead_code)]
 pub(crate) const TABLE_FILTER: &str = "KTABLE-FILTER-";
 #[allow(dead_code)]
+pub(crate) const JOIN: &str = "KSTREAM-JOIN-";
+#[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";

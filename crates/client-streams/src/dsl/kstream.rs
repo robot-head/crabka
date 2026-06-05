@@ -638,7 +638,7 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, Some(store_name))
+        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
     }
 }
 

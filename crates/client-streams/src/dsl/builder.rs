@@ -100,6 +100,8 @@ impl StreamsBuilder {
         VS: Serde<V> + Clone + 'static,
     {
         let topic: String = topic.into();
+        // Preserve a copy of the source topic to surface via `KTable::source_topic()`.
+        let topic_for_ktable = topic.clone();
         let mut g = self.internal.borrow_mut();
         // Store name at the JVM position (minted before the source/processor name).
         let store_name = match &materialized.store_name {
@@ -169,7 +171,12 @@ impl StreamsBuilder {
             },
         ));
         drop(g);
-        crate::dsl::ktable::KTable::new(Rc::clone(&self.internal), id, Some(store_name))
+        crate::dsl::ktable::KTable::new(
+            Rc::clone(&self.internal),
+            id,
+            Some(store_name),
+            Some(topic_for_ktable),
+        )
     }
 
     /// Build the topology with no optimizer (the JVM `NO_OPTIMIZATION` default):
