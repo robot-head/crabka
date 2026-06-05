@@ -56,3 +56,6 @@ name = "interop"
 
 [[test]]
 name = "capture_fixtures"
+
+[[test]]
+name = "schemas_record"
