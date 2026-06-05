@@ -218,4 +218,23 @@ mod tests {
         let r = "syntax = \"proto3\"; message M {} message U { M id = 1; }";
         assert!(check(r, w).is_err());
     }
+
+    // ── Task 2: oneof rules ───────────────────────────────────────────────────
+
+    #[test]
+    fn moving_field_into_oneof_does_not_panic() {
+        let w = "syntax = \"proto3\"; message U { int32 a = 1; int32 b = 2; }";
+        let r = "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }";
+        let _ = check(r, w); // verdict calibrated vs cp in Task 6; must not panic
+    }
+
+    #[test]
+    fn proto3_optional_is_not_a_oneof_change() {
+        let w = "syntax = \"proto3\"; message U { int32 a = 1; }";
+        let r = "syntax = \"proto3\"; message U { optional int32 a = 1; }";
+        assert!(
+            check(r, w).is_ok(),
+            "proto3 optional is not a oneof migration"
+        );
+    }
 }

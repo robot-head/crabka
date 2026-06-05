@@ -8,9 +8,19 @@ use super::diff::{Difference, Kind};
 #[must_use]
 pub fn is_backward_compatible(kind: &Kind) -> bool {
     match kind {
-        Kind::FieldAdded | Kind::FieldRemoved | Kind::MessageAdded | Kind::MessageRemoved => true,
+        Kind::FieldAdded
+        | Kind::FieldRemoved
+        | Kind::MessageAdded
+        | Kind::MessageRemoved
+        // Oneof rules (Task 2) — seed values, calibrated vs cp in Task 6.
+        | Kind::OneofFieldMovedIn
+        | Kind::OneofAdded => true,
         Kind::FieldScalarKindChanged { compatible_group } => *compatible_group,
-        Kind::FieldKindChanged | Kind::FieldNamedTypeChanged | Kind::FieldLabelChanged => false,
+        Kind::FieldKindChanged
+        | Kind::FieldNamedTypeChanged
+        | Kind::FieldLabelChanged
+        | Kind::OneofFieldMovedOut
+        | Kind::OneofRemoved => false,
     }
 }
 

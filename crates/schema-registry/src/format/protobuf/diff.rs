@@ -2,10 +2,12 @@
 //! `SchemaDiff`. Each `Difference` is classified by `compat.rs`. No direction logic
 //! here — the engine calls `check` with (reader, writer) swapped per level.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use prost_reflect::prost_types::field_descriptor_proto::Type as FieldType;
-use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorProto};
+use prost_reflect::prost_types::{
+    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, OneofDescriptorProto,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
@@ -17,6 +19,11 @@ pub enum Kind {
     FieldLabelChanged,
     MessageRemoved,
     MessageAdded,
+    // Oneof rules (Task 2)
+    OneofFieldMovedIn,
+    OneofFieldMovedOut,
+    OneofAdded,
+    OneofRemoved,
 }
 
 #[derive(Debug, Clone)]
@@ -88,6 +95,22 @@ fn compare_message(
             });
         }
     }
+    // Compare real oneof declarations (synthetic proto3_optional oneofs are named
+    // with a leading underscore by protoc; filter them out by name).
+    let orig_real_oneofs: Vec<&OneofDescriptorProto> = orig
+        .oneof_decl
+        .iter()
+        .filter(|o| !o.name().starts_with('_'))
+        .collect();
+    let upd_real_oneofs: Vec<&OneofDescriptorProto> = upd
+        .oneof_decl
+        .iter()
+        .filter(|o| !o.name().starts_with('_'))
+        .collect();
+    // Collect into vecs to pass as slices
+    let orig_real: Vec<OneofDescriptorProto> = orig_real_oneofs.into_iter().cloned().collect();
+    let upd_real: Vec<OneofDescriptorProto> = upd_real_oneofs.into_iter().cloned().collect();
+    compare_oneofs(path, &orig_real, &upd_real, out);
 }
 
 fn compare_field(
@@ -96,6 +119,22 @@ fn compare_field(
     uf: &FieldDescriptorProto,
     out: &mut Vec<Difference>,
 ) {
+    // Oneof membership change (proto3 `optional` is a synthetic oneof — not a real one).
+    let orig_in_oneof = real_oneof(of);
+    let upd_in_oneof = real_oneof(uf);
+    if !orig_in_oneof && upd_in_oneof {
+        out.push(Difference {
+            kind: Kind::OneofFieldMovedIn,
+            path: path.to_string(),
+        });
+        // Still check type/label changes below — they can co-occur.
+    } else if orig_in_oneof && !upd_in_oneof {
+        out.push(Difference {
+            kind: Kind::OneofFieldMovedOut,
+            path: path.to_string(),
+        });
+    }
+
     if of.label() != uf.label() {
         out.push(Difference {
             kind: Kind::FieldLabelChanged,
@@ -122,6 +161,39 @@ fn compare_field(
             kind: Kind::FieldNamedTypeChanged,
             path: path.to_string(),
         });
+    }
+}
+
+/// True iff this field is a real (user-declared) oneof member.
+/// proto3 `optional` generates a SYNTHETIC oneof (`proto3_optional == Some(true)`),
+/// which must NOT be treated as a real oneof membership change.
+fn real_oneof(f: &FieldDescriptorProto) -> bool {
+    f.oneof_index.is_some() && f.proto3_optional != Some(true)
+}
+
+fn compare_oneofs(
+    prefix: &str,
+    orig: &[OneofDescriptorProto],
+    upd: &[OneofDescriptorProto],
+    out: &mut Vec<Difference>,
+) {
+    let orig_names: BTreeSet<&str> = orig.iter().map(OneofDescriptorProto::name).collect();
+    let upd_names: BTreeSet<&str> = upd.iter().map(OneofDescriptorProto::name).collect();
+    for name in &orig_names {
+        if !upd_names.contains(name) {
+            out.push(Difference {
+                kind: Kind::OneofRemoved,
+                path: join(prefix, name),
+            });
+        }
+    }
+    for name in &upd_names {
+        if !orig_names.contains(name) {
+            out.push(Difference {
+                kind: Kind::OneofAdded,
+                path: join(prefix, name),
+            });
+        }
     }
 }
 
