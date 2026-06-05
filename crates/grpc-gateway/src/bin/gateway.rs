@@ -11,6 +11,9 @@ use tracing::info;
 
 use crabka_grpc_gateway::codec::RawCodec;
 use crabka_grpc_gateway::config::GatewayConfig;
+use crabka_grpc_gateway::dedup::DedupEngine;
+use crabka_grpc_gateway::dedup::store::DedupStore;
+use crabka_grpc_gateway::dedup::topic::ensure_dedup_topic;
 use crabka_grpc_gateway::health::{self, Readiness};
 use crabka_grpc_gateway::produce::ProduceCore;
 use crabka_grpc_gateway::state::AppState;
@@ -101,17 +104,52 @@ async fn main() -> anyhow::Result<()> {
         dedup_txn_id_prefix: args.dedup_txn_id_prefix.clone(),
     };
 
-    let produce =
-        ProduceCore::new(&config.bootstrap, &config.client_id, Arc::new(RawCodec)).await?;
+    // Ensure the internal compacted dedup-claim topic exists before opening
+    // any producer/consumer against it.
+    ensure_dedup_topic(
+        &config.bootstrap,
+        &config.dedup_topic,
+        config.dedup_partitions,
+        config.dedup_window_ms,
+        GatewayConfig::DEDUP_TOPIC_REPLICATION,
+    )
+    .await?;
+
+    // Build the dedup store and warm it from the topic in the background; the
+    // gateway reports `/readyz` 503 until warm-up succeeds.
+    let store = Arc::new(DedupStore::new(config.dedup_partitions));
+    let readiness = Readiness::new();
+    {
+        let store = store.clone();
+        let readiness = readiness.clone();
+        let bootstrap = config.bootstrap.clone();
+        let client_id = format!("{}-dedup-warm", config.client_id);
+        let dedup_topic = config.dedup_topic.clone();
+        tokio::spawn(async move {
+            match store.warm_up(&bootstrap, &client_id, &dedup_topic).await {
+                Ok(()) => readiness.set_ready(),
+                Err(e) => tracing::error!(error = %e, "dedup warm-up failed; /readyz stays 503"),
+            }
+        });
+    }
+
+    let engine = Arc::new(DedupEngine::new(
+        &config.bootstrap,
+        &config.client_id,
+        &config.dedup_txn_id_prefix,
+        config.dedup_topic.clone(),
+        config.dedup_partitions,
+        store,
+    ));
+    let produce = ProduceCore::new(&config.bootstrap, &config.client_id, Arc::new(RawCodec))
+        .await?
+        .with_dedup(engine);
     let state = Arc::new(AppState {
         produce: Arc::new(produce),
         config: Arc::new(config.clone()),
     });
 
-    let readiness = Readiness::new();
-    readiness.set_ready(); // dedup wired in Task 12
-
-    let app = crabka_grpc_gateway::router(state).merge(health::router(readiness.clone()));
+    let app = crabka_grpc_gateway::router(state).merge(health::router(readiness));
 
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
     info!(addr = %listener.local_addr()?, "gateway listening");
