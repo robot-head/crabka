@@ -116,6 +116,25 @@ impl<K: Send + Sync + 'static, V: Send + 'static> KeyValueStore<K, V> for KeyVal
         }
         prev
     }
+    async fn range(&self, lo: &K, hi: &K) -> Vec<(K, V)> {
+        let lo_b = self.key_serde.serialize(lo);
+        let hi_b = self.key_serde.serialize(hi);
+        self.backend
+            .range(&lo_b, &hi_b)
+            .await
+            .into_iter()
+            .map(|(kb, vb)| {
+                (
+                    self.key_serde
+                        .deserialize(&kb)
+                        .expect("kv range key deserialize"),
+                    self.value_serde
+                        .deserialize(&vb)
+                        .expect("kv range value deserialize"),
+                )
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +164,34 @@ mod tests {
         check!(cl.len() == 3);
         check!(cl[2].1.is_none());
         check!(s.take_changelog().is_empty());
+    }
+
+    #[tokio::test]
+    async fn range_returns_ordered_half_open() {
+        use crate::processor::serde::BytesSerde;
+        use bytes::Bytes;
+        let mut s = KeyValueBytesStore::<Bytes, Bytes>::in_memory(
+            "r".into(),
+            Box::new(BytesSerde),
+            Box::new(BytesSerde),
+            "r-cl".into(),
+        );
+        s.put(Bytes::from_static(&[1, 0]), Bytes::from_static(b"a"))
+            .await;
+        s.put(Bytes::from_static(&[1, 5]), Bytes::from_static(b"b"))
+            .await;
+        s.put(Bytes::from_static(&[2, 0]), Bytes::from_static(b"c"))
+            .await;
+        let r = s
+            .range(&Bytes::from_static(&[1, 0]), &Bytes::from_static(&[2, 0]))
+            .await; // [lo, hi)
+        assert_eq!(
+            r,
+            vec![
+                (Bytes::from_static(&[1, 0]), Bytes::from_static(b"a")),
+                (Bytes::from_static(&[1, 5]), Bytes::from_static(b"b")),
+            ]
+        );
     }
 
     #[tokio::test]

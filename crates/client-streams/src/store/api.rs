@@ -37,4 +37,6 @@ pub trait KeyValueStore<K: Send + Sync, V: Send>: StateStore {
     async fn get(&self, key: &K) -> Option<V>;
     async fn put(&mut self, key: K, value: V);
     async fn delete(&mut self, key: &K) -> Option<V>;
+    /// Half-open range scan `[lo, hi)` in memcmp (lexicographic) key order.
+    async fn range(&self, lo: &K, hi: &K) -> Vec<(K, V)>;
 }
