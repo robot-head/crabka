@@ -4,6 +4,7 @@
 //! `_schemas` compacted topic. See
 //! `docs/superpowers/specs/2026-06-04-crabka-schema-registry-design.md`.
 
+pub mod compat;
 pub mod config;
 pub mod error;
 pub mod format;
