@@ -52,6 +52,34 @@ fn windowed_count_matches_jvm() {
 }
 
 #[test]
+fn stream_stream_join_matches_jvm() {
+    use crabka_client_streams::{JoinWindows, StreamJoined, StringSerde};
+    // Mirrors Capture.java `streamStreamJoin()`:
+    //   stream("left").join(stream("right"), (a,c)->a+c, JoinWindows 60s, StreamJoined).to("out")
+    //
+    // One subtopology, source_topics ["left","right"], copartition [0,1]. Two
+    // retainDuplicates window stores named after the JVM join processors —
+    // KSTREAM-JOINTHIS-0000000004-store / KSTREAM-JOINOTHER-0000000005-store (the
+    // lowering burns two KSTREAM-WINDOWED- indices so the join processors land at
+    // 4/5). Each store's changelog is cleanup.policy=delete (NOT compact,delete) +
+    // retention.ms = 60_000 + 60_000 + 0 + 86_400_000 = 86_520_000. No outer store.
+    let b = StreamsBuilder::new();
+    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    left.join(
+        &right,
+        |a: &String, c: &String| format!("{a}{c}"),
+        JoinWindows::of(60_000),
+        StreamJoined::with(StringSerde, StringSerde, StringSerde),
+    )
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(left);
+    drop(right);
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "stream_stream_join");
+}
+
+#[test]
 fn count_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     let b = StreamsBuilder::new();

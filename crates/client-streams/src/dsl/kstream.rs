@@ -649,13 +649,19 @@ where
         let grace = windows.grace_ms;
 
         let mut g = self.builder.borrow_mut();
-        // Mint the two join-window store names, then the three processor node
-        // names. (The exact mint order + names are tuned vs the JVM fixture in
-        // Task B4; this order keeps the execution-test names consistent.)
-        let this_store = g.new_processor_name(names::KSTREAM_JOINTHIS_STORE);
-        let other_store = g.new_processor_name(names::KSTREAM_JOINOTHER_STORE);
+        // Mint names to match the JVM 4.1 `KStreamImplJoin` counter sequence
+        // (validated by the `stream_stream_join` golden, Task B4): the JVM first
+        // mints two `KSTREAM-WINDOWED-` windowed-stream processors (which put each
+        // side into its window store), then the two join processors, then merge.
+        // The two window-store names are `<joinProcessorName>-store`. We burn the
+        // two windowed indices (those nodes aren't wire-visible) so the join
+        // processors — and hence the store names — land at the JVM indices.
+        let _windowed_this = g.new_processor_name(names::KSTREAM_WINDOWED);
+        let _windowed_other = g.new_processor_name(names::KSTREAM_WINDOWED);
         let join_this = g.new_processor_name(names::KSTREAM_JOINTHIS);
         let join_other = g.new_processor_name(names::KSTREAM_JOINOTHER);
+        let this_store = format!("{join_this}-store");
+        let other_store = format!("{join_other}-store");
         let merge = g.new_processor_name(names::MERGE);
 
         // ── THIS side: fed by this stream; puts into `this_store`, reads `other_store`.

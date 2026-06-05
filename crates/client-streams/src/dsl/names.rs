@@ -56,16 +56,12 @@ pub(crate) const KTABLE_JOIN_OTHER: &str = "KTABLE-JOINOTHER-";
 pub(crate) const KTABLE_MERGE: &str = "KTABLE-MERGE-";
 /// Windowed `KStream`-`KStream` join processor names (the two per-side join
 /// nodes union into one copartitioned subtopology via their shared stores).
-#[allow(dead_code)]
 pub(crate) const KSTREAM_JOINTHIS: &str = "KSTREAM-JOINTHIS-";
-#[allow(dead_code)]
 pub(crate) const KSTREAM_JOINOTHER: &str = "KSTREAM-JOINOTHER-";
-/// The two `retainDuplicates` join-window store names. The EXACT store names
-/// (and mint order) are tuned against the JVM fixture in Task B4; these
-/// placeholders give the execution tests consistent unique names for now.
-#[allow(dead_code)]
-pub(crate) const KSTREAM_JOINTHIS_STORE: &str = "KSTREAM-JOINTHIS-STATE-STORE-";
-#[allow(dead_code)]
-pub(crate) const KSTREAM_JOINOTHER_STORE: &str = "KSTREAM-JOINOTHER-STATE-STORE-";
+/// The JVM's two windowed-stream processors (one per side) that put each record
+/// into its window store. Not wire-visible, but they consume counter indices, so
+/// the lowering burns two to land the join processors — and thus the
+/// `<joinProcessorName>-store` window-store names — at the JVM indices.
+pub(crate) const KSTREAM_WINDOWED: &str = "KSTREAM-WINDOWED-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";
