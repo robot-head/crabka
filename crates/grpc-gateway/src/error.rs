@@ -12,8 +12,8 @@ pub enum GatewayError {
     ProducerCanceled,
     #[error("consumer error: {0}")]
     Consumer(#[from] ConsumerError),
-    #[error("dedup store is not yet warmed up")]
-    NotReady,
+    #[error("dedup partition not owned by this replica or still warming up")]
+    Unavailable,
     #[error("dedup claim could not be (de)serialized: {0}")]
     Claim(#[from] serde_json::Error),
     #[error("{0}")]

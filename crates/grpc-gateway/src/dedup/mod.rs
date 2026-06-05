@@ -76,12 +76,16 @@ impl DedupEngine {
         rec: &GatewayRecord,
         value: Bytes,
     ) -> Result<RecordOutcome, GatewayError> {
-        if !self.store.is_ready() {
-            return Err(GatewayError::NotReady);
-        }
         let key = rec.idempotency_key.as_deref().ok_or_else(|| {
             GatewayError::Other("dedup_produce called without idempotency_key".into())
         })?;
+        let p = partition_for(key, self.partitions);
+        // Mutual exclusion: only the owner of `p` may produce its keys, and only
+        // once warmed (claim map rebuilt). Otherwise refuse so the caller retries
+        // against the owning replica.
+        if !self.store.owns(p) || !self.store.is_warm() {
+            return Err(GatewayError::Unavailable);
+        }
 
         // Fast path: already claimed.
         if let Some(c) = self.store.get(key) {
@@ -92,7 +96,6 @@ impl DedupEngine {
             });
         }
 
-        let p = partition_for(key, self.partitions);
         let mut slot = self.slots[usize::try_from(p).unwrap_or(0)].lock().await;
 
         // Re-check under the lock (another task may have just claimed it).

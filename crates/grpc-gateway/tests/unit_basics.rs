@@ -36,16 +36,17 @@ fn claim_value_round_trips() {
 }
 
 #[tokio::test]
-async fn dedup_produce_before_warmup_is_not_ready() {
+async fn dedup_produce_before_ownership_is_unavailable() {
     use crabka_grpc_gateway::dedup::DedupEngine;
     use crabka_grpc_gateway::dedup::store::DedupStore;
     use crabka_grpc_gateway::error::GatewayError;
     use crabka_grpc_gateway::types::GatewayRecord;
     use std::sync::Arc;
 
-    // The store is constructed but never warmed, so the engine must refuse
-    // keyed produces (and `/readyz` stays 503) rather than risk a cold-start
-    // double-write. No broker is needed: the readiness check precedes all I/O.
+    // The store is constructed but run_ownership has never run, so owns()
+    // returns false for every partition. The engine must refuse keyed produces
+    // (and `/readyz` stays 503) rather than risk a cold-start double-write.
+    // No broker is needed: the ownership check precedes all I/O.
     let store = Arc::new(DedupStore::new(4));
     let engine = DedupEngine::new(
         "127.0.0.1:0",
@@ -68,5 +69,5 @@ async fn dedup_produce_before_warmup_is_not_ready() {
         .dedup_produce(&rec, Bytes::from_static(b"x"))
         .await
         .unwrap_err();
-    assert!(matches!(err, GatewayError::NotReady));
+    assert!(matches!(err, GatewayError::Unavailable));
 }

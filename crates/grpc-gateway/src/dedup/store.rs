@@ -1,19 +1,17 @@
-//! Materialized view of the compacted dedup-claim topic. In single-owner
-//! P2, the owner updates the map locally on each commit AND rebuilds it from
-//! the topic at startup (`warm_up`) for crash recovery. P3 replaces the
-//! local update with a continuous `read_committed` tail across owners.
+//! Materialized view of the compacted dedup-claim topic. The ownership
+//! consumer (`run_ownership`) joins the owners consumer group, tracks the
+//! assigned dedup partitions, and keeps the claim map warm. P3 gates every
+//! produce on ownership + warmth so only the owning replica may write.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
 
@@ -28,7 +26,12 @@ pub struct ClaimValue {
 pub struct DedupStore {
     map: DashMap<String, ClaimValue>,
     partitions: u32,
-    ready: AtomicBool,
+    /// Dedup-partition ids this replica currently owns (consumer-group assignment).
+    owned: std::sync::RwLock<std::collections::HashSet<u32>>,
+    /// Caught up reading owned partitions since the last assignment change.
+    warm: AtomicBool,
+    /// Has been warm at least once (drives /readyz).
+    warmed_once: AtomicBool,
 }
 
 impl DedupStore {
@@ -37,13 +40,28 @@ impl DedupStore {
         Self {
             map: DashMap::new(),
             partitions,
-            ready: AtomicBool::new(false),
+            owned: std::sync::RwLock::new(std::collections::HashSet::new()),
+            warm: AtomicBool::new(false),
+            warmed_once: AtomicBool::new(false),
         }
     }
 
+    /// True if dedup-partition `p` is currently owned by this replica.
     #[must_use]
-    pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::SeqCst)
+    pub fn owns(&self, p: u32) -> bool {
+        self.owned.read().expect("owned lock").contains(&p)
+    }
+
+    /// True once caught up on owned partitions since the last assignment change.
+    #[must_use]
+    pub fn is_warm(&self) -> bool {
+        self.warm.load(Ordering::SeqCst)
+    }
+
+    /// Has warmed at least once (readiness probe).
+    #[must_use]
+    pub fn has_warmed_once(&self) -> bool {
+        self.warmed_once.load(Ordering::SeqCst)
     }
 
     #[must_use]
@@ -56,31 +74,76 @@ impl DedupStore {
         self.map.insert(key, value);
     }
 
-    /// Rebuild the map from the compacted topic, then mark ready. Reads with
-    /// `read_committed` from earliest until caught up (two consecutive empty
-    /// polls). Single-member unique group ⇒ all partitions assigned.
-    pub async fn warm_up(
-        self: &Arc<Self>,
-        bootstrap: &str,
-        client_id: &str,
-        dedup_topic: &str,
+    /// Run the ownership consumer until `shutdown` fires. Joins the owners group
+    /// on the dedup topic; its assignment is the owned-partition set. Reads owned
+    /// partitions from earliest (never commits) to (re)build the claim map,
+    /// re-arming the warm gate on each assignment change. Closes the consumer on
+    /// exit so the coordinator task + group member don't leak.
+    pub async fn run_ownership(
+        self: Arc<Self>,
+        bootstrap: String,
+        client_id: String,
+        dedup_topic: String,
+        group: String,
+        shutdown: tokio_util::sync::CancellationToken,
     ) -> Result<(), GatewayError> {
-        let group = format!("{client_id}-{}", Uuid::new_v4());
         let mut consumer = Consumer::builder()
-            .bootstrap(bootstrap.to_string())
-            .client_id(client_id.to_string())
+            .bootstrap(bootstrap)
+            .client_id(client_id)
             .group_id(group)
-            .subscribe(vec![dedup_topic.to_string()])
+            .subscribe(vec![dedup_topic.clone()])
             .isolation_level(IsolationLevel::ReadCommitted)
             .auto_offset_reset(AutoOffsetReset::Earliest)
+            .assignor(crabka_client_consumer::Assignor::CooperativeSticky)
             .build()
             .await?;
 
-        let mut empty_polls = 0;
-        while empty_polls < 2 {
-            let batch = consumer.poll(Duration::from_millis(500)).await?;
+        let mut current: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut empty_polls = 0u32;
+        let mut poll_err: Option<GatewayError> = None;
+
+        loop {
+            let batch = tokio::select! {
+                () = shutdown.cancelled() => break,
+                b = consumer.poll(Duration::from_millis(500)) => match b {
+                    Ok(batch) => batch,
+                    Err(e) => { poll_err = Some(e.into()); break; }
+                },
+            };
+
+            let assigned: std::collections::HashSet<u32> = consumer
+                .assignment()
+                .await
+                .into_iter()
+                .filter(|(t, _)| *t == dedup_topic)
+                .filter_map(|(_, p)| u32::try_from(p).ok())
+                .collect();
+            if assigned != current {
+                let revoked: std::collections::HashSet<u32> =
+                    current.difference(&assigned).copied().collect();
+                if !revoked.is_empty() {
+                    self.map.retain(|k, _| {
+                        !revoked.contains(&crate::dedup::partition_for(k, self.partitions))
+                    });
+                }
+                current.clone_from(&assigned);
+                *self.owned.write().expect("owned lock") = assigned;
+                self.warm.store(false, Ordering::SeqCst);
+                empty_polls = 0;
+            }
+
+            // Warm heuristic: two consecutive empty polls since the last
+            // assignment change ⇒ owned partitions drained to the tail, safe to
+            // serve. Assumes a low-traffic, bursty claim topic (it is: tiny
+            // compacted claims that replay then idle); a continuously-saturated
+            // owned partition would defer warmth until it next idles. A future
+            // HWM-precise gate (spec §2) removes that theoretical caveat.
             if batch.is_empty() {
                 empty_polls += 1;
+                if empty_polls >= 2 {
+                    self.warm.store(true, Ordering::SeqCst);
+                    self.warmed_once.store(true, Ordering::SeqCst);
+                }
                 continue;
             }
             empty_polls = 0;
@@ -91,15 +154,21 @@ impl DedupStore {
                     None => {
                         self.map.remove(&key);
                     }
+                    // A malformed claim must not kill the ownership loop; skip it.
                     Some(v) => {
-                        let claim: ClaimValue = serde_json::from_slice(&v)?;
-                        self.map.insert(key, claim);
+                        if let Ok(claim) = serde_json::from_slice::<ClaimValue>(&v) {
+                            self.map.insert(key, claim);
+                        }
                     }
                 }
             }
         }
-        self.ready.store(true, Ordering::SeqCst);
-        Ok(())
+
+        let _ = consumer.close().await;
+        match poll_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     /// Test/helper writer: produce a single claim record (compacted topic key

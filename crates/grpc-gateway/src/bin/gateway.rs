@@ -9,6 +9,8 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing::info;
 
+use tokio_util::sync::CancellationToken;
+
 use crabka_grpc_gateway::codec::RawCodec;
 use crabka_grpc_gateway::config::GatewayConfig;
 use crabka_grpc_gateway::dedup::DedupEngine;
@@ -51,7 +53,7 @@ struct Args {
     #[arg(
         long,
         env = "CRABKA_GATEWAY_DEDUP_TOPIC",
-        default_value = "__crabka_gateway_dedup"
+        default_value = "__crabka_grpc_dedup"
     )]
     dedup_topic: String,
 
@@ -115,20 +117,42 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // Build the dedup store and warm it from the topic in the background; the
-    // gateway reports `/readyz` 503 until warm-up succeeds.
+    // Build the dedup store and run the ownership consumer in the background;
+    // the gateway reports `/readyz` 503 until the store has warmed at least once.
     let store = Arc::new(DedupStore::new(config.dedup_partitions));
     let readiness = Readiness::new();
+    let shutdown = CancellationToken::new();
+    {
+        let store = store.clone();
+        let bootstrap = config.bootstrap.clone();
+        let client_id = format!("{}-dedup-owner", config.client_id);
+        let dedup_topic = config.dedup_topic.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            if let Err(e) = store
+                .run_ownership(
+                    bootstrap,
+                    client_id,
+                    dedup_topic,
+                    "__crabka_grpc_gateway_dedup_owners".to_string(),
+                    shutdown,
+                )
+                .await
+            {
+                tracing::error!(error = %e, "dedup ownership task exited with error");
+            }
+        });
+    }
     {
         let store = store.clone();
         let readiness = readiness.clone();
-        let bootstrap = config.bootstrap.clone();
-        let client_id = format!("{}-dedup-warm", config.client_id);
-        let dedup_topic = config.dedup_topic.clone();
         tokio::spawn(async move {
-            match store.warm_up(&bootstrap, &client_id, &dedup_topic).await {
-                Ok(()) => readiness.set_ready(),
-                Err(e) => tracing::error!(error = %e, "dedup warm-up failed; /readyz stays 503"),
+            loop {
+                if store.has_warmed_once() {
+                    readiness.set_ready();
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
         });
     }
@@ -154,8 +178,9 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
     info!(addr = %listener.local_addr()?, "gateway listening");
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             tokio::signal::ctrl_c().await.ok();
+            shutdown.cancel();
         })
         .await?;
     Ok(())

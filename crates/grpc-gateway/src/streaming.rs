@@ -39,12 +39,7 @@ pub fn send_stream_inner(
                         deduplicated: o.deduplicated,
                         error: None,
                     },
-                    Err(e) => pb::RecordResult {
-                        partition: -1,
-                        offset: -1,
-                        deduplicated: false,
-                        error: Some(pb::ErrorInfo { code: 1, message: e.to_string(), retriable: false }),
-                    },
+                    Err(e) => crate::handlers::error_result(&e),
                 };
                 results.push(result);
             }

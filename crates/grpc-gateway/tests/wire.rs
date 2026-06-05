@@ -84,8 +84,8 @@ async fn health_endpoints_reflect_readiness() {
 
 /// Drive the `Send` handler for both result arms: an unkeyed record takes the
 /// plain path and succeeds; a keyed record routes to a dedup engine whose
-/// store is never warmed, so it returns `NotReady` and the handler maps it to
-/// a per-record `ErrorInfo`. Also constructs the Connect router.
+/// store has never run `run_ownership`, so it returns `Unavailable` and the
+/// handler maps it to a per-record `ErrorInfo`. Also constructs the Connect router.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn send_handler_ok_and_error_arms() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -105,8 +105,8 @@ async fn send_handler_ok_and_error_arms() {
         .await
         .unwrap();
 
-    // A dedup engine over a store that is never warmed → keyed records fail
-    // `NotReady`, exercising the handler's error arm deterministically.
+    // A dedup engine over a store that never ran run_ownership → keyed records fail
+    // with `Unavailable`, exercising the handler's error arm deterministically.
     let store = Arc::new(DedupStore::new(4));
     let engine = Arc::new(DedupEngine::new(
         &bootstrap,
@@ -168,7 +168,7 @@ async fn send_handler_ok_and_error_arms() {
     // Unkeyed record produced successfully.
     assert!(body.results[0].error.is_none());
     assert_eq!(body.results[0].partition, 0);
-    // Keyed record hit the not-ready dedup store → per-record error, no panic.
+    // Keyed record hit the unowned dedup store → per-record error, no panic.
     assert!(body.results[1].error.is_some());
 
     broker.shutdown().await;
