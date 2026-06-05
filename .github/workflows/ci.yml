@@ -77,10 +77,15 @@ jobs:
       # `--exclude crabka-broker` skips the testcontainers-based JVM
       # acceptance tests (Docker-only); they run under the
       # `broker-jvm-acceptance` job below.
+      # `--exclude crabka-grpc-gateway` skips its Docker-gated `jvm_differential`
+      # test: with `--include-ignored` it would run here, but it advertises
+      # `host.docker.internal` (only set up in `broker-jvm-acceptance`), so it
+      # fails to connect. The gateway's coverage comes from the
+      # `grpc-gateway-integration` job's non-ignored tests.
       - name: JVM differential coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
+          cargo llvm-cov --workspace --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --exclude crabka-grpc-gateway --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
       - uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -233,6 +238,34 @@ jobs:
           files: coverage/client-streams-integration.lcov
           disable_search: true
           flags: client-streams-integration
+          fail_ci_if_error: true
+
+  # crabka-grpc-gateway integration: unary Send produce, group consume+commit,
+  # and single-owner exactly-once dedup against an in-process Rust broker (no
+  # Docker). The gateway's logic lives in `src/` but is exercised only by these
+  # `tests/` binaries, so the `unit` flag's `--lib --bins` walk never covers it.
+  # (The Docker-only `jvm_differential` test is `#[ignore]` and skipped here.)
+  grpc-gateway-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: grpc-gateway-integration
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: gRPC gateway integration coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov -p crabka-grpc-gateway --tests --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
+      - uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/grpc-gateway-integration.lcov
+          disable_search: true
+          flags: grpc-gateway-integration
           fail_ci_if_error: true
 
   # crabka-schema-registry integration: schema validation, REST conformance, and

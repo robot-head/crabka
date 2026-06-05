@@ -1,0 +1,46 @@
+[package]
+name = "crabka-grpc-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version = "1.95.0"
+description = "gRPC / Connect-RPC + HTTP gateway into Crabka (Kafka) topics"
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "crabka-grpc-gateway"
+path = "src/bin/gateway.rs"
+
+[dependencies]
+crabka-client-producer = { version = "0.2", path = "../client-producer" }
+crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
+crabka-client-admin = { version = "0.2", path = "../client-admin" }
+connectrpc-axum.workspace = true
+prost.workspace = true
+pbjson.workspace = true
+axum.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap = { workspace = true, features = ["env", "derive"] }
+anyhow.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true }
+
+[build-dependencies]
+connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+crabka-broker = { version = "0.2", path = "../broker", features = ["test-helpers"] }
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+# `ServiceExt::oneshot` to drive the health router in tests/wire.rs.
+tower = { workspace = true, features = ["util"] }

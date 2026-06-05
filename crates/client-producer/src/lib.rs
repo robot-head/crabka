@@ -5,6 +5,11 @@
 //! `(producer_id, producer_epoch, base_sequence)`, retries that re-frame
 //! the same `RecordBatch` so the broker's dedup catches them.
 //!
+//! Also supports transactional (exactly-once) production —
+//! `init_transactions`, `begin_transaction`, `commit_transaction`,
+//! `abort_transaction`, and `send_offsets_to_transaction` for the
+//! consume-process-produce (KIP-447) pattern.
+//!
 //! ## Quick start
 //!
 //! ```no_run
@@ -38,7 +43,6 @@
 //!
 //! ## Out of scope
 //!
-//! - Transactions.
 //! - Persisted producer-state snapshots (broker restart resets sequences).
 //! - Custom partitioner trait — sticky+hash only; `ProducerRecord::partition`
 //!   bypasses the partitioner per record.
