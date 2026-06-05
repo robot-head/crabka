@@ -5,6 +5,7 @@ pub(crate) mod byte;
 pub mod kv;
 pub(crate) mod registry;
 pub(crate) mod turso;
+pub(crate) mod window_schema;
 pub use api::{KeyValueStore, StateStore};
 pub use backend::StoreBackend;
 pub use kv::KeyValueBytesStore;
