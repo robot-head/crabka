@@ -102,7 +102,7 @@ impl<K: 'static, V: 'static> StateStore for WindowBytesStore<K, V> {
 impl<K: Send + Sync + 'static, V: Send + 'static> WindowStore<K, V> for WindowBytesStore<K, V> {
     async fn fetch_single(&self, key: &K, window_start: i64) -> Option<(i64, V)> {
         let kb = self.key_serde.serialize(key);
-        let sk = store_key(&kb, window_start);
+        let sk = store_key(&kb, window_start, 0);
         let wrapped = self.backend.get(&sk).await?;
         let (ts, raw) = unwrap_value(&wrapped);
         Some((
@@ -115,8 +115,8 @@ impl<K: Send + Sync + 'static, V: Send + 'static> WindowStore<K, V> for WindowBy
 
     async fn fetch(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, V)> {
         let kb = self.key_serde.serialize(key);
-        let lo = store_key(&kb, time_from);
-        let hi = store_key(&kb, time_to.saturating_add(1));
+        let lo = store_key(&kb, time_from, 0);
+        let hi = store_key(&kb, time_to.saturating_add(1), 0);
         let mut out = Vec::new();
         for (k, wrapped) in self.backend.range(&lo, &hi).await {
             // guard prefix collisions: only return entries whose inner key matches
@@ -136,7 +136,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> WindowStore<K, V> for WindowBy
 
     async fn put(&mut self, key: K, window_start: i64, value: V, record_ts: i64) {
         let kb = self.key_serde.serialize(&key);
-        let sk = store_key(&kb, window_start);
+        let sk = store_key(&kb, window_start, 0);
         let raw = self.value_serde.serialize(&value);
         let wrapped = wrap_value(record_ts, &raw);
         self.backend.put(sk.clone(), wrapped.clone()).await;
