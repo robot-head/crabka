@@ -124,7 +124,6 @@ parking_lot = "0.12"
 lru = "0.18"
 # Schema Registry (crabka-schema-registry) — schema parsing + canonical form.
 apache-avro = "0.21"
-protox = "0.9"
 prost-reflect = "0.16"
 
 # Fork of sspi 0.21.0 carrying our SASL/GSSAPI Kerberos work (keytab client
