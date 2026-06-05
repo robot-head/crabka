@@ -458,6 +458,20 @@ impl Topology {
         self
     }
 
+    /// Declare a copartition group: the given member topics must share a
+    /// partitioning. The grouping pass assigns the group to the subtopology that
+    /// reads its members, and the wire layer encodes member names as `int16`
+    /// indices into that subtopology's sorted source/repartition arrays. Required
+    /// for joins (KIP-1071).
+    pub fn add_copartition_group(
+        &mut self,
+        topics: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self {
+        self.reg
+            .add_copartition_group(topics.into_iter().map(Into::into).collect());
+        self
+    }
+
     /// Derive subtopologies and the wire topology. `application_id` drives
     /// internal-topic names (`<app>-<store>-changelog`).
     ///
@@ -756,6 +770,25 @@ mod tests {
         ) {
             ctx.forward(Record::new(r.key, r.value.to_uppercase(), r.timestamp));
         }
+    }
+
+    #[test]
+    fn copartition_group_emitted_in_wire() {
+        use crate::processor::serde::{BytesSerde, Consumed, Produced};
+        let mut t = Topology::new();
+        let a = t.add_source("sa", ["left"], Consumed::with(BytesSerde, BytesSerde));
+        let b = t.add_source("sb", ["right"], Consumed::with(BytesSerde, BytesSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            [&a, &b],
+            Produced::with(BytesSerde, BytesSerde),
+        ); // both → one subtopology
+        t.add_copartition_group(["left", "right"]);
+        let wire = t.build("app").unwrap().to_wire();
+        let sub = &wire.subtopologies[0];
+        check!(sub.copartition_groups.len() == 1);
+        check!(sub.copartition_groups[0].source_topics == vec![0i16, 1i16]); // sorted ["left","right"]
     }
 
     #[test]

@@ -22,6 +22,10 @@ pub(crate) struct GroupTopics {
     /// layer derives `<app>-<store>-changelog`; when `Some(topic)` (set by the
     /// `REUSE_KTABLE_SOURCE_TOPICS` pass) that topic name is used verbatim.
     pub changelog_stores: Vec<(String, Option<String>)>,
+    /// Declared copartition groups whose member topics all read into this
+    /// subtopology. Each is a list of member topic names; the wire layer maps
+    /// them to `int16` indices into the sorted source/repartition arrays.
+    pub copartition_groups: Vec<Vec<String>>,
 }
 
 /// Minimal quick-union over `usize` node indices (path-compressing find).
@@ -125,6 +129,20 @@ pub(crate) fn group_nodes(reg: &NodeRegistry) -> Vec<GroupTopics> {
                 g.changelog_stores
                     .push((store.name.clone(), store.changelog_override.clone()));
             }
+        }
+    }
+
+    // Assign each declared copartition group to the subtopology that reads all of
+    // its member topics. By construction all members of a group land in one
+    // subtopology, so the first group whose source ∪ repartition-source set
+    // contains every member owns it.
+    for members in &reg.copartition_groups {
+        if let Some(g) = groups.values_mut().find(|g| {
+            members
+                .iter()
+                .all(|m| g.source_topics.contains(m) || g.repartition_source_topics.contains(m))
+        }) {
+            g.copartition_groups.push(members.clone());
         }
     }
 

@@ -81,6 +81,18 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
         .collect();
     repartition_source_topics.sort_by(|a, b| a.name.cmp(&b.name));
 
+    // The sorted repartition-topic *names*, in the same order as the TopicInfo
+    // array above — copartition indices must point into these sorted arrays.
+    let repartition_names: Vec<String> = repartition_source_topics
+        .iter()
+        .map(|t| t.name.clone())
+        .collect();
+    let copartition_groups = g
+        .copartition_groups
+        .iter()
+        .map(|members| copartition_group(&source_topics, &repartition_names, members))
+        .collect();
+
     let mut state_changelog_topics: Vec<TopicInfo> = g
         .changelog_stores
         .iter()
@@ -106,7 +118,7 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
         state_changelog_topics,
         repartition_sink_topics,
         repartition_source_topics,
-        copartition_groups: Vec::new(),
+        copartition_groups,
         ..Default::default()
     }
 }
@@ -231,9 +243,9 @@ impl From<&CopartitionGroup> for WireCopartitionGroup {
 }
 
 /// Encode a copartition group as `int16` indices into the sorted `sources` /
-/// `repartition` arrays. Exposed (and unit-tested) so the byte-exact encoding is
-/// covered even though the #1 builder emits no copartition groups.
-#[allow(dead_code)]
+/// `repartition` arrays. The `subtopology()` builder calls this once per declared
+/// copartition group, passing the same sorted source/repartition arrays it emits
+/// for the wire `source_topics` / `repartition_source_topics` fields.
 pub(crate) fn copartition_group(
     sources: &[String],
     repartition: &[String],

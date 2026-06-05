@@ -51,6 +51,10 @@ pub(crate) struct NodeRegistry {
     pub stores: Vec<StoreEntry>,
     /// Topic names registered as internal repartition topics.
     pub repartition_topics: HashSet<String>,
+    /// Declared copartition groups: each a list of member topic names that must
+    /// share a partitioning (required for joins). The grouping pass assigns each
+    /// group to the subtopology containing its members.
+    pub copartition_groups: Vec<Vec<String>>,
 }
 
 impl NodeRegistry {
@@ -128,6 +132,11 @@ impl NodeRegistry {
             processors,
             changelog_override,
         });
+    }
+
+    /// Declare a copartition group over the given member topic names.
+    pub fn add_copartition_group(&mut self, topics: Vec<String>) {
+        self.copartition_groups.push(topics);
     }
 
     /// Validate that every referenced predecessor exists. Call after all nodes
