@@ -32,6 +32,8 @@ tracing-subscriber.workspace = true
 clap = { workspace = true, features = ["env", "derive"] }
 anyhow.workspace = true
 thiserror.workspace = true
+async-stream = { workspace = true }
+futures-util = { workspace = true }
 uuid = { workspace = true }
 
 [build-dependencies]
