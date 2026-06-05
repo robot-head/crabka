@@ -22,14 +22,12 @@ use crate::processor::record::Record;
 type Marker<T> = PhantomData<fn() -> T>;
 
 /// Which sides are required for the join row to exist.
-#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub(crate) struct JoinKind {
     pub a_required: bool,
     pub b_required: bool,
 }
 
-#[allow(dead_code)]
 impl JoinKind {
     pub fn inner() -> Self {
         Self {
@@ -58,7 +56,6 @@ impl JoinKind {
 /// - If `kind.a_required` and `a` is absent → `None`.
 /// - If `kind.b_required` and `b` is absent → `None`.
 /// - If both `a` and `b` are absent → `None` (outer still needs at least one).
-#[allow(dead_code)]
 pub(crate) fn result<VA, VB, VR, F>(
     kind: JoinKind,
     joiner: &F,
@@ -78,7 +75,6 @@ where
 ///
 /// Reads `b_cur` from the connected `other_store` (keyed by `K`, holding `VB`)
 /// and forwards a `Change<VR>` for every input `Change<VA>`.
-#[allow(dead_code)]
 pub(crate) struct KTableKTableJoinThisProcessor<K, VA, VB, VR, F> {
     pub other_store: String,
     pub joiner: F,
@@ -126,7 +122,6 @@ where
 ///
 /// Reads `a_cur` from the connected `other_store` (keyed by `K`, holding `VA`)
 /// and forwards a `Change<VR>` for every input `Change<VB>`.
-#[allow(dead_code)]
 pub(crate) struct KTableKTableJoinOtherProcessor<K, VA, VB, VR, F> {
     pub other_store: String,
     pub joiner: F,
