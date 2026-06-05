@@ -9,6 +9,24 @@ use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse};
 use crate::pb;
 use crate::state::AppState;
 
+/// Map a produce error to a per-record `RecordResult`. `Unavailable` is
+/// retriable (the caller should re-route to another replica); everything else
+/// is reported non-retriable.
+pub(crate) fn error_result(e: &crate::error::GatewayError) -> crate::pb::RecordResult {
+    let retriable = matches!(e, crate::error::GatewayError::Unavailable);
+    let code = if retriable { 14 } else { 1 }; // 14 = gRPC UNAVAILABLE
+    crate::pb::RecordResult {
+        partition: -1,
+        offset: -1,
+        deduplicated: false,
+        error: Some(crate::pb::ErrorInfo {
+            code,
+            message: e.to_string(),
+            retriable,
+        }),
+    }
+}
+
 /// Convert a wire [`pb::Record`] into the transport-agnostic [`GatewayRecord`].
 pub(crate) fn to_gateway_record(r: crate::pb::Record) -> crate::types::GatewayRecord {
     crate::types::GatewayRecord {
@@ -44,16 +62,7 @@ pub async fn send(
                 deduplicated: o.deduplicated,
                 error: None,
             },
-            Err(e) => pb::RecordResult {
-                partition: -1,
-                offset: -1,
-                deduplicated: false,
-                error: Some(pb::ErrorInfo {
-                    code: 1,
-                    message: e.to_string(),
-                    retriable: false,
-                }),
-            },
+            Err(e) => crate::handlers::error_result(&e),
         };
         results.push(result);
     }
