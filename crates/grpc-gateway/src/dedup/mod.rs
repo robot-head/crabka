@@ -1,5 +1,6 @@
 //! Single-owner exactly-once dedup engine.
 
+pub mod store;
 pub mod topic;
 
 /// Deterministic FNV-1a-64 over the key, modulo partition count. Stable
