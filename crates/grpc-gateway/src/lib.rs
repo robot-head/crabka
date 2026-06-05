@@ -23,9 +23,22 @@ pub mod dedup {
     }
 }
 pub mod error;
+pub mod handlers;
 pub mod produce;
 pub mod state;
 pub mod types;
+
+/// Build the Connect-RPC [`axum::Router`] for the Gateway service.
+///
+/// The returned router has the shared `AppState` wired in as an
+/// `Extension` layer so each handler can extract it with
+/// `axum::Extension<Arc<AppState>>`.
+pub fn router(state: std::sync::Arc<state::AppState>) -> axum::Router {
+    pb::gateway_connect::GatewayServiceBuilder::<()>::new()
+        .send(handlers::send)
+        .build()
+        .layer(axum::Extension(state))
+}
 
 /// Generated protobuf + Connect server stubs. The actual content lives
 /// in `OUT_DIR/crabka.gateway.v1.rs` and is produced by `build.rs`.
