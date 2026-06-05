@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::RegistryConfig;
 use crate::error::SrError;
-use crate::format::SchemaType;
+use crate::format::{self, SchemaType};
 use crate::store::{Registered, StoreState};
 
 /// Facade over the `_schemas`-backed store: owns the writer, the reader's shared
@@ -63,6 +63,9 @@ impl KafkaStore {
         schema: &str,
     ) -> Result<Registered, SrError> {
         let _gate = self.write_gate.lock().await;
+        // Normalise before dedup check: `syntax = "proto3"; message ...`
+        // needs to deduplicate against the same proto in normalised form.
+        let schema = &format::normalized_storage_form(ty, schema)?;
         if let Some(existing) = self.store.read().find_under_subject(subject, ty, schema) {
             return Ok(existing);
         }

@@ -37,6 +37,10 @@ impl StoreState {
     /// Decide id/version for a registration AND apply it locally. Validates the
     /// schema (NONE compat still rejects unparseable schemas -> `InvalidSchema`).
     /// `id` is global (keyed by canonical form); `version` is per-subject.
+    ///
+    /// The `schema` string is assumed to be already in normalised storage form
+    /// (see `format::normalized_storage_form`); the caller (e.g. `KafkaStore`)
+    /// is responsible for normalising before passing it in.
     pub fn register(
         &mut self,
         subject: &str,

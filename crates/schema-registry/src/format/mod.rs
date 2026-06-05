@@ -52,6 +52,24 @@ pub fn parse(ty: SchemaType, schema: &str) -> Result<Box<dyn ParsedSchema>, SrEr
     }
 }
 
+/// Parse `schema` as `ty` and return the normalised storage form.
+/// For AVRO and JSON, the raw input is returned (cp-schema-registry echoes
+/// them verbatim). For Protobuf, a pretty-printed canonical text is returned
+/// matching the format cp-schema-registry produces.
+pub fn normalized_storage_form(ty: SchemaType, schema: &str) -> Result<String, SrError> {
+    match ty {
+        SchemaType::Avro | SchemaType::Json => {
+            // Validate (returns Err on bad input) but keep the raw string.
+            parse(ty, schema)?;
+            Ok(schema.to_string())
+        }
+        SchemaType::Protobuf => {
+            let p = protobuf::parse(schema)?;
+            Ok(p.normalized_form().to_string())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
