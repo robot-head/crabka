@@ -15,7 +15,11 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
 
         // --- Properties ---
         Kind::PropertyRemovedFromClosedContentModel => false,
-        Kind::PropertyAddedToOpenContentModel => true,
+        // cp is authority: adding a property to an open content model is
+        // backward-INcompatible (the reader gains a property the writer's data
+        // lacks); removing one is compatible. (add_prop_open BACKWARD=false /
+        // remove_prop_open FORWARD=false in the cp golden matrix.)
+        Kind::PropertyAddedToOpenContentModel => false,
         Kind::PropertyRemovedFromOpenContentModel => true,
         Kind::PropertyAddedToClosedContentModel => true,
 
@@ -120,7 +124,10 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
         Kind::CombinedTypeSubschemasChanged => false,
 
         // --- $ref / dependencies / conditionals ---
-        Kind::DependencyAdded => false,
+        // cp is authority: cp's json.diff treats both adding and removing a
+        // dependency/dependentRequired as compatible in either direction
+        // (dependency_added BACKWARD=FORWARD=true in the cp golden matrix).
+        Kind::DependencyAdded => true,
         Kind::DependencyRemoved => true,
         Kind::ConditionalChanged => false,
     }

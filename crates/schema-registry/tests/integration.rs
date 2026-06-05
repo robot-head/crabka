@@ -644,6 +644,50 @@ async fn protobuf_compat_enforced_on_register() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn json_schema_compat_enforced_on_register() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // v1: an object with one integer property bounded by maximum=100. Default
+    // global compat is BACKWARD.
+    let v1 = r#"{"schemaType":"JSON","schema":"{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}},\"maximum\":100}"}"#;
+    assert_eq!(
+        app.clone()
+            .oneshot(req_post("/subjects/js/versions", v1))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // Adding a required property breaks BACKWARD (cp-calibrated: `required_added`
+    // BACKWARD=false) — expect 409.
+    let bad = r#"{"schemaType":"JSON","schema":"{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}},\"maximum\":100,\"required\":[\"a\"]}"}"#;
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/js/versions", bad))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert_eq!(body_json(r).await["error_code"], 409);
+
+    // Removing a numeric bound loosens the schema (cp-calibrated:
+    // `maximum_removed` BACKWARD=true) — compatible, expect 200.
+    let good = r#"{"schemaType":"JSON","schema":"{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}"}"#;
+    assert_eq!(
+        app.clone()
+            .oneshot(req_post("/subjects/js/versions", good))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn none_level_bypasses_enforcement() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     let app = rest::router(AppState { store });

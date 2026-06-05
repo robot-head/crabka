@@ -100,11 +100,15 @@ mod tests {
         assert!(parse("not json").is_err());
     }
 
+    // cp is authority: adding a property to an open content model is
+    // backward-INcompatible (`add_prop_open` BACKWARD=false in the cp golden
+    // matrix), even though the property is "optional" — the reader expects a
+    // field the writer's data does not carry.
     #[test]
-    fn add_optional_property_open_model_is_compatible() {
+    fn add_property_open_model_is_incompatible() {
         let w = r#"{"type":"object","properties":{"a":{"type":"integer"}}}"#;
         let r = r#"{"type":"object","properties":{"a":{"type":"integer"},"b":{"type":"string"}}}"#;
-        assert!(check(r, w).is_ok());
+        assert!(check(r, w).is_err());
     }
 
     #[test]
