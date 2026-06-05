@@ -250,6 +250,22 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! ## State stores & backends
+//!
+//! The execution path is **async**: [`Processor::process`](processor::Processor)
+//! is an `async fn`, and a processor reads/writes its connected state store with
+//! `ctx.get_state_store::<K, V>(name).get(&k).await` / `.put(k, v).await`.
+//!
+//! State stores are **pluggable** via a byte-level backend. A
+//! [`KeyValueStore`] is a typed view ([`KeyValueBytesStore`]) over a backend
+//! selected by [`StoreBackend`]: `InMemory` (a `BTreeMap`; the default and the
+//! test backend) or `Turso` (a pure-Rust `SQLite` engine persisting under a state
+//! dir, used by the managed runtime). The backend is a *materialized cache* — the
+//! changelog topic is the source of truth, so on assignment the store is rebuilt
+//! from the changelog (clean-slate replay), and a missing/corrupt local store is
+//! recovered by replay rather than data loss. Select it on the builder:
+//! `KafkaStreams::builder().store_backend(StoreBackend::Turso { state_dir })`.
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.0.0")]
 
 pub mod dsl;
