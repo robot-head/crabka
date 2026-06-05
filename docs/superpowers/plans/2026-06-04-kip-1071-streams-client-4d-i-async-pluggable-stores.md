@@ -494,6 +494,15 @@ use turso::Connection;
 
 use crate::store::byte::ByteKeyValueStore;
 
+// NOTE (from the Task 0 spike): turso 0.6 `Value` has NO `TryInto<Vec<u8>>`.
+// Extract a BLOB column by matching `turso::Value::Blob(b)` (or `.as_blob()`):
+fn blob(v: turso::Value) -> Vec<u8> {
+    match v {
+        turso::Value::Blob(b) => b,
+        other => panic!("expected BLOB column, got {other:?}"),
+    }
+}
+
 pub(crate) struct TursoBytes {
     conn: Connection,
 }
@@ -516,7 +525,7 @@ impl ByteKeyValueStore for TursoBytes {
     async fn get(&self, key: &[u8]) -> Option<Bytes> {
         let mut rows = self.conn.query("SELECT v FROM kv WHERE k = ?1", (key,)).await.expect("turso get");
         let row = rows.next().await.expect("turso row")?;
-        let v: Vec<u8> = row.get_value(0).expect("turso v").try_into().expect("v bytes");
+        let v = blob(row.get_value(0).expect("turso v"));
         Some(Bytes::from(v))
     }
     async fn put(&mut self, key: Bytes, value: Bytes) {
@@ -536,8 +545,8 @@ impl ByteKeyValueStore for TursoBytes {
         ).await.expect("turso range");
         let mut out = Vec::new();
         while let Some(row) = rows.next().await.expect("turso range row") {
-            let k: Vec<u8> = row.get_value(0).expect("k").try_into().expect("k bytes");
-            let v: Vec<u8> = row.get_value(1).expect("v").try_into().expect("v bytes");
+            let k = blob(row.get_value(0).expect("k"));
+            let v = blob(row.get_value(1).expect("v"));
             out.push((Bytes::from(k), Bytes::from(v)));
         }
         out
