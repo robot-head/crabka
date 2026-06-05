@@ -25,6 +25,7 @@ pub mod dedup {
 }
 pub mod error;
 pub mod handlers;
+pub mod health;
 pub mod produce;
 pub mod state;
 pub mod types;

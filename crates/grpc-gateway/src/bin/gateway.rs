@@ -11,51 +11,9 @@ use tracing::info;
 
 use crabka_grpc_gateway::codec::RawCodec;
 use crabka_grpc_gateway::config::GatewayConfig;
+use crabka_grpc_gateway::health::{self, Readiness};
 use crabka_grpc_gateway::produce::ProduceCore;
 use crabka_grpc_gateway::state::AppState;
-
-// ── minimal health / readiness ────────────────────────────────────────────────
-
-#[derive(Clone, Default)]
-struct Readiness(Arc<std::sync::atomic::AtomicBool>);
-
-impl Readiness {
-    fn new() -> Self {
-        Self(Arc::new(std::sync::atomic::AtomicBool::new(false)))
-    }
-
-    fn set_ready(&self) {
-        self.0.store(true, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    fn is_ready(&self) -> bool {
-        self.0.load(std::sync::atomic::Ordering::Relaxed)
-    }
-}
-
-mod health {
-    use super::Readiness;
-    use axum::{Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
-
-    pub fn router(r: Readiness) -> Router {
-        Router::new()
-            .route("/healthz", get(healthz))
-            .route("/readyz", get(readyz))
-            .with_state(r)
-    }
-
-    async fn healthz() -> impl IntoResponse {
-        (StatusCode::OK, "ok")
-    }
-
-    async fn readyz(State(r): State<Readiness>) -> impl IntoResponse {
-        if r.is_ready() {
-            (StatusCode::OK, "ready")
-        } else {
-            (StatusCode::SERVICE_UNAVAILABLE, "not ready")
-        }
-    }
-}
 
 // ── CLI ────────────────────────────────────────────────────────────────────────
 
