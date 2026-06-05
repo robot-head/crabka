@@ -1,9 +1,6 @@
 //! JVM-exact windowed store/changelog byte codecs.
 //! Store/changelog KEY  : `key_bytes ‖ windowStart:8B BE ‖ seqnum:4B BE` (seqnum 0 for aggregations).
 //! Store/changelog VALUE: `recordTs:8B BE ‖ serialized aggregate` (`ValueAndTimestamp`); None = tombstone.
-//!
-//! `#![allow(dead_code)]` — these fns are used by store/window.rs in the next task.
-#![allow(dead_code)]
 use bytes::{BufMut, Bytes, BytesMut};
 
 const TS_SIZE: usize = 8;

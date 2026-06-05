@@ -34,6 +34,19 @@ impl StoreRegistry {
         self.stores.keys().cloned().collect()
     }
 
+    /// Typed mutable access: downcast the erased store to the window store
+    /// of the requested types. `None` if absent or the types don't match.
+    pub fn get_window<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::window::WindowStore<K, V>> {
+        let store = self.stores.get_mut(name)?;
+        let concrete = store
+            .as_any_mut()
+            .downcast_mut::<crate::store::window::WindowBytesStore<K, V>>()?;
+        Some(concrete as &mut dyn crate::store::window::WindowStore<K, V>)
+    }
+
     /// Mutable erased access by name — the `StateStore` trait surface
     /// (`changelog_topic` / `take_changelog` / `apply_changelog` / `set_logging`) is
     /// available on the returned `&mut dyn StateStore`.
