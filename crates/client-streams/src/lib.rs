@@ -144,6 +144,14 @@
 //! records and drops tombstones from the output stream (full null-value output
 //! is deferred to a future slice).
 //!
+//! [`KStream::join`] and [`KStream::left_join`] join a stream against a
+//! **materialized** `KTable`: the stream side drives, and for each record the
+//! table store is looked up by key. An inner join emits only when the table has a
+//! matching entry; a left join always emits (with `None` as the table value when
+//! absent). The stream must be **copartitioned** with the table (same key serde
+//! and partition count); a key-changing stream must be `.repartition(..)`-ed
+//! before joining — the join itself inserts no implicit repartition.
+//!
 //! ```
 //! use crabka_client_streams::{
 //!     Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder, StringSerde,
