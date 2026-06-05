@@ -288,8 +288,8 @@ pub mod test_driver;
 pub mod topology;
 
 pub use dsl::{
-    BranchedStream, Grouped, KGroupedStream, KTable, Materialized, Repartitioned, StreamsBuilder,
-    TimeWindowedSerde, TimeWindows, Window, Windowed,
+    BranchedStream, Grouped, JoinWindows, KGroupedStream, KTable, Materialized, Repartitioned,
+    StreamsBuilder, TimeWindowedSerde, TimeWindows, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{

@@ -17,4 +17,4 @@ pub use kgrouped::KGroupedStream;
 pub use kstream::BranchedStream;
 pub use ktable::KTable;
 pub mod windows;
-pub use windows::{TimeWindowedSerde, TimeWindows, Window, Windowed};
+pub use windows::{JoinWindows, TimeWindowedSerde, TimeWindows, Window, Windowed};
