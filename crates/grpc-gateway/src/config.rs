@@ -19,10 +19,17 @@ pub struct GatewayConfig {
     pub dedup_window_ms: i64,
     /// `transactional.id` prefix; the per-partition id is `{prefix}-{p}`.
     pub dedup_txn_id_prefix: String,
+    /// Address other replicas reach THIS gateway at (host:port of `listen_addr`,
+    /// externally routable). Published to membership; used to forward.
+    pub advertised_addr: String,
+    /// Internal compacted topic carrying replica membership / owner routing.
+    pub membership_topic: String,
 }
 
 impl GatewayConfig {
     /// Replication factor requested for the dedup topic at create time.
     /// Kept here so `bin` and tests agree; broker may downgrade.
     pub const DEDUP_TOPIC_REPLICATION: i16 = 3;
+    /// Replication factor requested for the membership topic at create time.
+    pub const MEMBERSHIP_TOPIC_REPLICATION: i16 = 3;
 }
