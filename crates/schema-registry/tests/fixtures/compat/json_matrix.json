@@ -1,0 +1,646 @@
+[
+  {
+    "case": "add_prop_open",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "add_prop_open",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "remove_prop_open",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "remove_prop_open",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "remove_prop_open",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "add_prop_closed",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "add_prop_closed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "add_prop_closed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "remove_prop_closed",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "remove_prop_closed",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"string\"}}}"
+  },
+  {
+    "case": "required_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}},\"required\":[\"a\"]}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "required_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}},\"required\":[\"a\"]}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "required_removed",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}},\"required\":[\"a\"]}"
+  },
+  {
+    "case": "required_removed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}},\"required\":[\"a\"]}"
+  },
+  {
+    "case": "required_removed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}}}",
+    "writer": "{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"integer\"}},\"required\":[\"a\"]}"
+  },
+  {
+    "case": "addl_false_to_true",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":true}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false}"
+  },
+  {
+    "case": "addl_false_to_true",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":true}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false}"
+  },
+  {
+    "case": "addl_false_to_true",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":true}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":false}"
+  },
+  {
+    "case": "addl_true_to_false",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":true}"
+  },
+  {
+    "case": "addl_true_to_false",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"additionalProperties\":false}",
+    "writer": "{\"type\":\"object\",\"additionalProperties\":true}"
+  },
+  {
+    "case": "type_widen",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":[\"string\",\"null\"]}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "type_widen",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":[\"string\",\"null\"]}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "type_widen",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":[\"string\",\"null\"]}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "type_narrow",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"string\"}",
+    "writer": "{\"type\":[\"string\",\"null\"]}"
+  },
+  {
+    "case": "type_narrow",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"string\"}",
+    "writer": "{\"type\":[\"string\",\"null\"]}"
+  },
+  {
+    "case": "type_changed",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "type_changed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "type_changed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "enum_extended",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"enum\":[\"a\",\"b\"]}",
+    "writer": "{\"enum\":[\"a\"]}"
+  },
+  {
+    "case": "enum_extended",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"enum\":[\"a\",\"b\"]}",
+    "writer": "{\"enum\":[\"a\"]}"
+  },
+  {
+    "case": "enum_extended",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"enum\":[\"a\",\"b\"]}",
+    "writer": "{\"enum\":[\"a\"]}"
+  },
+  {
+    "case": "enum_narrowed",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"enum\":[\"a\"]}",
+    "writer": "{\"enum\":[\"a\",\"b\"]}"
+  },
+  {
+    "case": "enum_narrowed",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"enum\":[\"a\"]}",
+    "writer": "{\"enum\":[\"a\",\"b\"]}"
+  },
+  {
+    "case": "maximum_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\",\"maximum\":10}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "maximum_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\",\"maximum\":10}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "maximum_removed",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"integer\",\"maximum\":10}"
+  },
+  {
+    "case": "maximum_removed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"integer\",\"maximum\":10}"
+  },
+  {
+    "case": "maximum_removed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"integer\",\"maximum\":10}"
+  },
+  {
+    "case": "maximum_increased",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\",\"maximum\":100}",
+    "writer": "{\"type\":\"integer\",\"maximum\":10}"
+  },
+  {
+    "case": "maximum_increased",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\",\"maximum\":100}",
+    "writer": "{\"type\":\"integer\",\"maximum\":10}"
+  },
+  {
+    "case": "maximum_increased",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"integer\",\"maximum\":100}",
+    "writer": "{\"type\":\"integer\",\"maximum\":10}"
+  },
+  {
+    "case": "maximum_decreased",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\",\"maximum\":10}",
+    "writer": "{\"type\":\"integer\",\"maximum\":100}"
+  },
+  {
+    "case": "maximum_decreased",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\",\"maximum\":10}",
+    "writer": "{\"type\":\"integer\",\"maximum\":100}"
+  },
+  {
+    "case": "minimum_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\",\"minimum\":1}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "minimum_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\",\"minimum\":1}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "minimum_removed",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"integer\",\"minimum\":1}"
+  },
+  {
+    "case": "minimum_removed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"integer\",\"minimum\":1}"
+  },
+  {
+    "case": "minimum_removed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"integer\"}",
+    "writer": "{\"type\":\"integer\",\"minimum\":1}"
+  },
+  {
+    "case": "exclusive_max_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\",\"exclusiveMaximum\":10}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "exclusive_max_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\",\"exclusiveMaximum\":10}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "multiple_of_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"integer\",\"multipleOf\":5}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "multiple_of_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"integer\",\"multipleOf\":5}",
+    "writer": "{\"type\":\"integer\"}"
+  },
+  {
+    "case": "min_length_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"string\",\"minLength\":3}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "min_length_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"string\",\"minLength\":3}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "min_length_removed",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"string\"}",
+    "writer": "{\"type\":\"string\",\"minLength\":3}"
+  },
+  {
+    "case": "min_length_removed",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"string\"}",
+    "writer": "{\"type\":\"string\",\"minLength\":3}"
+  },
+  {
+    "case": "min_length_removed",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"string\"}",
+    "writer": "{\"type\":\"string\",\"minLength\":3}"
+  },
+  {
+    "case": "max_length_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"string\",\"maxLength\":9}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "max_length_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"string\",\"maxLength\":9}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "pattern_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"string\",\"pattern\":\"^x\"}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "pattern_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"string\",\"pattern\":\"^x\"}",
+    "writer": "{\"type\":\"string\"}"
+  },
+  {
+    "case": "min_items_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"array\",\"minItems\":1}",
+    "writer": "{\"type\":\"array\"}"
+  },
+  {
+    "case": "min_items_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"array\",\"minItems\":1}",
+    "writer": "{\"type\":\"array\"}"
+  },
+  {
+    "case": "max_items_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"array\",\"maxItems\":5}",
+    "writer": "{\"type\":\"array\"}"
+  },
+  {
+    "case": "max_items_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"array\",\"maxItems\":5}",
+    "writer": "{\"type\":\"array\"}"
+  },
+  {
+    "case": "items_type_change",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"array\",\"items\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"
+  },
+  {
+    "case": "items_type_change",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"array\",\"items\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"
+  },
+  {
+    "case": "items_type_change",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"array\",\"items\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}"
+  },
+  {
+    "case": "min_properties_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"minProperties\":1}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "min_properties_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"minProperties\":1}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "anyof_subschema_added",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}",
+    "writer": "{\"anyOf\":[{\"type\":\"string\"}]}"
+  },
+  {
+    "case": "anyof_subschema_added",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}",
+    "writer": "{\"anyOf\":[{\"type\":\"string\"}]}"
+  },
+  {
+    "case": "anyof_subschema_added",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}",
+    "writer": "{\"anyOf\":[{\"type\":\"string\"}]}"
+  },
+  {
+    "case": "anyof_subschema_removed",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"}]}",
+    "writer": "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "anyof_subschema_removed",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"anyOf\":[{\"type\":\"string\"}]}",
+    "writer": "{\"anyOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}"
+  },
+  {
+    "case": "allof_subschema_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"allOf\":[{\"type\":\"object\"},{\"type\":\"object\",\"required\":[\"a\"]}]}",
+    "writer": "{\"allOf\":[{\"type\":\"object\"}]}"
+  },
+  {
+    "case": "allof_subschema_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"allOf\":[{\"type\":\"object\"},{\"type\":\"object\",\"required\":[\"a\"]}]}",
+    "writer": "{\"allOf\":[{\"type\":\"object\"}]}"
+  },
+  {
+    "case": "oneof_subschema_added",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}",
+    "writer": "{\"oneOf\":[{\"type\":\"string\"}]}"
+  },
+  {
+    "case": "oneof_subschema_added",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}",
+    "writer": "{\"oneOf\":[{\"type\":\"string\"}]}"
+  },
+  {
+    "case": "oneof_subschema_added",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"oneOf\":[{\"type\":\"string\"},{\"type\":\"integer\"}]}",
+    "writer": "{\"oneOf\":[{\"type\":\"string\"}]}"
+  },
+  {
+    "case": "not_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"not\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "not_added",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"not\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "not_added",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"not\":{\"type\":\"string\"}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "ref_target_type_change",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"string\"}}}",
+    "writer": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "ref_target_type_change",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"string\"}}}",
+    "writer": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "ref_target_type_change",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"string\"}}}",
+    "writer": "{\"$ref\":\"#/$defs/T\",\"$defs\":{\"T\":{\"type\":\"integer\"}}}"
+  },
+  {
+    "case": "dependency_added",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"dependentRequired\":{\"a\":[\"b\"]}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "dependency_added",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"dependentRequired\":{\"a\":[\"b\"]}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "dependency_added",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"dependentRequired\":{\"a\":[\"b\"]}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "if_then_added",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"object\",\"if\":{\"required\":[\"a\"]},\"then\":{\"required\":[\"b\"]}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "if_then_added",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"object\",\"if\":{\"required\":[\"a\"]},\"then\":{\"required\":[\"b\"]}}",
+    "writer": "{\"type\":\"object\"}"
+  },
+  {
+    "case": "if_then_added",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"object\",\"if\":{\"required\":[\"a\"]},\"then\":{\"required\":[\"b\"]}}",
+    "writer": "{\"type\":\"object\"}"
+  }
+]
