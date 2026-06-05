@@ -2,6 +2,8 @@
 //!
 //! Built entirely on the native client crates; the broker is never modified.
 
+pub mod config;
+
 /// Generated protobuf + Connect server stubs. The actual content lives
 /// in `OUT_DIR/crabka.gateway.v1.rs` and is produced by `build.rs`.
 ///
