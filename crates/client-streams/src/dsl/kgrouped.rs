@@ -164,6 +164,25 @@ where
         self.aggregate_inner(materialized, names::AGGREGATE_STORE, init, agg)
     }
 
+    /// `windowedBy(TimeWindows)`: switch to a windowed aggregation. Moves the
+    /// grouped lineage (parent, key-changing flag, repartition thunk) into a
+    /// [`TimeWindowedKGroupedStream`], which exposes windowed
+    /// `count`/`reduce`/`aggregate` producing `KTable<Windowed<K>, _>`.
+    #[must_use]
+    pub fn windowed_by(
+        mut self,
+        windows: crate::dsl::windows::TimeWindows,
+    ) -> crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream<K, V> {
+        crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream::new(
+            Rc::clone(&self.builder),
+            self.parent,
+            self.key_changing_upstream,
+            self.grouped_name.take(),
+            self.repartition_lower.take(),
+            windows,
+        )
+    }
+
     /// Shared body for `count`/`aggregate`: mint the store name at the JVM
     /// counter position, then lower the (optional) repartition + aggregate node.
     fn aggregate_inner<KS, VS, VA, I, A>(
@@ -349,7 +368,7 @@ where
     ///
     /// Takes the needed fields by value (not `&mut self`) so the caller can hold
     /// the `builder.borrow_mut()` guard `g` across the call.
-    fn record_repartition(
+    pub(crate) fn record_repartition(
         g: &mut InternalStreamsBuilder,
         store_name: &str,
         parent: NodeId,
@@ -402,7 +421,7 @@ where
 
 /// Mint the store name: the `Materialized` name when present, else a fresh
 /// counter at the JVM position (called *before* the aggregate processor name).
-fn mint_store_name<KS, VS>(
+pub(crate) fn mint_store_name<KS, VS>(
     builder: &Rc<RefCell<InternalStreamsBuilder>>,
     materialized: &Materialized<KS, VS>,
     prefix: &str,

@@ -78,6 +78,76 @@ where
     }
 }
 
+/// Reduce records into a windowed accumulator stored in a `WindowStore`.
+///
+/// The windowed analogue of [`KStreamReduceProcessor`]: the **first** value in a
+/// window seeds the accumulator (no separate `init`), later values fold via
+/// `reducer(&acc, &value)`. Keeps the public value type `V` (no `Option`/sentinel
+/// leaks into the `KTable`); the "first value" check is the windowed store lookup
+/// returning `None`.
+///
+/// Emits a `Change<V>` per window that the record falls into (tumbling: one
+/// window; hopping: multiple) — the **emit-on-update** strategy.
+///
+/// Records with a null key are panicked (aggregations require non-null keys,
+/// enforced by the repartition step preceding this node in the DSL lowering).
+#[allow(dead_code)]
+pub(crate) struct KStreamWindowReduceProcessor<K, V, R> {
+    pub store_name: String,
+    pub windows: TimeWindows,
+    pub reducer: R,
+    pub _pd: Marker<(K, V)>,
+}
+
+#[async_trait]
+impl<K, V, R> Processor<K, V, Windowed<K>, Change<V>> for KStreamWindowReduceProcessor<K, V, R>
+where
+    K: std::any::Any + Send + Sync + Clone,
+    V: std::any::Any + Send + Clone,
+    R: Fn(&V, &V) -> V + Send + 'static,
+{
+    async fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
+        r: Record<K, V>,
+    ) {
+        let key = r.key.expect("windowed reduce requires a non-null key");
+        let size = self.windows.size_ms;
+
+        for ws in self.windows.windows_for(r.timestamp) {
+            // Borrow the store, do the async fetch + put, then drop the borrow
+            // before calling ctx.forward (which re-borrows ctx mutably).
+            let (old, new, new_ts) = {
+                let store = ctx
+                    .get_window_store::<K, V>(&self.store_name)
+                    .expect("window store not found");
+                let prior = store.fetch_single(&key, ws).await;
+                let stored_ts = prior.as_ref().map_or(i64::MIN, |&(ts, _)| ts);
+                let old = prior.map(|(_ts, v)| v);
+                // First value in this window seeds the accumulator; else fold.
+                let new = match &old {
+                    None => r.value.clone(),
+                    Some(acc) => (self.reducer)(acc, &r.value),
+                };
+                let new_ts = std::cmp::max(r.timestamp, stored_ts);
+                store.put(key.clone(), ws, new.clone(), new_ts).await;
+                (old, new, new_ts)
+            };
+            ctx.forward(Record::new(
+                Some(Windowed {
+                    key: key.clone(),
+                    window: Window {
+                        start: ws,
+                        end: ws + size,
+                    },
+                }),
+                Change::update(old, new),
+                new_ts,
+            ));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
