@@ -7,3 +7,4 @@ pub(crate) mod join;
 pub(crate) mod ktable_join;
 pub(crate) mod stateless;
 pub(crate) mod table;
+pub(crate) mod window_aggregate;
