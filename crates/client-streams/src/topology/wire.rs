@@ -35,6 +35,29 @@ fn changelog_topic_configs() -> Vec<KeyValue> {
     ])
 }
 
+/// Topic configs the JVM 4.x client attaches to a **windowed-store changelog**
+/// topic: `compact,delete` policy + `retention.ms` to ensure expired windows are
+/// actually purged. Keys are in sorted order (same rule as repartition configs).
+fn windowed_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
+    vec![
+        KeyValue {
+            key: "cleanup.policy".into(),
+            value: "compact,delete".into(),
+            ..Default::default()
+        },
+        KeyValue {
+            key: "message.timestamp.type".into(),
+            value: "CreateTime".into(),
+            ..Default::default()
+        },
+        KeyValue {
+            key: "retention.ms".into(),
+            value: retention_ms.to_string(),
+            ..Default::default()
+        },
+    ]
+}
+
 /// Build the `KeyValue` config array from `(key, value)` pairs (already in
 /// sorted order at the call site).
 fn topic_configs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<KeyValue> {
@@ -96,18 +119,23 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
     let mut state_changelog_topics: Vec<TopicInfo> = g
         .changelog_stores
         .iter()
-        .map(|(store, changelog_override)| TopicInfo {
-            // `REUSE_KTABLE_SOURCE_TOPICS`: when the store reuses its source
-            // topic as the changelog, the override carries that topic name;
-            // otherwise the JVM-default `<app>-<store>-changelog`.
-            name: changelog_override
-                .clone()
-                .unwrap_or_else(|| format!("{app}-{store}-changelog")),
-            partitions: 0,
-            replication_factor: INTERNAL_TOPIC_DEFAULT_RF,
-            topic_configs: changelog_topic_configs(),
-            ..Default::default()
-        })
+        .map(
+            |(store, changelog_override, windowed_retention_ms)| TopicInfo {
+                // `REUSE_KTABLE_SOURCE_TOPICS`: when the store reuses its source
+                // topic as the changelog, the override carries that topic name;
+                // otherwise the JVM-default `<app>-<store>-changelog`.
+                name: changelog_override
+                    .clone()
+                    .unwrap_or_else(|| format!("{app}-{store}-changelog")),
+                partitions: 0,
+                replication_factor: INTERNAL_TOPIC_DEFAULT_RF,
+                topic_configs: match windowed_retention_ms {
+                    Some(r) => windowed_changelog_topic_configs(*r),
+                    None => changelog_topic_configs(),
+                },
+                ..Default::default()
+            },
+        )
         .collect();
     state_changelog_topics.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -386,7 +414,7 @@ mod tests {
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
-            changelog_stores: vec![("store".into(), None)],
+            changelog_stores: vec![("store".into(), None, None)],
             ..Default::default()
         }];
         let topo = to_wire(&groups, "my-app");
@@ -419,7 +447,7 @@ mod tests {
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
-            changelog_stores: vec![("store".into(), Some("in".into()))],
+            changelog_stores: vec![("store".into(), Some("in".into()), None)],
             ..Default::default()
         }];
         let topo = to_wire(&groups, "my-app");
@@ -487,6 +515,62 @@ mod tests {
         let cg = copartition_group(&sources, &repartition, &["rp1".into(), "a".into()]);
         check!(cg.source_topics == vec![0i16]);
         check!(cg.repartition_source_topics == vec![1i16]);
+    }
+
+    #[test]
+    fn windowed_store_changelog_config_is_compact_delete_with_retention() {
+        // size=60_000ms, grace=0ms → retention = 60_000 + 0 + 86_400_000 = 86_460_000
+        let groups = vec![GroupTopics {
+            id: "0".into(),
+            source_topics: vec!["in".into()],
+            changelog_stores: vec![("w".into(), None, Some(86_460_000i64))],
+            ..Default::default()
+        }];
+        let topo = to_wire(&groups, "app");
+        let cl = &topo.subtopologies[0].state_changelog_topics;
+        check!(cl.len() == 1);
+        check!(cl[0].name == "app-w-changelog");
+        check!(cl[0].partitions == 0);
+        check!(cl[0].replication_factor == -1);
+        let configs: Vec<(&str, &str)> = cl[0]
+            .topic_configs
+            .iter()
+            .map(|kv| (kv.key.as_str(), kv.value.as_str()))
+            .collect();
+        check!(
+            configs
+                == vec![
+                    ("cleanup.policy", "compact,delete"),
+                    ("message.timestamp.type", "CreateTime"),
+                    ("retention.ms", "86460000"),
+                ]
+        );
+    }
+
+    #[test]
+    fn kv_store_changelog_config_unchanged_after_windowed_change() {
+        // KV store must still use compact-only config (golden frames must stay byte-identical)
+        let groups = vec![GroupTopics {
+            id: "0".into(),
+            source_topics: vec!["in".into()],
+            changelog_stores: vec![("store".into(), None, None)],
+            ..Default::default()
+        }];
+        let topo = to_wire(&groups, "my-app");
+        let cl = &topo.subtopologies[0].state_changelog_topics;
+        check!(cl.len() == 1);
+        let configs: Vec<(&str, &str)> = cl[0]
+            .topic_configs
+            .iter()
+            .map(|kv| (kv.key.as_str(), kv.value.as_str()))
+            .collect();
+        check!(
+            configs
+                == vec![
+                    ("cleanup.policy", "compact"),
+                    ("message.timestamp.type", "CreateTime"),
+                ]
+        );
     }
 
     #[test]

@@ -40,6 +40,9 @@ pub(crate) struct StoreEntry {
     pub name: String,
     pub processors: Vec<String>,
     pub changelog_override: Option<String>,
+    /// `Some(ms)` for windowed stores: drives `compact,delete` + `retention.ms` configs.
+    /// `None` for KV stores: drives `compact`-only configs.
+    pub windowed_retention_ms: Option<i64>,
 }
 
 /// The full node graph, recorded in insertion order.
@@ -131,6 +134,25 @@ impl NodeRegistry {
             name: name.to_string(),
             processors,
             changelog_override,
+            windowed_retention_ms: None,
+        });
+    }
+
+    /// Register a windowed state store. The `retention_ms` is stored and passed
+    /// to the wire layer so the changelog topic gets `compact,delete` +
+    /// `retention.ms=<retention_ms>` configs instead of the KV `compact`-only set.
+    pub fn add_window_store(
+        &mut self,
+        name: &str,
+        processors: Vec<String>,
+        changelog_override: Option<String>,
+        retention_ms: i64,
+    ) {
+        self.stores.push(StoreEntry {
+            name: name.to_string(),
+            processors,
+            changelog_override,
+            windowed_retention_ms: Some(retention_ms),
         });
     }
 
