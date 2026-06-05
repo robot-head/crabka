@@ -89,6 +89,10 @@ pub enum Kind {
     NotTypeExtended,
     NotTypeNarrowed,
     CombinedTypeSubschemasChanged,
+    // --- $ref / dependencies / conditionals ---
+    DependencyAdded,
+    DependencyRemoved,
+    ConditionalChanged,
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +110,6 @@ fn d(kind: Kind, path: &str) -> Difference {
 
 /// Context for $ref resolution — carries the document roots and a cycle-guard
 /// set of `(orig_ptr, upd_ptr)` pairs already visited.
-#[allow(dead_code)] // fields used in $ref resolution (added in Task 4)
 struct Ctx<'a> {
     orig_root: &'a Value,
     upd_root: &'a Value,
@@ -148,6 +151,9 @@ fn compare_schema(
     compare_array_constraints(path, orig, upd, ctx, out);
     compare_object_size(path, orig, upd, out);
     compare_combinators(path, orig, upd, ctx, out);
+    compare_refs(path, orig, upd, ctx, out);
+    compare_dependencies(path, orig, upd, out);
+    compare_conditionals(path, orig, upd, ctx, out);
 }
 
 fn types_of(schema: &Value) -> BTreeSet<String> {
@@ -642,6 +648,179 @@ fn compare_combinators(
         // Different keywords or one absent → incompatible structural change
         (Some(_) | None, Some(_)) | (Some(_), None) => {
             out.push(d(Kind::CombinedTypeChanged, path));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// $ref resolution
+// ---------------------------------------------------------------------------
+
+/// Follow a local JSON Pointer `$ref` (must start with `#`) against `root`.
+/// Returns `None` for remote refs or if the pointer doesn't resolve.
+fn resolve_ref<'a>(schema: &Value, root: &'a Value) -> Option<&'a Value> {
+    let ref_str = schema.get("$ref").and_then(Value::as_str)?;
+    if !ref_str.starts_with('#') {
+        return None; // remote ref — treat permissively
+    }
+    let ptr = ref_str.trim_start_matches('#');
+    if ptr.is_empty() {
+        Some(root)
+    } else {
+        root.pointer(ptr)
+    }
+}
+
+fn compare_refs(
+    path: &str,
+    orig: &Value,
+    upd: &Value,
+    ctx: &mut Ctx<'_>,
+    out: &mut Vec<Difference>,
+) {
+    let o_ref = orig.get("$ref").and_then(Value::as_str).map(String::from);
+    let u_ref = upd.get("$ref").and_then(Value::as_str).map(String::from);
+
+    if let (None, None) = (&o_ref, &u_ref) {
+        return;
+    }
+
+    // Build cycle-guard key from the two ref strings (or a sentinel for absent)
+    let key = (
+        o_ref.clone().unwrap_or_default(),
+        u_ref.clone().unwrap_or_default(),
+    );
+    if ctx.visited.contains(&key) {
+        return; // already walking this pair — cycle, stop
+    }
+    ctx.visited.insert(key.clone());
+
+    // Resolve both sides; if either is a non-local ref leave permissive
+    let o_resolved = o_ref
+        .as_deref()
+        .and_then(|_| resolve_ref(orig, ctx.orig_root));
+    let u_resolved = u_ref
+        .as_deref()
+        .and_then(|_| resolve_ref(upd, ctx.upd_root));
+
+    match (o_resolved, u_resolved) {
+        (Some(ores), Some(ures)) => {
+            // Both resolve — diff the targets; clone to avoid borrow issues
+            let ores = ores.clone();
+            let ures = ures.clone();
+            compare_schema(&format!("{path}/$ref"), &ores, &ures, ctx, out);
+        }
+        (Some(ores), None) => {
+            // orig had a $ref, update doesn't — diff resolved orig vs update directly
+            let ores = ores.clone();
+            compare_schema(path, &ores, upd, ctx, out);
+        }
+        (None, Some(ures)) => {
+            // update has a $ref, orig doesn't — diff orig vs resolved update
+            let ures = ures.clone();
+            compare_schema(path, orig, &ures, ctx, out);
+        }
+        (None, None) => {
+            // neither resolved (remote refs or unresolvable) — treat permissively
+        }
+    }
+
+    ctx.visited.remove(&key);
+}
+
+// ---------------------------------------------------------------------------
+// Dependencies
+// ---------------------------------------------------------------------------
+
+fn dep_keys(schema: &Value) -> Option<BTreeSet<String>> {
+    // Check `dependencies` (draft-07) or `dependentRequired`/`dependentSchemas` (draft 2019-09+)
+    for kw in &["dependencies", "dependentRequired", "dependentSchemas"] {
+        if let Some(obj) = schema.get(kw).and_then(Value::as_object) {
+            return Some(obj.keys().cloned().collect());
+        }
+    }
+    None
+}
+
+fn compare_dependencies(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Difference>) {
+    let ok = dep_keys(orig);
+    let uk = dep_keys(upd);
+    match (ok, uk) {
+        (None, None) => {}
+        (None, Some(uk)) => {
+            for k in &uk {
+                out.push(d(
+                    Kind::DependencyAdded,
+                    &format!("{path}/dependencies/{k}"),
+                ));
+            }
+        }
+        (Some(ok), None) => {
+            for k in &ok {
+                out.push(d(
+                    Kind::DependencyRemoved,
+                    &format!("{path}/dependencies/{k}"),
+                ));
+            }
+        }
+        (Some(ok), Some(uk)) => {
+            for k in uk.difference(&ok) {
+                out.push(d(
+                    Kind::DependencyAdded,
+                    &format!("{path}/dependencies/{k}"),
+                ));
+            }
+            for k in ok.difference(&uk) {
+                out.push(d(
+                    Kind::DependencyRemoved,
+                    &format!("{path}/dependencies/{k}"),
+                ));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Conditionals: if / then / else
+// ---------------------------------------------------------------------------
+
+fn compare_conditionals(
+    path: &str,
+    orig: &Value,
+    upd: &Value,
+    ctx: &mut Ctx<'_>,
+    out: &mut Vec<Difference>,
+) {
+    // Check if any of the conditional keywords are present in either schema
+    let has_cond_orig =
+        orig.get("if").is_some() || orig.get("then").is_some() || orig.get("else").is_some();
+    let has_cond_upd =
+        upd.get("if").is_some() || upd.get("then").is_some() || upd.get("else").is_some();
+
+    if !has_cond_orig && !has_cond_upd {
+        return;
+    }
+
+    // If both sides have the same structure, recurse into the branches; otherwise flag changed.
+    for kw in &["if", "then", "else"] {
+        let ov = orig.get(kw);
+        let uv = upd.get(kw);
+        match (ov, uv) {
+            (Some(ov), Some(uv)) => {
+                let oc = canonical_value(ov);
+                let uc = canonical_value(uv);
+                if oc != uc {
+                    out.push(d(Kind::ConditionalChanged, &format!("{path}/{kw}")));
+                    // Also recurse to surface detailed diffs inside the branch
+                    let ov = ov.clone();
+                    let uv = uv.clone();
+                    compare_schema(&format!("{path}/{kw}"), &ov, &uv, ctx, out);
+                }
+            }
+            (None, Some(_)) | (Some(_), None) => {
+                out.push(d(Kind::ConditionalChanged, &format!("{path}/{kw}")));
+            }
+            (None, None) => {}
         }
     }
 }

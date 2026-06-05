@@ -118,6 +118,11 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
         Kind::NotTypeExtended => true,
         Kind::NotTypeNarrowed => false,
         Kind::CombinedTypeSubschemasChanged => false,
+
+        // --- $ref / dependencies / conditionals ---
+        Kind::DependencyAdded => false,
+        Kind::DependencyRemoved => true,
+        Kind::ConditionalChanged => false,
     }
 }
 

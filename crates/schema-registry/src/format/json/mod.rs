@@ -190,4 +190,27 @@ mod tests {
             r#"{"allOf":[{"type":"object"}]}"#,
         );
     }
+
+    // --- Task 4: $ref / dependencies / conditionals ---
+
+    #[test]
+    fn ref_resolves_and_diffs_target() {
+        let w = r##"{"$ref":"#/$defs/T","$defs":{"T":{"type":"integer"}}}"##;
+        let r = r##"{"$ref":"#/$defs/T","$defs":{"T":{"type":"string"}}}"##;
+        assert!(check(r, w).is_err());
+    }
+
+    #[test]
+    fn recursive_ref_terminates() {
+        let s = r##"{"$ref":"#/$defs/N","$defs":{"N":{"type":"object","properties":{"next":{"$ref":"#/$defs/N"}}}}}"##;
+        assert!(check(s, s).is_ok());
+    }
+
+    #[test]
+    fn dependencies_and_conditionals_do_not_panic() {
+        let _ = check(
+            r#"{"if":{"required":["a"]},"then":{"required":["b"]}}"#,
+            r#"{"type":"object"}"#,
+        );
+    }
 }
