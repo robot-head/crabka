@@ -2,6 +2,7 @@
 //!
 //! Built entirely on the native client crates; the broker is never modified.
 
+pub mod codec;
 pub mod config;
 pub mod error;
 pub mod types;
