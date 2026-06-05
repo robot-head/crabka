@@ -3,7 +3,6 @@
 //! store sorts by `(key, end, start)` — the merge fetch scans by session end).
 //! VALUE: the raw serialized aggregate (session stores are not
 //! `ValueAndTimestamp`-wrapped; the session end carries the time).
-#![allow(dead_code)] // used by 4d-iv session store (Task 3)
 use bytes::{BufMut, Bytes, BytesMut};
 
 const TS_SIZE: usize = 8;
