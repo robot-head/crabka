@@ -62,7 +62,9 @@ regex = "1"
 memmap2 = "0.9"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
+async-stream = "0.3"
 futures-util = { version = "0.3", features = ["sink"] }
+tokio-stream = "0.1"
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }

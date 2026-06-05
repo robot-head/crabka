@@ -3,6 +3,8 @@ package crabka.gateway.v1;
 
 service Gateway {
   rpc Send(SendRequest) returns (SendResponse);
+  rpc SendStream(stream SendRequest) returns (stream SendAck);
+  rpc Subscribe(stream SubscribeFrame) returns (stream Inbound);
 }
 
 enum Acks {
@@ -41,4 +43,40 @@ message RecordResult {
 
 message SendResponse {
   repeated RecordResult results = 1;
+}
+
+message SendAck {
+  repeated RecordResult results = 1;
+}
+
+message SubscribeStart {
+  string group_id = 1;
+  repeated string topics = 2;
+  bool auto_commit = 3;
+}
+
+// An Ack triggers a commit of the consumer's current consumed positions. The
+// topic/partition/offset fields are advisory in the current implementation
+// (per-offset commit is a follow-up).
+message SubscribeAck {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+}
+
+message SubscribeFrame {
+  oneof frame {
+    SubscribeStart start = 1;
+    SubscribeAck ack = 2;
+  }
+}
+
+message Inbound {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  optional bytes key = 4;
+  bytes value = 5;
+  map<string, bytes> headers = 6;
+  int64 timestamp_ms = 7;
 }

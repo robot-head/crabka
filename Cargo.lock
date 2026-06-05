@@ -1512,6 +1512,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert2",
+ "async-stream",
  "axum",
  "bytes",
  "clap",
@@ -1522,6 +1523,7 @@ dependencies = [
  "crabka-client-consumer",
  "crabka-client-producer",
  "dashmap",
+ "futures-util",
  "pbjson",
  "prost",
  "serde",
@@ -1529,6 +1531,7 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-stream",
  "tower",
  "tracing",
  "tracing-subscriber",
