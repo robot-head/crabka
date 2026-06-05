@@ -7,6 +7,7 @@ pub mod config;
 pub mod consume;
 pub mod dedup;
 pub mod error;
+pub mod forward;
 pub mod handlers;
 pub mod health;
 pub mod produce;

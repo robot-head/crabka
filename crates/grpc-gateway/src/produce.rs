@@ -8,7 +8,9 @@ use std::sync::Arc;
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 
 use crate::codec::RecordCodec;
+use crate::dedup::membership::MembershipStore;
 use crate::error::GatewayError;
+use crate::forward::Forwarder;
 use crate::types::{GatewayRecord, RecordOutcome};
 
 pub struct ProduceCore {
@@ -16,6 +18,13 @@ pub struct ProduceCore {
     codec: Arc<dyn RecordCodec>,
     /// Filled by Task 12. `None` ⇒ keyed records take the plain path too.
     dedup: Option<Arc<crate::dedup::DedupEngine>>,
+    forwarding: Option<Forwarding>,
+}
+
+struct Forwarding {
+    membership: Arc<MembershipStore>,
+    forwarder: Arc<Forwarder>,
+    self_addr: String,
 }
 
 impl ProduceCore {
@@ -36,6 +45,7 @@ impl ProduceCore {
             producer: Arc::new(producer),
             codec,
             dedup: None,
+            forwarding: None,
         })
     }
 
@@ -46,13 +56,63 @@ impl ProduceCore {
         self
     }
 
+    /// Enable active-active forwarding: non-owned keyed records route to the
+    /// owner named by the membership routing table.
+    #[must_use]
+    pub fn with_forwarding(
+        mut self,
+        membership: Arc<MembershipStore>,
+        forwarder: Arc<Forwarder>,
+        self_addr: String,
+    ) -> Self {
+        self.forwarding = Some(Forwarding {
+            membership,
+            forwarder,
+            self_addr,
+        });
+        self
+    }
+
     #[must_use]
     pub fn codec(&self) -> &Arc<dyn RecordCodec> {
         &self.codec
     }
 
-    /// Produce one record, routing keyed records to dedup when configured.
+    /// Public produce entry point. A keyed record whose dedup-partition this
+    /// replica does not own is forwarded to the owner (per the membership
+    /// routing table); everything else is produced locally.
     pub async fn produce(&self, rec: GatewayRecord) -> Result<RecordOutcome, GatewayError> {
+        // Resolve the route without holding a borrow of `rec` across its move.
+        let forward_addr: Option<String> =
+            match (&self.dedup, &self.forwarding, &rec.idempotency_key) {
+                (Some(dedup), Some(fwd), Some(key)) => {
+                    let p = dedup.partition_for_key(key);
+                    if dedup.owns(p) {
+                        None
+                    } else {
+                        match fwd.membership.owner_of(p) {
+                            Some(addr) if addr == fwd.self_addr => None,
+                            Some(addr) => Some(addr),
+                            None => return Err(GatewayError::Unavailable),
+                        }
+                    }
+                }
+                _ => None,
+            };
+
+        match forward_addr {
+            Some(addr) => {
+                let fwd = self.forwarding.as_ref().expect("route implies forwarding");
+                fwd.forwarder.forward(&addr, &rec).await
+            }
+            None => self.produce_local(rec).await,
+        }
+    }
+
+    /// Local produce (NO forwarding): keyed → dedup engine (owner/warm gate),
+    /// unkeyed → plain idempotent producer. Used by the public path when this
+    /// replica owns the key, and by the internal forward endpoint.
+    pub async fn produce_local(&self, rec: GatewayRecord) -> Result<RecordOutcome, GatewayError> {
         let value = self.codec.encode_value(&rec.topic, rec.value.clone());
         match (&self.dedup, &rec.idempotency_key) {
             (Some(dedup), Some(_key)) => dedup.dedup_produce(&rec, value).await,
