@@ -116,6 +116,81 @@ impl JoinWindows {
     }
 }
 
+/// Session windows: records for a key form one session while they stay within
+/// `gap_ms` of each other (inactivity gap). A session window `[start, end]` is
+/// defined by data, not epoch-aligned. `grace_ms` only affects changelog
+/// retention here (window closing is deferred, as in the other windowing slices).
+#[derive(Debug, Clone, Copy)]
+pub struct SessionWindows {
+    pub gap_ms: i64,
+    pub grace_ms: i64,
+}
+
+impl SessionWindows {
+    /// Inactivity gap of `gap_ms` (grace 0). `gap_ms > 0`.
+    #[must_use]
+    pub fn of_inactivity_gap(gap_ms: i64) -> Self {
+        assert!(gap_ms > 0, "session gap must be > 0");
+        Self {
+            gap_ms,
+            grace_ms: 0,
+        }
+    }
+    /// Set the grace period (only affects changelog retention here).
+    #[must_use]
+    pub fn grace(mut self, grace_ms: i64) -> Self {
+        assert!(grace_ms >= 0, "grace must be >= 0");
+        self.grace_ms = grace_ms;
+        self
+    }
+}
+
+/// `Serde<Windowed<K>>` producing the JVM session **output-topic** format:
+/// `inner_key_bytes ‖ end:8B BE ‖ start:8B BE` (both bounds in the bytes; distinct
+/// from `TimeWindowedSerde`, which encodes only the start and derives `end`).
+#[derive(Debug, Clone, Copy)]
+pub struct SessionWindowedSerde<KS> {
+    inner: KS,
+}
+
+impl<KS> SessionWindowedSerde<KS> {
+    #[must_use]
+    pub fn new(inner: KS) -> Self {
+        Self { inner }
+    }
+}
+
+impl<K, KS> Serde<Windowed<K>> for SessionWindowedSerde<KS>
+where
+    K: Send + Sync + 'static,
+    KS: Serde<K>,
+{
+    fn serialize(&self, value: &Windowed<K>) -> Bytes {
+        let kb = self.inner.serialize(&value.key);
+        let mut b = BytesMut::with_capacity(kb.len() + 16);
+        b.extend_from_slice(&kb);
+        b.put_i64(value.window.end);
+        b.put_i64(value.window.start);
+        b.freeze()
+    }
+    fn deserialize(&self, bytes: &[u8]) -> Result<Windowed<K>, SerdeError> {
+        if bytes.len() < 16 {
+            return Err(SerdeError(format!(
+                "session key too short: {}",
+                bytes.len()
+            )));
+        }
+        let split = bytes.len() - 16;
+        let key = self.inner.deserialize(&bytes[..split])?;
+        let end = i64::from_be_bytes(bytes[split..split + 8].try_into().expect("8 bytes"));
+        let start = i64::from_be_bytes(bytes[split + 8..].try_into().expect("8 bytes"));
+        Ok(Windowed {
+            key,
+            window: Window { start, end },
+        })
+    }
+}
+
 /// `Serde<Windowed<K>>` producing the JVM **output-topic** format:
 /// `inner_key_bytes ‖ windowStart : 8-byte BE` (no end, no seqnum). Carries the
 /// window `size` so `deserialize` can reconstruct `end = start + size`.
@@ -208,5 +283,30 @@ mod tests {
         let back = s.deserialize(&b).unwrap();
         assert_eq!(back.key, "k");
         assert_eq!(back.window, Window { start: 20, end: 30 }); // end = start + size
+    }
+
+    #[test]
+    fn session_windows_gap_and_grace() {
+        let w = SessionWindows::of_inactivity_gap(60_000);
+        assert_eq!((w.gap_ms, w.grace_ms), (60_000, 0));
+        let g = SessionWindows::of_inactivity_gap(60_000).grace(5);
+        assert_eq!((g.gap_ms, g.grace_ms), (60_000, 5));
+    }
+
+    #[test]
+    fn session_windowed_serde_round_trips_end_then_start() {
+        use crate::processor::serde::{Serde, StringSerde};
+        let s = SessionWindowedSerde::new(StringSerde);
+        let wk = Windowed {
+            key: "k".to_string(),
+            window: Window { start: 5, end: 9 },
+        };
+        let b = s.serialize(&wk);
+        assert_eq!(b.len(), 17); // "k"(1) ‖ end:8 ‖ start:8
+        assert_eq!(&b[1..9], &9i64.to_be_bytes()); // end first
+        assert_eq!(&b[9..17], &5i64.to_be_bytes()); // start second
+        let back = s.deserialize(&b).unwrap();
+        assert_eq!(back.key, "k");
+        assert_eq!(back.window, Window { start: 5, end: 9 });
     }
 }
