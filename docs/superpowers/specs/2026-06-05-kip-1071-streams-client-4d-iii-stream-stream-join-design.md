@@ -110,15 +110,29 @@ Three new pieces (all gated to left/outer):
    `(timestamp:8BE ‖ side:1 ‖ key_bytes)` (sorts by time→side→key), value = a tagged
    `LeftOrRight(VA | VB)` (the unmatched value). Both processors connect to it. Its
    changelog is a standard KV changelog (config pinned by the capture).
+   - **Ground truth (C4 capture).** The JVM `KStreamImplJoin` *renames the per-side
+     join processors* for left/outer: THIS → `KSTREAM-OUTERTHIS-` when the other side
+     is outer (`rightOuter`), OTHER → `KSTREAM-OUTEROTHER-` when this side is outer
+     (`leftOuter`) — so inner = `JOINTHIS/JOINOTHER`, left = `JOINTHIS/OUTEROTHER`,
+     outer = `OUTERTHIS/OUTEROTHER`. The window-store names follow
+     (`<proc>-store`). The shared store does **not** mint a fresh counter index — it
+     *reuses the THIS processor's index*: `KSTREAM-OUTERSHARED-<thisIndex>-store`. Its
+     changelog is `cleanup.policy=compact` (+ `message.timestamp.type=CreateTime`),
+     i.e. the standard KV changelog. Sorted changelog order: `OUTEROTHER` <
+     `OUTERSHARED` < `OUTERTHIS`.
 2. **Shared stream-time tracker** — `{ stream_time, min_time }` shared between the
    THIS/OTHER processors via one `Arc<Mutex<TimeTracker>>` created in the lowering and
    captured by both processor suppliers (Send+Sync; uncontended — single-threaded
    task). `stream_time` = max record ts across both sides.
 3. **Emit-on-close, in each `process()`** (after the inner logic):
    - bump `stream_time = max(stream_time, t)`.
-   - **unmatched** (outer/left, no fetch match): if the outer store is empty **or** the
-     record's window already closed (`t + fetch_after < stream_time`), emit the
-     null-padded result eagerly; else buffer it at `(t, side, k)`.
+   - **unmatched** (outer/left, no fetch match): if the record's window already closed
+     (`t + fetch_after < stream_time`), emit the null-padded result eagerly; else
+     buffer it at `(t, side, k)`. *(Implementation note: the JVM's additional
+     "outer store empty" eager-emit short-circuit is intentionally dropped — with a
+     windowed buffer it is self-defeating, since the first unmatched record always
+     sees an empty store and would emit eagerly, defeating the buffer/close-scan and
+     reintroducing the spurious nulls KIP-633 removes.)*
    - **close scan**: iterate the outer store in timestamp order; for each buffered
      `(ts, side, k)` whose window has closed — `min_time + lookback(side) + grace <
      stream_time`, **lookback = after for a left-side (A) record, before for a
