@@ -58,6 +58,14 @@ pub(crate) const KTABLE_MERGE: &str = "KTABLE-MERGE-";
 /// nodes union into one copartitioned subtopology via their shared stores).
 pub(crate) const KSTREAM_JOINTHIS: &str = "KSTREAM-JOINTHIS-";
 pub(crate) const KSTREAM_JOINOTHER: &str = "KSTREAM-JOINOTHER-";
+/// The JVM renames the per-side join processors for left/outer joins: the THIS
+/// processor becomes `KSTREAM-OUTERTHIS-` when the *other* (right) side is outer
+/// (`rightOuter`), and the OTHER processor becomes `KSTREAM-OUTEROTHER-` when the
+/// *this* (left) side is outer (`leftOuter`). So inner → JOINTHIS/JOINOTHER, left
+/// → JOINTHIS/OUTEROTHER, outer → OUTERTHIS/OUTEROTHER. The window-store names are
+/// still `<joinProcessorName>-store`, so the prefix flows into the changelog name.
+pub(crate) const KSTREAM_OUTERTHIS: &str = "KSTREAM-OUTERTHIS-";
+pub(crate) const KSTREAM_OUTEROTHER: &str = "KSTREAM-OUTEROTHER-";
 /// The JVM's two windowed-stream processors (one per side) that put each record
 /// into its window store. Not wire-visible, but they consume counter indices, so
 /// the lowering burns two to land the join processors — and thus the

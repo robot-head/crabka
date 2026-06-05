@@ -80,6 +80,41 @@ fn stream_stream_join_matches_jvm() {
 }
 
 #[test]
+fn stream_stream_outer_join_matches_jvm() {
+    use crabka_client_streams::{JoinWindows, StreamJoined, StringSerde};
+    // Mirrors Capture.java `streamStreamOuterJoin()`:
+    //   stream("left").outerJoin(stream("right"), (a,c)->a+c, JoinWindows 60s, StreamJoined).to("out")
+    //
+    // Like the inner join but KIP-633 left/outer renames the per-side join
+    // processors (THIS → KSTREAM-OUTERTHIS-0000000004, OTHER →
+    // KSTREAM-OUTEROTHER-0000000005) and adds a SHARED outer-join KV store whose
+    // name reuses the THIS index: KSTREAM-OUTERSHARED-0000000004-store. The two
+    // window-store changelogs stay cleanup.policy=delete + retention.ms=86520000;
+    // the shared store's changelog is cleanup.policy=compact (a KV changelog).
+    // Three changelogs, sorted by name: OUTEROTHER < OUTERSHARED < OUTERTHIS.
+    let b = StreamsBuilder::new();
+    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    left.outer_join(
+        &right,
+        |a: Option<&String>, c: Option<&String>| {
+            format!(
+                "{}{}",
+                a.cloned().unwrap_or_default(),
+                c.cloned().unwrap_or_default()
+            )
+        },
+        JoinWindows::of(60_000),
+        StreamJoined::with(StringSerde, StringSerde, StringSerde),
+    )
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(left);
+    drop(right);
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "stream_stream_outer_join");
+}
+
+#[test]
 fn count_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     let b = StreamsBuilder::new();

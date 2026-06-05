@@ -75,8 +75,9 @@ public final class Capture {
         write(outDir, "ktable_ktable_join", ktableKtableJoin());
         write(outDir, "windowed_count", windowedCount());
         write(outDir, "stream_stream_join", streamStreamJoin());
+        write(outDir, "stream_stream_outer_join", streamStreamOuterJoin());
 
-        System.out.println("Capture complete. Wrote 10 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 11 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -193,6 +194,26 @@ public final class Capture {
         left.join(
                 right,
                 (a, c) -> a + c,
+                org.apache.kafka.streams.kstream.JoinWindows.ofTimeDifferenceWithNoGrace(java.time.Duration.ofSeconds(60)),
+                org.apache.kafka.streams.kstream.StreamJoined.with(Serdes.String(), Serdes.String(), Serdes.String()))
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 11. stream_stream_outer_join: stream("left").outerJoin(stream("right"), joiner, JoinWindows 60s).to("out").
+     * Like the inner join (two retainDuplicates window stores, cleanup.policy=delete changelogs,
+     * copartition), but KIP-633 left/outer adds a SHARED outer-join store (KSTREAM-OUTERSHARED-)
+     * that buffers non-matched records until their window closes. Its name/index and changelog
+     * config are JVM ground truth — this fixture pins them.
+     */
+    static Topology streamStreamOuterJoin() {
+        StreamsBuilder b = new StreamsBuilder();
+        KStream<String, String> left = b.stream("left", Consumed.with(Serdes.String(), Serdes.String()));
+        KStream<String, String> right = b.stream("right", Consumed.with(Serdes.String(), Serdes.String()));
+        left.outerJoin(
+                right,
+                (a, c) -> (a == null ? "" : a) + (c == null ? "" : c),
                 org.apache.kafka.streams.kstream.JoinWindows.ofTimeDifferenceWithNoGrace(java.time.Duration.ofSeconds(60)),
                 org.apache.kafka.streams.kstream.StreamJoined.with(Serdes.String(), Serdes.String(), Serdes.String()))
             .to("out", Produced.with(Serdes.String(), Serdes.String()));

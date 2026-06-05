@@ -790,14 +790,34 @@ where
         // processors — and hence the store names — land at the JVM indices.
         let _windowed_this = g.new_processor_name(names::KSTREAM_WINDOWED);
         let _windowed_other = g.new_processor_name(names::KSTREAM_WINDOWED);
-        let join_this = g.new_processor_name(names::KSTREAM_JOINTHIS);
-        let join_other = g.new_processor_name(names::KSTREAM_JOINOTHER);
+        // Left/outer rename the join processors (and hence their `<name>-store`
+        // window stores): THIS → OUTERTHIS when the OTHER side is outer; OTHER →
+        // OUTEROTHER when THIS is outer. Inner keeps JOINTHIS/JOINOTHER, so inner
+        // topologies are byte-unchanged. (JVM `KStreamImplJoin`; pinned by the
+        // `stream_stream_outer_join` golden, Task C4.)
+        let join_this_prefix = if other_emit {
+            names::KSTREAM_OUTERTHIS
+        } else {
+            names::KSTREAM_JOINTHIS
+        };
+        let join_other_prefix = if this_emit {
+            names::KSTREAM_OUTEROTHER
+        } else {
+            names::KSTREAM_JOINOTHER
+        };
+        let join_this = g.new_processor_name(join_this_prefix);
+        let join_other = g.new_processor_name(join_other_prefix);
         let this_store = format!("{join_this}-store");
         let other_store = format!("{join_other}-store");
         let merge = g.new_processor_name(names::MERGE);
-        // The shared outer-join KV store: minted AFTER merge and only for left/outer,
-        // so inner topologies are byte-unchanged. C4's golden pins the exact index.
-        let outer_store = has_outer.then(|| g.new_processor_name(names::KSTREAM_OUTERSHARED));
+        // The shared outer-join KV store (left/outer only). The JVM does NOT mint a
+        // fresh counter index for it — it reuses the THIS join processor's 10-digit
+        // index: `KSTREAM-OUTERSHARED-<thisIndex>-store`. (`new_processor_name`
+        // always formats the index as the trailing 10 chars.)
+        let outer_store = has_outer.then(|| {
+            let idx = &join_this[join_this.len() - 10..];
+            format!("{}{idx}-store", names::KSTREAM_OUTERSHARED)
+        });
 
         // ── THIS side: fed by this stream; puts into `this_store`, reads `other_store`.
         let this_id = g.graph.add(
