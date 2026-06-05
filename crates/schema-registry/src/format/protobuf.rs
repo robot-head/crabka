@@ -1,4 +1,4 @@
-//! Protobuf: parse a single `.proto` source into a FileDescriptorProto; dedup
+//! Protobuf: parse a single `.proto` source into a `FileDescriptorProto`; dedup
 //! key = deterministic prost encoding of the descriptor (source-info cleared so
 //! formatting doesn't change the bytes). Confluent-exact canonical form is slice 2+.
 
@@ -27,9 +27,8 @@ impl ParsedSchema for ProtobufSchema {
         let mut d = self.0.clone();
         d.source_code_info = None;
         d.name = None;
-        let bytes = d.encode_to_vec();
-        // hex-encode for a printable, stable string
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        // hex-encode for a printable, stable string (lowercase, like `{:02x}`)
+        hex::encode(d.encode_to_vec())
     }
 }
 

@@ -28,7 +28,7 @@ impl SchemaType {
     #[must_use]
     pub fn from_wire(s: Option<&str>) -> Self {
         match s {
-            None | Some("") | Some("AVRO") => Self::Avro,
+            None | Some("" | "AVRO") => Self::Avro,
             Some("PROTOBUF") => Self::Protobuf,
             _ => Self::Json,
         }

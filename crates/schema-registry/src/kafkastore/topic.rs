@@ -1,5 +1,5 @@
 //! Ensure the `_schemas` compacted topic exists; resolve its `topic_id`
-//! (needed by Fetch v>=13). Mirrors remote-storage-topic's ensure_topic.
+//! (needed by Fetch v>=13). Mirrors `remote-storage-topic`'s `ensure_topic`.
 
 use std::collections::BTreeMap;
 
@@ -40,7 +40,7 @@ pub async fn ensure_schemas_topic(cfg: &RegistryConfig) -> anyhow::Result<WireUu
         .into_iter()
         .find(|t| t.name == cfg.schemas_topic)
         .ok_or_else(|| anyhow::anyhow!("_schemas not found after create"))?;
-    Ok(entry.topic_id.map(to_wire_uuid).unwrap_or(WireUuid::ZERO))
+    Ok(entry.topic_id.map_or(WireUuid::ZERO, to_wire_uuid))
 }
 
 /// Convert admin's `uuid::Uuid` to the protocol `WireUuid` (same byte order).

@@ -1613,6 +1613,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-protocol",
+ "hex",
  "parking_lot",
  "prost-reflect",
  "protox",

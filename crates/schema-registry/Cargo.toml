@@ -23,6 +23,7 @@ axum = { workspace = true, features = ["query"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
 tokio-util = { workspace = true, features = ["rt"] }
 bytes.workspace = true
+hex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
