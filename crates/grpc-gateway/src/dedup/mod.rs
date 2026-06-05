@@ -1,5 +1,7 @@
 //! Single-owner exactly-once dedup engine.
 
+pub mod topic;
+
 /// Deterministic FNV-1a-64 over the key, modulo partition count. Stable
 /// across processes/restarts (unlike `DefaultHasher`'s per-run state), so a
 /// given key always maps to the same dedup partition.
