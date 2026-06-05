@@ -1,6 +1,15 @@
-//! Backward-compatibility classification for Protobuf differences. SEED values
-//! from Confluent's behavior; the cp golden matrix (`compat_conformance`) is the
-//! authority and re-tunes this table.
+//! Backward-compatibility classification for Protobuf differences. CALIBRATED
+//! against the golden cp-schema-registry matrix (`compat_conformance` →
+//! `engine_matches_cp_protobuf_verdicts`, 88 cases from real cp 7.4.0). cp is the
+//! authority; every verdict below is the one cp emits.
+//!
+//! Direction note: `diff::compare(original, update)` is called with
+//! `original = writer` for BACKWARD and `original = reader` for FORWARD (the
+//! engine swaps the pair per direction). So an asymmetric rule — e.g. adding a
+//! message is BACKWARD-ok but FORWARD-broken — is encoded by classifying the two
+//! mirror `Kind`s differently (`MessageAdded` true, `MessageRemoved` false): for
+//! BACKWARD a new reader message shows up as `MessageAdded`; for FORWARD the same
+//! schema pair diffs the other way and shows up as `MessageRemoved`.
 
 use super::diff::{Difference, Kind};
 
@@ -10,27 +19,40 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
     match kind {
         Kind::FieldAdded
         | Kind::FieldRemoved
+        // A message present only on the reader side is fine for a reader (cp:
+        // message_added is BACKWARD-compatible). The FORWARD case diffs to
+        // `MessageRemoved`, which is incompatible below.
         | Kind::MessageAdded
-        | Kind::MessageRemoved
-        // Oneof rules (Task 2) — seed values, calibrated vs cp in Task 6.
-        | Kind::OneofFieldMovedIn
+        // A field moved OUT of a oneof: cp says BACKWARD-compatible (FORWARD diffs
+        // to `OneofFieldMovedIn`, incompatible below).
+        | Kind::OneofFieldMovedOut
+        // Adding or removing a oneof *declaration* is itself compatible: the wire
+        // encoding of the member fields is unchanged. The only incompatible oneof
+        // change is grouping ≥2 formerly-independent fields together, which the
+        // diff reports as `OneofFieldMovedIn` (see `diff::compare_field`).
         | Kind::OneofAdded
-        // Reserved rules (Task 3) — seed values.
+        | Kind::OneofRemoved
         | Kind::ReservedNumberAdded
         | Kind::ReservedNameAdded
-        // Enum rules (Task 4) — seed values, calibrated vs cp in Task 6.
         | Kind::EnumConstAdded
         | Kind::EnumConstRemoved
         | Kind::EnumAdded
-        | Kind::EnumRemoved => true,
+        | Kind::EnumRemoved
+        // Changing the proto package is compatible in cp (the package is not part
+        // of the wire encoding).
+        | Kind::PackageChanged
+        // singular ↔ repeated of the same type is compatible in cp (a reader can
+        // decode a single value as a length-1 repeated and vice versa).
+        | Kind::FieldLabelChanged => true,
         Kind::FieldScalarKindChanged { compatible_group } => *compatible_group,
         Kind::FieldKindChanged
         | Kind::FieldNamedTypeChanged
-        | Kind::FieldLabelChanged
-        | Kind::OneofFieldMovedOut
-        | Kind::OneofRemoved
-        // Package change (Task 4) — seed value: incompatible.
-        | Kind::PackageChanged => false,
+        // A field moved INTO a oneof (grouping ≥2 formerly-independent fields) is
+        // BACKWARD-incompatible in cp (the mirror of `OneofFieldMovedOut`).
+        | Kind::OneofFieldMovedIn
+        // A message removed from the reader is BACKWARD-incompatible (mirror of
+        // `MessageAdded`).
+        | Kind::MessageRemoved => false,
     }
 }
 

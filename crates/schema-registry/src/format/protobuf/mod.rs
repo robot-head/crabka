@@ -208,8 +208,11 @@ mod tests {
     }
 
     #[test]
-    fn label_change_is_incompatible() {
-        assert!(check(&p("repeated int32 id = 1;"), &p("int32 id = 1;")).is_err());
+    fn label_change_singular_to_repeated_is_compatible() {
+        // cp is authority: singular ↔ repeated of the same type is compatible
+        // (calibrated in Task 6 against the golden matrix — previously seeded
+        // as incompatible, which cp contradicts).
+        assert!(check(&p("repeated int32 id = 1;"), &p("int32 id = 1;")).is_ok());
     }
 
     #[test]
@@ -222,10 +225,20 @@ mod tests {
     // ── Task 2: oneof rules ───────────────────────────────────────────────────
 
     #[test]
-    fn moving_field_into_oneof_does_not_panic() {
-        let w = "syntax = \"proto3\"; message U { int32 a = 1; int32 b = 2; }";
-        let r = "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }";
-        let _ = check(r, w); // verdict calibrated vs cp in Task 6; must not panic
+    fn moving_field_into_oneof_is_incompatible_out_is_compatible() {
+        // cp is authority (calibrated in Task 6): a reader that moved fields INTO
+        // a oneof cannot read a writer that had them as plain fields → incompatible.
+        // The reverse (oneof → plain) is compatible.
+        let plain = "syntax = \"proto3\"; message U { int32 a = 1; int32 b = 2; }";
+        let oneof = "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }";
+        assert!(
+            check(oneof, plain).is_err(),
+            "reader moved fields into oneof"
+        );
+        assert!(
+            check(plain, oneof).is_ok(),
+            "reader moved fields out of oneof"
+        );
     }
 
     #[test]
@@ -277,9 +290,34 @@ mod tests {
     }
 
     #[test]
-    fn package_change_does_not_panic() {
+    fn package_change_is_compatible() {
+        // cp is authority: a package rename is compatible (calibrated in Task 6).
         let w = "syntax = \"proto3\"; package a; message U { int32 id = 1; }";
         let r = "syntax = \"proto3\"; package b; message U { int32 id = 1; }";
-        let _ = check(r, w); // calibrated vs cp in Task 6
+        assert!(check(r, w).is_ok());
+    }
+
+    #[test]
+    fn int_to_enum_is_compatible_within_varint_group() {
+        // cp is authority: int32 ↔ enum is a compatible scalar-kind change (both
+        // are varints on the wire). scalar → message stays incompatible.
+        let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
+        let r = "syntax = \"proto3\"; enum E { A = 0; } message U { E id = 1; }";
+        assert!(check(r, w).is_ok());
+    }
+
+    #[test]
+    fn message_add_remove_is_asymmetric() {
+        // cp is authority: adding a message the reader has (writer lacks) is
+        // BACKWARD-ok; removing a message the writer had (reader lacks) is not.
+        let small = "syntax = \"proto3\"; message U { int32 id = 1; }";
+        let big = "syntax = \"proto3\"; message U { int32 id = 1; } message V { int32 a = 1; }";
+        // reader=big, writer=small → reader has an extra message → compatible.
+        assert!(check(big, small).is_ok(), "reader-only message is fine");
+        // reader=small, writer=big → reader is missing a writer message → incompatible.
+        assert!(
+            check(small, big).is_err(),
+            "reader missing a writer message"
+        );
     }
 }

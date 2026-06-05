@@ -600,6 +600,50 @@ async fn compat_enforced_on_register() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn protobuf_compat_enforced_on_register() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // v1: a single int32 field. Default global compat is BACKWARD.
+    let v1 =
+        r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { int32 id = 1; }"}"#;
+    assert_eq!(
+        app.clone()
+            .oneshot(req_post("/subjects/pb/versions", v1))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    // Changing the field's wire kind across groups (int32 → string) breaks
+    // BACKWARD — expect 409.
+    let bad =
+        r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { string id = 1; }"}"#;
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/pb/versions", bad))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert_eq!(body_json(r).await["error_code"], 409);
+
+    // Adding a new field is compatible.
+    let good = r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { int32 id = 1; int32 x = 2; }"}"#;
+    assert_eq!(
+        app.clone()
+            .oneshot(req_post("/subjects/pb/versions", good))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn none_level_bypasses_enforcement() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     let app = rest::router(AppState { store });
