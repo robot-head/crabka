@@ -857,3 +857,105 @@ fn dsl_to_table_executes() {
         Some("b".to_string())
     );
 }
+
+/// `to_table` with an **unnamed** `Materialized` (no `.as_store()`) auto-mints a
+/// store name from the `KSTREAM-TOTABLE-STATE-STORE-` counter. The store name is
+/// opaque here — we just assert that the output is correct (records flow through),
+/// which exercises the `store_name = None → auto-mint` branch in `to_table`.
+#[test]
+fn dsl_to_table_unnamed_store_executes() {
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        // No `.as_store(...)` — store gets an auto-minted name.
+        .to_table(Materialized::with(StringSerde, StringSerde))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "a".to_string(),
+        0,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "b".to_string(),
+        1,
+    );
+    // The table forwards each new value through to_stream to the sink.
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "a".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "b".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// `to_table` with `with_logging(false)` must suppress the changelog topic from
+/// the wire topology (`add_state_store_no_changelog` branch). The store is still
+/// functional at runtime.
+#[test]
+fn dsl_to_table_no_logging_omits_changelog() {
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .to_table(
+            Materialized::with(StringSerde, StringSerde)
+                .as_store("s")
+                .with_logging(false),
+        )
+        .to_stream()
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let built = b.build("app").unwrap();
+
+    // Wire topology must have no changelog topics for the to_table store.
+    let wire = built.to_wire();
+    let any_changelog = wire
+        .subtopologies
+        .iter()
+        .any(|sub| !sub.state_changelog_topics.is_empty());
+    assert!(
+        !any_changelog,
+        "expected no changelog topics when with_logging(false) but found some: {wire:?}"
+    );
+
+    // The store still functions at runtime.
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "a".to_string(),
+        0,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "b".to_string(),
+        1,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "a".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "b".to_string()))
+    );
+    assert_eq!(
+        d.get_key_value_store::<String, String>("s")
+            .unwrap()
+            .get(&"k".to_string()),
+        Some("b".to_string())
+    );
+}
