@@ -49,4 +49,10 @@ pub(crate) const TABLE_FILTER: &str = "KTABLE-FILTER-";
 #[allow(dead_code)]
 pub(crate) const JOIN: &str = "KSTREAM-JOIN-";
 #[allow(dead_code)]
+pub(crate) const KTABLE_JOIN_THIS: &str = "KTABLE-JOINTHIS-";
+#[allow(dead_code)]
+pub(crate) const KTABLE_JOIN_OTHER: &str = "KTABLE-JOINOTHER-";
+#[allow(dead_code)]
+pub(crate) const KTABLE_MERGE: &str = "KTABLE-MERGE-";
+#[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";
