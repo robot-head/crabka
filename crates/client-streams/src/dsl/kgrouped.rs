@@ -264,7 +264,7 @@ where
         }));
 
         drop(g);
-        KTable::new(Rc::clone(&self.builder), agg_id, Some(store_name))
+        KTable::new(Rc::clone(&self.builder), agg_id, Some(store_name), None)
     }
 
     /// Record the (optional) repartition node + a `KStreamReduceProcessor`
@@ -338,7 +338,7 @@ where
         }));
 
         drop(g);
-        KTable::new(Rc::clone(&self.builder), red_id, Some(store_name))
+        KTable::new(Rc::clone(&self.builder), red_id, Some(store_name), None)
     }
 
     /// If the upstream is key-changing, record a `Repartition` node

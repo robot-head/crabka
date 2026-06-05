@@ -51,6 +51,10 @@ pub(crate) struct NodeRegistry {
     pub stores: Vec<StoreEntry>,
     /// Topic names registered as internal repartition topics.
     pub repartition_topics: HashSet<String>,
+    /// Declared copartition groups: each a list of member topic names that must
+    /// share a partitioning (required for joins). The grouping pass assigns each
+    /// group to the subtopology containing its members.
+    pub copartition_groups: Vec<Vec<String>>,
 }
 
 impl NodeRegistry {
@@ -128,6 +132,25 @@ impl NodeRegistry {
             processors,
             changelog_override,
         });
+    }
+
+    /// Declare a copartition group over the given member topic names.
+    pub fn add_copartition_group(&mut self, topics: Vec<String>) {
+        self.copartition_groups.push(topics);
+    }
+
+    /// Connect an additional processor to an existing store.
+    ///
+    /// Mirrors `InternalTopologyBuilder.connectProcessorAndStateStores`: lets a
+    /// join processor read the joined table's store without being the original
+    /// owner. No-op if `processor` is already listed. No-op if `store` is not
+    /// found (callers ensure stores are registered before connecting).
+    pub fn connect_processor_store(&mut self, processor: &str, store: &str) {
+        if let Some(e) = self.stores.iter_mut().find(|e| e.name == store)
+            && !e.processors.iter().any(|p| p == processor)
+        {
+            e.processors.push(processor.to_string());
+        }
     }
 
     /// Validate that every referenced predecessor exists. Call after all nodes

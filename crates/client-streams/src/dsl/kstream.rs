@@ -19,6 +19,7 @@ use crate::dsl::kgrouped::KGroupedStream;
 use crate::dsl::ktable::KTable;
 use crate::dsl::names;
 use crate::dsl::processors::change::Change;
+use crate::dsl::processors::join::KStreamKTableJoinProcessor;
 use crate::dsl::processors::stateless;
 use crate::dsl::processors::table::KStreamToTableProcessor;
 use crate::processor::serde::{Produced, Serde};
@@ -35,6 +36,16 @@ pub struct KStream<K, V> {
     /// decide whether it must insert a repartition before the aggregate node.
     /// A source stream starts `false`; value-only ops propagate the parent bit.
     pub(crate) key_changing: bool,
+    /// The single Kafka source topic this stream still reads, when known. Set by
+    /// [`StreamsBuilder::stream`] when a stream is sourced from exactly one topic;
+    /// propagated unchanged through value-only ops (`map_values`/`filter`/`peek`/…)
+    /// since they don't change the key or the partitioning. Cleared (`None`) by
+    /// key-changing ops, `merge`, `repartition`, `to_stream`, and a join output —
+    /// in those cases the stream no longer corresponds to a single original source
+    /// topic. [`join`](Self::join) reads this as the stream-side copartition group
+    /// member when the key is unchanged (otherwise it repartitions and uses the
+    /// repartition topic as the member).
+    pub(crate) source_topic: Option<String>,
     pub(crate) _pd: std::marker::PhantomData<fn() -> (K, V)>,
 }
 
@@ -52,8 +63,16 @@ impl<K, V> KStream<K, V> {
             builder,
             node,
             key_changing,
+            source_topic: None,
             _pd: std::marker::PhantomData,
         }
+    }
+
+    /// Set the single source-topic lineage (see [`source_topic`](Self::source_topic)).
+    #[must_use]
+    pub(crate) fn with_source_topic(mut self, topic: Option<String>) -> Self {
+        self.source_topic = topic;
+        self
     }
 }
 
@@ -92,8 +111,9 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        // map_values is value-only → key lineage unchanged.
+        // map_values is value-only → key + source-topic lineage unchanged.
         KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
+            .with_source_topic(self.source_topic.clone())
     }
 
     /// `filter`: keep records where `predicate(key, value)` is true.
@@ -146,8 +166,9 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        // filter is value-only → key lineage unchanged.
+        // filter is value-only → key + source-topic lineage unchanged.
         KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
+            .with_source_topic(self.source_topic.clone())
     }
 
     /// `map`: transform key and value. Key-changing.
@@ -292,8 +313,9 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        // flat_map_values is value-only → key lineage unchanged.
+        // flat_map_values is value-only → key + source-topic lineage unchanged.
         KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
+            .with_source_topic(self.source_topic.clone())
     }
 
     /// `peek`: observe each record, then forward it unchanged.
@@ -327,8 +349,9 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        // peek is observe-only → key lineage unchanged.
+        // peek is observe-only → key + source-topic lineage unchanged.
         KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
+            .with_source_topic(self.source_topic.clone())
     }
 
     /// `foreach`: terminal side-effect on each record (consumes the stream).
@@ -421,6 +444,136 @@ where
             id,
             self.key_changing || other.key_changing,
         )
+    }
+
+    /// `join` (inner stream-table join): for each record on this stream, look up
+    /// the record's key in `table`'s materialized store and, **only when a value is
+    /// present**, forward `joiner(&stream_value, &table_value)` keyed by the same
+    /// key. Records whose key is absent from the table are dropped (inner join).
+    ///
+    /// `table` must be materialized (sourced via [`StreamsBuilder::table`] or any
+    /// materialized op) — the join reads its store by name. The stream side and the
+    /// table's source topic are declared as a **copartition group** (KIP-1071), so
+    /// the streams-group coordinator co-locates their partitions.
+    ///
+    /// The stream key must be unchanged relative to its source partitioning (a
+    /// stream-table join is partition-local). If a key-changing op (`map`/
+    /// `select_key`/`flat_map`/`group_by`) precedes the join, call
+    /// [`repartition`](Self::repartition) first to re-partition by the new key;
+    /// otherwise `join` panics.
+    ///
+    /// [`StreamsBuilder::table`]: crate::dsl::builder::StreamsBuilder::table
+    #[must_use]
+    pub fn join<VT, VO, F>(&self, table: &KTable<K, VT>, joiner: F) -> KStream<K, VO>
+    where
+        VT: Any + Send + Clone,
+        VO: Any + Send + Clone,
+        F: Fn(&V, &VT) -> VO + Clone + Send + Sync + 'static,
+    {
+        // Wrap the inner joiner to the left form `Fn(&V, Option<&VT>) -> VO`; with
+        // `emit_on_miss = false` the closure is only ever called with `Some`.
+        let lf = move |v: &V, opt: Option<&VT>| joiner(v, opt.expect("inner join hit"));
+        self.join_impl::<VT, VO, _>(table, lf, false)
+    }
+
+    /// `leftJoin` (left stream-table join): like [`join`](Self::join) but always
+    /// forwards a record for every stream record. On a table miss the `joiner`
+    /// receives `None` for the table-side value.
+    #[must_use]
+    pub fn left_join<VT, VO, F>(&self, table: &KTable<K, VT>, joiner: F) -> KStream<K, VO>
+    where
+        VT: Any + Send + Clone,
+        VO: Any + Send + Clone,
+        F: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
+    {
+        self.join_impl::<VT, VO, _>(table, joiner, true)
+    }
+
+    /// Shared lowering for inner/left stream-table join. `left_form` is the
+    /// `Fn(&V, Option<&VT>) -> VO` joiner; `emit_on_miss` is `false` for inner,
+    /// `true` for left.
+    ///
+    /// Records a `KSTREAM-JOIN-` processor node wired to this stream's node, and in
+    /// its thunk: (1) builds a [`KStreamKTableJoinProcessor`] reading the table's
+    /// store, (2) `connect_processor_store`s the join to that store (the union pulls
+    /// the join into the SAME subtopology as the table source, so both sources land
+    /// together), and (3) declares the `(stream_member, table_source)` copartition
+    /// group when both members are single source topics.
+    fn join_impl<VT, VO, LF>(
+        &self,
+        table: &KTable<K, VT>,
+        left_form: LF,
+        emit_on_miss: bool,
+    ) -> KStream<K, VO>
+    where
+        VT: Any + Send + Clone,
+        VO: Any + Send + Clone,
+        LF: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
+    {
+        assert!(
+            !self.key_changing,
+            "join: the stream key was changed upstream (map/select_key/flat_map/group_by); \
+             call `.repartition(..)` before joining to re-partition by the new key"
+        );
+        let table_store = table
+            .store_name()
+            .expect("join requires a materialized table (a store-backed KTable)")
+            .to_string();
+        let table_src = table.source_topic().map(str::to_string);
+        // The stream-side copartition member is this stream's single source topic
+        // (key unchanged → still copartitioned with that topic). `None` if the
+        // stream has no single source topic (multi-topic source, prior merge, …).
+        let stream_member = self.source_topic.clone();
+
+        let parent_id = self.node;
+        let mut g = self.builder.borrow_mut();
+        let join_name = g.new_processor_name(names::JOIN);
+        let join_id = g.graph.add(
+            join_name.clone(),
+            // The join lowers to a plain processor node (its store connection +
+            // copartition declaration happen in the thunk); reusing the stateless
+            // kind keeps the optimizer passes (which only inspect Repartition /
+            // TableSource) correctly skipping it.
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![parent_id],
+        );
+        let store_for_thunk = table_store.clone();
+        g.graph.nodes[join_id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+            let store_for_proc = store_for_thunk.clone();
+            let lf = left_form.clone();
+            let h = state.topology.add_processor::<K, V, K, VO, _, _, _>(
+                join_name.clone(),
+                move || KStreamKTableJoinProcessor {
+                    table_store: store_for_proc.clone(),
+                    joiner: lf.clone(),
+                    emit_on_miss,
+                    _pd: PhantomData,
+                },
+                [parent],
+            );
+            // Union the join into the table store's processor set: this pulls the
+            // join (and therefore the stream source feeding it) into the SAME
+            // subtopology as the table source that owns the store.
+            state
+                .topology
+                .connect_processor_store(h.name(), &store_for_thunk);
+            // Declare the copartition group when both sides are single source
+            // topics. The grouping pass assigns it to the subtopology and the wire
+            // layer encodes the members as int16 indices into the sorted sources.
+            if let (Some(sm), Some(ts)) = (&stream_member, &table_src) {
+                state
+                    .topology
+                    .add_copartition_group([sm.clone(), ts.clone()]);
+            }
+            state.handle_name.insert(join_id, h.name().to_string());
+        }));
+        drop(g);
+        // The joined stream keeps the key but no longer maps to a single source
+        // topic (it is the join output), so its source-topic lineage is `None`.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), join_id, false)
     }
 
     /// `repartition`: force a repartition through an internal topic.
@@ -518,6 +671,7 @@ where
             builder: Rc::clone(&self.builder),
             parent: self.node,
             key_changing: self.key_changing,
+            source_topic: self.source_topic.clone(),
             _pd: std::marker::PhantomData,
         }
     }
@@ -638,7 +792,7 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, Some(store_name))
+        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
     }
 }
 
@@ -665,6 +819,7 @@ pub struct BranchedStream<K, V> {
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     pub(crate) parent: NodeId,
     pub(crate) key_changing: bool,
+    pub(crate) source_topic: Option<String>,
     pub(crate) _pd: std::marker::PhantomData<fn() -> (K, V)>,
 }
 
@@ -707,8 +862,9 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        // branch is filter-only → key lineage unchanged.
+        // branch is filter-only → key + source-topic lineage unchanged.
         KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
+            .with_source_topic(self.source_topic.clone())
     }
 }
 

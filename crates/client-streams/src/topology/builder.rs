@@ -452,9 +452,45 @@ impl Topology {
         self
     }
 
+    /// Connect an additional processor to an already-registered state store.
+    ///
+    /// Mirrors `InternalTopologyBuilder.connectProcessorAndStateStores`: a join
+    /// processor needs to read the joined table's store even though it wasn't the
+    /// store's original owner. The grouping pass unions all connected processors
+    /// into one subtopology, so adding a second processor here is sufficient to
+    /// pull the join processor into the same subtopology as the store.
+    pub fn connect_processor_store(&mut self, processor: &str, store: &str) -> &mut Self {
+        self.reg.connect_processor_store(processor, store);
+        self
+    }
+
+    /// Return the connected-processor list for a store (test helper).
+    #[cfg(test)]
+    pub(crate) fn store_entry_for_test(&self, store: &str) -> Option<Vec<String>> {
+        self.reg
+            .stores
+            .iter()
+            .find(|e| e.name == store)
+            .map(|e| e.processors.clone())
+    }
+
     /// Register a topic name as an internal repartition topic.
     pub fn add_repartition_topic<S: Into<String>>(&mut self, name: S) -> &mut Self {
         self.reg.repartition_topics.insert(name.into());
+        self
+    }
+
+    /// Declare a copartition group: the given member topics must share a
+    /// partitioning. The grouping pass assigns the group to the subtopology that
+    /// reads its members, and the wire layer encodes member names as `int16`
+    /// indices into that subtopology's sorted source/repartition arrays. Required
+    /// for joins (KIP-1071).
+    pub fn add_copartition_group(
+        &mut self,
+        topics: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self {
+        self.reg
+            .add_copartition_group(topics.into_iter().map(Into::into).collect());
         self
     }
 
@@ -759,6 +795,25 @@ mod tests {
     }
 
     #[test]
+    fn copartition_group_emitted_in_wire() {
+        use crate::processor::serde::{BytesSerde, Consumed, Produced};
+        let mut t = Topology::new();
+        let a = t.add_source("sa", ["left"], Consumed::with(BytesSerde, BytesSerde));
+        let b = t.add_source("sb", ["right"], Consumed::with(BytesSerde, BytesSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            [&a, &b],
+            Produced::with(BytesSerde, BytesSerde),
+        ); // both → one subtopology
+        t.add_copartition_group(["left", "right"]);
+        let wire = t.build("app").unwrap().to_wire();
+        let sub = &wire.subtopologies[0];
+        check!(sub.copartition_groups.len() == 1);
+        check!(sub.copartition_groups[0].source_topics == vec![0i16, 1i16]); // sorted ["left","right"]
+    }
+
+    #[test]
     fn build_single_source_sink_wire_unchanged() {
         let mut t = Topology::new();
         let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
@@ -922,6 +977,35 @@ mod tests {
         );
         let built = t.build("app").unwrap();
         check!(built.source_topics_for("99").is_empty());
+    }
+
+    #[test]
+    fn connect_processor_store_adds_processor_to_store() {
+        let mut t = Topology::new();
+        // register a store connected to processor "p1"
+        t.add_state_store::<String, String, _, _>("s", StringSerde, StringSerde, ["p1"]);
+        t.connect_processor_store("p2", "s");
+        // the store's connected-processor list now has both p1 and p2
+        let entry = t.store_entry_for_test("s").unwrap();
+        check!(entry == vec!["p1".to_string(), "p2".to_string()]);
+    }
+
+    #[test]
+    fn connect_processor_store_is_idempotent() {
+        let mut t = Topology::new();
+        t.add_state_store::<String, String, _, _>("s", StringSerde, StringSerde, ["p1"]);
+        t.connect_processor_store("p1", "s"); // p1 already connected — must not duplicate
+        let entry = t.store_entry_for_test("s").unwrap();
+        check!(entry == vec!["p1".to_string()]);
+    }
+
+    #[test]
+    fn connect_processor_store_unknown_store_is_noop() {
+        let mut t = Topology::new();
+        t.add_state_store::<String, String, _, _>("s", StringSerde, StringSerde, ["p1"]);
+        t.connect_processor_store("p2", "no_such_store"); // should not panic
+        let entry = t.store_entry_for_test("s").unwrap();
+        check!(entry == vec!["p1".to_string()]); // unchanged
     }
 
     #[test]

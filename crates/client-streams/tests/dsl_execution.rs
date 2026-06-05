@@ -901,6 +901,113 @@ fn dsl_to_table_unnamed_store_executes() {
     );
 }
 
+/// `KStream::join` (inner stream-table join): a stream record is joined against
+/// the materialized table store. Populate the table FIRST (pipe a `right` record),
+/// then drive the stream side: a key present in the table produces an output; a
+/// key absent from the table is dropped (inner join).
+#[test]
+fn dsl_stream_table_inner_join_executes() {
+    let b = StreamsBuilder::new();
+    let table = b.table::<String, String, _, _>(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("store"),
+    );
+    b.stream(["left"], Consumed::with(StringSerde, StringSerde))
+        .join(&table, |v: &String, vt: &String| format!("{v}{vt}"))
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(table);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // 1. Populate the table store via the `right` source: ("k", "T").
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "T".to_string(),
+        0,
+    );
+    // 2. Stream record with a key present in the table → join emits "ST".
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "S".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "ST".to_string()))
+    );
+    // 3. Stream record with a key ABSENT from the table → inner join drops it.
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("x".to_string()),
+        "S2".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// `KStream::left_join` (left stream-table join): every stream record is
+/// forwarded. On a table hit the joiner receives `Some`; on a miss it receives
+/// `None` (here rendered as the empty string).
+#[test]
+fn dsl_stream_table_left_join_executes() {
+    let b = StreamsBuilder::new();
+    let table = b.table::<String, String, _, _>(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("store"),
+    );
+    b.stream(["left"], Consumed::with(StringSerde, StringSerde))
+        .left_join(&table, |v: &String, opt: Option<&String>| {
+            format!("{v}{}", opt.cloned().unwrap_or_default())
+        })
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(table);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // Populate the table: ("k", "T").
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "T".to_string(),
+        0,
+    );
+    // Hit: ("k", "S") → "ST".
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "S".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "ST".to_string()))
+    );
+    // Miss: ("x", "S2") → joiner gets None → "S2".
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("x".to_string()),
+        "S2".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("x".to_string()), "S2".to_string()))
+    );
+}
+
 /// `to_table` with `with_logging(false)` must suppress the changelog topic from
 /// the wire topology (`add_state_store_no_changelog` branch). The store is still
 /// functional at runtime.

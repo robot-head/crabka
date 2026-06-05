@@ -52,6 +52,13 @@ impl StreamsBuilder {
         VS: Serde<V> + Clone,
     {
         let topics: Vec<String> = topics.into_iter().map(Into::into).collect();
+        // A stream sourced from exactly one topic carries that topic as its
+        // copartition-group member lineage (used by `KStream::join`). A multi-topic
+        // source has no single member, so the lineage is `None`.
+        let single_source_topic = match topics.as_slice() {
+            [only] => Some(only.clone()),
+            _ => None,
+        };
         let mut g = self.internal.borrow_mut();
         let name = g.new_processor_name(crate::dsl::names::SOURCE);
         let id = g.graph.add(
@@ -75,6 +82,7 @@ impl StreamsBuilder {
         ));
         drop(g);
         crate::dsl::kstream::KStream::new(Rc::clone(&self.internal), id)
+            .with_source_topic(single_source_topic)
     }
 
     /// Source a materialized `KTable` from a changelog-style topic.
@@ -100,6 +108,8 @@ impl StreamsBuilder {
         VS: Serde<V> + Clone + 'static,
     {
         let topic: String = topic.into();
+        // Preserve a copy of the source topic to surface via `KTable::source_topic()`.
+        let topic_for_ktable = topic.clone();
         let mut g = self.internal.borrow_mut();
         // Store name at the JVM position (minted before the source/processor name).
         let store_name = match &materialized.store_name {
@@ -169,7 +179,12 @@ impl StreamsBuilder {
             },
         ));
         drop(g);
-        crate::dsl::ktable::KTable::new(Rc::clone(&self.internal), id, Some(store_name))
+        crate::dsl::ktable::KTable::new(
+            Rc::clone(&self.internal),
+            id,
+            Some(store_name),
+            Some(topic_for_ktable),
+        )
     }
 
     /// Build the topology with no optimizer (the JVM `NO_OPTIMIZATION` default):

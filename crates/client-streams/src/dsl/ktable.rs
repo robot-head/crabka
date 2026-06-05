@@ -26,12 +26,16 @@ use crate::topology::NodeHandle;
 
 /// A changelog-backed table handle. `store_name` is the materialized store this
 /// table reads/writes (used to derive changelog topics + reuse the store in
-/// downstream materialized ops).
+/// downstream materialized ops). `source_topic` is the Kafka topic this table
+/// was sourced from (set for `builder.table()` `KTables`; `None` for derived
+/// `KTables`). Used by the join DSL to declare copartition groups.
 pub struct KTable<K, V> {
     builder: Rc<RefCell<InternalStreamsBuilder>>,
     node: NodeId,
     #[allow(dead_code)]
     store_name: Option<String>,
+    #[allow(dead_code)]
+    source_topic: Option<String>,
     _pd: PhantomData<fn() -> (K, V)>,
 }
 
@@ -40,13 +44,28 @@ impl<K, V> KTable<K, V> {
         builder: Rc<RefCell<InternalStreamsBuilder>>,
         node: NodeId,
         store_name: Option<String>,
+        source_topic: Option<String>,
     ) -> Self {
         Self {
             builder,
             node,
             store_name,
+            source_topic,
             _pd: PhantomData,
         }
+    }
+
+    /// The name of the materialized state store backing this table, if any.
+    #[allow(dead_code)]
+    pub(crate) fn store_name(&self) -> Option<&str> {
+        self.store_name.as_deref()
+    }
+
+    /// The Kafka source topic this table was sourced from (`builder.table()`),
+    /// or `None` for derived `KTables` (aggregations, `map_values`, `filter`).
+    #[allow(dead_code)]
+    pub(crate) fn source_topic(&self) -> Option<&str> {
+        self.source_topic.as_deref()
     }
 }
 
@@ -118,7 +137,7 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, None)
+        KTable::new(Rc::clone(&self.builder), id, None, None)
     }
 
     /// `mapValues`: transform each value, materializing the rewritten table into
@@ -177,7 +196,7 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, Some(store_name))
+        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
     }
 
     /// `filter`: keep rows matching `predicate`, materializing the filtered view.
@@ -239,7 +258,7 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, Some(store_name))
+        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
     }
 }
 
