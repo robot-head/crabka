@@ -43,7 +43,10 @@ fn windowed_count_matches_jvm() {
         .windowed_by(TimeWindows::of_size(60_000))
         .count(Materialized::with(StringSerde, I64Serde))
         .to_stream()
-        .to("out", Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde));
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "windowed_count");
 }

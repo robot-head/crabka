@@ -168,6 +168,16 @@
 //! unmaterialized `KTable` (no result store/changelog — materialize a downstream op
 //! to persist it).
 //!
+//! [`KGroupedStream::windowed_by`] turns a grouped stream into time-windowed
+//! aggregations: `windowed_by(TimeWindows::of_size(..))` then `count`/`reduce`/
+//! `aggregate` yields a [`KTable`]`<`[`Windowed`]`<K>, V>`. [`TimeWindows`] are
+//! tumbling (`of_size`) or hopping (`.advance_by(..)`); each record is aggregated
+//! into every window it falls into, and a result is emitted on **every update**
+//! (window closing / grace / `suppress` are deferred). The windowed store is a
+//! [`Window`]-keyed store over the same pluggable backend, with a `compact,delete`
+//! changelog (`retention.ms = size + grace + 1 day`). Read the windowed output
+//! with [`TimeWindowedSerde`] (the key carries the window start).
+//!
 //! ```
 //! use crabka_client_streams::{
 //!     Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder, StringSerde,
