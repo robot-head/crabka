@@ -1,1 +1,45 @@
-//! Stub — filled in by a later task.
+//! Primary-only writer: serialises a `_schemas` record and produces it,
+//! returning the produced offset for read-your-writes gating.
+
+use bytes::Bytes;
+use crabka_client_producer::{Acks, Producer, ProducerRecord};
+
+use crate::config::RegistryConfig;
+
+pub struct SchemaWriter {
+    producer: Producer,
+    topic: String,
+}
+
+impl SchemaWriter {
+    pub async fn start(cfg: &RegistryConfig) -> anyhow::Result<Self> {
+        let producer = Producer::builder()
+            .bootstrap(cfg.bootstrap.clone())
+            .client_id(format!("{}-writer", cfg.client_id))
+            .enable_idempotence(true)
+            .acks(Acks::All)
+            .build()
+            .await?;
+        Ok(Self {
+            producer,
+            topic: cfg.schemas_topic.clone(),
+        })
+    }
+
+    /// Produce one keyed `_schemas` record; return the assigned offset.
+    pub async fn produce(&self, key: Vec<u8>, value: Vec<u8>) -> anyhow::Result<i64> {
+        let rx = self
+            .producer
+            .send(ProducerRecord {
+                topic: self.topic.clone(),
+                key: Some(Bytes::from(key)),
+                value: Some(Bytes::from(value)),
+                ..Default::default()
+            })
+            .await;
+        let meta = rx
+            .await
+            .map_err(|_| anyhow::anyhow!("producer dropped ack"))??;
+        Ok(meta.offset)
+    }
+}
