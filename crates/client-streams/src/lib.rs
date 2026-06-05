@@ -152,6 +152,16 @@
 //! and partition count); a key-changing stream must be `.repartition(..)`-ed
 //! before joining — the join itself inserts no implicit repartition.
 //!
+//! [`KTable::join`], [`KTable::left_join`], and [`KTable::outer_join`] join two
+//! **materialized** `KTables`. Unlike the stream-table join, a change on *either*
+//! side recomputes the join: the changed side re-reads the other side's current
+//! value from its store and forwards a `Change` (a tombstone when the joined row
+//! stops existing). Inner emits only when both sides hold a value; left emits
+//! whenever the left side is present; outer emits whenever either side is. The two
+//! source topics are declared as a **copartition group**, and the result is an
+//! unmaterialized `KTable` (no result store/changelog — materialize a downstream op
+//! to persist it).
+//!
 //! ```
 //! use crabka_client_streams::{
 //!     Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder, StringSerde,
