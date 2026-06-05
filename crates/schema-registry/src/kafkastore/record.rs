@@ -128,6 +128,31 @@ impl SchemaRecord {
     }
 }
 
+/// Build the `(key, value)` bytes for a `CONFIG` record. `subject = None` is the
+/// global config.
+///
+/// NOTE: not fixture-validated (cp-schema-registry writes no `CONFIG` record by
+/// default); shape follows the Confluent docs and is read back by our own reader,
+/// so it round-trips internally.
+///
+/// # Panics
+///
+/// Panics only if `serde_json` fails to serialise a plain struct — i.e. never in
+/// practice.
+#[must_use]
+pub fn encode_config(subject: Option<&str>, level: &str) -> (Vec<u8>, Vec<u8>) {
+    let key = ConfigKey {
+        keytype: "CONFIG".to_string(),
+        subject: subject.map(str::to_string),
+        magic: 0,
+    };
+    let value = ConfigValue { compatibility_level: level.to_string() };
+    (
+        serde_json::to_vec(&key).expect("config key serialises"),
+        serde_json::to_vec(&value).expect("config value serialises"),
+    )
+}
+
 /// Build the byte-exact key and structurally-stable value for a `SCHEMA`
 /// record.
 ///
@@ -161,4 +186,21 @@ pub fn encode_schema(
         serde_json::to_vec(&key).expect("key serialises"),
         serde_json::to_vec(&value).expect("value serialises"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_config_round_trips_via_decode() {
+        let (k, v) = encode_config(None, "FULL");
+        match SchemaRecord::decode(&k, Some(&v)) {
+            SchemaRecord::Config(key, val) => {
+                assert!(key.subject.is_none());
+                assert_eq!(val.compatibility_level, "FULL");
+            }
+            other => panic!("expected Config, got {other:?}"),
+        }
+    }
 }
