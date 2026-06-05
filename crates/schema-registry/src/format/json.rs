@@ -17,6 +17,11 @@ pub fn parse(schema: &str) -> Result<JsonSchema, SrError> {
     Ok(JsonSchema(v))
 }
 
+/// Compatibility check. Permissive until slice 2b/2c implement the real rules.
+pub fn check(_reader: &str, _writer: &str) -> Result<(), Vec<String>> {
+    Ok(())
+}
+
 impl ParsedSchema for JsonSchema {
     fn canonical_form(&self) -> String {
         canonicalize(&self.0)
@@ -54,6 +59,11 @@ fn canonicalize(v: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use crate::format::ParsedSchema;
+
+    #[test]
+    fn check_is_permissive_for_now() {
+        assert!(check("anything", "anything else").is_ok());
+    }
 
     #[test]
     fn parses_object_and_dedups_key_order() {
