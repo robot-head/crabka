@@ -266,6 +266,7 @@ fn compare_required(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differe
 }
 
 fn compare_additional_properties(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Difference>) {
+    // NOTE: only the boolean open/closed transition is classified; a schema-valued additionalProperties narrowing is treated permissively (no cp matrix case pins it). Slice 2c+.
     let oa = orig.get("additionalProperties");
     let ua = upd.get("additionalProperties");
     let o_false = matches!(oa, Some(Value::Bool(false)));
@@ -337,7 +338,6 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
         Kind::MaximumRemoved,
         Kind::MaximumDecreased,
         Kind::MaximumIncreased,
-        true, // max: decreased = tighter
     );
     compare_bound(
         path,
@@ -349,7 +349,6 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
         Kind::MinimumRemoved,
         Kind::MinimumDecreased,
         Kind::MinimumIncreased,
-        false, // min: increased = tighter (Decreased = looser)
     );
     compare_bound(
         path,
@@ -361,7 +360,6 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
         Kind::ExclusiveMaximumRemoved,
         Kind::ExclusiveMaximumDecreased,
         Kind::ExclusiveMaximumIncreased,
-        true,
     );
     compare_bound(
         path,
@@ -373,7 +371,6 @@ fn compare_numeric(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differen
         Kind::ExclusiveMinimumRemoved,
         Kind::ExclusiveMinimumDecreased,
         Kind::ExclusiveMinimumIncreased,
-        false,
     );
     // multipleOf: added or changed = tighter
     match (num(orig, "multipleOf"), num(upd, "multipleOf")) {
@@ -397,7 +394,6 @@ fn compare_bound(
     kind_removed: Kind,
     kind_decreased: Kind,
     kind_increased: Kind,
-    max_style: bool, // true = max (decreased=tighter), false = min (increased=tighter)
 ) {
     match (num(orig, key), num(upd, key)) {
         (None, Some(_)) => out.push(d(kind_added, path)),
@@ -405,15 +401,9 @@ fn compare_bound(
         (Some(o), Some(u)) => {
             if (o - u).abs() > f64::EPSILON {
                 if u < o {
-                    if max_style {
-                        out.push(d(kind_decreased, path)); // max decreased = tighter
-                    } else {
-                        out.push(d(kind_decreased, path)); // min decreased = looser
-                    }
-                } else if max_style {
-                    out.push(d(kind_increased, path)); // max increased = looser
+                    out.push(d(kind_decreased, path));
                 } else {
-                    out.push(d(kind_increased, path)); // min increased = tighter
+                    out.push(d(kind_increased, path));
                 }
             }
         }
@@ -436,7 +426,6 @@ fn compare_string_constraints(path: &str, orig: &Value, upd: &Value, out: &mut V
         Kind::MaxLengthRemoved,
         Kind::MaxLengthDecreased,
         Kind::MaxLengthIncreased,
-        true,
     );
     compare_bound(
         path,
@@ -448,7 +437,6 @@ fn compare_string_constraints(path: &str, orig: &Value, upd: &Value, out: &mut V
         Kind::MinLengthRemoved,
         Kind::MinLengthDecreased,
         Kind::MinLengthIncreased,
-        false,
     );
     // pattern
     let op = orig.get("pattern").and_then(Value::as_str);
@@ -492,7 +480,6 @@ fn compare_array_constraints(
         Kind::MaxItemsRemoved,
         Kind::MaxItemsDecreased,
         Kind::MaxItemsIncreased,
-        true,
     );
     compare_bound(
         path,
@@ -504,7 +491,6 @@ fn compare_array_constraints(
         Kind::MinItemsRemoved,
         Kind::MinItemsDecreased,
         Kind::MinItemsIncreased,
-        false,
     );
 
     // additionalItems: false in update = tighter
@@ -534,7 +520,6 @@ fn compare_object_size(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Diff
         Kind::MaxPropertiesRemoved,
         Kind::MaxPropertiesDecreased,
         Kind::MaxPropertiesIncreased,
-        true,
     );
     compare_bound(
         path,
@@ -546,7 +531,6 @@ fn compare_object_size(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Diff
         Kind::MinPropertiesRemoved,
         Kind::MinPropertiesDecreased,
         Kind::MinPropertiesIncreased,
-        false,
     );
 }
 
@@ -588,12 +572,7 @@ fn compare_combinators(
                     let oc = canonical_value(on);
                     let uc = canonical_value(un);
                     if oc != uc {
-                        // emit a coarse-grained NotType* based on whether the
-                        // negated schema got wider (=> restriction on instances
-                        // is narrower) or narrower (restriction is stricter).
-                        // Since recursive diff direction is hard to infer here,
-                        // we emit NotTypeNarrowed as the conservative/safe guess
-                        // and let the combinator recurse to catch nested changes.
+                        // Conservative: any change to a `not` subschema is classified incompatible (NotTypeNarrowed); the cp matrix only exercises not-added (CombinedTypeChanged), so the directional split is unexercised.
                         out.push(d(Kind::NotTypeNarrowed, &cpath));
                         compare_schema(&format!("{path}/not"), on, un, ctx, out);
                     }
