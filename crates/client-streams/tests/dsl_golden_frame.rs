@@ -88,6 +88,26 @@ fn branch_merge_matches_jvm() {
 }
 
 #[test]
+fn to_table_matches_jvm() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
+    // Mirrors Capture.java `toTable()`:
+    //   stream("in").toTable(Materialized.as("store")).toStream().to("out")
+    //
+    // The key is unchanged through the source, so `toTable` must NOT insert a
+    // repartition. The materialized store ("store") gets an implicit
+    // `app-store-changelog` (compact KV-store changelog). Wire result: ONE
+    // subtopology "0", source_topics=["in"], one changelog "app-store-changelog".
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .to_table(Materialized::with(StringSerde, StringSerde).as_store("store"))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let wire = b.build("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "to_table");
+}
+
+#[test]
 fn repartition_merge_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     // The JVM `repartitionMerge()` app: one `selectKey` feeds TWO bare aggregations

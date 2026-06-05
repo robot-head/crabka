@@ -136,6 +136,14 @@
 //! with [`TopologyTestDriver`] for broker-free testing or [`KafkaStreams`] for
 //! production.
 //!
+//! A [`KTable`] is internally a *change stream*: each record carries a
+//! `Change { old_value, new_value }` and `filter` emits tombstones (a row whose
+//! key stops matching is deleted downstream with `new_value = None`).
+//! [`KStream::to_table`] materializes a stream into a [`KTable`] backed by a
+//! named [`Materialized`] store. Note: [`KTable::to_stream`] forwards update
+//! records and drops tombstones from the output stream (full null-value output
+//! is deferred to a future slice).
+//!
 //! ```
 //! use crabka_client_streams::{
 //!     Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder, StringSerde,

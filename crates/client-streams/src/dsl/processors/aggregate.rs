@@ -5,6 +5,7 @@
 
 use std::marker::PhantomData;
 
+use crate::dsl::processors::change::Change;
 use crate::processor::api::{Processor, ProcessorContext};
 use crate::processor::record::Record;
 
@@ -27,7 +28,7 @@ pub(crate) struct KStreamAggregateProcessor<K, V, VA, I, A> {
     pub _pd: Marker<(K, V, VA)>,
 }
 
-impl<K, V, VA, I, A> Processor<K, V, K, VA> for KStreamAggregateProcessor<K, V, VA, I, A>
+impl<K, V, VA, I, A> Processor<K, V, K, Change<VA>> for KStreamAggregateProcessor<K, V, VA, I, A>
 where
     K: std::any::Any + Send + Clone,
     V: 'static,
@@ -35,16 +36,25 @@ where
     I: Fn() -> VA + Send + 'static,
     A: Fn(&K, &V, VA) -> VA + Send + 'static,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, VA>, r: Record<K, V>) {
+    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<VA>>, r: Record<K, V>) {
         // Aggregations require non-null keys (post-repartition).
         let key = r.key.expect("aggregate requires a non-null key");
         let store = ctx
             .get_state_store::<K, VA>(&self.store_name)
             .expect("aggregate state store not found");
-        let old = store.get(&key).unwrap_or_else(|| (self.init)());
-        let new = (self.agg)(&key, &r.value, old);
+        // Aggregate math unchanged: seed the accumulator with `init` when the
+        // store has no prior value. The forwarded `Change.old` is the *actual*
+        // prior store value (None on the first record for this key), not the
+        // init-seeded accumulator.
+        let old = store.get(&key);
+        let seed = old.clone().unwrap_or_else(|| (self.init)());
+        let new = (self.agg)(&key, &r.value, seed);
         store.put(key.clone(), new.clone());
-        ctx.forward(Record::new(Some(key), new, r.timestamp));
+        ctx.forward(Record::new(
+            Some(key),
+            Change::update(old, new),
+            r.timestamp,
+        ));
     }
 }
 
@@ -64,25 +74,31 @@ pub(crate) struct KStreamReduceProcessor<K, V, R> {
     pub _pd: Marker<(K, V)>,
 }
 
-impl<K, V, R> Processor<K, V, K, V> for KStreamReduceProcessor<K, V, R>
+impl<K, V, R> Processor<K, V, K, Change<V>> for KStreamReduceProcessor<K, V, R>
 where
     K: std::any::Any + Send + Clone,
     V: std::any::Any + Send + Clone,
     R: Fn(&V, &V) -> V + Send + 'static,
 {
-    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, V>, r: Record<K, V>) {
+    fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, Change<V>>, r: Record<K, V>) {
         let key = r.key.expect("reduce requires a non-null key");
         let store = ctx
             .get_state_store::<K, V>(&self.store_name)
             .expect("reduce state store not found");
-        let new = match store.get(&key) {
-            // First value for this key seeds the accumulator.
+        // Reduce math unchanged: the first value for a key seeds the accumulator;
+        // later values fold via the reducer. `old` is the prior store value
+        // (None on the first record), forwarded as the `Change.old`.
+        let old = store.get(&key);
+        let new = match &old {
             None => r.value,
-            // Later values fold via the reducer.
-            Some(acc) => (self.reducer)(&acc, &r.value),
+            Some(acc) => (self.reducer)(acc, &r.value),
         };
         store.put(key.clone(), new.clone());
-        ctx.forward(Record::new(Some(key), new, r.timestamp));
+        ctx.forward(Record::new(
+            Some(key),
+            Change::update(old, new),
+            r.timestamp,
+        ));
     }
 }
 
@@ -139,15 +155,17 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
             };
-            let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 0));
         }
 
-        // After 1st process: forwarded value should be 1.
+        // After 1st process: forwarded Change is (old None → new 1).
         let (_, rec1) = buffer
             .pop_front()
             .expect("expected forwarded record after 1st process");
-        check!(*rec1.value.downcast::<i64>().unwrap() == 1i64);
+        let change1 = rec1.value.downcast::<Change<i64>>().unwrap();
+        check!(change1.old.is_none());
+        check!(change1.new == Some(1i64));
 
         // Process record 2: same key="a", value="x" again.
         {
@@ -158,15 +176,17 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
             };
-            let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 0));
         }
 
-        // After 2nd process: forwarded value should be 2.
+        // After 2nd process: forwarded Change is (old 1 → new 2).
         let (_, rec2) = buffer
             .pop_front()
             .expect("expected forwarded record after 2nd process");
-        check!(*rec2.value.downcast::<i64>().unwrap() == 2i64);
+        let change2 = rec2.value.downcast::<Change<i64>>().unwrap();
+        check!(change2.old == Some(1i64));
+        check!(change2.new == Some(2i64));
 
         // Store should now contain count=2 for key "a".
         let store = stores.get_kv::<String, i64>("counts").unwrap();

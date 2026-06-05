@@ -129,14 +129,17 @@ impl StreamsBuilder {
                     .topology
                     .add_source::<K, V, KS, VS>(source_name, [topic], consumed);
                 let store_for_proc = store_for_thunk.clone();
-                let h = state.topology.add_processor::<K, V, K, V, _, _, _>(
-                    proc_name,
-                    move || crate::dsl::processors::table::KTableSourceProcessor {
-                        store_name: store_for_proc.clone(),
-                        _pd: std::marker::PhantomData,
-                    },
-                    [&src],
-                );
+                // The KTable source forwards Change<V> (prior store value as old).
+                let h = state
+                    .topology
+                    .add_processor::<K, V, K, crate::dsl::processors::change::Change<V>, _, _, _>(
+                        proc_name,
+                        move || crate::dsl::processors::table::KTableSourceProcessor {
+                            store_name: store_for_proc.clone(),
+                            _pd: std::marker::PhantomData,
+                        },
+                        [&src],
+                    );
                 // REUSE_KTABLE_SOURCE_TOPICS: if the optimizer flagged this
                 // TableSource, register the store with the source topic as its
                 // changelog; otherwise the default `<app>-<store>-changelog`.

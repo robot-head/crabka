@@ -13,11 +13,14 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::Grouped;
+use crate::dsl::config::{Grouped, Materialized};
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kgrouped::KGroupedStream;
+use crate::dsl::ktable::KTable;
 use crate::dsl::names;
+use crate::dsl::processors::change::Change;
 use crate::dsl::processors::stateless;
+use crate::dsl::processors::table::KStreamToTableProcessor;
 use crate::processor::serde::{Produced, Serde};
 use crate::topology::NodeHandle;
 
@@ -556,6 +559,86 @@ where
         F: Fn(&K, &V) -> K2 + Clone + Send + Sync + 'static,
     {
         self.select_key(f).group_by_key(grouped)
+    }
+
+    /// `toTable`: materialize this stream into a [`KTable`] by writing each record
+    /// into a state store and forwarding a `Change<V>` change-stream (prior store
+    /// value as `old`). Backed by [`KStreamToTableProcessor`].
+    ///
+    /// The key is carried through unchanged, so `to_table` never inserts a
+    /// repartition (the JVM only repartitions when the upstream key is rewritten
+    /// without a re-group). The store name is `Materialized`'s explicit name when
+    /// set, else a fresh `KSTREAM-TOTABLE-STATE-STORE-` counter; the store gets the
+    /// standard `<app>-<store>-changelog` changelog (or none when
+    /// [`Materialized::with_logging(false)`]).
+    ///
+    /// [`KStreamToTableProcessor`]: crate::dsl::processors::table::KStreamToTableProcessor
+    /// [`Materialized::with_logging(false)`]: crate::dsl::config::Materialized::with_logging
+    pub fn to_table<KS, VS>(&self, materialized: Materialized<KS, VS>) -> KTable<K, V>
+    where
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+    {
+        let parent_id = self.node;
+        // Mint the store name at the JVM counter position (before the processor
+        // name), matching the aggregate store-naming convention.
+        let store_name = match &materialized.store_name {
+            Some(name) => name.clone(),
+            None => self
+                .builder
+                .borrow_mut()
+                .new_processor_name(names::TOTABLE_STORE),
+        };
+        let Materialized {
+            key_serde,
+            value_serde,
+            logging,
+            ..
+        } = materialized;
+        let mut g = self.builder.borrow_mut();
+        let name = g.new_processor_name(names::TOTABLE);
+        let id = g.graph.add(
+            name.clone(),
+            GraphNodeKind::Aggregate {
+                store_name: store_name.clone(),
+                changelog: logging,
+            },
+            vec![parent_id],
+        );
+        let store_for_thunk = store_name.clone();
+        g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+            let store_for_proc = store_for_thunk.clone();
+            // The stream → table boundary forwards Change<V> (prior store value as old).
+            let h = state.topology.add_processor::<K, V, K, Change<V>, _, _, _>(
+                name.clone(),
+                move || KStreamToTableProcessor {
+                    store_name: store_for_proc.clone(),
+                    _pd: PhantomData,
+                },
+                [parent],
+            );
+            // Honor `Materialized::with_logging(bool)`, mirroring the aggregate ops:
+            // logging=true → changelog topic emitted; logging=false → store usable
+            // at runtime but no state_changelog_topics entry in the wire topology.
+            if logging {
+                state.topology.add_state_store::<K, V, KS, VS>(
+                    store_for_thunk.clone(),
+                    key_serde.clone(),
+                    value_serde.clone(),
+                    [h.name().to_string()],
+                );
+            } else {
+                state.topology.add_state_store_no_changelog::<K, V, KS, VS>(
+                    store_for_thunk.clone(),
+                    key_serde.clone(),
+                    value_serde.clone(),
+                );
+            }
+            state.handle_name.insert(id, h.name().to_string());
+        }));
+        drop(g);
+        KTable::new(Rc::clone(&self.builder), id, Some(store_name))
     }
 }
 
