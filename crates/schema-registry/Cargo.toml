@@ -34,6 +34,7 @@ uuid = { workspace = true }
 parking_lot = { workspace = true }
 apache-avro = { workspace = true }
 protox = { workspace = true }
+protox-parse = "0.9"
 prost-reflect = { workspace = true }
 
 [dev-dependencies]
@@ -51,3 +52,6 @@ name = "integration"
 
 [[test]]
 name = "interop"
+
+[[test]]
+name = "capture_fixtures"
