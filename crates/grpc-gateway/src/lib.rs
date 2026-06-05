@@ -4,6 +4,7 @@
 
 pub mod codec;
 pub mod config;
+pub mod consume;
 pub mod dedup {
     //! Replaced in Task 12. Stub keeps `ProduceCore` compiling.
     use crate::error::GatewayError;
