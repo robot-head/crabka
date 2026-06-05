@@ -1316,6 +1316,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-grpc-gateway"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "assert2",
+ "axum",
+ "bytes",
+ "clap",
+ "connectrpc-axum",
+ "connectrpc-axum-build",
+ "crabka-broker",
+ "crabka-client-admin",
+ "crabka-client-consumer",
+ "crabka-client-core",
+ "crabka-client-producer",
+ "dashmap",
+ "pbjson",
+ "prost",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "crabka-log"
 version = "0.2.0"
 dependencies = [
