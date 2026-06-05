@@ -47,6 +47,21 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::window::WindowStore<K, V>)
     }
 
+    /// Typed mutable access: downcast the erased store to the join-window store
+    /// of the requested types. `None` if absent or the types don't match.
+    // used by Phase B (stream-stream join processor)
+    #[allow(dead_code)]
+    pub fn get_join_window<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::join_window::JoinWindowStore<K, V>> {
+        let store = self.stores.get_mut(name)?;
+        let concrete = store
+            .as_any_mut()
+            .downcast_mut::<crate::store::join_window::JoinWindowBytesStore<K, V>>()?;
+        Some(concrete as &mut dyn crate::store::join_window::JoinWindowStore<K, V>)
+    }
+
     /// Mutable erased access by name — the `StateStore` trait surface
     /// (`changelog_topic` / `take_changelog` / `apply_changelog` / `set_logging`) is
     /// available on the returned `&mut dyn StateStore`.

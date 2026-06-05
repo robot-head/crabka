@@ -157,6 +157,18 @@ where
         self.dispatch.stores.get_window::<K2, V2>(name)
     }
 
+    /// Access a connected join-window store (retainDuplicates), typed. `None` if
+    /// absent or the K/V types don't match. Fetch it per-record (do not hold
+    /// across `process` calls).
+    // used by Phase B (stream-stream join processor)
+    #[allow(dead_code)]
+    pub fn get_join_window_store<K2: Send + Sync + 'static, V2: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::join_window::JoinWindowStore<K2, V2>> {
+        self.dispatch.stores.get_join_window::<K2, V2>(name)
+    }
+
     /// Metadata of the source record currently being processed.
     #[must_use]
     pub fn record_context(&self) -> &RecordContext {
