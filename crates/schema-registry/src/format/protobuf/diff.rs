@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use prost_reflect::prost_types::descriptor_proto::ReservedRange;
 use prost_reflect::prost_types::field_descriptor_proto::Type as FieldType;
 use prost_reflect::prost_types::{
-    DescriptorProto, FieldDescriptorProto, FileDescriptorProto, OneofDescriptorProto,
+    DescriptorProto, EnumDescriptorProto, FieldDescriptorProto, FileDescriptorProto,
+    OneofDescriptorProto,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +29,13 @@ pub enum Kind {
     // Reserved rules (Task 3)
     ReservedNumberAdded,
     ReservedNameAdded,
+    // Enum rules (Task 4)
+    EnumConstAdded,
+    EnumConstRemoved,
+    EnumAdded,
+    EnumRemoved,
+    // Package rule (Task 4)
+    PackageChanged,
 }
 
 #[derive(Debug, Clone)]
@@ -39,7 +47,15 @@ pub struct Difference {
 #[must_use]
 pub fn compare(original: &FileDescriptorProto, update: &FileDescriptorProto) -> Vec<Difference> {
     let mut out = Vec::new();
+    // Package change (Task 4)
+    if original.package != update.package {
+        out.push(Difference {
+            kind: Kind::PackageChanged,
+            path: "package".to_string(),
+        });
+    }
     compare_messages("", &original.message_type, &update.message_type, &mut out);
+    compare_enums("", &original.enum_type, &update.enum_type, &mut out);
     out
 }
 
@@ -127,6 +143,16 @@ fn compare_message(
     // Reserved ranges and names (Task 3)
     compare_reserved(path, &orig.reserved_range, &upd.reserved_range, out);
     compare_reserved_names(path, &orig.reserved_name, &upd.reserved_name, out);
+    // Recurse into non-map nested messages (Task 4a)
+    let is_map_entry =
+        |nt: &&DescriptorProto| nt.options.as_ref().and_then(|o| o.map_entry) != Some(true);
+    let orig_nested: Vec<&DescriptorProto> = orig.nested_type.iter().filter(is_map_entry).collect();
+    let upd_nested: Vec<&DescriptorProto> = upd.nested_type.iter().filter(is_map_entry).collect();
+    let orig_nested_owned: Vec<DescriptorProto> = orig_nested.into_iter().cloned().collect();
+    let upd_nested_owned: Vec<DescriptorProto> = upd_nested.into_iter().cloned().collect();
+    compare_messages(path, &orig_nested_owned, &upd_nested_owned, out);
+    // Compare nested enums (Task 4b)
+    compare_enums(path, &orig.enum_type, &upd.enum_type, out);
 }
 
 fn compare_field(
@@ -317,6 +343,63 @@ fn compare_reserved_names(path: &str, orig: &[String], upd: &[String], out: &mut
             kind: Kind::ReservedNameAdded,
             path: format!("{path}.reserved_name#{name}"),
         });
+    }
+}
+
+fn compare_enums(
+    prefix: &str,
+    orig: &[EnumDescriptorProto],
+    upd: &[EnumDescriptorProto],
+    out: &mut Vec<Difference>,
+) {
+    let orig_by: BTreeMap<&str, &EnumDescriptorProto> =
+        orig.iter().map(|e| (e.name(), e)).collect();
+    let upd_by: BTreeMap<&str, &EnumDescriptorProto> = upd.iter().map(|e| (e.name(), e)).collect();
+    for (name, oe) in &orig_by {
+        let epath = join(prefix, name);
+        match upd_by.get(name) {
+            None => out.push(Difference {
+                kind: Kind::EnumRemoved,
+                path: epath,
+            }),
+            Some(ue) => compare_enum_values(&epath, oe, ue, out),
+        }
+    }
+    for name in upd_by.keys() {
+        if !orig_by.contains_key(name) {
+            out.push(Difference {
+                kind: Kind::EnumAdded,
+                path: join(prefix, name),
+            });
+        }
+    }
+}
+
+fn compare_enum_values(
+    path: &str,
+    orig: &EnumDescriptorProto,
+    upd: &EnumDescriptorProto,
+    out: &mut Vec<Difference>,
+) {
+    // Match values by NUMBER (not name), mirroring how fields are matched.
+    let orig_vals: BTreeMap<i32, &str> =
+        orig.value.iter().map(|v| (v.number(), v.name())).collect();
+    let upd_vals: BTreeMap<i32, &str> = upd.value.iter().map(|v| (v.number(), v.name())).collect();
+    for num in orig_vals.keys() {
+        if !upd_vals.contains_key(num) {
+            out.push(Difference {
+                kind: Kind::EnumConstRemoved,
+                path: format!("{path}.#{num}"),
+            });
+        }
+    }
+    for num in upd_vals.keys() {
+        if !orig_vals.contains_key(num) {
+            out.push(Difference {
+                kind: Kind::EnumConstAdded,
+                path: format!("{path}.#{num}"),
+            });
+        }
     }
 }
 

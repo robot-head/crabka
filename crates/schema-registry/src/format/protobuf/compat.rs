@@ -17,13 +17,20 @@ pub fn is_backward_compatible(kind: &Kind) -> bool {
         | Kind::OneofAdded
         // Reserved rules (Task 3) — seed values.
         | Kind::ReservedNumberAdded
-        | Kind::ReservedNameAdded => true,
+        | Kind::ReservedNameAdded
+        // Enum rules (Task 4) — seed values, calibrated vs cp in Task 6.
+        | Kind::EnumConstAdded
+        | Kind::EnumConstRemoved
+        | Kind::EnumAdded
+        | Kind::EnumRemoved => true,
         Kind::FieldScalarKindChanged { compatible_group } => *compatible_group,
         Kind::FieldKindChanged
         | Kind::FieldNamedTypeChanged
         | Kind::FieldLabelChanged
         | Kind::OneofFieldMovedOut
-        | Kind::OneofRemoved => false,
+        | Kind::OneofRemoved
+        // Package change (Task 4) — seed value: incompatible.
+        | Kind::PackageChanged => false,
     }
 }
 

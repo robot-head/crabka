@@ -259,4 +259,27 @@ mod tests {
         let s = "syntax = \"proto3\"; message U { map<string, int32> m = 1; }";
         assert!(check(s, s).is_ok());
     }
+
+    // ── Task 4: enum + nested + package ──────────────────────────────────────
+
+    #[test]
+    fn enum_const_added_compatible() {
+        let w = "syntax = \"proto3\"; enum E { A = 0; } message U { E e = 1; }";
+        let r = "syntax = \"proto3\"; enum E { A = 0; B = 1; } message U { E e = 1; }";
+        assert!(check(r, w).is_ok());
+    }
+
+    #[test]
+    fn nested_message_field_change_detected() {
+        let w = "syntax = \"proto3\"; message U { message N { int32 a = 1; } N n = 1; }";
+        let r = "syntax = \"proto3\"; message U { message N { string a = 1; } N n = 1; }";
+        assert!(check(r, w).is_err(), "nested int32->string is across-group");
+    }
+
+    #[test]
+    fn package_change_does_not_panic() {
+        let w = "syntax = \"proto3\"; package a; message U { int32 id = 1; }";
+        let r = "syntax = \"proto3\"; package b; message U { int32 id = 1; }";
+        let _ = check(r, w); // calibrated vs cp in Task 6
+    }
 }
