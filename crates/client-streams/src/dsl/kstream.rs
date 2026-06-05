@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::dsl::builder::InternalStreamsBuilder;
-use crate::dsl::config::{Grouped, Materialized};
+use crate::dsl::config::{Grouped, Materialized, StreamJoined};
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kgrouped::KGroupedStream;
 use crate::dsl::ktable::KTable;
@@ -21,7 +21,9 @@ use crate::dsl::names;
 use crate::dsl::processors::change::Change;
 use crate::dsl::processors::join::KStreamKTableJoinProcessor;
 use crate::dsl::processors::stateless;
+use crate::dsl::processors::stream_join::KStreamKStreamJoinProcessor;
 use crate::dsl::processors::table::KStreamToTableProcessor;
+use crate::dsl::windows::JoinWindows;
 use crate::processor::serde::{Produced, Serde};
 use crate::topology::NodeHandle;
 
@@ -460,11 +462,18 @@ where
     /// stream-table join is partition-local). If a key-changing op (`map`/
     /// `select_key`/`flat_map`/`group_by`) precedes the join, call
     /// [`repartition`](Self::repartition) first to re-partition by the new key;
-    /// otherwise `join` panics.
+    /// otherwise `join_table` panics.
+    ///
+    /// # Naming vs the JVM
+    /// The JVM overloads `join` for both stream-table and (windowed) stream-stream
+    /// joins. Rust cannot have two inherent methods of the same name and differing
+    /// arity, so the stream-table forms are named `join_table`/`left_join_table`
+    /// here, leaving the plain `join`/`left_join` for the windowed stream-stream
+    /// join (see [`KStream::join`](Self::join)).
     ///
     /// [`StreamsBuilder::table`]: crate::dsl::builder::StreamsBuilder::table
     #[must_use]
-    pub fn join<VT, VO, F>(&self, table: &KTable<K, VT>, joiner: F) -> KStream<K, VO>
+    pub fn join_table<VT, VO, F>(&self, table: &KTable<K, VT>, joiner: F) -> KStream<K, VO>
     where
         VT: Any + Send + Clone,
         VO: Any + Send + Clone,
@@ -473,20 +482,21 @@ where
         // Wrap the inner joiner to the left form `Fn(&V, Option<&VT>) -> VO`; with
         // `emit_on_miss = false` the closure is only ever called with `Some`.
         let lf = move |v: &V, opt: Option<&VT>| joiner(v, opt.expect("inner join hit"));
-        self.join_impl::<VT, VO, _>(table, lf, false)
+        self.join_table_impl::<VT, VO, _>(table, lf, false)
     }
 
-    /// `leftJoin` (left stream-table join): like [`join`](Self::join) but always
-    /// forwards a record for every stream record. On a table miss the `joiner`
-    /// receives `None` for the table-side value.
+    /// `leftJoin` (left stream-table join): like [`join_table`](Self::join_table)
+    /// but always forwards a record for every stream record. On a table miss the
+    /// `joiner` receives `None` for the table-side value. See
+    /// [`join_table`](Self::join_table) for the naming-vs-JVM note.
     #[must_use]
-    pub fn left_join<VT, VO, F>(&self, table: &KTable<K, VT>, joiner: F) -> KStream<K, VO>
+    pub fn left_join_table<VT, VO, F>(&self, table: &KTable<K, VT>, joiner: F) -> KStream<K, VO>
     where
         VT: Any + Send + Clone,
         VO: Any + Send + Clone,
         F: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
-        self.join_impl::<VT, VO, _>(table, joiner, true)
+        self.join_table_impl::<VT, VO, _>(table, joiner, true)
     }
 
     /// Shared lowering for inner/left stream-table join. `left_form` is the
@@ -499,7 +509,7 @@ where
     /// the join into the SAME subtopology as the table source, so both sources land
     /// together), and (3) declares the `(stream_member, table_source)` copartition
     /// group when both members are single source topics.
-    fn join_impl<VT, VO, LF>(
+    fn join_table_impl<VT, VO, LF>(
         &self,
         table: &KTable<K, VT>,
         left_form: LF,
@@ -574,6 +584,218 @@ where
         // The joined stream keeps the key but no longer maps to a single source
         // topic (it is the join output), so its source-topic lineage is `None`.
         KStream::new_with_key_changing(Rc::clone(&self.builder), join_id, false)
+    }
+
+    /// `join` (windowed inner stream-stream join): for each record on either
+    /// stream, the record is put into its own [`JoinWindowStore`] and the OTHER
+    /// stream's store is fetched over the join window; one output is forwarded per
+    /// match, keyed by the same key. A left record at `t` matches right records
+    /// with timestamp in `[t - before, t + after]` (and symmetrically — the
+    /// per-side OTHER processor swaps `before`/`after` so the rule holds whichever
+    /// side drives the record).
+    ///
+    /// Lowers (mirroring [`KTable::join`]'s dual+merge) to a **THIS** processor fed
+    /// by this stream, an **OTHER** processor fed by `other`, and a **MERGE** node
+    /// unioning the two outputs. Each side puts into its own `retainDuplicates`
+    /// join-window store and reads the other's, and is connected to BOTH stores so
+    /// the grouping pass folds A, B, both stores, and the two join nodes into one
+    /// copartitioned subtopology. When both streams are single-source-topic streams
+    /// their source topics are declared as a copartition group (KIP-1071).
+    ///
+    /// Both stream keys must be unchanged relative to their source partitioning;
+    /// a key-changing op upstream must be `repartition()`-ed first (else panics).
+    ///
+    /// # Naming vs the JVM
+    /// The JVM overloads `join` for stream-table and stream-stream. Rust cannot, so
+    /// the windowed stream-stream join keeps `join`/`left_join` while the
+    /// stream-table forms are [`join_table`](Self::join_table)/
+    /// [`left_join_table`](Self::left_join_table).
+    ///
+    /// [`JoinWindowStore`]: crate::store::join_window::JoinWindowStore
+    /// [`KTable::join`]: crate::dsl::ktable::KTable::join
+    #[must_use]
+    #[allow(clippy::too_many_lines)] // dual+merge lowering: 3 nodes, each with a typed thunk
+    pub fn join<V2, VO, F, KS, V1S, V2S>(
+        &self,
+        other: &KStream<K, V2>,
+        joiner: F,
+        windows: JoinWindows,
+        stream_joined: StreamJoined<KS, V1S, V2S>,
+    ) -> KStream<K, VO>
+    where
+        V2: Any + Send + Sync + Clone,
+        VO: Any + Send + Clone,
+        F: Fn(&V, &V2) -> VO + Clone + Send + Sync + 'static,
+        KS: Serde<K> + Clone + 'static,
+        V1S: Serde<V> + Clone + 'static,
+        V2S: Serde<V2> + Clone + 'static,
+        V: Send + Sync,
+    {
+        assert!(
+            !self.key_changing && !other.key_changing,
+            "stream-stream join: a key-changing stream must `.repartition()` first"
+        );
+        let a_src = self.source_topic.clone();
+        let b_src = other.source_topic.clone();
+        let self_node = self.node;
+        let other_node = other.node;
+        let StreamJoined {
+            key_serde,
+            value1_serde,
+            value2_serde,
+        } = stream_joined;
+        let before = windows.before_ms;
+        let after = windows.after_ms;
+        let grace = windows.grace_ms;
+
+        let mut g = self.builder.borrow_mut();
+        // Mint the two join-window store names, then the three processor node
+        // names. (The exact mint order + names are tuned vs the JVM fixture in
+        // Task B4; this order keeps the execution-test names consistent.)
+        let this_store = g.new_processor_name(names::KSTREAM_JOINTHIS_STORE);
+        let other_store = g.new_processor_name(names::KSTREAM_JOINOTHER_STORE);
+        let join_this = g.new_processor_name(names::KSTREAM_JOINTHIS);
+        let join_other = g.new_processor_name(names::KSTREAM_JOINOTHER);
+        let merge = g.new_processor_name(names::MERGE);
+
+        // ── THIS side: fed by this stream; puts into `this_store`, reads `other_store`.
+        let this_id = g.graph.add(
+            join_this.clone(),
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![self_node],
+        );
+        {
+            let join_this_name = join_this.clone();
+            let own = this_store.clone();
+            let other_s = other_store.clone();
+            let ks = key_serde.clone();
+            let vs = value1_serde.clone();
+            let joiner_this = joiner.clone();
+            g.graph.nodes[this_id].lower = Some(Box::new(move |state: &mut LowerState| {
+                let parent = NodeHandle::<K, V>::from_name(state.handle_name[&self_node].clone());
+                let own_for_proc = own.clone();
+                let other_for_proc = other_s.clone();
+                // THIS joiner: own=V (left), other=V2 (right) → user `joiner(a, b)`.
+                let jf = joiner_this.clone();
+                let h = state.topology.add_processor::<K, V, K, VO, _, _, _>(
+                    join_this_name.clone(),
+                    move || KStreamKStreamJoinProcessor {
+                        own_store: own_for_proc.clone(),
+                        other_store: other_for_proc.clone(),
+                        fetch_before: before,
+                        fetch_after: after,
+                        joiner: {
+                            let jf = jf.clone();
+                            move |a: &V, b: &V2| jf(a, b)
+                        },
+                        side_left: true,
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
+                // Register the THIS store (holds V) + connect to BOTH stores.
+                state.topology.add_join_window_store::<K, V, KS, V1S>(
+                    own.clone(),
+                    ks.clone(),
+                    vs.clone(),
+                    before,
+                    after,
+                    grace,
+                    [h.name().to_string()],
+                );
+                state.topology.connect_processor_store(h.name(), &own);
+                state.topology.connect_processor_store(h.name(), &other_s);
+                state.handle_name.insert(this_id, h.name().to_string());
+            }));
+        }
+
+        // ── OTHER side: fed by `other`; puts into `other_store`, reads `this_store`.
+        let other_id = g.graph.add(
+            join_other.clone(),
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![other_node],
+        );
+        {
+            let join_other_name = join_other.clone();
+            let own = other_store.clone();
+            let other_s = this_store.clone();
+            let ks = key_serde.clone();
+            let vs = value2_serde.clone();
+            let joiner_other = joiner.clone();
+            g.graph.nodes[other_id].lower = Some(Box::new(move |state: &mut LowerState| {
+                let parent = NodeHandle::<K, V2>::from_name(state.handle_name[&other_node].clone());
+                let own_for_proc = own.clone();
+                let other_for_proc = other_s.clone();
+                // OTHER joiner: own=V2 (right), other=V (left) → SWAP args back to
+                // the user's `joiner(a=V, b=V2)` order.
+                let jf = joiner_other.clone();
+                let h = state.topology.add_processor::<K, V2, K, VO, _, _, _>(
+                    join_other_name.clone(),
+                    move || KStreamKStreamJoinProcessor {
+                        own_store: own_for_proc.clone(),
+                        other_store: other_for_proc.clone(),
+                        // SWAPPED relative to the named window: from the OTHER
+                        // (right) record's perspective, the left side lives in
+                        // `[t - after, t + before]`.
+                        fetch_before: after,
+                        fetch_after: before,
+                        joiner: {
+                            let jf = jf.clone();
+                            move |b: &V2, a: &V| jf(a, b)
+                        },
+                        side_left: false,
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
+                // Register the OTHER store (holds V2) + connect to BOTH stores.
+                state.topology.add_join_window_store::<K, V2, KS, V2S>(
+                    own.clone(),
+                    ks.clone(),
+                    vs.clone(),
+                    before,
+                    after,
+                    grace,
+                    [h.name().to_string()],
+                );
+                state.topology.connect_processor_store(h.name(), &own);
+                state.topology.connect_processor_store(h.name(), &other_s);
+                state.handle_name.insert(other_id, h.name().to_string());
+            }));
+        }
+
+        // ── MERGE: union the two join outputs (forwards each record unchanged).
+        let merge_id = g.graph.add(
+            merge.clone(),
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![this_id, other_id],
+        );
+        g.graph.nodes[merge_id].merge_node = true;
+        g.graph.nodes[merge_id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let this_parent = NodeHandle::<K, VO>::from_name(state.handle_name[&this_id].clone());
+            let other_parent = NodeHandle::<K, VO>::from_name(state.handle_name[&other_id].clone());
+            let h = state.topology.add_processor::<K, VO, K, VO, _, _, _>(
+                merge.clone(),
+                || stateless::MergeProcessor::<K, VO> { _pd: PhantomData },
+                [this_parent, other_parent],
+            );
+            // Declare the copartition group when both streams are single-source.
+            if let (Some(a), Some(bb)) = (&a_src, &b_src) {
+                state
+                    .topology
+                    .add_copartition_group([a.clone(), bb.clone()]);
+            }
+            state.handle_name.insert(merge_id, h.name().to_string());
+        }));
+        drop(g);
+        // The join output keeps the key but no longer maps to a single source topic.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), merge_id, false)
     }
 
     /// `repartition`: force a repartition through an internal topic.

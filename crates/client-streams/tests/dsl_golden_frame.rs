@@ -152,7 +152,7 @@ fn stream_table_join_matches_jvm() {
         Materialized::with(StringSerde, StringSerde).as_store("store"),
     );
     b.stream(["left"], Consumed::with(StringSerde, StringSerde))
-        .join(&table, |v: &String, vt: &String| format!("{v}{vt}"))
+        .join_table(&table, |v: &String, vt: &String| format!("{v}{vt}"))
         .to("out", Produced::with(StringSerde, StringSerde));
     drop(table);
     let wire = b.build_optimized("app").unwrap().to_wire();

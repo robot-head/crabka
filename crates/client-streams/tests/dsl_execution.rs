@@ -883,7 +883,7 @@ fn dsl_stream_table_inner_join_executes() {
         Materialized::with(StringSerde, StringSerde).as_store("store"),
     );
     b.stream(["left"], Consumed::with(StringSerde, StringSerde))
-        .join(&table, |v: &String, vt: &String| format!("{v}{vt}"))
+        .join_table(&table, |v: &String, vt: &String| format!("{v}{vt}"))
         .to("out", Produced::with(StringSerde, StringSerde));
     drop(table);
     let built = b.build("app").unwrap();
@@ -935,7 +935,7 @@ fn dsl_stream_table_left_join_executes() {
         Materialized::with(StringSerde, StringSerde).as_store("store"),
     );
     b.stream(["left"], Consumed::with(StringSerde, StringSerde))
-        .left_join(&table, |v: &String, opt: Option<&String>| {
+        .left_join_table(&table, |v: &String, opt: Option<&String>| {
             format!("{v}{}", opt.cloned().unwrap_or_default())
         })
         .to("out", Produced::with(StringSerde, StringSerde));
@@ -1454,5 +1454,209 @@ fn dsl_windowed_aggregate_executes() {
             }),
             2
         ))
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Windowed KStream-KStream inner join (#4d-iii Task B3)
+// ---------------------------------------------------------------------------
+
+/// `KStream::join` (windowed inner stream-stream join): for each record on either
+/// side, the matching window of the OTHER side's store is scanned and a joined
+/// record emitted per match. A left record at `t` matches right records with
+/// timestamp in `[t - before, t + after]` (and symmetrically the other side).
+#[test]
+fn dsl_stream_stream_inner_join_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    let b = StreamsBuilder::new();
+    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    left.join(
+        &right,
+        |a: &String, c: &String| format!("{a}{c}"),
+        JoinWindows::of(10),
+        StreamJoined::with(StringSerde, StringSerde, StringSerde),
+    )
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(left);
+    drop(right);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // Left record ("k", "a") at t=5: no matching right record yet → no output.
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "a".to_string(),
+        5,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+    // Right record ("k", "b") at t=8: 8 ∈ [5-10, 5+10] → joins with the left "a".
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "b".to_string(),
+        8,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "ab".to_string()))
+    );
+    // Right record ("k", "c") at t=20: 20 ∉ [5-10, 5+10] → no join with "a".
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "c".to_string(),
+        20,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// Asymmetric `JoinWindows::of(10).before(0).after(20)` proves the OTHER-side
+/// fetch-window swap. A record at `t` matches the other side over `[t-before,
+/// t+after]` *from this record's perspective*; the per-side processor swaps
+/// `before`/`after` so this holds for whichever side drives the record.
+#[test]
+fn dsl_stream_stream_join_swap_asymmetric() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    let b = StreamsBuilder::new();
+    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    left.join(
+        &right,
+        |a: &String, c: &String| format!("{a}{c}"),
+        JoinWindows::of(10).before(0).after(20),
+        StreamJoined::with(StringSerde, StringSerde, StringSerde),
+    )
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(left);
+    drop(right);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // Key "k1": A first at t=0, then B at t=15. When B@15 drives, the OTHER (B)
+    // processor fetches A over the SWAPPED window [15-after, 15+before] =
+    // [15-20, 15+0] = [-5, 15], which includes A@0 → joins.
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k1".to_string()),
+        "a".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k1".to_string()),
+        "b".to_string(),
+        15,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k1".to_string()), "ab".to_string()))
+    );
+
+    // Key "k2": B first at t=0, then A at t=15. When A@15 drives, the THIS (A)
+    // processor fetches B over [15-before, 15+after] = [15-0, 15+20] = [15, 35],
+    // which does NOT include B@0 → no join (forward-only). Proves the swap: had
+    // the OTHER processor not swapped, the symmetric reasoning would have matched.
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k2".to_string()),
+        "b2".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k2".to_string()),
+        "a2".to_string(),
+        15,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// Windowed join emits one output per matching record on the other side: two left
+/// records at the same timestamp, then one right record in the window → TWO joins.
+#[test]
+fn dsl_stream_stream_join_duplicates() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
+    let b = StreamsBuilder::new();
+    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    left.join(
+        &right,
+        |a: &String, c: &String| format!("{a}{c}"),
+        JoinWindows::of(10),
+        StreamJoined::with(StringSerde, StringSerde, StringSerde),
+    )
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(left);
+    drop(right);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+
+    // Two left records for "k" at t=5 (retainDuplicates store keeps both).
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "a1".to_string(),
+        5,
+    );
+    d.pipe_input(
+        "left",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "a2".to_string(),
+        5,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+    // One right record at t=8 ∈ [5-10, 5+10]: matches BOTH left records → two outputs.
+    d.pipe_input(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "b".to_string(),
+        8,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "a1b".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "a2b".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
     );
 }

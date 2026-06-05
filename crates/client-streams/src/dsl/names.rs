@@ -54,5 +54,18 @@ pub(crate) const KTABLE_JOIN_THIS: &str = "KTABLE-JOINTHIS-";
 pub(crate) const KTABLE_JOIN_OTHER: &str = "KTABLE-JOINOTHER-";
 #[allow(dead_code)]
 pub(crate) const KTABLE_MERGE: &str = "KTABLE-MERGE-";
+/// Windowed `KStream`-`KStream` join processor names (the two per-side join
+/// nodes union into one copartitioned subtopology via their shared stores).
+#[allow(dead_code)]
+pub(crate) const KSTREAM_JOINTHIS: &str = "KSTREAM-JOINTHIS-";
+#[allow(dead_code)]
+pub(crate) const KSTREAM_JOINOTHER: &str = "KSTREAM-JOINOTHER-";
+/// The two `retainDuplicates` join-window store names. The EXACT store names
+/// (and mint order) are tuned against the JVM fixture in Task B4; these
+/// placeholders give the execution tests consistent unique names for now.
+#[allow(dead_code)]
+pub(crate) const KSTREAM_JOINTHIS_STORE: &str = "KSTREAM-JOINTHIS-STATE-STORE-";
+#[allow(dead_code)]
+pub(crate) const KSTREAM_JOINOTHER_STORE: &str = "KSTREAM-JOINOTHER-STATE-STORE-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";

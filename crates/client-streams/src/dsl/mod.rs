@@ -12,7 +12,7 @@ pub(crate) mod optimizer;
 pub(crate) mod processors;
 pub mod windowed_kgrouped;
 pub use builder::StreamsBuilder;
-pub use config::{Grouped, Materialized, Repartitioned};
+pub use config::{Grouped, Materialized, Repartitioned, StreamJoined};
 pub use kgrouped::KGroupedStream;
 pub use kstream::BranchedStream;
 pub use ktable::KTable;

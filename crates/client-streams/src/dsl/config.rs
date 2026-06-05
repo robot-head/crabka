@@ -54,6 +54,26 @@ impl<KS, VS> Materialized<KS, VS> {
     }
 }
 
+/// Serdes for a windowed `KStream`-`KStream` join (`StreamJoined`): the key
+/// serde plus the per-side value serdes (`value1` for this/left side, `value2`
+/// for the other/right side). The two join-window stores are registered with
+/// `key_serde` + the matching value serde, mirroring JVM `StreamJoined.with`.
+#[allow(clippy::struct_field_names)] // key/value serdes mirror JVM `StreamJoined`
+pub struct StreamJoined<KS, V1S, V2S> {
+    pub(crate) key_serde: KS,
+    pub(crate) value1_serde: V1S,
+    pub(crate) value2_serde: V2S,
+}
+impl<KS, V1S, V2S> StreamJoined<KS, V1S, V2S> {
+    pub fn with(key_serde: KS, value1_serde: V1S, value2_serde: V2S) -> Self {
+        Self {
+            key_serde,
+            value1_serde,
+            value2_serde,
+        }
+    }
+}
+
 /// Serdes + optional name/partitions for an explicit `repartition()`.
 pub struct Repartitioned<KS, VS> {
     pub(crate) key_serde: KS,

@@ -289,7 +289,7 @@ pub mod topology;
 
 pub use dsl::{
     BranchedStream, Grouped, JoinWindows, KGroupedStream, KTable, Materialized, Repartitioned,
-    StreamsBuilder, TimeWindowedSerde, TimeWindows, Window, Windowed,
+    StreamJoined, StreamsBuilder, TimeWindowedSerde, TimeWindows, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{
