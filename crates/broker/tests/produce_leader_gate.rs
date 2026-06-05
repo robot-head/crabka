@@ -32,6 +32,7 @@ use assert2::assert;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crabka_broker::BrokerHandle;
 use crabka_client_core::Client;
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::produce_request::{
@@ -96,6 +97,33 @@ async fn produce_one(
         .expect("produce round-trip");
     let pr = &resp.responses[0].partition_responses[0];
     (pr.error_code, pr.current_leader.leader_id)
+}
+
+/// Block until `broker` has materialized its LOCAL replica for
+/// `(topic, partition)` — i.e. the supervisor reconcile has turned the
+/// metadata image into a live writer-actor (`PartitionRegistry::get` returns
+/// `Some`). Producing directly at a broker before this is done races its
+/// image/replica catch-up: the metadata image is applied per-broker and a
+/// follower lags the controller, so a Produce can surface `UNKNOWN_TOPIC_ID`
+/// (100, the broker's image hasn't applied this `topic_id` yet — it resolves
+/// the request by id before the leadership gate) or a transient
+/// `NOT_LEADER_OR_FOLLOWER` (6, the image names this broker leader but the
+/// writer-actor isn't spun up yet). A materialized local replica implies the
+/// image already holds the topic + partition, so both races are closed.
+/// Panics if the replica never appears within 30s.
+async fn wait_for_local_replica(broker: &BrokerHandle, topic: &str, partition: i32) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while broker
+        .local_log_end_offset(topic, partition)
+        .await
+        .is_none()
+    {
+        assert!(
+            Instant::now() <= deadline,
+            "broker never materialized a local replica for {topic}/{partition}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -193,19 +221,7 @@ async fn produce_to_non_leader_is_rejected() {
     // reconcile lags the controller image). Without a local replica the rf=3
     // case would degenerate into the rf=1 case and not prove the
     // "don't append to a follower" property.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while cluster[follower_idx]
-        .0
-        .local_log_end_offset("gate-rf3", 0)
-        .await
-        .is_none()
-    {
-        assert!(
-            Instant::now() <= deadline,
-            "follower never created a local replica for gate-rf3"
-        );
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
+    wait_for_local_replica(&cluster[follower_idx].0, "gate-rf3", 0).await;
     let follower_leo_before = cluster[follower_idx]
         .0
         .local_log_end_offset("gate-rf3", 0)
@@ -297,6 +313,10 @@ async fn produce_to_non_leader_is_rejected() {
         .build()
         .await
         .unwrap();
+    // Gate on the leader broker's own replica/image catch-up before producing,
+    // so the success Produce can't race the image apply (UNKNOWN_TOPIC_ID 100 /
+    // transient NOT_LEADER 6) — and so the `leo_before` read below is non-None.
+    wait_for_local_replica(&cluster[rf3_leader_idx].0, "gate-rf3", 0).await;
     let leader3_leo_before = cluster[rf3_leader_idx]
         .0
         .local_log_end_offset("gate-rf3", 0)
@@ -327,6 +347,12 @@ async fn produce_to_non_leader_is_rejected() {
         .build()
         .await
         .unwrap();
+    // The observed flake: without this gate the Produce can reach the rf=1
+    // leader before its image has applied the gate-rf1 topic_id, so the v13
+    // topic_id resolution misses and returns UNKNOWN_TOPIC_ID (100) instead of
+    // the required success. The rf=1 partition has no replica elsewhere, so
+    // nothing else forces this broker's image/replica to be warm by now.
+    wait_for_local_replica(&cluster[rf1_leader_idx].0, "gate-rf1", off_node_part).await;
     let (code, _) = produce_one(
         &leader1_client,
         "gate-rf1",
