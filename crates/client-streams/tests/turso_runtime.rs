@@ -1,0 +1,330 @@
+//! Turso end-to-end + restart-restore integration test.
+//!
+//! Proves the real runtime works with `StoreBackend::Turso`:
+//! - (a) state is read/written through a Turso-backed store during processing.
+//! - (b) on restart, the store rebuilds from the changelog into a fresh Turso DB
+//!   so counts resume from where the previous instance left off.
+//!
+//! Mirrors the harness in `state_store_integration.rs`, adding a `tempdir`-based
+//! `StoreBackend::Turso` to both `KafkaStreams` instances.
+#![cfg(not(target_os = "windows"))]
+
+use std::time::Duration;
+
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
+use crabka_client_streams::{
+    Consumed, I64Serde, KafkaStreams, Processor, ProcessorContext, Produced, Record, StoreBackend,
+    StringSerde, Topology,
+};
+use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
+
+// ─── broker helpers ───────────────────────────────────────────────────────────
+
+async fn boot() -> (BrokerHandle, String, tempfile::TempDir) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
+async fn finalize_streams_version(client: &Client) {
+    let resp = client
+        .send(UpdateFeaturesRequest {
+            feature_updates: vec![FeatureUpdateKey {
+                feature: "streams.version".into(),
+                max_version_level: 1,
+                upgrade_type: 1,
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("UpdateFeatures");
+    assert_eq!(
+        resp.error_code, 0,
+        "streams.version finalize failed: {resp:?}"
+    );
+}
+
+async fn create_topic(client: &Client, topic: &str, partitions: i32) {
+    let resp = client
+        .send(CreateTopicsRequest {
+            topics: vec![CreatableTopic {
+                name: topic.into(),
+                num_partitions: partitions,
+                replication_factor: 1,
+                ..Default::default()
+            }],
+            timeout_ms: 5_000,
+            ..Default::default()
+        })
+        .await
+        .expect("CreateTopics");
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "topic create failed: {resp:?}"
+    );
+}
+
+// ─── Counter processor ────────────────────────────────────────────────────────
+
+/// Counts per-value occurrences and forwards `(value_as_key, count)`.
+struct Counter;
+
+#[async_trait::async_trait]
+impl Processor<String, String, String, i64> for Counter {
+    async fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, String, i64>,
+        r: Record<String, String>,
+    ) {
+        let n = {
+            let store = ctx.get_state_store::<String, i64>("counts").unwrap();
+            let n = store.get(&r.value).await.unwrap_or(0) + 1;
+            store.put(r.value.clone(), n).await;
+            n
+        };
+        ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+    }
+}
+
+fn counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
+    let mut topo = Topology::new();
+    let src = topo.add_source(
+        "src",
+        ["stream-in"],
+        Consumed::with(StringSerde, StringSerde),
+    );
+    let c = topo.add_processor("c", || Counter, [&src]);
+    topo.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
+    topo.add_sink(
+        "out",
+        "stream-out",
+        [&c],
+        Produced::with(StringSerde, I64Serde),
+    );
+    topo.build(app_id).unwrap()
+}
+
+// ─── output collector ────────────────────────────────────────────────────────
+
+/// Poll `stream-out` partition 0 until `want` records arrive.
+/// Returns `(key, i64_value)` pairs in arrival order.
+async fn collect_output_keyed(
+    admin: &Client,
+    bootstrap: &str,
+    topic_name: &str,
+    want: usize,
+    start_offset: i64,
+) -> Vec<(String, i64)> {
+    let meta = admin.refresh_metadata().await.expect("metadata");
+    let topic_id = meta
+        .topics
+        .iter()
+        .find(|t| t.name.as_deref() == Some(topic_name))
+        .map_or_else(
+            || panic!("{topic_name} not found in metadata"),
+            |t| t.topic_id,
+        );
+
+    let addr = tokio::net::lookup_host(bootstrap)
+        .await
+        .expect("resolve")
+        .next()
+        .expect("no addr");
+    let conn = Connection::connect_with_options(
+        addr,
+        ConnectionOptions {
+            client_id: "test-reader".to_string(),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("connect");
+
+    let mut collected: Vec<(String, i64)> = Vec::new();
+    let mut next_offset = start_offset;
+
+    loop {
+        let records: Vec<FetchedRecord> =
+            fetch_partition(&conn, topic_name, topic_id, 0, next_offset, 500, 1 << 20)
+                .await
+                .unwrap_or_default();
+
+        for r in &records {
+            next_offset = r.offset + 1;
+            let key = r
+                .key
+                .as_ref()
+                .and_then(|b| std::str::from_utf8(b).ok())
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            let value = r
+                .value
+                .as_ref()
+                .filter(|b| b.len() == 8)
+                .map_or(0, |b| i64::from_be_bytes(b.as_ref().try_into().unwrap()));
+            collected.push((key, value));
+        }
+
+        if collected.len() >= want {
+            break;
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    collected
+}
+
+// ─── test ─────────────────────────────────────────────────────────────────────
+
+/// Assertion (a): e2e on Turso — state is read/written through a Turso-backed
+/// store; counts 1 and 2 for key "a" are produced correctly.
+///
+/// Assertion (b): restart-restore — after the first instance closes, a FRESH
+/// `KafkaStreams` with the SAME `state_dir` drops and recreates the table
+/// (empty), then replays the changelog into the empty Turso DB. Processing
+/// one more "a" must emit count 3 (not 1 from a cold start).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
+async fn turso_stateful_count_and_restart_restore() {
+    let (broker, bootstrap, _broker_dir) = boot().await;
+    let admin = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id("admin")
+        .build()
+        .await
+        .unwrap();
+    finalize_streams_version(&admin).await;
+    create_topic(&admin, "stream-in", 1).await;
+    create_topic(&admin, "stream-out", 1).await;
+
+    // Turso state dir — shared across both instances.
+    let turso_dir = tempfile::TempDir::new().unwrap();
+
+    // ── 1. Produce ["a","a","b"] to stream-in ─────────────────────────────────
+    let producer = crabka_client_producer::Producer::builder()
+        .bootstrap(&bootstrap)
+        .build()
+        .await
+        .unwrap();
+
+    for val in ["a", "a", "b"] {
+        drop(
+            producer
+                .send(crabka_client_producer::ProducerRecord {
+                    topic: "stream-in".into(),
+                    partition: Some(0),
+                    key: Some(bytes::Bytes::copy_from_slice(val.as_bytes())),
+                    value: Some(bytes::Bytes::copy_from_slice(val.as_bytes())),
+                    ..Default::default()
+                })
+                .await,
+        );
+    }
+    producer.flush().await.unwrap();
+
+    // ── 2. Start counting KafkaStreams app with Turso backend ─────────────────
+    let app_id = "turso-count-restart-app";
+    let mut streams = KafkaStreams::builder()
+        .bootstrap(&bootstrap)
+        .application_id(app_id)
+        .topology(counting_topology(app_id))
+        .store_backend(StoreBackend::Turso {
+            state_dir: turso_dir.path().to_path_buf(),
+        })
+        .build()
+        .await
+        .unwrap();
+
+    // ── 3. Assertion (a): collect 3 output records — Turso e2e ───────────────
+    let got = tokio::time::timeout(
+        Duration::from_secs(30),
+        collect_output_keyed(&admin, &bootstrap, "stream-out", 3, 0),
+    )
+    .await
+    .expect("counting streams (Turso) produced 3 output records within 30s");
+
+    // a→1, a→2, b→1 (in key-order within each key)
+    let a_counts: Vec<i64> = got
+        .iter()
+        .filter(|(k, _)| k == "a")
+        .map(|(_, v)| *v)
+        .collect();
+    let b_counts: Vec<i64> = got
+        .iter()
+        .filter(|(k, _)| k == "b")
+        .map(|(_, v)| *v)
+        .collect();
+    assert_eq!(
+        a_counts,
+        vec![1, 2],
+        "Turso e2e: a counts must be [1, 2]; got {got:?}"
+    );
+    assert_eq!(
+        b_counts,
+        vec![1],
+        "Turso e2e: b count must be [1]; got {got:?}"
+    );
+
+    // ── 4. Close the first instance ───────────────────────────────────────────
+    streams.close().await.unwrap();
+
+    // ── 5. Queue one more "a" to stream-in BEFORE the fresh instance starts ──
+    drop(
+        producer
+            .send(crabka_client_producer::ProducerRecord {
+                topic: "stream-in".into(),
+                partition: Some(0),
+                key: Some(bytes::Bytes::copy_from_slice(b"a")),
+                value: Some(bytes::Bytes::copy_from_slice(b"a")),
+                ..Default::default()
+            })
+            .await,
+    );
+    producer.flush().await.unwrap();
+
+    // ── 6. Start a FRESH instance with the SAME application_id + SAME state_dir
+    // TursoBytes::open DROPs+CREATEs the table → empty store.
+    // The runtime's restore() replays the changelog into the fresh Turso DB.
+    let mut streams2 = KafkaStreams::builder()
+        .bootstrap(&bootstrap)
+        .application_id(app_id)
+        .topology(counting_topology(app_id))
+        .store_backend(StoreBackend::Turso {
+            state_dir: turso_dir.path().to_path_buf(),
+        })
+        .build()
+        .await
+        .unwrap();
+
+    // ── 7. Assertion (b): restart-restore — 4th output must be a→3, not a→1 ──
+    // We already collected 3 records; start reading from offset 3.
+    let got2 = tokio::time::timeout(
+        Duration::from_secs(30),
+        collect_output_keyed(&admin, &bootstrap, "stream-out", 1, 3),
+    )
+    .await
+    .expect("restarted streams (Turso) produced output within 30s");
+
+    let a_restart = got2
+        .iter()
+        .filter(|(k, _)| k == "a")
+        .map(|(_, v)| *v)
+        .next();
+
+    assert_eq!(
+        a_restart,
+        Some(3),
+        "Turso restart-restore: 'a' count must be 3 (restored from changelog), \
+         not 1 (cold start); got {got2:?}",
+    );
+
+    streams2.close().await.unwrap();
+    broker.shutdown().await;
+}
