@@ -1,19 +1,17 @@
-//! Materialized view of the compacted dedup-claim topic. In single-owner
-//! P2, the owner updates the map locally on each commit AND rebuilds it from
-//! the topic at startup (`warm_up`) for crash recovery. P3 replaces the
-//! local update with a continuous `read_committed` tail across owners.
+//! Materialized view of the compacted dedup-claim topic. The ownership
+//! consumer (`run_ownership`) joins the owners consumer group, tracks the
+//! assigned dedup partitions, and keeps the claim map warm. P3 gates every
+//! produce on ownership + warmth so only the owning replica may write.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
-use dashmap::DashMap;
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
 
@@ -28,7 +26,6 @@ pub struct ClaimValue {
 pub struct DedupStore {
     map: DashMap<String, ClaimValue>,
     partitions: u32,
-    ready: AtomicBool,
     /// Dedup-partition ids this replica currently owns (consumer-group assignment).
     owned: std::sync::RwLock<std::collections::HashSet<u32>>,
     /// Caught up reading owned partitions since the last assignment change.
@@ -43,16 +40,10 @@ impl DedupStore {
         Self {
             map: DashMap::new(),
             partitions,
-            ready: AtomicBool::new(false),
             owned: std::sync::RwLock::new(std::collections::HashSet::new()),
             warm: AtomicBool::new(false),
             warmed_once: AtomicBool::new(false),
         }
-    }
-
-    #[must_use]
-    pub fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::SeqCst)
     }
 
     /// True if dedup-partition `p` is currently owned by this replica.
@@ -81,52 +72,6 @@ impl DedupStore {
     /// Apply a claim to the in-memory map (called locally after a commit).
     pub fn apply(&self, key: String, value: ClaimValue) {
         self.map.insert(key, value);
-    }
-
-    /// Rebuild the map from the compacted topic, then mark ready. Reads with
-    /// `read_committed` from earliest until caught up (two consecutive empty
-    /// polls). Single-member unique group ⇒ all partitions assigned.
-    pub async fn warm_up(
-        self: &Arc<Self>,
-        bootstrap: &str,
-        client_id: &str,
-        dedup_topic: &str,
-    ) -> Result<(), GatewayError> {
-        let group = format!("{client_id}-{}", Uuid::new_v4());
-        let mut consumer = Consumer::builder()
-            .bootstrap(bootstrap.to_string())
-            .client_id(client_id.to_string())
-            .group_id(group)
-            .subscribe(vec![dedup_topic.to_string()])
-            .isolation_level(IsolationLevel::ReadCommitted)
-            .auto_offset_reset(AutoOffsetReset::Earliest)
-            .build()
-            .await?;
-
-        let mut empty_polls = 0;
-        while empty_polls < 2 {
-            let batch = consumer.poll(Duration::from_millis(500)).await?;
-            if batch.is_empty() {
-                empty_polls += 1;
-                continue;
-            }
-            empty_polls = 0;
-            for r in batch {
-                let Some(key_bytes) = r.key else { continue };
-                let key = String::from_utf8_lossy(&key_bytes).into_owned();
-                match r.value {
-                    None => {
-                        self.map.remove(&key);
-                    }
-                    Some(v) => {
-                        let claim: ClaimValue = serde_json::from_slice(&v)?;
-                        self.map.insert(key, claim);
-                    }
-                }
-            }
-        }
-        self.ready.store(true, Ordering::SeqCst);
-        Ok(())
     }
 
     /// Run the ownership consumer until `shutdown` fires. Joins the owners group
