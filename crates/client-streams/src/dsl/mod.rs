@@ -10,6 +10,7 @@ pub(crate) mod lower;
 pub(crate) mod names;
 pub(crate) mod optimizer;
 pub(crate) mod processors;
+pub mod session_windowed_kgrouped;
 pub mod windowed_kgrouped;
 pub use builder::StreamsBuilder;
 pub use config::{Grouped, Materialized, Repartitioned, StreamJoined};
