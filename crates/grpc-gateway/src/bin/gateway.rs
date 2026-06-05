@@ -53,7 +53,7 @@ struct Args {
     #[arg(
         long,
         env = "CRABKA_GATEWAY_DEDUP_TOPIC",
-        default_value = "__crabka_gateway_dedup"
+        default_value = "__crabka_grpc_dedup"
     )]
     dedup_topic: String,
 

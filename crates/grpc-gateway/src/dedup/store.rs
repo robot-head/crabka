@@ -132,6 +132,12 @@ impl DedupStore {
                 empty_polls = 0;
             }
 
+            // Warm heuristic: two consecutive empty polls since the last
+            // assignment change ⇒ owned partitions drained to the tail, safe to
+            // serve. Assumes a low-traffic, bursty claim topic (it is: tiny
+            // compacted claims that replay then idle); a continuously-saturated
+            // owned partition would defer warmth until it next idles. A future
+            // HWM-precise gate (spec §2) removes that theoretical caveat.
             if batch.is_empty() {
                 empty_polls += 1;
                 if empty_polls >= 2 {
