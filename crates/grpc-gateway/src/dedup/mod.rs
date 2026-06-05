@@ -69,6 +69,18 @@ impl DedupEngine {
         }
     }
 
+    /// The dedup partition a key hashes to (for routing decisions).
+    #[must_use]
+    pub fn partition_for_key(&self, key: &str) -> u32 {
+        partition_for(key, self.partitions)
+    }
+
+    /// True if this replica currently owns dedup-partition `p`.
+    #[must_use]
+    pub fn owns(&self, p: u32) -> bool {
+        self.store.owns(p)
+    }
+
     /// EOS produce: fast-path map hit returns the cached offset; a miss takes
     /// the partition's transactional producer and writes the data record +
     /// claim atomically, then updates the local map.

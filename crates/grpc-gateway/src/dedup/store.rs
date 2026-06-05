@@ -4,6 +4,7 @@
 //! produce on ownership + warmth so only the owning replica may write.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -32,6 +33,9 @@ pub struct DedupStore {
     warm: AtomicBool,
     /// Has been warm at least once (drives /readyz).
     warmed_once: AtomicBool,
+    /// Optional membership publisher; set by the binary before `run_ownership`
+    /// starts. `None` in single-owner/unit contexts ⇒ no publishing (P3a behavior).
+    membership: OnceLock<Arc<crate::dedup::membership::MembershipPublisher>>,
 }
 
 impl DedupStore {
@@ -43,7 +47,14 @@ impl DedupStore {
             owned: std::sync::RwLock::new(std::collections::HashSet::new()),
             warm: AtomicBool::new(false),
             warmed_once: AtomicBool::new(false),
+            membership: OnceLock::new(),
         }
+    }
+
+    /// Install the membership publisher. Call before spawning `run_ownership`
+    /// so the first assignment is published.
+    pub fn set_membership(&self, publisher: Arc<crate::dedup::membership::MembershipPublisher>) {
+        let _ = self.membership.set(publisher);
     }
 
     /// True if dedup-partition `p` is currently owned by this replica.
@@ -130,6 +141,11 @@ impl DedupStore {
                 *self.owned.write().expect("owned lock") = assigned;
                 self.warm.store(false, Ordering::SeqCst);
                 empty_polls = 0;
+                if let Some(publisher) = self.membership.get()
+                    && let Err(e) = publisher.publish(&current).await
+                {
+                    tracing::warn!(error = %e, "membership publish failed");
+                }
             }
 
             // Warm heuristic: two consecutive empty polls since the last
