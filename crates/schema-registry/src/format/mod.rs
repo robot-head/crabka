@@ -70,6 +70,17 @@ pub fn normalized_storage_form(ty: SchemaType, schema: &str) -> Result<String, S
     }
 }
 
+/// Directional compatibility check: can a reader using `reader` read data
+/// written with `writer`, per format `ty`? `Err(messages)` on incompatibility.
+/// Avro is real (apache-avro); Protobuf/JSON are permissive until 2b/2c.
+pub fn check(ty: SchemaType, reader: &str, writer: &str) -> Result<(), Vec<String>> {
+    match ty {
+        SchemaType::Avro => avro::check(reader, writer),
+        SchemaType::Protobuf => protobuf::check(reader, writer),
+        SchemaType::Json => json::check(reader, writer),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

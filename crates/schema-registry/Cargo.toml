@@ -58,3 +58,9 @@ name = "capture_fixtures"
 
 [[test]]
 name = "schemas_record"
+
+[[test]]
+name = "capture_compat_fixtures"
+
+[[test]]
+name = "compat_conformance"

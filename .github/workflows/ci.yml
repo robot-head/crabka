@@ -288,7 +288,7 @@ jobs:
       - name: Schema registry integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-schema-registry --test integration --test rest_conformance --test schemas_record --lcov --output-path coverage/schema-registry-integration.lcov -- --nocapture
+          cargo llvm-cov -p crabka-schema-registry --test integration --test rest_conformance --test schemas_record --test compat_conformance --lcov --output-path coverage/schema-registry-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

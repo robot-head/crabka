@@ -1,0 +1,149 @@
+[
+  {
+    "case": "add_default",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\",\"default\":0}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "add_default",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\",\"default\":0}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "add_default",
+    "is_compatible": true,
+    "level": "FULL",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\",\"default\":0}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "add_nodef",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\"}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "add_nodef",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\"}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "add_nodef",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"},{\"name\":\"x\",\"type\":\"int\"}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "remove_field",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "remove_field",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "remove_field",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "promote_int_long",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "promote_int_long",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "promote_int_long",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"
+  },
+  {
+    "case": "narrow_long_int",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"}]}"
+  },
+  {
+    "case": "narrow_long_int",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"}]}"
+  },
+  {
+    "case": "narrow_long_int",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"}]}"
+  },
+  {
+    "case": "enum_add",
+    "is_compatible": true,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"]}}]}"
+  },
+  {
+    "case": "enum_add",
+    "is_compatible": false,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"]}}]}"
+  },
+  {
+    "case": "enum_add",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"]}}]}"
+  },
+  {
+    "case": "enum_remove",
+    "is_compatible": false,
+    "level": "BACKWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"]}}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}}]}"
+  },
+  {
+    "case": "enum_remove",
+    "is_compatible": true,
+    "level": "FORWARD",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"]}}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}}]}"
+  },
+  {
+    "case": "enum_remove",
+    "is_compatible": false,
+    "level": "FULL",
+    "reader": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\"]}}]}",
+    "writer": "{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"e\",\"type\":{\"type\":\"enum\",\"name\":\"E\",\"symbols\":[\"A\",\"B\"]}}]}"
+  }
+]

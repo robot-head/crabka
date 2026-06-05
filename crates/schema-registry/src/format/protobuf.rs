@@ -125,6 +125,11 @@ impl ProtobufSchema {
     }
 }
 
+/// Compatibility check. Permissive until slice 2b/2c implement the real rules.
+pub fn check(_reader: &str, _writer: &str) -> Result<(), Vec<String>> {
+    Ok(())
+}
+
 impl ParsedSchema for ProtobufSchema {
     fn canonical_form(&self) -> String {
         // Clone the descriptor, clear source_code_info (formatting/comments)
@@ -147,6 +152,11 @@ impl ParsedSchema for ProtobufSchema {
 mod tests {
     use super::*;
     use crate::format::ParsedSchema;
+
+    #[test]
+    fn check_is_permissive_for_now() {
+        assert!(check("anything", "anything else").is_ok());
+    }
 
     const P: &str = "syntax = \"proto3\"; message User { int32 id = 1; }";
 

@@ -23,6 +23,10 @@ pub enum SrError {
     InvalidCompatibilityLevel(String),
     #[error("Error in the backend data store: {0}")]
     Backend(String),
+    /// Schema incompatible with prior version(s) under the subject. The strings
+    /// are best-effort reasons (Avro's wording, not Confluent's).
+    #[error("Schema being registered is incompatible with an earlier schema; details: {0:?}")]
+    Incompatible(Vec<String>),
 }
 
 impl SrError {
@@ -36,6 +40,7 @@ impl SrError {
             Self::InvalidVersion(_) => 42202,
             Self::InvalidCompatibilityLevel(_) => 42203,
             Self::Backend(_) => 50001,
+            Self::Incompatible(_) => 409,
         }
     }
 
@@ -49,6 +54,7 @@ impl SrError {
             | Self::InvalidVersion(_)
             | Self::InvalidCompatibilityLevel(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Backend(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Incompatible(_) => StatusCode::CONFLICT,
         }
     }
 }
@@ -71,6 +77,14 @@ mod tests {
     use super::*;
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
+
+    #[test]
+    fn incompatible_is_409_conflict() {
+        let e = SrError::Incompatible(vec!["reader missing default".into()]);
+        assert_eq!(e.error_code(), 409);
+        assert_eq!(e.http_status(), StatusCode::CONFLICT);
+        assert!(e.to_string().contains("incompatible"));
+    }
 
     #[test]
     fn codes_map_to_status() {
