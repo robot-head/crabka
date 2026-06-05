@@ -1008,6 +1008,142 @@ fn dsl_stream_table_left_join_executes() {
     );
 }
 
+/// `KTable::join` (inner KTable-KTable join): a row exists in the join output
+/// only when BOTH source tables have a value for the key. Populate the left
+/// table first (no output yet), then the right table (join emits "AB").
+#[test]
+fn dsl_ktable_ktable_inner_join_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
+    let b = StreamsBuilder::new();
+    let ta = b.table::<String, String, _, _>(
+        "a",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sa"),
+    );
+    let tb = b.table::<String, String, _, _>(
+        "b",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sb"),
+    );
+    ta.join(&tb, |va: &String, vb: &String| format!("{va}{vb}"))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(ta);
+    drop(tb);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // Left side present, right side absent → inner join emits nothing.
+    d.pipe_input(
+        "a",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "A".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+    // Right side now present → join emits "AB".
+    d.pipe_input(
+        "b",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "B".to_string(),
+        1,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "AB".to_string()))
+    );
+}
+
+/// `KTable::left_join`: emits a row whenever the LEFT (this) side is present;
+/// the right side is optional. Pipe only the left table → output reflects the
+/// left value with an empty right side.
+#[test]
+fn dsl_ktable_ktable_left_join_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
+    let b = StreamsBuilder::new();
+    let ta = b.table::<String, String, _, _>(
+        "a",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sa"),
+    );
+    let tb = b.table::<String, String, _, _>(
+        "b",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sb"),
+    );
+    ta.left_join(&tb, |va: &String, ob: Option<&String>| {
+        format!("{va}{}", ob.cloned().unwrap_or_default())
+    })
+    .to_stream()
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(ta);
+    drop(tb);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // Only the left side present → left join emits the left value (right empty).
+    d.pipe_input(
+        "a",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "A".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "A".to_string()))
+    );
+}
+
+/// `KTable::outer_join`: emits a row whenever EITHER side is present. Pipe only
+/// the right table → output reflects the right value with an empty left side.
+#[test]
+fn dsl_ktable_ktable_outer_join_executes() {
+    use crabka_client_streams::dsl::StreamsBuilder;
+    use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
+    let b = StreamsBuilder::new();
+    let ta = b.table::<String, String, _, _>(
+        "a",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sa"),
+    );
+    let tb = b.table::<String, String, _, _>(
+        "b",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sb"),
+    );
+    ta.outer_join(&tb, |oa: Option<&String>, ob: Option<&String>| {
+        format!(
+            "{}{}",
+            oa.cloned().unwrap_or_default(),
+            ob.cloned().unwrap_or_default()
+        )
+    })
+    .to_stream()
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(ta);
+    drop(tb);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // Only the right side present → outer join emits the right value (left empty).
+    d.pipe_input(
+        "b",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "B".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "B".to_string()))
+    );
+}
+
 /// `to_table` with `with_logging(false)` must suppress the changelog topic from
 /// the wire topology (`add_state_store_no_changelog` branch). The store is still
 /// functional at runtime.

@@ -17,6 +17,10 @@ use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kstream::KStream;
 use crate::dsl::names;
 use crate::dsl::processors::change::Change;
+use crate::dsl::processors::ktable_join::{
+    JoinKind, KTableKTableJoinOtherProcessor, KTableKTableJoinThisProcessor,
+};
+use crate::dsl::processors::stateless::MergeProcessor;
 use crate::dsl::processors::table::{
     KTableFilterProcessor, KTableMapValuesProcessor, KTableMapValuesViewProcessor,
     KTableToStreamProcessor,
@@ -259,6 +263,192 @@ where
         }));
         drop(g);
         KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
+    }
+
+    /// `join` (inner KTable-KTable join): for each key, the join row exists only
+    /// when **both** tables hold a value. On any change to either side, the join
+    /// re-reads the other side's current value from its store and forwards a
+    /// `Change<VR>` (a tombstone when the row stops existing).
+    ///
+    /// Both tables must be materialized — the join reads each side's store. The
+    /// two source topics are declared as a copartition group (KIP-1071).
+    pub fn join<VB, VR, F>(&self, other: &KTable<K, VB>, joiner: F) -> KTable<K, VR>
+    where
+        VB: Any + Send + Clone,
+        VR: Any + Send + Clone,
+        F: Fn(&V, &VB) -> VR + Clone + Send + Sync + 'static,
+    {
+        // Inner: both sides required → the outer-form joiner only ever sees `Some`.
+        let jf = move |a: Option<&V>, b: Option<&VB>| {
+            joiner(
+                a.expect("inner join: a present"),
+                b.expect("inner join: b present"),
+            )
+        };
+        self.join_impl(other, jf, JoinKind::inner())
+    }
+
+    /// `leftJoin` (left KTable-KTable join): emits a row whenever the **left**
+    /// (this) side is present; the right side is optional (the joiner receives
+    /// `None` for it on a miss).
+    pub fn left_join<VB, VR, F>(&self, other: &KTable<K, VB>, joiner: F) -> KTable<K, VR>
+    where
+        VB: Any + Send + Clone,
+        VR: Any + Send + Clone,
+        F: Fn(&V, Option<&VB>) -> VR + Clone + Send + Sync + 'static,
+    {
+        let jf = move |a: Option<&V>, b: Option<&VB>| joiner(a.expect("left join: a present"), b);
+        self.join_impl(other, jf, JoinKind::left())
+    }
+
+    /// `outerJoin` (outer KTable-KTable join): emits a row whenever **either**
+    /// side is present; the joiner receives `Option` for each side.
+    pub fn outer_join<VB, VR, F>(&self, other: &KTable<K, VB>, joiner: F) -> KTable<K, VR>
+    where
+        VB: Any + Send + Clone,
+        VR: Any + Send + Clone,
+        F: Fn(Option<&V>, Option<&VB>) -> VR + Clone + Send + Sync + 'static,
+    {
+        self.join_impl(other, joiner, JoinKind::outer())
+    }
+
+    /// Shared lowering for KTable-KTable inner/left/outer joins.
+    ///
+    /// Records three logical nodes and their thunks:
+    /// - `KTABLE-JOINTHIS-` (fed by this table's node): reads the OTHER (`b`)
+    ///   store, applies the join, forwards `Change<VR>`.
+    /// - `KTABLE-JOINOTHER-` (fed by the other table's node): reads the OTHER
+    ///   (`a`) store, applies the join, forwards `Change<VR>`.
+    /// - `KTABLE-MERGE-` (fed by both join nodes): forwards each `Change<VR>`
+    ///   unchanged, unioning the two join outputs.
+    ///
+    /// Each join node is connected to the store it reads (so the lowering pulls it
+    /// into the same subtopology as that store's owning table source). When both
+    /// tables are single-source-topic tables, their source topics are declared as
+    /// a copartition group.
+    #[allow(clippy::too_many_lines)]
+    fn join_impl<VB, VR, JF>(&self, other: &KTable<K, VB>, jf: JF, kind: JoinKind) -> KTable<K, VR>
+    where
+        VB: Any + Send + Clone,
+        VR: Any + Send + Clone,
+        JF: Fn(Option<&V>, Option<&VB>) -> VR + Clone + Send + Sync + 'static,
+    {
+        let a_store = self
+            .store_name()
+            .expect("KTable-KTable join: left table must be materialized")
+            .to_string();
+        let b_store = other
+            .store_name()
+            .expect("KTable-KTable join: right table must be materialized")
+            .to_string();
+        let a_src = self.source_topic().map(str::to_string);
+        let b_src = other.source_topic().map(str::to_string);
+        let self_node = self.node;
+        let other_node = other.node;
+
+        let mut g = self.builder.borrow_mut();
+        let join_this = g.new_processor_name(names::KTABLE_JOIN_THIS);
+        let join_other = g.new_processor_name(names::KTABLE_JOIN_OTHER);
+        let merge = g.new_processor_name(names::KTABLE_MERGE);
+
+        // ── "this" side: fed by this table, reads the OTHER (b) store ──────────
+        let this_id = g.graph.add(
+            join_this.clone(),
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![self_node],
+        );
+        let b_store_this = b_store.clone();
+        let jf_this = jf.clone();
+        let join_this_name = join_this.clone();
+        g.graph.nodes[this_id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent =
+                NodeHandle::<K, Change<V>>::from_name(state.handle_name[&self_node].clone());
+            let store_for_proc = b_store_this.clone();
+            let jf_for_proc = jf_this.clone();
+            let h = state
+                .topology
+                .add_processor::<K, Change<V>, K, Change<VR>, _, _, _>(
+                    join_this_name.clone(),
+                    move || KTableKTableJoinThisProcessor {
+                        other_store: store_for_proc.clone(),
+                        joiner: jf_for_proc.clone(),
+                        kind,
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
+            state
+                .topology
+                .connect_processor_store(h.name(), &b_store_this);
+            state.handle_name.insert(this_id, h.name().to_string());
+        }));
+
+        // ── "other" side: fed by the other table, reads the OTHER (a) store ────
+        let other_id = g.graph.add(
+            join_other.clone(),
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![other_node],
+        );
+        let a_store_other = a_store.clone();
+        let jf_other = jf.clone();
+        let join_other_name = join_other.clone();
+        g.graph.nodes[other_id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent =
+                NodeHandle::<K, Change<VB>>::from_name(state.handle_name[&other_node].clone());
+            let store_for_proc = a_store_other.clone();
+            let jf_for_proc = jf_other.clone();
+            let h = state
+                .topology
+                .add_processor::<K, Change<VB>, K, Change<VR>, _, _, _>(
+                    join_other_name.clone(),
+                    move || KTableKTableJoinOtherProcessor {
+                        other_store: store_for_proc.clone(),
+                        joiner: jf_for_proc.clone(),
+                        kind,
+                        _pd: PhantomData,
+                    },
+                    [parent],
+                );
+            state
+                .topology
+                .connect_processor_store(h.name(), &a_store_other);
+            state.handle_name.insert(other_id, h.name().to_string());
+        }));
+
+        // ── merge: union the two join outputs (forwards Change<VR> unchanged) ──
+        let merge_id = g.graph.add(
+            merge.clone(),
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![this_id, other_id],
+        );
+        g.graph.nodes[merge_id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let this_parent =
+                NodeHandle::<K, Change<VR>>::from_name(state.handle_name[&this_id].clone());
+            let other_parent =
+                NodeHandle::<K, Change<VR>>::from_name(state.handle_name[&other_id].clone());
+            let h = state
+                .topology
+                .add_processor::<K, Change<VR>, K, Change<VR>, _, _, _>(
+                    merge.clone(),
+                    || MergeProcessor::<K, Change<VR>> { _pd: PhantomData },
+                    [this_parent, other_parent],
+                );
+            // Declare the copartition group (when both tables are single-source).
+            if let (Some(a), Some(bb)) = (&a_src, &b_src) {
+                state
+                    .topology
+                    .add_copartition_group([a.clone(), bb.clone()]);
+            }
+            state.handle_name.insert(merge_id, h.name().to_string());
+        }));
+        drop(g);
+        KTable::new(Rc::clone(&self.builder), merge_id, None, None)
     }
 }
 

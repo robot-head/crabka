@@ -72,8 +72,9 @@ public final class Capture {
         write(outDir, "branch_merge", branchMerge());
         write(outDir, "to_table", toTable());
         write(outDir, "stream_table_join", streamTableJoin());
+        write(outDir, "ktable_ktable_join", ktableKtableJoin());
 
-        System.out.println("Capture complete. Wrote 7 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 8 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -154,6 +155,30 @@ public final class Capture {
             Consumed.with(Serdes.String(), Serdes.String()),
             Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("store"));
         left.join(right, (v, vt) -> v + vt)
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 8. ktable_ktable_join: table("a", sa).join(table("b", sb), joiner).toStream().to("out").
+     * Both tables are materialized and copartitioned, so the JVM unions both table sources,
+     * the two join processors (JOINTHIS/JOINOTHER), and the merge into ONE subtopology with a
+     * copartition group binding "a" and "b". Under optimization=all REUSE_KTABLE_SOURCE_TOPICS
+     * makes each store's changelog its own source topic ("a"/"b"). The join result is NOT
+     * materialized (no result changelog).
+     */
+    static Topology ktableKtableJoin() {
+        StreamsBuilder b = new StreamsBuilder();
+        org.apache.kafka.streams.kstream.KTable<String, String> a = b.table(
+            "a",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sa"));
+        org.apache.kafka.streams.kstream.KTable<String, String> bt = b.table(
+            "b",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sb"));
+        a.join(bt, (va, vb) -> va + vb)
+            .toStream()
             .to("out", Produced.with(Serdes.String(), Serdes.String()));
         return b.build(optimizedProps());
     }

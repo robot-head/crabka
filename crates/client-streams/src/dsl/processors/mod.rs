@@ -4,5 +4,6 @@
 pub(crate) mod aggregate;
 pub(crate) mod change;
 pub(crate) mod join;
+pub(crate) mod ktable_join;
 pub(crate) mod stateless;
 pub(crate) mod table;
