@@ -72,6 +72,10 @@ impl Resolver<'_> {
         match f.type_name.as_deref() {
             // A named-type reference (message or enum). protox gives the short
             // leaf name; classify by membership in the file's enum-name set.
+            // KNOWN EDGE (slice 2+): an enum and a message sharing a leaf name in
+            // different scopes could be misclassified here; not exercised by the
+            // cp matrix. A fully-qualified-name resolver is the proper fix when
+            // full Confluent canonical form lands.
             Some(tn) => {
                 let leaf = tn.rsplit('.').next().unwrap_or(tn);
                 if enum_names.contains(leaf) {
@@ -229,10 +233,12 @@ fn compare_message(
     compare_reserved(path, &orig.reserved_range, &upd.reserved_range, out);
     compare_reserved_names(path, &orig.reserved_name, &upd.reserved_name, out);
     // Recurse into non-map nested messages (Task 4a)
-    let is_map_entry =
+    // Keep ordinary nested messages; synthetic `map<>` entry messages are
+    // compared via the map path (`compare_map_entries`), not as nested types.
+    let keep_nested =
         |nt: &&DescriptorProto| nt.options.as_ref().and_then(|o| o.map_entry) != Some(true);
-    let orig_nested: Vec<&DescriptorProto> = orig.nested_type.iter().filter(is_map_entry).collect();
-    let upd_nested: Vec<&DescriptorProto> = upd.nested_type.iter().filter(is_map_entry).collect();
+    let orig_nested: Vec<&DescriptorProto> = orig.nested_type.iter().filter(keep_nested).collect();
+    let upd_nested: Vec<&DescriptorProto> = upd.nested_type.iter().filter(keep_nested).collect();
     let orig_nested_owned: Vec<DescriptorProto> = orig_nested.into_iter().cloned().collect();
     let upd_nested_owned: Vec<DescriptorProto> = upd_nested.into_iter().cloned().collect();
     compare_messages(path, &orig_nested_owned, &upd_nested_owned, r, out);
