@@ -71,8 +71,9 @@ public final class Capture {
         write(outDir, "table_reuse", tableReuse());
         write(outDir, "branch_merge", branchMerge());
         write(outDir, "to_table", toTable());
+        write(outDir, "stream_table_join", streamTableJoin());
 
-        System.out.println("Capture complete. Wrote 6 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 7 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -135,6 +136,24 @@ public final class Capture {
         b.<String, String>stream("in", Consumed.with(Serdes.String(), Serdes.String()))
             .toTable(Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("store"))
             .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 7. stream_table_join: stream("left").join(table("right", store), joiner).to("out").
+     * The stream side and the table side are copartitioned, so the JVM places both sources,
+     * the join, and the table source in ONE subtopology with a copartition group binding
+     * "left" and "right", and an implicit {@code app-store-changelog} for the table store.
+     */
+    static Topology streamTableJoin() {
+        StreamsBuilder b = new StreamsBuilder();
+        KStream<String, String> left = b.stream("left", Consumed.with(Serdes.String(), Serdes.String()));
+        org.apache.kafka.streams.kstream.KTable<String, String> right = b.table(
+            "right",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("store"));
+        left.join(right, (v, vt) -> v + vt)
             .to("out", Produced.with(Serdes.String(), Serdes.String()));
         return b.build(optimizedProps());
     }

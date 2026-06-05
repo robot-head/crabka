@@ -108,6 +108,32 @@ fn to_table_matches_jvm() {
 }
 
 #[test]
+fn stream_table_join_matches_jvm() {
+    use crabka_client_streams::{Materialized, StringSerde};
+    // Mirrors Capture.java `streamTableJoin()`:
+    //   stream("left").join(table("right", Materialized.as("store")), (v,vt)->v+vt).to("out")
+    //
+    // Both the stream source ("left") and the table source ("right") land in ONE
+    // subtopology (the join's `connect_processor_store` unions the join with the
+    // table store), with a copartition group binding "left" and "right" as the
+    // int16 indices [0, 1] into the sorted source_topics. Under optimization=all
+    // (`build_optimized`) REUSE_KTABLE_SOURCE_TOPICS makes the "store" changelog
+    // the source topic "right" — matching the JVM ground truth.
+    let b = StreamsBuilder::new();
+    let table = b.table::<String, String, _, _>(
+        "right",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("store"),
+    );
+    b.stream(["left"], Consumed::with(StringSerde, StringSerde))
+        .join(&table, |v: &String, vt: &String| format!("{v}{vt}"))
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(table);
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "stream_table_join");
+}
+
+#[test]
 fn repartition_merge_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     // The JVM `repartitionMerge()` app: one `selectKey` feeds TWO bare aggregations
