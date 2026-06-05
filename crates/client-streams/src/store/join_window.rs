@@ -122,7 +122,10 @@ impl<K: Send + Sync + 'static, V: Send + 'static> JoinWindowStore<K, V>
 
     async fn fetch(&self, key: &K, time_from: i64, time_to: i64) -> Vec<(i64, V)> {
         let kb = self.key_serde.serialize(key);
-        let lo = store_key(&kb, time_from, 0);
+        // Clamp to 0: negative timestamps encode to 0xFF… in BE, which sorts
+        // after all positive entries in the lexicographic BTreeMap backend.
+        // Kafka's segment-scoped range fetch does the same (`Math.max(0, timeFrom)`).
+        let lo = store_key(&kb, time_from.max(0), 0);
         let hi = store_key(&kb, time_to.saturating_add(1), 0);
         let mut out = Vec::new();
         for (k, raw) in self.backend.range(&lo, &hi).await {
