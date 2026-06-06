@@ -78,8 +78,9 @@ public final class Capture {
         write(outDir, "stream_stream_outer_join", streamStreamOuterJoin());
         write(outDir, "session_count", sessionCount());
         write(outDir, "suppress_until_window_closes", suppressUntilWindowCloses());
+        write(outDir, "suppress_until_window_closes_logged", suppressUntilWindowClosesLogged());
 
-        System.out.println("Capture complete. Wrote 13 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 14 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -278,6 +279,25 @@ public final class Capture {
             .suppress(org.apache.kafka.streams.kstream.Suppressed.untilWindowCloses(
                 org.apache.kafka.streams.kstream.Suppressed.BufferConfig.unbounded()
                     .withLoggingDisabled()))
+            .toStream()
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 14. suppress_until_window_closes_logged: identical to #13 but with the suppress
+     * buffer's changelog ENABLED (the default). The suppress buffer's changelog topic
+     * now appears in the wire topology — pins its name + config.
+     */
+    static Topology suppressUntilWindowClosesLogged() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .groupByKey()
+            .windowedBy(org.apache.kafka.streams.kstream.TimeWindows.ofSizeWithNoGrace(
+                java.time.Duration.ofSeconds(60)))
+            .count()
+            .suppress(org.apache.kafka.streams.kstream.Suppressed.untilWindowCloses(
+                org.apache.kafka.streams.kstream.Suppressed.BufferConfig.unbounded()))
             .toStream()
             .to("out");
         return b.build(optimizedProps());

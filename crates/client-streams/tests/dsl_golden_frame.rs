@@ -169,6 +169,32 @@ fn suppress_until_window_closes_matches_jvm() {
 }
 
 #[test]
+fn suppress_until_window_closes_logged_matches_jvm() {
+    use crabka_client_streams::{
+        BufferConfig, Grouped, I64Serde, Materialized, Suppressed, TimeWindowedSerde, TimeWindows,
+    };
+    // Mirrors Capture.java `suppressUntilWindowClosesLogged()` — identical to the #13
+    // app but with the suppress buffer's changelog ENABLED (the slice-D default). The
+    // buffer's changelog topic now appears in the wire:
+    // `app-KTABLE-SUPPRESS-STATE-STORE-0000000004-changelog` (a plain compacted KV
+    // changelog). Pins the suppress store name (consecutive index after the processor)
+    // + the changelog config.
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(60_000))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "suppress_until_window_closes_logged");
+}
+
+#[test]
 fn count_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     let b = StreamsBuilder::new();

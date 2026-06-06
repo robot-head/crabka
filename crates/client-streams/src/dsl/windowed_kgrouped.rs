@@ -92,7 +92,6 @@ where
             names::AGGREGATE_STORE,
             || 0i64,
             |_k: &K, _v: &V, acc: i64| acc + 1,
-            true,
         )
     }
 
@@ -130,20 +129,21 @@ where
         I: Fn() -> VA + Clone + Send + Sync + 'static,
         A: Fn(&K, &V, VA) -> VA + Clone + Send + Sync + 'static,
     {
-        self.aggregate_inner_windowed(materialized, names::AGGREGATE_STORE, init, agg, false)
+        self.aggregate_inner_windowed(materialized, names::AGGREGATE_STORE, init, agg)
     }
 
     /// Shared body for windowed `count`/`aggregate`: mint the store name at the
     /// JVM counter position, then lower the (optional) repartition + windowed
-    /// aggregate node. `is_count` triggers the JVM `count` extra name-burn when no
-    /// explicit `Materialized` store name was given.
+    /// aggregate node. Unlike the non-windowed `count`, the JVM windowed `count`
+    /// does NOT burn an extra store-name index (validated byte-exact against the
+    /// `suppress_until_window_closes_logged` fixture #14, whose suppress store index
+    /// is consecutive with the aggregate store + processor).
     fn aggregate_inner_windowed<KS, VS, VA, I, A>(
         self,
         materialized: Materialized<KS, VS>,
         store_prefix: &'static str,
         init: I,
         agg: A,
-        is_count: bool,
     ) -> KTable<Windowed<K>, VA>
     where
         VA: Any + Send + Clone,
@@ -153,15 +153,6 @@ where
         A: Fn(&K, &V, VA) -> VA + Clone + Send + Sync + 'static,
     {
         let store_name = mint_store_name(&self.builder, &materialized, store_prefix);
-        // JVM `count` burns an extra `KSTREAM-AGGREGATE-STATE-STORE-` counter index
-        // when no explicit store name was supplied (its internal store materializer
-        // names a second store). Mirror that so downstream auto-names line up with
-        // the JVM windowed-count fixture byte-for-byte.
-        if is_count && materialized.store_name.is_none() {
-            self.builder
-                .borrow_mut()
-                .new_processor_name(names::AGGREGATE_STORE);
-        }
         self.lower_aggregate_windowed::<KS, VS, VA, I, A>(materialized, store_name, init, agg)
     }
 
@@ -355,16 +346,14 @@ where
 {
     std::sync::Arc::new(
         move |state: &mut LowerState, store_name: &str, proc_name: &str, logging: bool| {
-            // Suppress changelog retention mirrors the windowed store (size+grace+1day);
-            // tuned to the JVM golden #14 in T5.
-            let retention_ms = windows.size_ms + windows.grace_ms + 86_400_000;
+            // The suppress buffer's changelog is a plain compacted KV changelog
+            // (validated byte-exact against the JVM golden #14) — no retention arg.
             state
                 .topology
                 .add_suppress_store::<Windowed<K>, VA, TimeWindowedSerde<KS>, VS>(
                     store_name.to_string(),
                     TimeWindowedSerde::new(key_serde.clone(), windows.size_ms),
                     value_serde.clone(),
-                    retention_ms,
                     logging,
                     [proc_name.to_string()],
                 );

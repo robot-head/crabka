@@ -61,7 +61,6 @@ where
                 store_name.to_string(),
                 key_serde.clone(),
                 value_serde.clone(),
-                86_400_000,
                 logging,
                 [proc_name.to_string()],
             );
@@ -561,8 +560,9 @@ where
         let parent_id = self.node;
         let mut g = self.builder.borrow_mut();
         let name = g.new_processor_name(names::KTABLE_SUPPRESS);
-        // The suppress buffer's store name (the JVM mints a buffer store name here).
-        let store_name = format!("{name}-store");
+        // The JVM mints the buffer store via `newStoreName(SUPPRESS_NAME)` right after
+        // the processor name → `KTABLE-SUPPRESS-STATE-STORE-<index+1>` (consecutive).
+        let store_name = g.new_processor_name(names::KTABLE_SUPPRESS_STORE);
         let store_for_thunk = store_name.clone();
         let id = g.graph.add(
             name.clone(),

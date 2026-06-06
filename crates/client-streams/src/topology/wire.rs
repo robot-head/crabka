@@ -81,30 +81,6 @@ fn join_window_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
     ]
 }
 
-/// Topic configs the JVM 4.x client attaches to a **suppress-buffer changelog**
-/// topic. The suppress buffer (`InMemoryTimeOrderedKeyValueChangeBuffer`) logs a
-/// `compact,delete` changelog + `retention.ms`. (Initial best-guess mirroring the
-/// windowed config; pinned/tuned against the golden #14 capture in T5.)
-fn suppress_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
-    vec![
-        KeyValue {
-            key: "cleanup.policy".into(),
-            value: "compact,delete".into(),
-            ..Default::default()
-        },
-        KeyValue {
-            key: "message.timestamp.type".into(),
-            value: "CreateTime".into(),
-            ..Default::default()
-        },
-        KeyValue {
-            key: "retention.ms".into(),
-            value: retention_ms.to_string(),
-            ..Default::default()
-        },
-    ]
-}
-
 /// Build the `KeyValue` config array from `(key, value)` pairs (already in
 /// sorted order at the call site).
 fn topic_configs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<KeyValue> {
@@ -182,9 +158,6 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
                 }
                 crate::topology::node::ChangelogKind::JoinWindow { retention_ms } => {
                     join_window_changelog_topic_configs(*retention_ms)
-                }
-                crate::topology::node::ChangelogKind::Suppress { retention_ms } => {
-                    suppress_changelog_topic_configs(*retention_ms)
                 }
             },
             ..Default::default()

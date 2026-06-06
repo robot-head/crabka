@@ -590,9 +590,10 @@ impl Topology {
     /// buffer with its own storage (it does NOT use the pluggable byte backend),
     /// so the factory ignores the opened backend. `logging` toggles ONLY the
     /// changelog: when `true` the changelog topic is emitted in the wire topology
-    /// (`compact,delete` + `retention.ms`) and the store logs/restores; when
-    /// `false` the store stays in memory and NO changelog topic appears (so a
-    /// logging-off suppress is byte-identical to the slice-A wire output).
+    /// (a plain `cleanup.policy=compact` changelog — the JVM suppress buffer is a
+    /// compacted KV store) and the store logs/restores; when `false` the store
+    /// stays in memory and NO changelog topic appears (so a logging-off suppress
+    /// is byte-identical to the slice-A wire output).
     ///
     /// [`SuppressBytesStore`]: crate::store::suppress_store::SuppressBytesStore
     pub fn add_suppress_store<K, V, KS, VS>(
@@ -600,7 +601,6 @@ impl Topology {
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
-        retention_ms: i64,
         logging: bool,
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
@@ -613,10 +613,10 @@ impl Topology {
         let name: String = name.into();
         let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
         // Logging toggles ONLY the changelog topic; the runtime store is always
-        // registered so the processor can buffer through it either way.
+        // registered so the processor can buffer through it either way. The suppress
+        // changelog is a plain compacted KV changelog (ChangelogKind::Kv).
         if logging {
-            self.reg
-                .add_suppress_store(&name, procs, None, retention_ms);
+            self.reg.add_store(&name, procs, None);
         }
         self.store_factories.insert(
             name.clone(),

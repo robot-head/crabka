@@ -143,11 +143,8 @@ where
             value_serde,
             ..
         } = materialized;
-        let suppress_factory = session_suppress_factory::<K, VA, KS, VS>(
-            key_serde.clone(),
-            value_serde.clone(),
-            self.windows,
-        );
+        let suppress_factory =
+            session_suppress_factory::<K, VA, KS, VS>(key_serde.clone(), value_serde.clone());
         let parent = self.parent;
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
@@ -225,11 +222,8 @@ where
             value_serde,
             ..
         } = materialized;
-        let suppress_factory = session_suppress_factory::<K, V, KS, VS>(
-            key_serde.clone(),
-            value_serde.clone(),
-            self.windows,
-        );
+        let suppress_factory =
+            session_suppress_factory::<K, V, KS, VS>(key_serde.clone(), value_serde.clone());
         let parent = self.parent;
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
@@ -291,11 +285,7 @@ where
 /// Captures the session key serde ([`SessionWindowedSerde`]) + the aggregate value
 /// serde so a downstream `suppress` registers a `SuppressBytesStore<Windowed<K>, VA>`
 /// with the session-windowed key serde + the matching changelog config.
-fn session_suppress_factory<K, VA, KS, VS>(
-    key_serde: KS,
-    value_serde: VS,
-    windows: SessionWindows,
-) -> SuppressStoreFactory
+fn session_suppress_factory<K, VA, KS, VS>(key_serde: KS, value_serde: VS) -> SuppressStoreFactory
 where
     K: Any + Send + Sync + Clone,
     VA: Any + Send + Clone,
@@ -304,16 +294,14 @@ where
 {
     std::sync::Arc::new(
         move |state: &mut LowerState, store_name: &str, proc_name: &str, logging: bool| {
-            // Suppress changelog retention mirrors the session store (gap+grace+1day);
-            // tuned to the JVM golden in T5 if a session-suppress golden is added.
-            let retention_ms = windows.gap_ms + windows.grace_ms + 86_400_000;
+            // The suppress buffer's changelog is a plain compacted KV changelog
+            // (the JVM suppress buffer is a compacted KV store) — no retention arg.
             state
                 .topology
                 .add_suppress_store::<Windowed<K>, VA, SessionWindowedSerde<KS>, VS>(
                     store_name.to_string(),
                     SessionWindowedSerde::new(key_serde.clone()),
                     value_serde.clone(),
-                    retention_ms,
                     logging,
                     [proc_name.to_string()],
                 );

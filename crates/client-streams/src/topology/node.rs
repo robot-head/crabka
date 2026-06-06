@@ -37,9 +37,6 @@ pub(crate) enum ChangelogKind {
     /// Join window store: `cleanup.policy=delete` + `retention.ms`
     /// (retainDuplicates prevents compaction).
     JoinWindow { retention_ms: i64 },
-    /// Suppress buffer store: `cleanup.policy=compact,delete` + `retention.ms`
-    /// (the JVM `InMemoryTimeOrderedKeyValueChangeBuffer` changelog).
-    Suppress { retention_ms: i64 },
 }
 
 /// A registered state store: its name, the processors it connects (used to
@@ -185,24 +182,6 @@ impl NodeRegistry {
             processors,
             changelog_override,
             changelog_kind: ChangelogKind::JoinWindow { retention_ms },
-        });
-    }
-
-    /// Register a suppress buffer store. The changelog gets `compact,delete`
-    /// policy + `retention.ms=<retention_ms>` (the JVM
-    /// `InMemoryTimeOrderedKeyValueChangeBuffer` changelog).
-    pub fn add_suppress_store(
-        &mut self,
-        name: &str,
-        processors: Vec<String>,
-        changelog_override: Option<String>,
-        retention_ms: i64,
-    ) {
-        self.stores.push(StoreEntry {
-            name: name.to_string(),
-            processors,
-            changelog_override,
-            changelog_kind: ChangelogKind::Suppress { retention_ms },
         });
     }
 

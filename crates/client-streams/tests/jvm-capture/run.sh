@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 #
-# Capture the 13 DSL golden fixtures from JVM Kafka Streams 4.1.0, inside Docker.
+# Capture the 14 DSL golden fixtures from JVM Kafka Streams 4.1.0, inside Docker.
 # (stateless_chain, count, repartition_merge, table_reuse, branch_merge, to_table,
 #  stream_table_join, ktable_ktable_join, windowed_count, stream_stream_join,
 #  stream_stream_outer_join, session_count, suppress_until_window_closes)
 #
-# Mechanism A (default, no broker): builds the 13 DSL topologies with optimization=all
+# Mechanism A (default, no broker): builds the 14 DSL topologies with optimization=all
 # and runs Kafka's own DSL -> StreamsGroupHeartbeatRequest.Topology conversion via
 # reflection, writing Crabka wire-shape JSON to ../testdata/golden/dsl/.
 #
