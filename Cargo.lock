@@ -1241,6 +1241,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-authz"
+version = "0.2.0"
+dependencies = [
+ "assert2",
+ "crabka-metadata",
+ "crabka-security",
+ "uuid",
+]
+
+[[package]]
 name = "crabka-bench-driver"
 version = "0.2.0"
 dependencies = [
