@@ -424,4 +424,63 @@ mod tests {
         let _ = s.evict_while(10).await;
         check!(s.take_changelog().is_empty());
     }
+
+    /// Restart-restore at the golden's scenario: a windowed-key suppress buffer
+    /// (the `until_window_closes` shape, `Windowed<String>` keys via
+    /// `TimeWindowedSerde`) survives `take_changelog` → fresh store →
+    /// `apply_changelog`, and the restored buffered windows still emit their final
+    /// value when stream-time closes them. The generic `StreamTask::restore`
+    /// machinery drives exactly this drain/replay over the registered store.
+    #[tokio::test]
+    async fn windowed_buffer_restores_and_emits_on_close() {
+        use crate::dsl::windows::{TimeWindowedSerde, Window, Windowed};
+
+        fn win_store() -> SuppressBytesStore<Windowed<String>, i64> {
+            SuppressBytesStore::<Windowed<String>, i64>::in_memory(
+                "sup".into(),
+                Box::new(TimeWindowedSerde::new(StringSerde, 10)),
+                Box::new(I64Serde),
+                "app-sup-changelog".into(),
+            )
+        }
+        fn wk(key: &str, start: i64) -> Windowed<String> {
+            Windowed {
+                key: key.into(),
+                window: Window {
+                    start,
+                    end: start + 10,
+                },
+            }
+        }
+
+        // Source store buffers two windows' final values (buffer_time = window end).
+        let mut src = win_store();
+        src.put(wk("a", 0), 10, Change::update(None, 2), ctx(5))
+            .await;
+        src.put(wk("b", 20), 30, Change::update(None, 7), ctx(25))
+            .await;
+        let changelog = src.take_changelog();
+        check!(changelog.len() == 2);
+
+        // Restart: a FRESH store replays the changelog (silently — no re-emit).
+        let mut restored = win_store();
+        for (key, value) in changelog {
+            restored.apply_changelog(key, value).await;
+        }
+        check!(restored.len() == 2);
+        check!(restored.take_changelog().is_empty());
+
+        // Closing window [0,10) (threshold 10) emits a@[0,10)'s final value (2);
+        // b@[20,30) stays buffered until its own close.
+        let closed = restored.evict_while(10).await;
+        check!(closed.len() == 1);
+        check!(closed[0].0 == wk("a", 0));
+        check!(closed[0].1.new == Some(2));
+        check!(restored.len() == 1);
+        // Raising the threshold closes b@[20,30) too.
+        let rest = restored.evict_while(30).await;
+        check!(rest.len() == 1);
+        check!(rest[0].0 == wk("b", 20));
+        check!(rest[0].1.new == Some(7));
+    }
 }

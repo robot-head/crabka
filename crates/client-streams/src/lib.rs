@@ -194,14 +194,26 @@
 //! turns a windowed table's emit-on-update change-stream into **final results**: it
 //! buffers each window's updates and forwards the window's final value exactly once,
 //! when stream-time passes `window.end + grace` (the grace comes from the upstream
-//! windowed/session aggregation). The buffer is in-memory and time-ordered.
-//! [`BufferConfig::unbounded`]`().with_max_records(n)` caps it; exceeding the cap
-//! shuts the task down (`shutDownWhenFull`). [`Suppressed::until_time_limit`] is the
+//! windowed/session aggregation). [`Suppressed::until_time_limit`] is the
 //! rate-limiter variant for *any* table — it emits at most one update per key per
-//! wait (stream-time), a newer record resetting the timer; `BufferConfig::max_records(n)`
-//! (eager) / [`BufferConfig::emit_early_when_full`] evict + emit the oldest buffered
-//! record when full instead of shutting down. `maxBytes` and the buffer changelog
-//! are later slices.
+//! wait (stream-time), a newer record resetting the timer.
+//!
+//! The buffer is a **registered, durable state store** (a time-ordered
+//! `SuppressBytesStore` keyed by the serialized record key). With logging on (the
+//! default) it writes a **JVM-byte-exact** changelog — `BufferValue` +
+//! `ProcessorRecordContext` value, a plain `cleanup.policy=compact` topic
+//! `app-KTABLE-SUPPRESS-STATE-STORE-<n>-changelog` — and restores the buffered
+//! records on restart via the same machinery as every other store, so windows that
+//! were still buffered re-emit on close after a restart. [`Suppressed::with_logging_disabled`]
+//! keeps the buffer in memory only (no changelog topic). The serdes reach the store
+//! from the producing op (the windowed/session aggregation or [`StreamsBuilder::table`]).
+//!
+//! The buffer is bounded by [`BufferConfig`]: [`BufferConfig::unbounded`]`().with_max_records(n)`
+//! / [`BufferConfig::with_max_bytes`]`(n)` cap it (bytes = serialized key + value
+//! summed); exceeding a cap either shuts the task down (`shutDownWhenFull`, the
+//! `until_window_closes` default) or — with `BufferConfig::max_records(n)` /
+//! [`BufferConfig::max_bytes`] (eager) / [`BufferConfig::emit_early_when_full`] —
+//! evicts + emits the oldest buffered record (`emitEarlyWhenFull`).
 //!
 //! [`KStream::join`], [`KStream::left_join`], and [`KStream::outer_join`] are the
 //! windowed **stream-stream** joins: two streams join over a [`JoinWindows`] time

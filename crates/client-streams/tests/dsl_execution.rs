@@ -2216,6 +2216,90 @@ fn dsl_suppress_max_records_shuts_down_when_full() {
     }
 }
 
+/// Suppress `with_max_bytes` on a STRICT (`until_window_closes`) buffer →
+/// shutDownWhenFull. Each buffered entry is `TimeWindowedSerde` key (1-char key +
+/// 8-byte window start = 9) + i64 value (8) = 17 bytes. With a 20-byte cap the
+/// first key fits (17 ≤ 20); the second (34 > 20) overflows the still-open window
+/// → panic. Exercises the full DSL → `BufferConfig::byte_cap` → processor path.
+#[test]
+#[should_panic(expected = "bytes")]
+fn dsl_suppress_max_bytes_shuts_down_when_full() {
+    use crabka_client_streams::{
+        BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows,
+    };
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(60_000))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .suppress(Suppressed::until_window_closes(
+            BufferConfig::unbounded().with_max_bytes(20),
+        ))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // Two distinct keys in the open window [0,60000): the second pushes the buffer
+    // to 34 bytes > 20 → shutdown.
+    for (k, ts) in [("a", 1_000i64), ("b", 2_000)] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some(k.to_string()),
+            "x".to_string(),
+            ts,
+        );
+    }
+}
+
+/// Suppress `max_bytes` on an EAGER (`until_time_limit`) buffer → emitEarlyWhenFull:
+/// an over-full byte buffer evicts + emits the oldest early. Non-windowed count keys
+/// serialize to 1 byte + 8-byte i64 = 9 bytes each; a 10-byte cap holds one, so the
+/// second key evicts the first early.
+#[test]
+fn dsl_suppress_max_bytes_emit_early() {
+    use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .suppress(Suppressed::until_time_limit(
+            1_000_000,
+            BufferConfig::max_bytes(10),
+        ))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // "a"@1 buffers (9 ≤ 10), nothing emits.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("a".to_string()),
+        "x".to_string(),
+        1,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        None
+    );
+    // "b"@2 pushes the buffer to 18 > 10 → evict + emit the oldest ("a", count 1).
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("b".to_string()),
+        "x".to_string(),
+        2,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("a".into()), 1))
+    );
+}
+
 /// Suppress `until_time_limit`: a key is buffered and emitted once stream-time
 /// advances past `record_ts + wait`. Rate-limiter for a non-windowed table.
 #[test]
