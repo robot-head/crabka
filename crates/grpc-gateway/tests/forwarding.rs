@@ -125,6 +125,7 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             dedup_txn_id_prefix: format!("crabka-grpc-dedup-{client}"),
             advertised_addr: addr.clone(),
             membership_topic: MEMBERSHIP.into(),
+            tls: None,
         }),
     });
 

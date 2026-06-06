@@ -11,6 +11,7 @@ pub mod forward;
 pub mod handlers;
 pub mod health;
 pub mod produce;
+pub mod serve;
 pub mod state;
 pub mod streaming;
 pub mod types;

@@ -112,6 +112,30 @@ impl TlsConfig {
             .with_no_client_auth();
         Ok(Arc::new(cfg))
     }
+
+    /// Build a rustls `ClientConfig` that BOTH verifies the peer's server cert
+    /// against `trust_roots_path` AND presents this node's own
+    /// `cert_chain_path`/`private_key_path` as a client certificate (mTLS).
+    /// Used by peer-to-peer dialers (e.g. the gRPC gateway forwarding to an
+    /// owning replica) that must mutually authenticate.
+    ///
+    /// # Errors
+    /// Propagates `TlsError` from cert/key loading or rustls config building.
+    pub fn build_client_config_with_identity(&self) -> Result<Arc<rustls::ClientConfig>, TlsError> {
+        let mut roots = rustls::RootCertStore::empty();
+        if let Some(path) = &self.trust_roots_path {
+            for cert in load_certs(path)? {
+                roots.add(cert)?;
+            }
+        }
+        let certs = load_certs(&self.cert_chain_path)?;
+        let key = load_private_key(&self.private_key_path)?;
+        let cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_client_auth_cert(certs, key)
+            .map_err(TlsError::Rustls)?;
+        Ok(Arc::new(cfg))
+    }
 }
 
 fn load_certs(path: &PathBuf) -> Result<Vec<CertificateDer<'static>>, TlsError> {
@@ -253,5 +277,37 @@ mod tests {
         };
         cfg.build_server_config()
             .expect("build with optional client cert verifier");
+    }
+
+    #[test]
+    fn client_config_with_identity_builds() {
+        install_provider();
+        let dir = tempfile::tempdir().unwrap();
+        let ca = crate::ca::generate_clients_ca("p4-ca", 365).expect("ca");
+        let leaf = crate::ca::issue_user_cert(&ca.cert_pem, &ca.key_pem, "gw", 365).expect("leaf");
+        let cert_path = dir.path().join("c.pem");
+        let key_path = dir.path().join("k.pem");
+        let ca_path = dir.path().join("ca.pem");
+        File::create(&cert_path)
+            .unwrap()
+            .write_all(leaf.cert_pem.as_bytes())
+            .unwrap();
+        File::create(&key_path)
+            .unwrap()
+            .write_all(leaf.key_pem.as_bytes())
+            .unwrap();
+        File::create(&ca_path)
+            .unwrap()
+            .write_all(ca.cert_pem.as_bytes())
+            .unwrap();
+        let cfg = TlsConfig {
+            cert_chain_path: cert_path,
+            private_key_path: key_path,
+            trust_roots_path: Some(ca_path),
+            client_ca_path: None,
+            client_auth: ClientAuthMode::Disabled,
+        };
+        cfg.build_client_config_with_identity()
+            .expect("client cfg with identity");
     }
 }
