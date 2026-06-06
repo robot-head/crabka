@@ -142,6 +142,31 @@ fn session_count_matches_jvm() {
 }
 
 #[test]
+fn suppress_until_window_closes_matches_jvm() {
+    use crabka_client_streams::{
+        BufferConfig, Grouped, I64Serde, Materialized, Suppressed, TimeWindowedSerde, TimeWindows,
+    };
+    // Mirrors Capture.java `suppressUntilWindowCloses()`. With logging disabled the
+    // suppress buffer adds no changelog → the wire is byte-identical to
+    // windowed_count (the suppress processor is not wire-visible, and the aggregate
+    // store naming/counter is unperturbed). Pins that the suppress DSL introduces no
+    // spurious topic.
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(60_000))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "suppress_until_window_closes");
+}
+
+#[test]
 fn count_matches_jvm() {
     use crabka_client_streams::{Grouped, I64Serde, Materialized};
     let b = StreamsBuilder::new();

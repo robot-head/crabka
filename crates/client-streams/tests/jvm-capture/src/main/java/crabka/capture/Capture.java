@@ -77,8 +77,9 @@ public final class Capture {
         write(outDir, "stream_stream_join", streamStreamJoin());
         write(outDir, "stream_stream_outer_join", streamStreamOuterJoin());
         write(outDir, "session_count", sessionCount());
+        write(outDir, "suppress_until_window_closes", suppressUntilWindowCloses());
 
-        System.out.println("Capture complete. Wrote 12 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 13 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -257,6 +258,26 @@ public final class Capture {
             .windowedBy(org.apache.kafka.streams.kstream.SessionWindows.ofInactivityGapWithNoGrace(
                 java.time.Duration.ofSeconds(60)))
             .count()
+            .toStream()
+            .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 13. suppress_until_window_closes: windowed count + suppress(untilWindowCloses,
+     * logging disabled). With logging disabled the suppress buffer adds no changelog,
+     * so the wire is expected byte-identical to windowed_count.
+     */
+    static Topology suppressUntilWindowCloses() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .groupByKey()
+            .windowedBy(org.apache.kafka.streams.kstream.TimeWindows.ofSizeWithNoGrace(
+                java.time.Duration.ofSeconds(60)))
+            .count()
+            .suppress(org.apache.kafka.streams.kstream.Suppressed.untilWindowCloses(
+                org.apache.kafka.streams.kstream.Suppressed.BufferConfig.unbounded()
+                    .withLoggingDisabled()))
             .toStream()
             .to("out");
         return b.build(optimizedProps());
