@@ -1,6 +1,9 @@
+#![allow(clippy::pedantic)]
+#![cfg(not(target_os = "windows"))]
+
 //! cp/JVM cross-validation for `DescribeGroups` (`api_key=15`) metadata.
 //!
-//! Boots a single-node real Kafka (`confluentinc/cp-kafka:7.4.0`, KRaft) in
+//! Boots a single-node real Kafka (`confluentinc/cp-kafka:7.4.0`, `KRaft`) in
 //! Docker, forms a CLASSIC consumer group `g` with the `RangeAssignor`, then
 //! sends a `DescribeGroupsRequest` to the real broker FROM THE HOST via
 //! `crabka_client_core::Client` and captures the response. cp/JVM is the
@@ -11,7 +14,7 @@
 //!   * `protocol_type == "consumer"` for an active classic consumer group;
 //!   * `protocol_data == "range"` — the SELECTED assignor name, NON-empty;
 //!   * `member_metadata` NON-empty — the encoded `ConsumerProtocolSubscription`
-//!     the consumer sent in its JoinGroup;
+//!     the consumer sent in its `JoinGroup`;
 //!   * a TYPELESS group (offset-commit-only, never had a protocol) reports
 //!     `protocol_type == ""`, settling the `unwrap_or_default()` projection in
 //!     `handlers/describe_groups.rs`.
@@ -34,10 +37,7 @@
 //! CLI, and `EXTERNAL` on `19092` advertised as `localhost:19092`, published to
 //! host port 19092 so the host `Client` reaches it on `127.0.0.1:19092`. A
 //! single `DescribeGroups` is served by the sole broker (it is the group
-//! coordinator), so no FindCoordinator redirect is needed.
-
-#![cfg(not(target_os = "windows"))]
-#![allow(clippy::pedantic)]
+//! coordinator), so no `FindCoordinator` redirect is needed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
