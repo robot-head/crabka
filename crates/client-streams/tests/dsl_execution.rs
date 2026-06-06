@@ -2706,3 +2706,100 @@ fn dsl_process_is_key_changing_forces_repartition() {
         "expected a repartition topic from the key-changing process; wire = {wire:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// KStream::process_values (fixed-key custom Processor-API node)
+// ---------------------------------------------------------------------------
+
+/// `KStream::process_values` with a fixed-key processor that uppercases the value
+/// and forwards — the KEY is preserved (KIP-820 fixed-key semantics).
+///
+/// Topology: `stream("in")` → `process_values(Upper, ["store"])` → `to("out")`.
+/// Pipe `("k","hi")`; the output is `("k","HI")` — SAME key, uppercased value. The
+/// store is connected (so the changelog appears) but not read by the processor.
+#[test]
+fn dsl_process_values_preserves_key_executes() {
+    use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
+    struct Upper;
+    #[async_trait::async_trait]
+    impl FixedKeyProcessor<String, String, String> for Upper {
+        async fn process(
+            &mut self,
+            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
+            r: FixedKeyRecord<String, String>,
+        ) {
+            // Capture the value before `with_value` consumes the record.
+            let v = r.value.clone();
+            ctx.forward(r.with_value(v.to_uppercase()));
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process_values(|| Upper, ["store"])
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "hi".to_string(),
+        0,
+    );
+    // SAME key "k", value uppercased to "HI".
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "HI".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// `KStream::process_values` is **non-key-changing** (KIP-820 preserves the key):
+/// a downstream aggregation must NOT insert a repartition. Build
+/// `stream("in").process_values(Upper,["store"]).group_by_key().count()` and assert
+/// the wire carries NO repartition topic anywhere. This is the CONTRAST with the
+/// `process` case (`dsl_process_is_key_changing_forces_repartition`), which DOES
+/// repartition.
+#[test]
+fn dsl_process_values_is_not_key_changing_no_repartition() {
+    use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
+    struct Upper;
+    #[async_trait::async_trait]
+    impl FixedKeyProcessor<String, String, String> for Upper {
+        async fn process(
+            &mut self,
+            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
+            r: FixedKeyRecord<String, String>,
+        ) {
+            let v = r.value.clone();
+            ctx.forward(r.with_value(v.to_uppercase()));
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process_values(|| Upper, ["store"])
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let wire = b.build("app").unwrap().to_wire();
+    // process_values preserves the key → NO repartition. Every subtopology's
+    // repartition sink AND source lists must be empty.
+    let any_sink = wire
+        .subtopologies
+        .iter()
+        .any(|s| !s.repartition_sink_topics.is_empty());
+    let any_source = wire
+        .subtopologies
+        .iter()
+        .any(|s| !s.repartition_source_topics.is_empty());
+    assert!(
+        !any_sink && !any_source,
+        "expected NO repartition topic from non-key-changing process_values; wire = {wire:?}"
+    );
+}

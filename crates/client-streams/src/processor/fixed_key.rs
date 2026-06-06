@@ -51,8 +51,7 @@ where
     K: Any + Send + Clone,
     VOut: Any + Send + Clone,
 {
-    // constructed by FixedKeyAdapter, which KStream::process_values wires up in T5
-    #[allow(dead_code)]
+    // Constructed by FixedKeyAdapter (wired up by KStream::process_values).
     pub(crate) fn new(inner: &'a mut ProcessorContext<'ctx, 'd, K, VOut>) -> Self {
         Self { inner }
     }
@@ -156,12 +155,9 @@ where
 }
 
 /// Bridges a [`FixedKeyProcessor`] into the regular [`Processor`] runtime with
-/// `KOut = KIn` (the key is preserved). Consumed by `KStream::process_values` in
-/// a later task; not yet referenced by production code.
-// consumed by KStream::process_values in T5
-#[allow(dead_code)]
+/// `KOut = KIn` (the key is preserved). Wrapped around a [`FixedKeyProcessorSupplier`]
+/// by [`KStream::process_values`](crate::dsl::kstream::KStream::process_values).
 pub(crate) struct FixedKeyAdapter<P> {
-    // consumed by KStream::process_values in T5
     pub inner: P,
 }
 
