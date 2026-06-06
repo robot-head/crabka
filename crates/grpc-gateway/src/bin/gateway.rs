@@ -121,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         dedup_txn_id_prefix: args.dedup_txn_id_prefix.clone(),
         advertised_addr: args.advertised_addr.clone(),
         membership_topic: args.membership_topic.clone(),
+        tls: None, // wired in Task 5
     };
 
     run(config).await
