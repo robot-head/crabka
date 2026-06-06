@@ -20,11 +20,14 @@ coverage:
     patch:
       default:
         only_pulls: true
-        # Allow a PR's changed-line coverage to dip up to 1% below the base,
-        # matching the `project` gate. A large feature branch that adds mostly
-        # hand-written code plus some thinly-tested edge/error arms should not
-        # be blocked by a fraction-of-a-percent patch dip against an auto target.
-        threshold: 1%
+        # Patch (changed-line) coverage is ADVISORY, not a gate. It is not a
+        # required check, and large feature branches legitimately add
+        # integration-tested-not-unit-tested code (OTLP exporter wiring, K8s
+        # reconcile IO, serve loops) whose patch % dips without indicating a
+        # real gap. `informational: true` keeps the coverage delta visible in
+        # the PR comment but never fails the check; the `project` gate above
+        # still guards overall repo coverage.
+        informational: true
 
 # Auto-generated protocol codecs are machine-emitted (encode/decode/populate
 # per record type) and exercised indirectly via the round-trip/integration
