@@ -3,7 +3,10 @@ use bytes::{BufMut, Bytes, BytesMut};
 
 use crate::processor::serde::{Serde, SerdeError};
 
-/// A half-open time window `[start, end)` (epoch millis).
+/// A time window (epoch millis). Time windows ([`TimeWindows`]) are half-open
+/// `[start, end)`; session windows ([`SessionWindows`]) are inclusive `[start,
+/// end]` (both bounds are observed record timestamps). The interpretation is
+/// carried by the producing operator, not encoded in this struct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Window {
     pub start: i64,
