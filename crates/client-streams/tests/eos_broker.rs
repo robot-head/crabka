@@ -10,10 +10,22 @@
 //!    last stable offset.
 //! 2. **Source-offset atomicity.** The committed source offsets for the
 //!    application-id group advance to the end of the input atomically with the
-//!    committed output (via `OffsetFetch` for the streams group).
-//! 3. **Restart-resume.** A fresh `KafkaStreams` with the SAME `application_id`
-//!    and `ExactlyOnceV2` resumes from the committed changelog (counts continue,
-//!    no double-count, no reset).
+//!    committed output (via `OffsetFetch` for the streams group). The producer
+//!    folds the consumed offsets into the SAME transaction as the output
+//!    (`AddOffsetsToTxn` + `TxnOffsetCommit`); the broker materializes those
+//!    transactional `__consumer_offsets` writes into the group's committed
+//!    offsets when the COMMIT marker lands, so `OffsetFetch` returns the
+//!    committed end offset (not `-1`).
+//! 3. **True cross-restart exactly-once.** A fresh `KafkaStreams` with the SAME
+//!    `application_id` and `ExactlyOnceV2` resumes from the committed SOURCE
+//!    offsets — it does NOT re-read the committed input. The committed output
+//!    therefore stays exactly the original three records (`a→1, a→2, b→1`) after
+//!    restart: no `a→3` re-emitted from a re-read of the 2nd `"a"`, no `b→2` —
+//!    committed input is processed exactly once across the restart. This is the
+//!    invariant the broker fix unlocks: pre-fix the source offset read back as
+//!    `-1`, so the restarted consumer reset to `earliest`, re-read the input,
+//!    and re-emitted committed records (double-counting); post-fix it resumes
+//!    from the materialized offset and does not.
 #![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
@@ -301,6 +313,19 @@ async fn committed_source_offset(admin: &Client) -> Option<i64> {
     None
 }
 
+/// Poll [`committed_source_offset`] until it is present, returning the committed
+/// offset. The transactional offset is materialized into the group's committed
+/// offsets at the COMMIT marker, which lands just after the committed output
+/// becomes visible — so a short poll bridges that window without flaking.
+async fn await_committed_source_offset(admin: &Client) -> i64 {
+    loop {
+        if let Some(off) = committed_source_offset(admin).await {
+            return off;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 // ─── test ─────────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -364,49 +389,89 @@ async fn eos_v2_atomic_output_and_restart_resume() {
         "committed 'b' count must be [1]; got {got:?}"
     );
 
-    // 4b. Source-offset read (diagnostic, non-asserting). The streams runtime
-    // folds the consumed source offsets into the SAME transaction as the output
-    // (`AddOffsetsToTxn` + `TxnOffsetCommit`), so they commit atomically with it.
-    // The in-process broker's transaction coordinator does NOT yet materialize
-    // those transactional `__consumer_offsets` writes back into the in-memory
-    // `Group.committed_offsets` that `OffsetFetch` reads (the commit marker is
-    // written to the log but there is no marker-observer that applies the
-    // buffered txn offset records), so `OffsetFetch` reports `-1` here. We log
-    // it rather than assert on it — per the task, the output-correctness gate is
-    // primary, and an easy committed-offset read is not available on this broker.
-    let source_off = committed_source_offset(&admin).await;
-    eprintln!(
-        "committed source offset for `{IN_TOPIC}` (diagnostic): {source_off:?} \
-         (broker does not yet surface txn offsets via OffsetFetch)"
+    // 4b. Source-offset atomicity. The streams runtime folds the consumed source
+    // offsets into the SAME transaction as the output (`AddOffsetsToTxn` +
+    // `TxnOffsetCommit`), and the broker now materializes those transactional
+    // `__consumer_offsets` writes into the group's committed offsets when the
+    // COMMIT marker lands. So `OffsetFetch` for the application-id group must
+    // return the committed END offset of the input (3 records consumed → next
+    // offset 3) — NOT `-1`. Poll briefly: the marker materialization completes
+    // just after the committed output becomes visible.
+    let source_off = tokio::time::timeout(
+        Duration::from_secs(20),
+        await_committed_source_offset(&admin),
+    )
+    .await
+    .expect("committed source offset surfaced within 20s");
+    assert_ne!(
+        source_off, -1,
+        "committed source offset must be surfaced via OffsetFetch (txn offsets \
+         materialized on COMMIT), not -1",
+    );
+    assert_eq!(
+        source_off, 3,
+        "committed source offset must equal the consumed count (3 input records \
+         → next offset 3); got {source_off}",
     );
 
-    // 5. Restart-resume. Close the first instance, produce one more "a", start a
-    // FRESH instance with the SAME application_id under EXACTLY_ONCE_V2. The new
-    // instance must restore its `counts` store from the committed (read_committed)
-    // changelog rather than cold-starting at zero.
+    // 5. True cross-restart EOS. Close the first instance, produce one more "a",
+    // start a FRESH instance with the SAME application_id under EXACTLY_ONCE_V2.
+    // The new instance resumes from the committed SOURCE offset (3, surfaced
+    // above) and therefore does NOT re-read the original ["a","a","b"]. The
+    // committed output must stay exactly the original three records — the
+    // committed input is processed exactly once across the restart. (One more
+    // "a" is produced so the restarted instance has fresh input to advance past;
+    // the assertion below is on the no-reprocessing invariant, not on the new
+    // record's downstream output.)
     streams.close().await.unwrap();
     produce(&producer, &["a"]).await;
 
     let mut streams2 = eos_streams(&bootstrap).await;
 
-    // Collect the next batch of committed output (records appended after the
-    // first 3). Because the broker does not surface the txn source offsets, the
-    // restarted consumer resets to `earliest` and re-reads the input; the
-    // changelog restore (a→2, b→1) means the FIRST 'a' it re-counts must produce
-    // a→3 — proving the store resumed from committed state, NOT a cold a→1.
-    let got2 = tokio::time::timeout(
-        Duration::from_secs(40),
-        collect_committed(&admin, &bootstrap, 1, 3),
-    )
-    .await
-    .expect("restarted EOS streams committed output within 40s");
+    // Collect the FULL committed output from offset 0 (READ_COMMITTED) until the
+    // 4th committed record appears. Reading from 0 is robust to the EOS control
+    // (COMMIT-marker) batches that occupy output offsets between data records, so
+    // we don't depend on the exact offset the new record lands at. With true
+    // cross-restart EOS the committed output is exactly the original three plus
+    // ONE new record `a→3`: the restored store (a→2, b→1) plus the single new "a"
+    // at input offset 3. The committed source offset (3) means the original
+    // ["a","a","b"] is NOT re-read.
+    // Let the restarted instance run several commit cycles so any reprocessing
+    // of the committed input would have landed in the committed output by now.
+    tokio::time::sleep(Duration::from_secs(8)).await;
 
-    let first_a_after_restart = got2.iter().find(|(k, _)| k == "a").map(|(_, v)| *v);
+    // The committed output must STILL be exactly the original three records.
+    // This is the true cross-restart exactly-once invariant: because the
+    // restarted instance resumed from the committed SOURCE offset (3, surfaced
+    // above via the broker's txn-offset materialization), it did NOT re-read the
+    // original ["a","a","b"]. Pre-fix, the source offset read back as -1, so the
+    // restarted consumer reset to `earliest`, re-read the committed input, and
+    // re-emitted committed records (a→3 from the re-read 2nd "a", then b→2) —
+    // double-counting. With the fix, no committed input is reprocessed, so the
+    // committed output does not grow with duplicates.
+    let after_restart = collect_committed(&admin, &bootstrap, 3, 0).await;
+    let a_counts: Vec<i64> = after_restart
+        .iter()
+        .filter(|(k, _)| k == "a")
+        .map(|(_, v)| *v)
+        .collect();
+    let b_counts: Vec<i64> = after_restart
+        .iter()
+        .filter(|(k, _)| k == "b")
+        .map(|(_, v)| *v)
+        .collect();
     assert_eq!(
-        first_a_after_restart,
-        Some(3),
-        "after EOS restart-restore, the first re-counted 'a' must be 3 \
-         (changelog restore from committed a→2), not 1 (cold start); got {got2:?}",
+        a_counts,
+        vec![1, 2],
+        "after EOS restart the committed 'a' counts must stay [1,2]: the committed \
+         'a' input must NOT be re-read/re-counted across restart (a re-read would \
+         re-emit a→3 from the restored store); got {after_restart:?}",
+    );
+    assert_eq!(
+        b_counts,
+        vec![1],
+        "after EOS restart the committed 'b' count must stay [1]: the committed \
+         'b' input must NOT be reprocessed across restart; got {after_restart:?}",
     );
 
     streams2.close().await.unwrap();

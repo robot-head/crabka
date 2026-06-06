@@ -34,6 +34,7 @@ use crabka_security::ListenerProtocol;
 use crate::authorizer::{AuthorizationRequest, AuthorizationResult};
 use crate::broker::Broker;
 use crate::codes;
+use crate::coordinator::unified::actor::{GroupActorMessage, GroupKindTag};
 use crate::error::BrokerError;
 use crate::network::client::InterBrokerClient;
 use crate::txn::marker::{MarkerType, build_marker_batch};
@@ -260,7 +261,74 @@ pub(crate) async fn handle(
         return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
     }
 
+    // ── KIP-447: materialize buffered transactional consumer offsets ──────
+    //
+    // A consume-process-produce producer folds its source offsets into the
+    // transaction via `AddOffsetsToTxn` + `TxnOffsetCommit`, which appended
+    // them to `__consumer_offsets` (held under the LSO) AND buffered them on
+    // the txn coordinator keyed by `producer_id`. The Phase-2 marker fan-out
+    // above just wrote the COMMIT/ABORT marker to those partitions; nothing
+    // else surfaces the buffered offsets into the group coordinator's
+    // in-memory `committed_offsets` (the map `OffsetFetch` reads). Do it here,
+    // exactly at the commit-marker boundary (Kafka makes txn offsets visible
+    // to `OffsetFetch` only AFTER the commit marker):
+    //
+    // - COMMIT (`req.committed`): drain the producer's buffer and apply each
+    //   group's offsets via the same `UpdateCommitted` actor message a normal
+    //   `OffsetCommit` uses, so a restarting EOS consumer resumes from them.
+    // - ABORT: still drain (to free the buffer) but discard — aborted offsets
+    //   must never become committed.
+    //
+    // Keyed by `req.producer_id` (the buffer key from `TxnOffsetCommit`), not
+    // the post-completion `response_pid`, which may have been epoch-bumped or
+    // rolled to a fresh id at TV_2.
+    materialize_txn_offsets(broker, req.producer_id, req.committed).await;
+
     encode_ok(version, response_pid, response_epoch)
+}
+
+/// Apply (on COMMIT) or drop (on ABORT) the transactional consumer offsets
+/// buffered for `producer_id` under each consumer `group_id`. On COMMIT the
+/// offsets are written into the owning group's in-memory `committed_offsets`
+/// via the group actor's `UpdateCommitted` message — the same path a normal
+/// `OffsetCommit` uses and the same map `OffsetFetch` reads — so they become
+/// visible to `OffsetFetch` only now, after the commit marker. The buffer is
+/// always drained (even on abort) so a producer's pending offsets can't leak.
+///
+/// Single-broker MVP: every consumer group is local, so the owning group's
+/// actor is found (or created) on this broker. A multi-broker future would
+/// route each group's offsets to its `__consumer_offsets`-partition leader.
+async fn materialize_txn_offsets(broker: &Broker, producer_id: i64, committed: bool) {
+    let pending = broker.txn_coordinator.take_txn_offsets(producer_id);
+    if !committed || pending.is_empty() {
+        // Abort (or nothing buffered): the take above already dropped it.
+        return;
+    }
+    for (group_id, entries) in pending {
+        if entries.is_empty() {
+            continue;
+        }
+        let handle = broker.group_coordinator.find(&group_id).unwrap_or_else(|| {
+            broker
+                .group_coordinator
+                .get_or_create_group(&group_id, GroupKindTag::Classic)
+        });
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if handle
+            .tx
+            .send(GroupActorMessage::UpdateCommitted { entries, reply: tx })
+            .await
+            .is_ok()
+        {
+            let _ = rx.await;
+        } else {
+            tracing::warn!(
+                group = %group_id,
+                producer_id,
+                "EndTxn: group actor unavailable; could not materialize txn offsets"
+            );
+        }
+    }
 }
 
 /// KIP-890: the `(producer_id, producer_epoch)` a producer continues with after

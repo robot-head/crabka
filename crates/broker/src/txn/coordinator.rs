@@ -19,11 +19,22 @@ use tracing::{info, warn};
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
 
+use crate::coordinator::unified::classic_state::OffsetEntry;
 use crate::error::BrokerError;
 use crate::partition_registry::PartitionRegistry;
 use crate::txn::bootstrap;
 use crate::txn::partitioner::partition_for_tid;
 use crate::txn::state::TxnEntry;
+
+/// A consumer-group committed-offset key: `(topic, partition)`.
+pub(crate) type OffsetKey = (String, i32);
+
+/// Buffered transactional offsets for one producer, grouped by consumer
+/// `group_id`. A producer may fold offset commits for several groups into a
+/// single transaction (each `TxnOffsetCommit` carries its own `group_id`), so
+/// the buffer keys by group inside one producer's pending set.
+pub(crate) type PendingTxnOffsets =
+    std::collections::HashMap<String, Vec<(OffsetKey, OffsetEntry)>>;
 
 /// Per-broker transaction coordinator. Constructed in `Broker::start`
 /// and shared via `Arc` with the transaction wire handlers.
@@ -38,6 +49,17 @@ pub(crate) struct TxnCoordinator {
     /// Reverse lookup: `producer_id` → `transactional_id`. Used by the
     /// Produce handler to verify transactional batches (KIP-1319 v2).
     pid_to_tid: DashMap<i64, String>,
+    /// KIP-447 transactional consumer offsets buffered per `producer_id`,
+    /// pending the transaction's COMMIT/ABORT marker. `TxnOffsetCommit`
+    /// appends the offset records to `__consumer_offsets` (held under the LSO)
+    /// AND records them here; on COMMIT (`EndTxn` with `committed=true`) the
+    /// buffer is drained and materialized into the owning group's in-memory
+    /// `committed_offsets` (the map `OffsetFetch` reads), matching Kafka's
+    /// "visible only after the commit marker" semantics. On ABORT the buffer
+    /// is dropped without applying. Keyed by `producer_id` because that is the
+    /// identity `EndTxn` finalizes on; the value groups offsets by the
+    /// `group_id` each `TxnOffsetCommit` named.
+    pending_txn_offsets: DashMap<i64, PendingTxnOffsets>,
 }
 
 impl TxnCoordinator {
@@ -53,7 +75,44 @@ impl TxnCoordinator {
             state: DashMap::new(),
             leader_partitions: RwLock::new(HashSet::new()),
             pid_to_tid: DashMap::new(),
+            pending_txn_offsets: DashMap::new(),
         }
+    }
+
+    /// Buffer a `TxnOffsetCommit`'s offsets for `producer_id` under `group_id`,
+    /// pending the transaction's commit marker. Called from the
+    /// `TxnOffsetCommit` handler after the offset records are appended to
+    /// `__consumer_offsets`. Multiple commits for the same `(producer_id,
+    /// group_id)` within one transaction accumulate (later entries for the same
+    /// `(topic, partition)` are applied last-writer-wins at materialization, the
+    /// same as a non-transactional re-commit).
+    pub(crate) fn buffer_txn_offsets(
+        &self,
+        producer_id: i64,
+        group_id: &str,
+        entries: Vec<(OffsetKey, OffsetEntry)>,
+    ) {
+        if entries.is_empty() {
+            return;
+        }
+        self.pending_txn_offsets
+            .entry(producer_id)
+            .or_default()
+            .entry(group_id.to_string())
+            .or_default()
+            .extend(entries);
+    }
+
+    /// Remove and return all buffered transactional offsets for `producer_id`
+    /// (grouped by `group_id`). Used by `EndTxn`: on COMMIT the returned offsets
+    /// are materialized into each group's `committed_offsets`; on ABORT this is
+    /// still called so the buffer is dropped, and the result discarded. Returns
+    /// an empty map if the producer buffered no transactional offsets.
+    pub(crate) fn take_txn_offsets(&self, producer_id: i64) -> PendingTxnOffsets {
+        self.pending_txn_offsets
+            .remove(&producer_id)
+            .map(|(_, v)| v)
+            .unwrap_or_default()
     }
 
     /// Recompute which `__transaction_state` partitions this broker leads
