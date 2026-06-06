@@ -34,7 +34,7 @@ pub struct RegistryConfig {
 pub struct SecurityConfig {
     /// When true, an unauthenticated (Anonymous) request is rejected with 401.
     pub require_auth: bool,
-    /// `WWW-Authenticate: Basic realm="<realm>"`.
+    /// `WWW-Authenticate: basic realm="<realm>"`.
     pub realm: String,
     pub basic: Option<BasicAuthConfig>,
     pub bearer: Option<BearerAuthConfig>,

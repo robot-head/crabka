@@ -73,11 +73,13 @@ struct Args {
     /// Reject unauthenticated (anonymous) requests with 401.
     #[arg(long, env = "SCHEMA_REGISTRY_REQUIRE_AUTH", default_value_t = false)]
     require_auth: bool,
-    /// `WWW-Authenticate: Basic realm="<realm>"` value advertised on 401.
+    /// `WWW-Authenticate: basic realm="<realm>"` realm advertised on 401. The
+    /// default matches the realm `cp-schema-registry` emits under the standard
+    /// `PropertyFileLoginModule` BASIC setup (the JAAS entry name).
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_AUTH_REALM",
-        default_value = "Schema Registry"
+        default_value = "SchemaRegistry-Props"
     )]
     realm: String,
     /// htpasswd-style `user:cred` file (one per line) for HTTP Basic. The cred

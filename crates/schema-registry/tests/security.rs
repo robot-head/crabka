@@ -8,7 +8,7 @@
 //! the broker's `DescribeAcls`) → `forward_layer`. It asserts the end-to-end
 //! HTTP contract:
 //!
-//! - `401` with no / bad credentials (and `WWW-Authenticate: Basic`),
+//! - `401` with no / bad credentials (and `WWW-Authenticate: basic`),
 //! - `403` for an authenticated principal lacking an ACL,
 //! - `200` for an authorized `register`,
 //! - reads succeed where the principal holds `Read`,
@@ -290,9 +290,11 @@ async fn single_node_enforces_authn_and_authz() {
         .get(reqwest::header::WWW_AUTHENTICATE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
-    assert!(
-        www.starts_with("Basic"),
-        "WWW-Authenticate should advertise Basic, got {www:?}"
+    // cp-calibrated form: lowercase `basic` scheme + the configured realm
+    // (this node uses `realm: "test"`). See tests/fixtures/auth/basic.json.
+    assert_eq!(
+        www, r#"basic realm="test""#,
+        "WWW-Authenticate must match cp's `basic realm=\"…\"` form"
     );
 
     // ── 401: wrong password, and an unknown user. ────────────────────────────

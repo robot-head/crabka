@@ -31,7 +31,7 @@ pub struct AuthState {
     pub bearer: Option<Arc<OAuthBearerValidator>>,
     /// Reject anonymous (credential-less) requests with `401`.
     pub require_auth: bool,
-    /// Realm advertised in the `WWW-Authenticate: Basic realm="…"` header.
+    /// Realm advertised in the `WWW-Authenticate: basic realm="…"` header.
     pub realm: String,
 }
 
@@ -113,7 +113,7 @@ pub async fn resolve(
 
 /// `from_fn_with_state` middleware: resolve the principal, insert it into
 /// request extensions on success, or return `401` (with a
-/// `WWW-Authenticate: Basic` challenge when Basic is configured).
+/// `WWW-Authenticate: basic realm="…"` challenge when Basic is configured).
 pub async fn auth_layer(
     State(st): State<Arc<AuthState>>,
     mut req: Request,
@@ -143,17 +143,38 @@ pub async fn auth_layer(
             req.extensions_mut().insert(p);
             next.run(req).await
         }
-        AuthDecision::Unauthorized => {
-            let mut resp = (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-            if st.basic.is_some()
-                && let Ok(v) =
-                    header::HeaderValue::from_str(&format!("Basic realm=\"{}\"", st.realm))
-            {
-                resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
-            }
-            resp
-        }
+        AuthDecision::Unauthorized => unauthorized(&st),
     }
+}
+
+/// Build the cp-byte-exact `401` response.
+///
+/// Calibrated against `confluentinc/cp-schema-registry:7.4.0`
+/// (`tests/fixtures/auth/basic.json`):
+///
+/// - status `401`;
+/// - body `{"error_code":401,"message":"Unauthorized"}` with the vendor
+///   `application/vnd.schemaregistry.v1+json` content-type (cp's standard error
+///   envelope — same shape as every other registry error);
+/// - when Basic is configured, `WWW-Authenticate: basic realm="<realm>"`. NOTE
+///   the scheme token is lowercase `basic`, exactly as cp's Jetty
+///   `BasicAuthenticator` emits it; the realm is the operator's
+///   `authentication.realm` (the JAAS entry name — `SchemaRegistry-Props` in the
+///   capture).
+fn unauthorized(st: &AuthState) -> Response {
+    let body = serde_json::json!({ "error_code": 401, "message": "Unauthorized" }).to_string();
+    let mut resp = (
+        StatusCode::UNAUTHORIZED,
+        [("content-type", crate::error::CONTENT_TYPE)],
+        body,
+    )
+        .into_response();
+    if st.basic.is_some()
+        && let Ok(v) = header::HeaderValue::from_str(&format!("basic realm=\"{}\"", st.realm))
+    {
+        resp.headers_mut().insert(header::WWW_AUTHENTICATE, v);
+    }
+    resp
 }
 
 /// Current time as Unix epoch milliseconds, used to pass `now_ms` to
@@ -313,5 +334,79 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "non-forwarded credential-less request must 401"
         );
+    }
+
+    /// cp-byte-exact pin: drive `auth_layer` (Basic configured) over a tiny
+    /// router with NO credentials and assert the `401` matches
+    /// `confluentinc/cp-schema-registry:7.4.0` (`tests/fixtures/auth/basic.json`)
+    /// byte-for-byte:
+    ///
+    ///   * status `401`,
+    ///   * `WWW-Authenticate: basic realm="SchemaRegistry-Props"` — lowercase
+    ///     `basic`, realm = the configured `authentication.realm`,
+    ///   * body `{"error_code":401,"message":"Unauthorized"}` with the vendor
+    ///     content-type.
+    ///
+    /// This runs WITHOUT Docker — the durable regression proof that our `401`
+    /// reproduces cp's wire bytes (mirrors the slice-3/4/5 cp pins).
+    #[tokio::test]
+    async fn auth_layer_401_matches_cp_byte_exact() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt as _; // for `oneshot`
+
+        // The realm cp emitted in the capture (its `authentication.realm` = the
+        // JAAS entry name). Our binary defaults to the same value.
+        let st = AuthState {
+            basic: Some(Arc::new(BasicAuthStore::from_users(
+                [("alice".to_string(), "pw".to_string())]
+                    .into_iter()
+                    .collect(),
+            ))),
+            bearer: None,
+            require_auth: true,
+            realm: "SchemaRegistry-Props".to_string(),
+        };
+        let app: Router = Router::new()
+            .route("/subjects", get(|| async { "[]" }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(st),
+                auth_layer,
+            ));
+
+        let req = Request::builder()
+            .uri("/subjects")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        // Status.
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // WWW-Authenticate — the exact captured string.
+        let www = resp
+            .headers()
+            .get(header::WWW_AUTHENTICATE)
+            .expect("WWW-Authenticate present when Basic configured")
+            .to_str()
+            .unwrap();
+        assert_eq!(www, r#"basic realm="SchemaRegistry-Props""#);
+
+        // Content-type — cp's vendor envelope.
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            crate::error::CONTENT_TYPE,
+        );
+
+        // Body — the exact captured bytes.
+        let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&body[..], br#"{"error_code":401,"message":"Unauthorized"}"#);
     }
 }
