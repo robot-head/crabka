@@ -173,6 +173,10 @@ pub fn subscribe_inner(
                                     value: r.value.map(|b| b.to_vec()).unwrap_or_default(),
                                     headers: std::collections::HashMap::new(),
                                     timestamp_ms: r.timestamp,
+                                    // Structured/schema view is wired by a later
+                                    // task; RawCodec emits the raw value only.
+                                    structured: None,
+                                    schema: None,
                                 });
                             }
                             if !to_emit.is_empty() && auto_commit { commit = true; }

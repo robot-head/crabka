@@ -1545,6 +1545,7 @@ dependencies = [
  "arc-swap",
  "assert2",
  "async-stream",
+ "async-trait",
  "axum",
  "base64",
  "bytes",

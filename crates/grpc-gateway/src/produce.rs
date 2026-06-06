@@ -146,7 +146,11 @@ impl ProduceCore {
     /// unkeyed → plain idempotent producer. Used by the public path when this
     /// replica owns the key, and by the internal forward endpoint.
     pub async fn produce_local(&self, rec: GatewayRecord) -> Result<RecordOutcome, GatewayError> {
-        let value = self.codec.encode_value(&rec.topic, rec.value.clone());
+        let value = self
+            .codec
+            .encode(&rec.topic, rec.encode_body())
+            .await
+            .map_err(GatewayError::from)?;
         match (&self.dedup, &rec.idempotency_key) {
             (Some(dedup), Some(_key)) => dedup.dedup_produce(&rec, value).await,
             _ => self.produce_plain(&rec, value).await,

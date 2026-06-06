@@ -463,6 +463,7 @@ async fn tls_forward_between_two_gateways() {
         topic: USER_TOPIC.into(),
         key: None,
         value: Bytes::from(key.clone().into_bytes()),
+        body_structured: None,
         headers: vec![],
         partition: None,
         timestamp_ms: None,

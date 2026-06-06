@@ -126,6 +126,9 @@ impl ForwardRecord {
             topic: self.topic,
             key: self.key.map(bytes::Bytes::from),
             value: bytes::Bytes::from(self.value),
+            // A forwarded record carries already-encoded bytes (the origin
+            // replica ran the codec before forwarding), so it is always raw.
+            body_structured: None,
             headers: self
                 .headers
                 .into_iter()

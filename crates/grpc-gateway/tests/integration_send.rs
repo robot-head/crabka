@@ -60,6 +60,7 @@ async fn produce_plain_then_read_back() {
                 topic: "send-itest".into(),
                 key: None,
                 value: Bytes::from_static(b"payload-1"),
+                body_structured: None,
                 headers: vec![],
                 partition: None,
                 timestamp_ms: None,

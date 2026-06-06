@@ -38,6 +38,7 @@ clap = { workspace = true, features = ["env", "derive"] }
 anyhow.workspace = true
 thiserror.workspace = true
 async-stream = { workspace = true }
+async-trait = { workspace = true }
 futures-util = { workspace = true }
 uuid = { workspace = true }
 tokio-util = { workspace = true }

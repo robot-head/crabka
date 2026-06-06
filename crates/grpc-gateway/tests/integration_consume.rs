@@ -53,6 +53,7 @@ async fn subscribe_receives_then_commits() {
             topic: "consume-itest".into(),
             key: None,
             value: Bytes::from_static(b"c1"),
+            body_structured: None,
             headers: vec![],
             partition: None,
             timestamp_ms: None,

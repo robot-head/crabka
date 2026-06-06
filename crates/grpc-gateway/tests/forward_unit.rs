@@ -31,6 +31,7 @@ fn rec(topic: &str) -> GatewayRecord {
         topic: topic.into(),
         key: None,
         value: Bytes::from_static(b"v"),
+        body_structured: None,
         headers: vec![],
         partition: None,
         timestamp_ms: None,

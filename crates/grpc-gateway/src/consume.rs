@@ -52,7 +52,11 @@ impl ConsumeSession {
             .await?;
         for r in &mut batch {
             if let Some(v) = r.value.take() {
-                r.value = Some(self.codec.decode_value(&r.topic, v));
+                let decoded = self.codec.decode(&r.topic, v).await?;
+                // The structured/json/schema_meta view on the decoded value is
+                // threaded onto the Subscribe `Inbound` by a later task; for now
+                // the de-framed payload is the record value.
+                r.value = Some(decoded.value);
             }
         }
         Ok(batch)
