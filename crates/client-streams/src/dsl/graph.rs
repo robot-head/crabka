@@ -52,6 +52,16 @@ pub(crate) enum GraphNodeKind {
     TableProcessor {
         store_name: Option<String>,
     },
+    /// A `GlobalKTable` source. Invisible in the wire (no subtopology, no
+    /// changelog); its lowering thunk calls `Topology::add_global_store`, which
+    /// registers a source + update-processor (consuming a node-group index) and a
+    /// separate global KV store factory.
+    GlobalSource {
+        topic: String,
+        store_name: String,
+        source_name: String,
+        processor_name: String,
+    },
 }
 
 #[allow(dead_code)]

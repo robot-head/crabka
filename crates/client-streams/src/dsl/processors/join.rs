@@ -108,6 +108,7 @@ mod tests {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
+        let globals = crate::runtime::global::GlobalStateManager::default();
         let rc = RecordContext {
             topic: "in".into(),
             partition: 0,
@@ -120,6 +121,7 @@ mod tests {
             output: &mut output,
             record_ctx: &rc,
             stores,
+            globals: &globals,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
         proc.process(&mut ctx, Record::new(Some(key.to_string()), value, 0))

@@ -40,6 +40,13 @@ pub trait RecordFetcher: Send + Sync + 'static {
         partition: i32,
         offset: i64,
     ) -> Result<FetchBatch, StreamsClientError>;
+
+    /// The partition indices of `topic`. The global consumer reads all of them to
+    /// materialize a fully-replicated global store. Default: a single partition 0
+    /// (overridden by the broker fetcher via metadata).
+    async fn partitions(&self, _topic: &str) -> Result<Vec<i32>, StreamsClientError> {
+        Ok(vec![0])
+    }
 }
 
 #[async_trait::async_trait]

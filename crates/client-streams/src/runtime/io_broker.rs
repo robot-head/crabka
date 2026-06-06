@@ -28,6 +28,7 @@ use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use crabka_protocol::owned::list_offsets_request::{
     ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic,
 };
+use crabka_protocol::owned::metadata_request::{MetadataRequest, MetadataRequestTopic};
 use crabka_protocol::owned::offset_commit_request::{
     OffsetCommitRequest, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
 };
@@ -89,6 +90,39 @@ impl RecordFetcher for BrokerFetcher {
             .collect();
 
         Ok(FetchBatch { records })
+    }
+
+    /// Resolve the real partition list for `topic` via a topic-scoped
+    /// `MetadataRequest`, returning `0..partition_count`. The global consumer
+    /// reads every partition to materialize the fully-replicated global store, so
+    /// the default `vec![0]` would silently drop records on any partition > 0.
+    async fn partitions(&self, topic: &str) -> Result<Vec<i32>, StreamsClientError> {
+        let resp = self
+            .client
+            .send(MetadataRequest {
+                topics: Some(vec![MetadataRequestTopic {
+                    name: Some(topic.to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            })
+            .await?;
+
+        let count = resp
+            .topics
+            .iter()
+            .find(|t| t.name.as_deref() == Some(topic))
+            .map(|t| t.partitions.len())
+            .ok_or_else(|| {
+                StreamsClientError::Runtime(format!(
+                    "Metadata: topic {topic} not present in response"
+                ))
+            })?;
+
+        // Fall back to a single partition if the broker reports none (e.g. a
+        // not-yet-created topic) so the consumer still reads partition 0.
+        let count = i32::try_from(count.max(1)).unwrap_or(1);
+        Ok((0..count).collect())
     }
 }
 

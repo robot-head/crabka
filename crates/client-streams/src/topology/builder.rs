@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 
 /// Factory that builds a fresh erased [`StateStore`] given the store name, pre-derived
 /// changelog topic, and an already-opened byte backend. The factory only owns the serdes.
-type StoreFactory = Box<
+pub(crate) type StoreFactory = Box<
     dyn Fn(
             &str,
             String,
@@ -94,6 +94,19 @@ pub struct Topology {
     /// `(changelog_override, factory)` — override is `None` for the default
     /// `<app_id>-<store_name>-changelog` derivation.
     store_factories: HashMap<String, (Option<String>, StoreFactory)>,
+    /// `GlobalKTable` store factories, keyed by store name. Kept SEPARATE from
+    /// `store_factories` so per-task `instantiate` does NOT build them (a global
+    /// store is fully replicated, not task-partitioned) and NO changelog topic is
+    /// emitted. The override is always `None` here (global stores have no
+    /// changelog) but the tuple mirrors the regular-store shape for the
+    /// global-store builder/restorer (a later task) to consume. Populated by
+    /// [`Topology::add_global_store`].
+    global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
+    /// `global store name -> source topic` for each `GlobalKTable`. The shared
+    /// global consumer reads each source topic (all partitions) to fully
+    /// replicate the matching store. Populated by [`Topology::add_global_store`]
+    /// alongside `global_store_factories`. Invisible in the wire output.
+    global_store_topics: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for Topology {
@@ -109,6 +122,14 @@ impl std::fmt::Debug for Topology {
                 "store_factories",
                 &format!("<{} store_factories>", self.store_factories.len()),
             )
+            .field(
+                "global_store_factories",
+                &format!(
+                    "<{} global_store_factories>",
+                    self.global_store_factories.len()
+                ),
+            )
+            .field("global_store_topics", &self.global_store_topics)
             .finish()
     }
 }
@@ -689,6 +710,85 @@ impl Topology {
         self
     }
 
+    /// Register a `GlobalKTable` source, update-processor, and KV store.
+    ///
+    /// A `GlobalKTable` is **invisible in the wire**: no subtopology of its own,
+    /// no changelog topic. But its source node still occupies a node-group index
+    /// during grouping (so other subtopology ids shift). This method:
+    ///
+    /// 1. registers a source node reading `topic` and a processor node fed by it
+    ///    (the source→processor edge unites them into one node group);
+    /// 2. marks `topic` global ([`NodeRegistry::add_global_source`]) so the
+    ///    grouping pass skips it in the source-bucketing pass — the resulting
+    ///    source-less group is dropped by the final filter but already consumed
+    ///    its index;
+    /// 3. stores the global KV factory in a SEPARATE map (`global_store_factories`,
+    ///    NOT `store_factories`) so per-task `instantiate` does not build it and NO
+    ///    changelog topic is emitted. The factory builds a
+    ///    [`KeyValueBytesStore`] with an empty changelog (like
+    ///    [`Topology::add_state_store_no_changelog`]).
+    ///
+    /// The global store is *not* built by `instantiate` in this slice — the
+    /// fully-replicated global-store runtime (a later task) reads the factory.
+    ///
+    /// [`KeyValueBytesStore`]: crate::store::kv::KeyValueBytesStore
+    pub fn add_global_store<K, V, KS, VS>(
+        &mut self,
+        store_name: impl Into<String>,
+        source_name: impl Into<String>,
+        topic: impl Into<String>,
+        processor_name: impl Into<String>,
+        consumed: Consumed<KS, VS>,
+    ) -> &mut Self
+    where
+        K: Send + 'static,
+        V: Send + 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        let store_name: String = store_name.into();
+        let source_name: String = source_name.into();
+        let topic: String = topic.into();
+        let processor_name: String = processor_name.into();
+        let Consumed {
+            key_serde,
+            value_serde,
+        } = consumed;
+
+        // (a) source node reading the global topic (consumes a node-group index).
+        let r = self.reg.add_source(&source_name, vec![topic.clone()]);
+        self.record(r);
+        // (b) update-processor fed by the source — the edge unites them.
+        let r = self
+            .reg
+            .add_processor(&processor_name, vec![source_name.clone()]);
+        self.record(r);
+        // (c) mark the topic global so grouping skips it (group ends source-less).
+        self.reg.add_global_source(&topic);
+
+        // (d) global KV factory, in the SEPARATE global map. The override is
+        //     `None`; the factory uses an empty changelog so the store never
+        //     flushes. `instantiate` only iterates `store_factories`, so it ignores
+        //     this and no changelog topic is emitted.
+        let factory: StoreFactory = Box::new(
+            move |sn: &str,
+                  _changelog: String,
+                  backend: Box<dyn crate::store::byte::ByteKeyValueStore>| {
+                Box::new(crate::store::kv::KeyValueBytesStore::<K, V>::new(
+                    sn.to_string(),
+                    backend,
+                    Box::new(key_serde.clone()),
+                    Box::new(value_serde.clone()),
+                    String::new(),
+                )) as Box<dyn crate::store::api::StateStore>
+            },
+        );
+        self.global_store_topics.insert(store_name.clone(), topic);
+        self.global_store_factories
+            .insert(store_name, (None, factory));
+        self
+    }
+
     /// Connect an additional processor to an already-registered state store.
     ///
     /// Mirrors `InternalTopologyBuilder.connectProcessorAndStateStores`: a join
@@ -709,6 +809,12 @@ impl Topology {
             .iter()
             .find(|e| e.name == store)
             .map(|e| e.processors.clone())
+    }
+
+    /// Whether a global store factory is registered under `store` (test helper).
+    #[cfg(test)]
+    pub(crate) fn has_global_store_for_test(&self, store: &str) -> bool {
+        self.global_store_factories.contains_key(store)
     }
 
     /// Register a topic name as an internal repartition topic.
@@ -761,11 +867,38 @@ impl Topology {
             source_topics.insert(g.id.clone(), all);
         }
 
-        // ── Build node specs for instantiation ────────────────────────────────
+        // ── Identify the GlobalKTable source + update-processor nodes ─────────
+        // A `GlobalKTable` source/processor is invisible in the wire AND has no
+        // per-task runtime factory (the fully-replicated global store is built by
+        // the shared global manager — a later task — or populated directly by the
+        // TestDriver, NOT by per-task `instantiate`). Excluding them from
+        // `node_specs` keeps `instantiate` from trying to build a node it has no
+        // factory for. A node is global if it reads a global source topic, or if
+        // any predecessor is global (nodes are in topological insertion order, so
+        // one forward pass suffices).
+        let mut global_nodes: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for n in &self.reg.nodes {
+            let is_global = match &n.kind {
+                NodeKind::Source { topics } => topics
+                    .iter()
+                    .any(|t| self.reg.global_source_topics.contains(t)),
+                NodeKind::Processor { predecessors } | NodeKind::Sink { predecessors, .. } => {
+                    predecessors
+                        .iter()
+                        .any(|p| global_nodes.contains(p.as_str()))
+                }
+            };
+            if is_global {
+                global_nodes.insert(n.name.as_str());
+            }
+        }
+
+        // ── Build node specs for instantiation (excluding global nodes) ───────
         let node_specs: Vec<NodeSpec> = self
             .reg
             .nodes
             .iter()
+            .filter(|n| !global_nodes.contains(n.name.as_str()))
             .map(|n| {
                 let (predecessors, kind_str, st, sink_t) = match &n.kind {
                     NodeKind::Source { topics } => (Vec::new(), "source", topics.clone(), None),
@@ -799,6 +932,8 @@ impl Topology {
             factories: self.factories,
             node_specs,
             store_factories: self.store_factories,
+            global_store_factories: self.global_store_factories,
+            global_store_topics: self.global_store_topics,
         })
     }
 
@@ -848,6 +983,18 @@ pub struct BuiltTopology {
     /// `(changelog_override, factory)` — override is `None` for the default
     /// `<app_id>-<store_name>-changelog` derivation.
     store_factories: HashMap<String, (Option<String>, StoreFactory)>,
+    /// `GlobalKTable` store factories (separate from `store_factories`): NOT built
+    /// by per-task `instantiate`. The fully-replicated global-store runtime
+    /// (`StreamThread`) reads these to build + restore each global store once;
+    /// the [`TopologyTestDriver`] reads them via
+    /// [`global_store_factories`](Self::global_store_factories)
+    /// to materialize global stores directly for join tests.
+    global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
+    /// `global store name -> source topic` for each `GlobalKTable`. Read by the
+    /// shared global manager so the consumer knows which topic feeds each store.
+    // Consumed by the global consumer / dispatch wiring in T7/T8 (via the accessor).
+    #[allow(dead_code)]
+    global_store_topics: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for BuiltTopology {
@@ -871,6 +1018,27 @@ impl BuiltTopology {
     #[must_use]
     pub(crate) fn to_wire_request(&self) -> WireTopology {
         self.wire.clone()
+    }
+
+    /// The `GlobalKTable` store factories, keyed by store name. The
+    /// [`TopologyTestDriver`] materializes these directly into its per-task store
+    /// registry so a stream-globaltable join can find them; the real runtime
+    /// (`StreamThread`) builds them once in a shared global manager, NOT per task.
+    ///
+    /// [`TopologyTestDriver`]: crate::TopologyTestDriver
+    pub(crate) fn global_store_factories(
+        &self,
+    ) -> &HashMap<String, (Option<String>, StoreFactory)> {
+        &self.global_store_factories
+    }
+
+    /// The `global store name -> source topic` map for each `GlobalKTable`.
+    /// The shared [`GlobalStateManager`] reads this so the global consumer knows
+    /// which topic feeds each store. Invisible in the wire output.
+    ///
+    /// [`GlobalStateManager`]: crate::runtime::global::GlobalStateManager
+    pub(crate) fn global_store_topics(&self) -> HashMap<String, String> {
+        self.global_store_topics.clone()
     }
 
     /// The external + repartition source topics a subtopology's tasks read.
@@ -1015,6 +1183,10 @@ impl BuiltTopology {
             sources,
             output: Vec::new(),
             stores: store_registry,
+            // Default-empty here; the app wiring (T8b) / TopologyTestDriver builds
+            // and assigns the shared GlobalStateManager. `instantiate` produces a
+            // per-task graph and never owns the fully-replicated global stores.
+            globals: crate::runtime::global::GlobalStateManager::default(),
         })
     }
 }
@@ -1061,6 +1233,49 @@ mod tests {
         let sub = &wire.subtopologies[0];
         check!(sub.copartition_groups.len() == 1);
         check!(sub.copartition_groups[0].source_topics == vec![0i16, 1i16]); // sorted ["left","right"]
+    }
+
+    #[test]
+    fn global_store_is_invisible_and_bumps_stream_index() {
+        // A GlobalKTable declared FIRST takes node-group index 0 but is invisible
+        // in the wire (no subtopology, no changelog). The normal stream emits as
+        // "1". The global topic appears in NO source_topics. The global factory is
+        // recorded in the SEPARATE map (not built by `instantiate`).
+        let mut t = Topology::new();
+        // Global store declared first → index 0.
+        t.add_global_store::<String, String, _, _>(
+            "global-store",
+            "gsrc",
+            "global",
+            "gproc",
+            Consumed::with(StringSerde, StringSerde),
+        );
+        // Normal stream second → index 1.
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            [&src],
+            Produced::with(StringSerde, StringSerde),
+        );
+        check!(t.has_global_store_for_test("global-store"));
+        let built = t.build("app").unwrap();
+        let wire = built.to_wire();
+        check!(wire.subtopologies.len() == 1);
+        check!(wire.subtopologies[0].subtopology_id == "1");
+        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
+        // No changelog topic anywhere.
+        check!(
+            wire.subtopologies
+                .iter()
+                .all(|s| s.state_changelog_topics.is_empty())
+        );
+        // The global topic is not a wire source topic.
+        check!(
+            !wire.subtopologies[0]
+                .source_topics
+                .contains(&"global".to_string())
+        );
     }
 
     #[test]

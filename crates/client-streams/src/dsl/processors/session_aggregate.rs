@@ -246,12 +246,14 @@ mod tests {
 
         // record 1 @ ts=0 → new session [0,0] count 1, no candidates → one update.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 0))
@@ -267,12 +269,14 @@ mod tests {
         // record 2 @ ts=30 (within gap 60 of session [0,0]) → merge:
         //   tombstone [0,0], update merged [0,30] count 2.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 30))
@@ -312,12 +316,14 @@ mod tests {
             _pd: PhantomData::<fn() -> (String, String, i64)>,
         };
         for ts in [0i64, 200] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), ts))
@@ -353,12 +359,14 @@ mod tests {
         // ts=0 → [0,0]; ts=100 → [100,100] (not within gap of [0,0]); ts=50 bridges
         // both → merged [0,100] count 3 + tombstones for [0,0] and [100,100].
         for ts in [0i64, 100] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), ts))
@@ -366,12 +374,14 @@ mod tests {
         }
         buffer.clear(); // discard the two initial updates
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 50))
@@ -442,12 +452,14 @@ mod tests {
         // "x"@0 seeds [0,0]="x" (one update). "y"@30 merges → tombstone [0,0] then
         // update [0,30]="xy". Drain in order and check the final merged update.
         for (v, ts) in [("x", 0i64), ("y", 30)] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<String>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), v.into(), ts))

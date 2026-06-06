@@ -164,12 +164,14 @@ mod tests {
 
         // Process record 1: key="a", value="x".
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 0))
@@ -186,12 +188,14 @@ mod tests {
 
         // Process record 2: same key="a", value="x" again.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 0))

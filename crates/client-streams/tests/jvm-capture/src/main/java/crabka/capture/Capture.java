@@ -9,6 +9,7 @@ import org.apache.kafka.streams.Topology;
 import org.apache.kafka.streams.kstream.BranchedKStream;
 import org.apache.kafka.streams.kstream.Branched;
 import org.apache.kafka.streams.kstream.Consumed;
+import org.apache.kafka.streams.kstream.GlobalKTable;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Produced;
@@ -79,8 +80,9 @@ public final class Capture {
         write(outDir, "session_count", sessionCount());
         write(outDir, "suppress_until_window_closes", suppressUntilWindowCloses());
         write(outDir, "suppress_until_window_closes_logged", suppressUntilWindowClosesLogged());
+        write(outDir, "global_table_join", globalTableJoin());
 
-        System.out.println("Capture complete. Wrote 14 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 15 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -172,6 +174,24 @@ public final class Capture {
      * the join, and the table source in ONE subtopology with a copartition group binding
      * "left" and "right", and an implicit {@code app-store-changelog} for the table store.
      */
+    /**
+     * 15. global_table_join: a KStream joined to a GlobalKTable by a key-mapper.
+     * The global table is fully replicated (no copartition / repartition); the key-mapper
+     * maps the stream value to the global lookup key. Pins how the KIP-1071 wire encodes
+     * a global store (no dedicated global field in the Topology — capture-first).
+     */
+    static Topology globalTableJoin() {
+        StreamsBuilder b = new StreamsBuilder();
+        GlobalKTable<String, String> g = b.globalTable(
+            "global",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("global-store"));
+        b.stream("in", Consumed.with(Serdes.String(), Serdes.String()))
+            .join(g, (k, v) -> v, (sv, gv) -> sv + gv)
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
     static Topology streamTableJoin() {
         StreamsBuilder b = new StreamsBuilder();
         KStream<String, String> left = b.stream("left", Consumed.with(Serdes.String(), Serdes.String()));

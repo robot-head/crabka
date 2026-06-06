@@ -63,6 +63,9 @@ pub(crate) struct Dispatch<'a> {
     pub output: &'a mut Vec<OutputRecord>,
     pub record_ctx: &'a RecordContext,
     pub stores: &'a mut crate::store::registry::StoreRegistry,
+    /// The app-wide, fully-replicated global stores (shared across tasks). Read
+    /// by stream-globaltable join processors via `ProcessorContext::global_get`.
+    pub globals: &'a crate::runtime::global::GlobalStateManager,
 }
 
 #[cfg(test)]

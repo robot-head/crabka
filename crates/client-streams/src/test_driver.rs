@@ -27,9 +27,21 @@ impl TopologyTestDriver {
     /// invalid (propagates `instantiate`'s error).
     pub fn new(built: &BuiltTopology) -> Result<Self, ProcessorError> {
         let source_topics: HashSet<String> = built.list_source_topics().into_iter().collect();
-        let mut graph = pollster::block_on(
-            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
-        )?;
+        let backend = crate::store::backend::StoreBackend::InMemory;
+        let mut graph = pollster::block_on(built.instantiate(&backend, "app"))?;
+        // The TopologyTestDriver builds the SHARED, fully-replicated global stores
+        // into a `GlobalStateManager` and lends it to the graph's dispatch — the
+        // same shared manager the real app runtime uses (the global consumer that
+        // populates it lives in the app wiring; `BuiltTopology::instantiate`
+        // deliberately omits global stores from the per-task registry, since a
+        // global store is fully replicated, not task-partitioned). Tests populate
+        // it directly via `pipe_global`, and stream-globaltable joins read it.
+        graph.globals = pollster::block_on(crate::runtime::global::GlobalStateManager::build(
+            built.global_store_factories(),
+            built.global_store_topics(),
+            &backend,
+            "app",
+        ));
         pollster::block_on(graph.init_processors())?;
         Ok(Self {
             graph,
@@ -108,6 +120,20 @@ impl TopologyTestDriver {
     ) -> Option<V> {
         let s = self.graph.stores.get_kv::<K, V>(store)?;
         pollster::block_on(s.get(key))
+    }
+
+    /// Populate a GLOBAL store directly (test-only). In a real app the global
+    /// consumer reads all partitions of the source topic and applies them to the
+    /// fully-replicated global store; the test driver injects values straight into
+    /// the shared [`GlobalStateManager`](crate::runtime::global::GlobalStateManager)
+    /// so a stream-globaltable join can look them up.
+    #[allow(clippy::needless_pass_by_value)] // owned K/V is the natural API
+    pub fn pipe_global<K, V>(&mut self, store_name: &str, key: K, value: V)
+    where
+        K: Send + Sync + 'static,
+        V: Send + 'static,
+    {
+        pollster::block_on(self.graph.globals.put(store_name, key, value));
     }
 
     /// Pop + deserialize the next output record for `topic`.

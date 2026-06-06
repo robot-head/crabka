@@ -253,12 +253,14 @@ mod tests {
         let mut proc = make_proc();
 
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
             proc.process(
@@ -288,12 +290,14 @@ mod tests {
         let mut proc = make_proc();
 
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
             proc.process(
@@ -323,12 +327,14 @@ mod tests {
         let mut proc = make_proc();
 
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
             proc.process(

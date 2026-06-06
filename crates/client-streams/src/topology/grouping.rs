@@ -107,6 +107,13 @@ pub(crate) fn group_nodes(reg: &NodeRegistry) -> Vec<GroupTopics> {
         match &reg.nodes[i].kind {
             NodeKind::Source { topics } => {
                 for t in topics {
+                    if reg.global_source_topics.contains(t) {
+                        // GlobalKTable source: invisible in the wire. The node still
+                        // consumed this group's index above, so downstream
+                        // subtopology ids shift; the now-source-less group is dropped
+                        // by the final filter.
+                        continue;
+                    }
                     if reg.repartition_topics.contains(t) {
                         entry.repartition_source_topics.push(t.clone());
                     } else {
@@ -223,5 +230,27 @@ mod tests {
             .unwrap();
         let groups = group_nodes(&reg);
         check!(ids(&groups) == vec!["1"]);
+    }
+
+    #[test]
+    fn global_source_is_invisible_but_consumes_an_index() {
+        // A GlobalKTable's source node, declared FIRST, takes node-group index 0.
+        // Its topic is marked global, so it is skipped in the source-bucketing
+        // pass — leaving its group source-less. The final filter drops that group
+        // (it already consumed index 0), so the normal stream subtopology emits as
+        // "1". The global topic appears in NO emitted subtopology.
+        let mut reg = NodeRegistry::default();
+        // Global source first → index 0.
+        reg.add_source("gsrc", vec!["global".into()]).unwrap();
+        reg.add_processor("gproc", vec!["gsrc".into()]).unwrap();
+        reg.add_global_source("global");
+        // Normal stream second → index 1.
+        reg.add_source("src", vec!["in".into()]).unwrap();
+        reg.add_sink("snk", "out".into(), vec!["src".into()])
+            .unwrap();
+        let groups = group_nodes(&reg);
+        check!(groups.len() == 1);
+        check!(ids(&groups) == vec!["1"]);
+        check!(groups[0].source_topics == vec!["in".to_string()]);
     }
 }

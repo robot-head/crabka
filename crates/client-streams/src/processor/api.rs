@@ -148,6 +148,18 @@ where
         self.dispatch.stores.get_kv::<K2, V2>(name)
     }
 
+    /// Look up a value in a connected GLOBAL store (fully-replicated, shared across
+    /// tasks). Returns an owned value — no borrow escapes the shared manager's lock,
+    /// so the lookup future need not be held across `forward`. `None` on miss /
+    /// type mismatch. Fetch it per-record (do not hold across `process` calls).
+    pub async fn global_get<GK: Send + Sync + 'static, VG: Send + 'static>(
+        &mut self,
+        store: &str,
+        key: &GK,
+    ) -> Option<VG> {
+        self.dispatch.globals.get::<GK, VG>(store, key).await
+    }
+
     /// Access a connected window store, typed. `None` if absent or the K/V types
     /// don't match. Fetch it per-record (do not hold across `process` calls).
     pub fn get_window_store<K2: Send + Sync + 'static, V2: Send + 'static>(
@@ -238,12 +250,14 @@ mod tests {
         };
         let children = [3usize, 4usize];
         let mut stores = crate::store::registry::StoreRegistry::default();
+        let globals = crate::runtime::global::GlobalStateManager::default();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
             output: &mut output,
             record_ctx: &rc,
             stores: &mut stores,
+            globals: &globals,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         Upper
@@ -272,12 +286,14 @@ mod tests {
         };
         let children = [1usize];
         let mut stores = crate::store::registry::StoreRegistry::default();
+        let globals = crate::runtime::global::GlobalStateManager::default();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
             output: &mut output,
             record_ctx: &rc,
             stores: &mut stores,
+            globals: &globals,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         boxed.init(&mut ctx).await; // forwards to Upper's default no-op
@@ -302,12 +318,14 @@ mod tests {
             timestamp: 9,
         };
         let mut stores = crate::store::registry::StoreRegistry::default();
+        let globals = crate::runtime::global::GlobalStateManager::default();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &[],
             output: &mut output,
             record_ctx: &rc,
             stores: &mut stores,
+            globals: &globals,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         p.init(&mut ctx).await; // default no-op

@@ -19,6 +19,19 @@ pub(crate) struct StreamThread {
     /// Application ID passed to `instantiate` for changelog-name derivation and
     /// backend path construction.
     application_id: String,
+    /// The shared, fully-replicated global stores for this app. Built + bootstrapped
+    /// once from the topology's global store factories (on the first assignment that
+    /// has work), then lent by `Arc` clone into every task's graph so a
+    /// stream-globaltable join reads the same global state. Empty (default) when the
+    /// topology declares no `GlobalKTable`.
+    globals: crate::runtime::global::GlobalStateManager,
+    /// Whether `globals` has been built + bootstrapped yet. Guards the one-time
+    /// lazy build at the top of `apply_assignment`.
+    globals_ready: bool,
+    /// Per-`(global topic, partition)` next-offset, seeded by the bootstrap read and
+    /// advanced by each `poll_all` live-update pass. Empty when the topology declares
+    /// no `GlobalKTable`.
+    global_offsets: std::collections::HashMap<(String, i32), i64>,
 }
 
 impl StreamThread {
@@ -32,6 +45,9 @@ impl StreamThread {
             fetcher,
             backend,
             application_id,
+            globals: crate::runtime::global::GlobalStateManager::default(),
+            globals_ready: false,
+            global_offsets: std::collections::HashMap::new(),
         }
     }
 
@@ -49,6 +65,27 @@ impl StreamThread {
         producer: &Arc<dyn RecordProducer>,
         store: &Arc<dyn OffsetStore>,
     ) -> Result<(), StreamsClientError> {
+        // Lazily build + bootstrap the shared global store(s) exactly once, before
+        // any task processes. Kafka blocks task start until the global store is
+        // ready, so we drain every partition of each global source topic here.
+        if !self.globals_ready {
+            let factories = topology.global_store_factories();
+            if !factories.is_empty() {
+                self.globals = crate::runtime::global::GlobalStateManager::build(
+                    factories,
+                    topology.global_store_topics(),
+                    &self.backend,
+                    &self.application_id,
+                )
+                .await;
+                // Bootstrap from all partitions BEFORE any task processes
+                // (bootstrap-before-process is the required behavior); the returned
+                // resume offsets seed the live-update poll in `poll_all`.
+                self.global_offsets = self.globals.bootstrap(&*self.fetcher).await?;
+            }
+            self.globals_ready = true;
+        }
+
         // Desired (subtopology_id, partition) -> the owning TaskAssignment.
         let mut desired: HashMap<(String, i32), &crate::membership::TaskAssignment> =
             HashMap::new();
@@ -77,10 +114,13 @@ impl StreamThread {
             if self.tasks.contains_key(&key) {
                 continue;
             }
-            let graph = topology
+            let mut graph = topology
                 .instantiate(&self.backend, &self.application_id)
                 .await
                 .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+            // Lend the shared, bootstrapped global manager to this task's graph so a
+            // stream-globaltable join reads the same fully-replicated global state.
+            graph.globals = self.globals.clone();
             let sources: Vec<crate::membership::TopicPartition> = ta
                 .source_topic_partitions
                 .iter()
@@ -109,6 +149,14 @@ impl StreamThread {
         &mut self,
         fetcher: &dyn RecordFetcher,
     ) -> Result<(), StreamsClientError> {
+        // Apply any new global-topic records to the shared global store(s) before
+        // processing, so stream-globaltable joins see live updates (Kafka keeps the
+        // global store current after the initial bootstrap). No-op without globals.
+        if !self.global_offsets.is_empty() {
+            self.globals
+                .poll_once(fetcher, &mut self.global_offsets)
+                .await?;
+        }
         for task in self.tasks.values_mut() {
             task.process_once(fetcher).await?;
         }
@@ -455,6 +503,110 @@ mod tests {
                 .any(|(t, _p, _k, v)| t == "out"
                     && v.as_deref() == Some(8i64.to_be_bytes().as_ref())),
             "after restore with N=7, processing 'a' must emit count = 8"
+        );
+    }
+
+    /// End-to-end of the real runtime global-store path: `StreamThread` builds +
+    /// bootstraps the shared `GlobalStateManager` from the broker BEFORE any task
+    /// processes, then a stream-globaltable join reads the bootstrapped value.
+    ///
+    /// Topology: a `GlobalKTable` over topic "global" (store "g-store"), and a
+    /// stream "in" that joins it with `key_mapper = |_k, v| v.clone()` (lookup key
+    /// = the record value) and `joiner = |sv, gv| sv + gv`. The global store is
+    /// seeded on the broker at (global, 0, 0) = ("gk", "GV"); the stream record is
+    /// (key "k", value "gk"). The derived lookup key "gk" hits "GV", so the join
+    /// emits key "k", value "gkGV". Proves bootstrap-before-process wires the
+    /// shared manager into the task graph in the real runtime.
+    #[tokio::test]
+    async fn global_apply_assignment_bootstraps_store_before_join() {
+        use crate::dsl::{GlobalKTable, Materialized, StreamsBuilder};
+
+        // Build the global-table join topology via the DSL.
+        let b = StreamsBuilder::new();
+        let g: GlobalKTable<String, String> = b.global_table(
+            "global",
+            Consumed::with(StringSerde, StringSerde),
+            Materialized::with(StringSerde, StringSerde).as_store("g-store"),
+        );
+        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+            .join_global(
+                &g,
+                |_k: &String, v: &String| v.clone(),
+                |sv: &String, gv: &String| format!("{sv}{gv}"),
+            )
+            .to("out", Produced::with(StringSerde, StringSerde));
+        drop(g);
+        let built = b.build("app").unwrap();
+
+        // Bootstrap fetcher: serves the single global record at (global, 0, 0), then
+        // empty. The default `partitions("global")` is vec![0], which matches the
+        // single-partition global topic. The "in" restore replays nothing (no state
+        // store on the stream subtopology).
+        let boot_fetcher: Arc<dyn RecordFetcher> = Arc::new(ScriptedFetcher::new(vec![(
+            ("global".to_string(), 0, 0),
+            FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: Some("gk".into()),
+                    value: Some("GV".into()),
+                    timestamp: -1,
+                }],
+            },
+        )]));
+
+        let producer_c = Arc::new(CollectProducer::default());
+        let store_c = Arc::new(MemStore::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
+        let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
+
+        let mut thread = StreamThread::new(
+            Arc::clone(&boot_fetcher),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+
+        // The global-table topology emits the stream subtopology as id "1".
+        let assignment = StreamsAssignment {
+            active: vec![TaskAssignment {
+                subtopology_id: "1".into(),
+                partitions: vec![0],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 0,
+                }],
+            }],
+            standby: vec![],
+            warmup: vec![],
+        };
+        thread
+            .apply_assignment(&assignment, &built, &producer, &store)
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        // Now process one stream record (key "k", value "gk"). The key-mapper derives
+        // lookup key "gk", which the bootstrapped global store resolves to "GV", so
+        // the join emits key "k", value "gk" + "GV" = "gkGV".
+        let process_fetcher = ScriptedFetcher::new(vec![(
+            ("in".to_string(), 0, 0),
+            FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: Some("k".into()),
+                    value: Some("gk".into()),
+                    timestamp: -1,
+                }],
+            },
+        )]);
+        thread.poll_all(&process_fetcher).await.unwrap();
+        thread.commit_all().await.unwrap();
+
+        let sent = producer_c.sent.lock().unwrap();
+        check!(
+            sent.iter().any(|(t, _p, k, v)| t == "out"
+                && k.as_deref() == Some(b"k".as_ref())
+                && v.as_deref() == Some(b"gkGV".as_ref())),
+            "join must see the bootstrapped global value: ('out', key 'k', value 'gkGV')"
         );
     }
 }
