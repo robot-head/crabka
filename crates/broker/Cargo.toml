@@ -91,8 +91,13 @@ assert2 = { workspace = true }
 crabka-broker = { version = "0.2", path = ".", features = ["test-helpers"] }
 crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
 crabka-client-producer = { version = "0.2", path = "../client-producer" }
+# Host-side raw `Client::send(DescribeGroupsRequest)` against the
+# real-Kafka Docker capture (`describe_groups_jvm.rs`).
+crabka-client-core = { version = "0.2", path = "../client-core" }
 crabka-records-legacy = { version = "0.2", path = "../records-legacy" }
 crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
+# Serialize the captured real-Kafka DescribeGroups fixture as JSON.
+serde_json = { workspace = true }
 bytes = { workspace = true }
 rustls.workspace = true
 rustls-pki-types.workspace = true

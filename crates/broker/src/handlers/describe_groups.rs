@@ -1,6 +1,8 @@
 //! `DescribeGroups` (`api_key=15`). One entry per requested `group_id`.
-//! Members include their current assignment bytes; the `protocol_type` is
-//! reported from the group's stored value (defaulting to "consumer").
+//! Members include their `JoinGroup` protocol metadata (`member_metadata`)
+//! and current assignment bytes; the group reports its selected protocol
+//! name (`protocol_data`) and stored `protocol_type` (`""` for a typeless /
+//! dead group, matching Kafka).
 //!
 //! KIP-430: when `include_authorized_operations` is set on the request,
 //! each Allow row carries a bitfield of the group operations the
@@ -72,7 +74,9 @@ pub(crate) async fn handle(
                 member_id: m.member_id,
                 client_id: m.client_id,
                 client_host: m.client_host,
-                // MemberSnapshot.assignment is Vec<u8>; wire type is Bytes.
+                // MemberSnapshot.{protocol_metadata,assignment} are Vec<u8>;
+                // wire type is Bytes.
+                member_metadata: m.protocol_metadata.into(),
                 member_assignment: m.assignment.into(),
                 ..Default::default()
             })
@@ -94,8 +98,11 @@ pub(crate) async fn handle(
         };
         groups.push(DescribedGroup {
             group_id: snap.group_id,
-            protocol_type: snap.protocol_type.unwrap_or_else(|| "consumer".into()),
-            protocol_data: String::new(),
+            // Kafka returns "" for a typeless/dead group; real consumer
+            // groups already carry Some("consumer").
+            protocol_type: snap.protocol_type.clone().unwrap_or_default(),
+            // Selected protocol NAME (e.g. "range"); "" for an empty group.
+            protocol_data: snap.protocol_name.clone().unwrap_or_default(),
             group_state: state_str.into(),
             error_code: codes::NONE,
             members,
