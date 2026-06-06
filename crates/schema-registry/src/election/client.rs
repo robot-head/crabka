@@ -77,8 +77,19 @@ impl ElectionClient {
         cancel: &CancellationToken,
     ) -> anyhow::Result<()> {
         let coord = self.connect_coordinator().await?;
+        let result = self.run_session(&coord, member_id, cancel).await;
+        coord.close(); // deterministic teardown on every exit (Ok = cancelled, Err = reconnect)
+        result
+    }
+
+    async fn run_session(
+        &self,
+        coord: &Client,
+        member_id: &mut String,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
         loop {
-            let (generation, assignment) = self.join_and_sync(&coord, member_id).await?;
+            let (generation, assignment) = self.join_and_sync(coord, member_id).await?;
             self.publish(&assignment);
             // heartbeat until a rebalance/error forces a rejoin
             loop {
@@ -128,7 +139,9 @@ impl ElectionClient {
                 coordinator_keys: vec![self.group_id.clone()],
                 ..Default::default()
             })
-            .await?;
+            .await;
+        boot.close(); // release the bootstrap connection regardless of outcome
+        let fc = fc?;
         let (host, port) = fc
             .coordinators
             .first()
