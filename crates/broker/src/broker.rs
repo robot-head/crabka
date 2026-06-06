@@ -2168,6 +2168,7 @@ impl Broker {
                                 trust_roots_pem: t.trust_roots_path.clone(),
                                 // SNI = the advertised host of the inter-broker listener.
                                 server_name: advertised_host.clone(),
+                                client_identity: None,
                             }
                         })
                     } else {

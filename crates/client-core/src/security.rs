@@ -24,14 +24,24 @@ pub struct TlsConnectorConfig {
     /// SNI / server-name used for the TLS handshake and as the
     /// canonical hostname for any GSSAPI SPN.
     pub server_name: String,
+    /// Optional mTLS client identity: `(cert_chain_pem, private_key_pem)`.
+    ///
+    /// When `Some`, the cert chain and key are loaded from the given PEM
+    /// files and presented to the server during the TLS handshake
+    /// (mutual TLS / client authentication).  `None` → one-way TLS; the
+    /// client does not present a certificate (`with_no_client_auth`).
+    pub client_identity: Option<(PathBuf, PathBuf)>,
 }
 
 impl TlsConnectorConfig {
-    /// Build a `rustls::ClientConfig` (no client cert; trust-roots only).
+    /// Build a `rustls::ClientConfig`.
+    ///
+    /// When [`Self::client_identity`] is `Some`, the cert chain and key are
+    /// loaded and the config is built with mutual TLS client authentication.
+    /// When `None`, the client presents no certificate (`with_no_client_auth`).
     ///
     /// # Errors
-    /// Returns a string error if a trust-roots PEM is configured but
-    /// fails to load or add to the root store.
+    /// Returns a string error if any PEM file fails to load or parse.
     pub fn build(&self) -> Result<Arc<rustls::ClientConfig>, String> {
         let mut roots = rustls::RootCertStore::empty();
         if let Some(path) = &self.trust_roots_pem {
@@ -44,9 +54,23 @@ impl TlsConnectorConfig {
                     .map_err(|e| format!("trust roots add: {e}"))?;
             }
         }
-        let cfg = rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
+        let cfg = if let Some((cert_pem, key_pem)) = &self.client_identity {
+            let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+                rustls::pki_types::CertificateDer::pem_file_iter(cert_pem)
+                    .map_err(|e| format!("client cert load {}: {e}", cert_pem.display()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| format!("client cert parse: {e}"))?;
+            let key = rustls::pki_types::PrivateKeyDer::from_pem_file(key_pem)
+                .map_err(|e| format!("client key load {}: {e}", key_pem.display()))?;
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(certs, key)
+                .map_err(|e| format!("client auth cert: {e}"))?
+        } else {
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth()
+        };
         Ok(Arc::new(cfg))
     }
 
@@ -154,6 +178,7 @@ mod tests {
             tls: Some(TlsConnectorConfig {
                 trust_roots_pem: None,
                 server_name: "tls-host".into(),
+                client_identity: None,
             }),
             sasl: None,
             sasl_host: None,
@@ -180,7 +205,37 @@ mod tests {
         let cfg = TlsConnectorConfig {
             trust_roots_pem: None,
             server_name: "broker".into(),
+            client_identity: None,
         };
         cfg.build().expect("client config builds with empty roots");
+    }
+
+    #[test]
+    fn tls_connector_config_client_identity_none_builds_and_bogus_path_errors() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        // None path: one-way TLS builds successfully.
+        let no_id = TlsConnectorConfig {
+            trust_roots_pem: None,
+            server_name: "broker".into(),
+            client_identity: None,
+        };
+        no_id
+            .build()
+            .expect("one-way TLS builds with client_identity=None");
+
+        // Bogus path: mTLS arm must return Err (files don't exist).
+        let bogus = TlsConnectorConfig {
+            trust_roots_pem: None,
+            server_name: "broker".into(),
+            client_identity: Some((
+                "/nonexistent/cert.pem".into(),
+                "/nonexistent/key.pem".into(),
+            )),
+        };
+        assert!(
+            bogus.build().is_err(),
+            "bogus client-identity path returns Err"
+        );
     }
 }
