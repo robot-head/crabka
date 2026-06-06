@@ -1,0 +1,252 @@
+[
+  {
+    "body": {
+      "compatibility": "NONE"
+    },
+    "method": "PUT",
+    "op": "config_t_none",
+    "path": "/config/t",
+    "status": 200
+  },
+  {
+    "body": {
+      "id": 1
+    },
+    "method": "POST",
+    "op": "register_t_v1",
+    "path": "/subjects/t/versions",
+    "status": 200
+  },
+  {
+    "body": {
+      "id": 2
+    },
+    "method": "POST",
+    "op": "register_t_v2",
+    "path": "/subjects/t/versions",
+    "status": 200
+  },
+  {
+    "body": 1,
+    "method": "DELETE",
+    "op": "soft_delete_t_v1",
+    "path": "/subjects/t/versions/1",
+    "status": 200
+  },
+  {
+    "body": [
+      2
+    ],
+    "method": "GET",
+    "op": "list_t_versions",
+    "path": "/subjects/t/versions",
+    "status": 200
+  },
+  {
+    "body": [
+      1,
+      2
+    ],
+    "method": "GET",
+    "op": "list_t_versions_deleted",
+    "path": "/subjects/t/versions?deleted=true",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 40402,
+      "message": "Version 1 not found."
+    },
+    "method": "GET",
+    "op": "get_t_v1_after_soft",
+    "path": "/subjects/t/versions/1",
+    "status": 404
+  },
+  {
+    "body": {
+      "id": 1,
+      "schema": "{\"type\":\"record\",\"name\":\"A\",\"fields\":[]}",
+      "subject": "t",
+      "version": 1
+    },
+    "method": "GET",
+    "op": "get_t_v1_after_soft_deleted",
+    "path": "/subjects/t/versions/1?deleted=true",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 40407,
+      "message": "Subject 't' Version 2 was not deleted first before being permanently deleted"
+    },
+    "method": "DELETE",
+    "op": "perm_delete_t_v2_no_soft",
+    "path": "/subjects/t/versions/2?permanent=true",
+    "status": 404
+  },
+  {
+    "body": 1,
+    "method": "DELETE",
+    "op": "perm_delete_t_v1_after_soft",
+    "path": "/subjects/t/versions/1?permanent=true",
+    "status": 200
+  },
+  {
+    "body": {
+      "id": 3
+    },
+    "method": "POST",
+    "op": "register_d_v1",
+    "path": "/subjects/d/versions",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 40405,
+      "message": "Subject 'd' was not deleted first before being permanently deleted"
+    },
+    "method": "DELETE",
+    "op": "perm_delete_d_no_soft",
+    "path": "/subjects/d?permanent=true",
+    "status": 404
+  },
+  {
+    "body": [
+      1
+    ],
+    "method": "DELETE",
+    "op": "soft_delete_d",
+    "path": "/subjects/d",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 40404,
+      "message": "Subject 'd' was soft deleted.Set permanent=true to delete permanently"
+    },
+    "method": "DELETE",
+    "op": "soft_delete_d_again",
+    "path": "/subjects/d",
+    "status": 404
+  },
+  {
+    "body": [
+      1
+    ],
+    "method": "DELETE",
+    "op": "perm_delete_d_after_soft",
+    "path": "/subjects/d?permanent=true",
+    "status": 200
+  },
+  {
+    "body": {
+      "mode": "READONLY"
+    },
+    "method": "PUT",
+    "op": "mode_r_readonly",
+    "path": "/mode/r",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 42205,
+      "message": "Subject r is in read-only mode"
+    },
+    "method": "POST",
+    "op": "register_r_readonly",
+    "path": "/subjects/r/versions",
+    "status": 422
+  },
+  {
+    "body": {
+      "mode": "READWRITE"
+    },
+    "method": "GET",
+    "op": "get_mode_global",
+    "path": "/mode",
+    "status": 200
+  },
+  {
+    "body": {
+      "mode": "READONLY"
+    },
+    "method": "GET",
+    "op": "get_mode_r",
+    "path": "/mode/r",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 40409,
+      "message": "Subject 'nope' does not have subject-level mode configured"
+    },
+    "method": "GET",
+    "op": "get_mode_nope",
+    "path": "/mode/nope",
+    "status": 404
+  },
+  {
+    "body": {
+      "mode": "READONLY"
+    },
+    "method": "DELETE",
+    "op": "delete_mode_r",
+    "path": "/mode/r",
+    "status": 200
+  },
+  {
+    "body": {
+      "mode": "IMPORT"
+    },
+    "method": "PUT",
+    "op": "mode_i_import",
+    "path": "/mode/i",
+    "status": 200
+  },
+  {
+    "body": {
+      "id": 42
+    },
+    "method": "POST",
+    "op": "register_i_import",
+    "path": "/subjects/i/versions",
+    "status": 200
+  },
+  {
+    "body": [
+      {
+        "id": 42,
+        "schema": "{\"type\":\"record\",\"name\":\"C\",\"fields\":[]}",
+        "subject": "i",
+        "version": 5
+      },
+      {
+        "id": 2,
+        "schema": "{\"type\":\"record\",\"name\":\"B\",\"fields\":[]}",
+        "subject": "t",
+        "version": 2
+      }
+    ],
+    "method": "GET",
+    "op": "get_schemas",
+    "path": "/schemas",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 40403,
+      "message": "Schema not found"
+    },
+    "method": "GET",
+    "op": "schemas_id1_versions",
+    "path": "/schemas/ids/1/versions",
+    "status": 404
+  },
+  {
+    "body": [],
+    "method": "GET",
+    "op": "i_v5_referencedby",
+    "path": "/subjects/i/versions/5/referencedby",
+    "status": 200
+  }
+]

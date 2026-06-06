@@ -140,11 +140,11 @@ pub fn check_against_version(
     candidate: &str,
     version: Option<i32>,
 ) -> Result<Verdict, SrError> {
-    if snap.versions(subject).is_none() {
+    if snap.versions(subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject.to_string()));
     }
     let (_, _, _vty, vschema) = snap
-        .version(subject, version)
+        .version(subject, version, false)
         .ok_or(SrError::VersionNotFound)?;
     let level = effective_level(snap, subject);
     let dirs = level.directions();
