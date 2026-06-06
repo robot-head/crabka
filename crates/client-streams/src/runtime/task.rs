@@ -47,6 +47,11 @@ impl StreamTask {
         }
     }
 
+    /// Read-only access to this task's store registry (for interactive queries).
+    pub(crate) fn registry(&self) -> &crate::store::registry::StoreRegistry {
+        &self.graph.stores
+    }
+
     /// Call `Processor::init` on every node in the graph.
     pub async fn init(&mut self) -> Result<(), StreamsClientError> {
         self.graph

@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -15,6 +16,7 @@ use crate::error::StreamsClientError;
 use crate::membership::{StreamsEvent, StreamsMembership};
 use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
 use crate::runtime::io_broker;
+use crate::runtime::iq::IqRequest;
 use crate::runtime::thread::StreamThread;
 use crate::topology::BuiltTopology;
 
@@ -33,6 +35,10 @@ pub struct KafkaStreams {
     shutdown: CancellationToken,
     handle: Option<JoinHandle<()>>,
     state: KafkaStreamsState,
+    /// Channel to the supervisor for interactive queries. Read by the
+    /// `KafkaStreams` IQ accessors in IQ-T4.
+    #[allow(dead_code)] // read by KafkaStreams IQ accessors in IQ-T4
+    iq_tx: mpsc::Sender<IqRequest>,
 }
 
 #[bon::bon]
@@ -69,6 +75,7 @@ impl KafkaStreams {
         let sd = shutdown.clone();
         let topo_for_thread = Arc::clone(&built);
         let fetcher_for_thread = Arc::clone(&fetcher);
+        let (iq_tx, mut iq_rx) = mpsc::channel::<IqRequest>(64);
         let handle = tokio::spawn(async move {
             let mut thread = StreamThread::new(fetcher_for_thread, store_backend, application_id);
             let mut poll = tokio::time::interval(poll_interval);
@@ -100,6 +107,9 @@ impl KafkaStreams {
                             tracing::warn!(error = %e, "commit_all failed");
                         }
                     }
+                    Some(req) = iq_rx.recv() => {
+                        thread.serve_iq(req).await;
+                    }
                 }
             }
         });
@@ -109,6 +119,7 @@ impl KafkaStreams {
             shutdown,
             handle: Some(handle),
             state: KafkaStreamsState::Running,
+            iq_tx,
         })
     }
 }
