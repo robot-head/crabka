@@ -6,10 +6,8 @@ use crate::dsl::graph::{GraphNodeKind, LogicalGraph};
 use crate::processor::serde::{Consumed, Serde};
 
 /// A serde-carrying thunk that registers + connects a DSL-added state store to a
-/// processor by name during lowering. Looked up + invoked by `process`/`process_values`.
-//
-// consumed by process/process_values in T3/T5 (this task only records the thunk).
-#[allow(dead_code)]
+/// processor by name during lowering. Looked up + invoked by `process` (and
+/// `process_values`, T5).
 pub(crate) type StoreConnectThunk =
     std::sync::Arc<dyn Fn(&mut crate::dsl::graph::LowerState, &str) + Send + Sync>;
 
@@ -18,8 +16,7 @@ pub(crate) struct InternalStreamsBuilder {
     index: usize,
     /// Serde-carrying connect thunks for DSL-added stores, keyed by store name.
     /// Populated by [`StreamsBuilder::add_state_store`]; looked up + invoked by a
-    /// `process`/`process_values` node during lowering (T3/T5).
-    #[allow(dead_code)] // consumed by process/process_values in T3/T5
+    /// `process`/`process_values` node during lowering.
     pub store_thunks: std::collections::HashMap<String, StoreConnectThunk>,
 }
 
@@ -40,7 +37,6 @@ impl InternalStreamsBuilder {
     }
 
     /// The connect thunk for an added store, if any (cloned `Arc`). Used by `process`.
-    #[allow(dead_code)] // consumed by process/process_values in T3/T5
     pub fn store_thunk(&self, name: &str) -> Option<StoreConnectThunk> {
         self.store_thunks.get(name).cloned()
     }

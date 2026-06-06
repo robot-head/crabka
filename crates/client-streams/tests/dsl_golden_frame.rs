@@ -276,6 +276,33 @@ fn to_table_matches_jvm() {
 }
 
 #[test]
+fn process_matches_jvm() {
+    use crabka_client_streams::{Processor, ProcessorContext, Record};
+    // Mirrors a JVM `addStateStore("store") + process(supplier, "store") + to("out")`
+    // app: ONE subtopology "0", source "in", and the connected store's compact
+    // `app-store-changelog`. The Fwd processor just forwards each record unchanged;
+    // the store connection (not its use) is what surfaces the changelog topic.
+    struct Fwd;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, String> for Fwd {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
+            r: Record<String, String>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process(|| Fwd, ["store"])
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "process");
+}
+
+#[test]
 fn stream_table_join_matches_jvm() {
     use crabka_client_streams::{Materialized, StringSerde};
     // Mirrors Capture.java `streamTableJoin()`:

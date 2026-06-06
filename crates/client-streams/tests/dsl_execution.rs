@@ -2595,3 +2595,114 @@ fn dsl_global_join_key_mapper_derives_compound_key() {
         Some((Some("k1".to_string()), "v1G".to_string()))
     );
 }
+
+// ---------------------------------------------------------------------------
+// KStream::process (custom Processor-API node + connected state stores)
+// ---------------------------------------------------------------------------
+
+/// `KStream::process` with a stateful custom processor: a `Counter` reads/writes
+/// a connected `counts` store per record and forwards `(value, running_count)`.
+///
+/// Topology: `stream("in")` → `process(Counter, ["counts"])` → `to("out")`.
+/// Pipe `("k","a")`,`("k","a")`,`("k","b")`; the per-VALUE running count yields
+/// `("a",1)`,`("a",2)`,`("b",1)`, and the store holds 2 for "a".
+#[test]
+fn dsl_process_stateful_counter_executes() {
+    use crabka_client_streams::{Processor, ProcessorContext, Record};
+    struct Counter;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, i64> for Counter {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, i64>,
+            r: Record<String, String>,
+        ) {
+            let n = {
+                let store = ctx.get_state_store::<String, i64>("counts").unwrap();
+                let n = store.get(&r.value).await.unwrap_or(0) + 1;
+                store.put(r.value.clone(), n).await;
+                n
+            };
+            ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, i64, _, _>("counts", StringSerde, I64Serde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process(|| Counter, ["counts"])
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for v in ["a", "a", "b"] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some("k".to_string()),
+            v.to_string(),
+            0,
+        );
+    }
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("a".into()), 1))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("a".into()), 2))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("b".into()), 1))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        None
+    );
+    assert_eq!(
+        d.store_get::<String, i64>("counts", &"a".to_string()),
+        Some(2)
+    );
+}
+
+/// `KStream::process` is **key-changing**: a downstream aggregation must insert a
+/// repartition. Build `stream("in").process(Fwd,["store"]).group_by_key().count()`
+/// and assert the wire carries a repartition topic (the process result re-keys, so
+/// the count repartitions before aggregating).
+#[test]
+fn dsl_process_is_key_changing_forces_repartition() {
+    use crabka_client_streams::{Processor, ProcessorContext, Record};
+    struct Fwd;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, String> for Fwd {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
+            r: Record<String, String>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process(|| Fwd, ["store"])
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let wire = b.build("app").unwrap().to_wire();
+    // The process result is key-changing → the count inserts a repartition. Assert
+    // SOME subtopology has a non-empty repartition sink + source.
+    let has_sink = wire
+        .subtopologies
+        .iter()
+        .any(|s| !s.repartition_sink_topics.is_empty());
+    let has_source = wire
+        .subtopologies
+        .iter()
+        .any(|s| !s.repartition_source_topics.is_empty());
+    assert!(
+        has_sink && has_source,
+        "expected a repartition topic from the key-changing process; wire = {wire:?}"
+    );
+}

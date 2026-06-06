@@ -1276,6 +1276,87 @@ where
         self.select_key(f).group_by_key(grouped)
     }
 
+    /// `process`: attach a custom Processor-API node that may rewrite the key.
+    ///
+    /// `supplier` is any user [`ProcessorSupplier`] (e.g. a `|| MyProc` closure);
+    /// `store_names` names the [`StreamsBuilder::add_state_store`]-registered stores
+    /// the processor reads/writes via [`ProcessorContext::get_state_store`]. Each
+    /// named store's connect thunk is looked up **now** (so the store must have been
+    /// added before this call) and invoked during lowering to register the store +
+    /// emit its compact `<app>-<store>-changelog` changelog, connecting it to this
+    /// processor node.
+    ///
+    /// Mirrors the JVM `KStream.process`: the result is treated as **key-changing**
+    /// (the processor may call `forward` with any key), so the single-source-topic
+    /// lineage is broken and a downstream aggregation/join must `repartition` first.
+    ///
+    /// # Panics
+    /// Panics if any name in `store_names` was not registered via
+    /// [`add_state_store`](crate::dsl::builder::StreamsBuilder::add_state_store).
+    ///
+    /// [`ProcessorSupplier`]: crate::processor::api::ProcessorSupplier
+    /// [`ProcessorContext::get_state_store`]: crate::processor::api::ProcessorContext::get_state_store
+    /// [`StreamsBuilder::add_state_store`]: crate::dsl::builder::StreamsBuilder::add_state_store
+    pub fn process<KOut, VOut, PS>(
+        &self,
+        supplier: PS,
+        store_names: impl IntoIterator<Item = impl Into<String>>,
+    ) -> KStream<KOut, VOut>
+    where
+        KOut: Any + Send + Sync + Clone,
+        VOut: Any + Send + Clone,
+        PS: crate::processor::api::ProcessorSupplier<K, V, KOut, VOut> + Clone + 'static,
+    {
+        let stores: Vec<String> = store_names.into_iter().map(Into::into).collect();
+        // `add_state_store` must precede `process`; look up each connect thunk now so
+        // a missing store panics here (at call time) rather than during lowering.
+        let thunks: Vec<crate::dsl::builder::StoreConnectThunk> = {
+            let g = self.builder.borrow();
+            stores
+                .iter()
+                .map(|s| {
+                    g.store_thunk(s).unwrap_or_else(|| {
+                        panic!(
+                            "process references store '{s}' that was not added via add_state_store"
+                        )
+                    })
+                })
+                .collect()
+        };
+        let parent_id = self.node;
+        let mut g = self.builder.borrow_mut();
+        let name = g.new_processor_name(names::KSTREAM_PROCESSOR);
+        let id = g.graph.add(
+            name.clone(),
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![parent_id],
+        );
+        g.graph.nodes[id].key_changing_operation = true;
+        // The supplier is moved into the lower thunk; the thunk clones it per task
+        // when `add_processor` runs (`PS: Clone`), so the supplier closure type need
+        // not itself be re-instantiable.
+        g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+            let h = state.topology.add_processor::<K, V, KOut, VOut, _, _, _>(
+                name.clone(),
+                supplier.clone(),
+                [parent],
+            );
+            let proc_name = h.name().to_string();
+            // Register + connect each named store to this processor (the connect
+            // thunks carry the store serdes and emit the compact changelog).
+            for t in &thunks {
+                t(state, &proc_name);
+            }
+            state.handle_name.insert(id, proc_name);
+        }));
+        drop(g);
+        // process MAY change the key → key-changing; source-topic lineage broken.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, true)
+    }
+
     /// `toTable`: materialize this stream into a [`KTable`] by writing each record
     /// into a state store and forwarding a `Change<V>` change-stream (prior store
     /// value as `old`). Backed by [`KStreamToTableProcessor`].
