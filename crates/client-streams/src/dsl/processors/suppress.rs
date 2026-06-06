@@ -17,7 +17,6 @@ type Marker<T> = PhantomData<fn() -> T>;
 /// Suppress processor for a windowed `KTable<Windowed<KInner>, V>`. `grace_ms` is
 /// the upstream window's grace; a window closes when `observed_stream_time >=
 /// window.end + grace_ms`.
-#[allow(dead_code)]
 pub(crate) struct KTableSuppressProcessor<KInner, V> {
     pub buffer: TimeOrderedKeyValueBuffer<Windowed<KInner>, Change<V>>,
     pub observed_stream_time: i64,
@@ -29,7 +28,6 @@ impl<KInner, V> KTableSuppressProcessor<KInner, V>
 where
     KInner: Eq + std::hash::Hash + Clone,
 {
-    #[allow(dead_code)] // called by Task 4 KTable::suppress lowering
     pub(crate) fn new(grace_ms: i64) -> Self {
         Self {
             buffer: TimeOrderedKeyValueBuffer::new(),

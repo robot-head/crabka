@@ -75,5 +75,7 @@ pub(crate) const KSTREAM_WINDOWED: &str = "KSTREAM-WINDOWED-";
 /// Only minted for left/outer joins (inner topologies are byte-unchanged). The
 /// exact JVM index/naming is pinned by Task C4's golden capture.
 pub(crate) const KSTREAM_OUTERSHARED: &str = "KSTREAM-OUTERSHARED-";
+/// The JVM `KTableImpl.suppress` processor node prefix.
+pub(crate) const KTABLE_SUPPRESS: &str = "KTABLE-SUPPRESS-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";

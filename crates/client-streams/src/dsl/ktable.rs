@@ -40,6 +40,9 @@ pub struct KTable<K, V> {
     store_name: Option<String>,
     #[allow(dead_code)]
     source_topic: Option<String>,
+    /// For windowed tables: the upstream window's grace (suppress closes a window
+    /// at `window.end + window_grace_ms`). `None` for non-windowed tables.
+    window_grace_ms: Option<i64>,
     _pd: PhantomData<fn() -> (K, V)>,
 }
 
@@ -55,6 +58,7 @@ impl<K, V> KTable<K, V> {
             node,
             store_name,
             source_topic,
+            window_grace_ms: None,
             _pd: PhantomData,
         }
     }
@@ -70,6 +74,19 @@ impl<K, V> KTable<K, V> {
     #[allow(dead_code)]
     pub(crate) fn source_topic(&self) -> Option<&str> {
         self.source_topic.as_deref()
+    }
+
+    /// Tag this table with its upstream window's grace (set by windowed/session
+    /// aggregations; propagated through `Change`-preserving ops). Read by `suppress`.
+    #[must_use]
+    pub(crate) fn with_window_grace(mut self, grace_ms: Option<i64>) -> Self {
+        self.window_grace_ms = grace_ms;
+        self
+    }
+
+    #[allow(dead_code)] // read by golden/execution tests in later tasks
+    pub(crate) fn window_grace_ms(&self) -> Option<i64> {
+        self.window_grace_ms
     }
 }
 
@@ -115,6 +132,7 @@ where
         V2: Any + Send + Clone,
         F: Fn(&V) -> V2 + Clone + Send + Sync + 'static,
     {
+        let grace = self.window_grace_ms;
         let parent_id = self.node;
         let mut g = self.builder.borrow_mut();
         let name = g.new_processor_name(names::TABLE_MAPVALUES);
@@ -141,7 +159,7 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, None, None)
+        KTable::new(Rc::clone(&self.builder), id, None, None).with_window_grace(grace)
     }
 
     /// `mapValues`: transform each value, materializing the rewritten table into
@@ -157,6 +175,7 @@ where
         VS: Serde<V2> + Clone + 'static,
         F: Fn(&V) -> V2 + Clone + Send + Sync + 'static,
     {
+        let grace = self.window_grace_ms;
         let store_name = mint_table_store(&self.builder, &materialized, names::TABLE_MAPVALUES);
         let crate::dsl::config::Materialized {
             key_serde,
@@ -200,7 +219,7 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
+        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None).with_window_grace(grace)
     }
 
     /// `filter`: keep rows matching `predicate`, materializing the filtered view.
@@ -218,6 +237,7 @@ where
         VS: Serde<V> + Clone + 'static,
         P: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,
     {
+        let grace = self.window_grace_ms;
         let store_name = mint_table_store(&self.builder, &materialized, names::TABLE_FILTER);
         let crate::dsl::config::Materialized {
             key_serde,
@@ -262,7 +282,7 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
+        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None).with_window_grace(grace)
     }
 
     /// `join` (inner KTable-KTable join): for each key, the join row exists only
@@ -449,6 +469,59 @@ where
         }));
         drop(g);
         KTable::new(Rc::clone(&self.builder), merge_id, None, None)
+    }
+}
+
+impl<KInner, V> KTable<crate::dsl::windows::Windowed<KInner>, V>
+where
+    KInner: Any + Send + Sync + Clone + Eq + std::hash::Hash,
+    V: Any + Send + Clone,
+{
+    /// `suppress(untilWindowCloses(..))`: buffer per-window updates and emit each
+    /// window's final value once it closes (`stream_time >= window.end + grace`).
+    /// The grace comes from the upstream windowed aggregation.
+    #[must_use]
+    pub fn suppress(
+        &self,
+        _suppressed: crate::dsl::suppress::Suppressed,
+    ) -> KTable<crate::dsl::windows::Windowed<KInner>, V> {
+        let grace_ms = self.window_grace_ms.unwrap_or(0);
+        let parent_id = self.node;
+        let mut g = self.builder.borrow_mut();
+        let name = g.new_processor_name(names::KTABLE_SUPPRESS);
+        let id = g.graph.add(
+            name.clone(),
+            GraphNodeKind::TableProcessor { store_name: None },
+            vec![parent_id],
+        );
+        g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
+            // Parent forwards Change<V>; suppress buffers and forwards Change<V>.
+            let parent = NodeHandle::<crate::dsl::windows::Windowed<KInner>, Change<V>>::from_name(
+                state.handle_name[&parent_id].clone(),
+            );
+            let h = state
+                .topology
+                .add_processor::<
+                    crate::dsl::windows::Windowed<KInner>,
+                    Change<V>,
+                    crate::dsl::windows::Windowed<KInner>,
+                    Change<V>,
+                    _,
+                    _,
+                    _,
+                >(
+                    name.clone(),
+                    move || {
+                        crate::dsl::processors::suppress::KTableSuppressProcessor::<KInner, V>::new(
+                            grace_ms,
+                        )
+                    },
+                    [parent],
+                );
+            state.handle_name.insert(id, h.name().to_string());
+        }));
+        drop(g);
+        KTable::new(Rc::clone(&self.builder), id, None, None).with_window_grace(Some(grace_ms))
     }
 }
 

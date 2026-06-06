@@ -6,7 +6,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 
-#[allow(dead_code)] // fields moved out in evict_while; used via KTableSuppressProcessor (Task 3)
 struct Entry<K, V> {
     key: K,
     value: V,
@@ -19,13 +18,10 @@ pub(crate) struct TimeOrderedKeyValueBuffer<K, V> {
     /// Ordered by `(buffer_time, seq)`; `seq` disambiguates equal buffer times.
     entries: BTreeMap<(i64, u64), Entry<K, V>>,
     /// Locate-and-replace the slot currently held by a key.
-    #[allow(dead_code)] // written and read within put/evict_while
     index: HashMap<K, (i64, u64)>,
-    #[allow(dead_code)] // incremented within put
     seq: u64,
 }
 
-#[allow(dead_code)] // new/put/evict_while called by KTableSuppressProcessor (suppress.rs)
 impl<K: Eq + Hash + Clone, V> TimeOrderedKeyValueBuffer<K, V> {
     pub(crate) fn new() -> Self {
         Self {
