@@ -176,6 +176,20 @@ where
         self.dispatch.stores.get_session::<K2, V2>(name)
     }
 
+    /// Access a connected suppress store, typed. `None` if absent or the K/V types
+    /// don't match. Fetch it per-record (do not hold across `process` calls).
+    ///
+    /// `pub(crate)`: the returned trait surfaces `Change<V>` (crate-internal) and
+    /// the suppress store is a built-in DSL mechanism, not a user-facing store.
+    // The suppress processor calls this in T3; unused until then.
+    #[allow(dead_code)]
+    pub(crate) fn get_suppress_store<K2: Send + Sync + 'static, V2: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::suppress_store::SuppressStore<K2, V2>> {
+        self.dispatch.stores.get_suppress::<K2, V2>(name)
+    }
+
     /// Metadata of the source record currently being processed.
     #[must_use]
     pub fn record_context(&self) -> &RecordContext {

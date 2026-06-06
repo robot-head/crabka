@@ -31,11 +31,6 @@
 //! record's `oldValue` (same array), so it always serializes as `-2`. Crabka uses
 //! value-equality, which reproduces every captured case and round-trips cleanly;
 //! the codec is self-consistent for restore regardless.
-//
-// The codec's consumers (the suppress processor + the typed `SuppressBytesStore`)
-// land in later tasks of this slice; until then these `pub(crate)` items are
-// exercised only by tests. Remove this allow once the processor wires them in.
-#![allow(dead_code)]
 use bytes::{BufMut, Bytes, BytesMut};
 
 const I64: usize = 8;
@@ -60,6 +55,9 @@ pub(crate) struct SuppressRecordCtx {
 impl SuppressRecordCtx {
     /// `ProcessorRecordContext.serialize()`:
     /// `ts:8 ‖ offset:8 ‖ topicLen:4 ‖ topic ‖ partition:4 ‖ headerCount:4(0)`.
+    // Reached only through `serialize_buffer_change` (see its allow); the chain is
+    // lib-dead until the suppress processor logs through `SuppressBytesStore` in T3.
+    #[allow(dead_code)]
     fn write(&self, b: &mut BytesMut) {
         b.put_i64(self.timestamp);
         b.put_i64(self.offset);
@@ -106,6 +104,8 @@ pub(crate) struct BufferedChange {
 }
 
 /// `addValue`: `-1` for null, else `len:4 ‖ bytes`.
+// Reached only through `serialize_buffer_change` (see its allow); lib-dead until T3.
+#[allow(dead_code)]
 fn add_value(b: &mut BytesMut, value: Option<&[u8]>) {
     match value {
         None => b.put_i32(NULL),
@@ -117,6 +117,10 @@ fn add_value(b: &mut BytesMut, value: Option<&[u8]>) {
 }
 
 /// Serialize one buffered entry to its JVM-exact changelog VALUE bytes.
+// Consumed by `SuppressBytesStore::put`, but that path is itself only reachable
+// from tests until the suppress processor logs through the store in T3, so the
+// chain stays lib-dead for now. Narrow allow (no blanket module allow).
+#[allow(dead_code)]
 pub(crate) fn serialize_buffer_change(
     ctx: &SuppressRecordCtx,
     prior: Option<&[u8]>,
