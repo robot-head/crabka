@@ -2387,3 +2387,211 @@ fn dsl_until_window_closes_rejects_eager_buffer() {
     use crabka_client_streams::{BufferConfig, Suppressed, Windowed};
     let _ = Suppressed::<Windowed<String>>::until_window_closes(BufferConfig::max_records(2));
 }
+
+// ── stream-globaltable join (GlobalKTable, G-i) ─────────────────────────────
+//
+// The global store/source/processor are invisible in the wire, so the executable
+// graph has no global-update processor. The `TopologyTestDriver` materializes the
+// global store directly (`pipe_global`) and the join processor reads it via the
+// per-task registry. `as_store("global-store")` names the store so `pipe_global`
+// can target it; the key-mapper derives the lookup key from the record value, so a
+// stream value of "v1" looks up global key "v1".
+
+/// Inner stream-globaltable join: a global hit forwards `joiner(sv, gv)` keyed by
+/// the stream key. With `key_mapper = |_k, v| v.clone()`, a stream value "v1" looks
+/// up global key "v1" (a NON-stream-key lookup) → "G1" → "v1G1".
+#[test]
+fn dsl_global_join_inner_hit_executes() {
+    use crabka_client_streams::GlobalKTable;
+    let b = StreamsBuilder::new();
+    let g: GlobalKTable<String, String> = b.global_table(
+        "global",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("global-store"),
+    );
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .join_global(
+            &g,
+            |_k: &String, v: &String| v.clone(),
+            |sv: &String, gv: &String| format!("{sv}{gv}"),
+        )
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(g);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // Seed the global store, then drive a record whose value maps to that key.
+    d.pipe_global("global-store", "v1".to_string(), "G1".to_string());
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "v1".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "v1G1".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// Inner join miss: a stream value with no matching global key is dropped.
+#[test]
+fn dsl_global_join_inner_miss_drops() {
+    use crabka_client_streams::GlobalKTable;
+    let b = StreamsBuilder::new();
+    let g: GlobalKTable<String, String> = b.global_table(
+        "global",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("global-store"),
+    );
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .join_global(
+            &g,
+            |_k: &String, v: &String| v.clone(),
+            |sv: &String, gv: &String| format!("{sv}{gv}"),
+        )
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(g);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_global("global-store", "v1".to_string(), "G1".to_string());
+    // value "absent" has no matching global key → dropped.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "absent".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// Left join miss: a global miss still forwards, the joiner receiving `None`.
+#[test]
+fn dsl_global_left_join_miss_emits_none() {
+    use crabka_client_streams::GlobalKTable;
+    let b = StreamsBuilder::new();
+    let g: GlobalKTable<String, String> = b.global_table(
+        "global",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("global-store"),
+    );
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .left_join_global(
+            &g,
+            |_k: &String, v: &String| v.clone(),
+            |sv: &String, gv: Option<&String>| match gv {
+                Some(g) => format!("{sv}{g}"),
+                None => format!("{sv}-none"),
+            },
+        )
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(g);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // No global seed for "v2" → miss → "v2-none".
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "v2".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "v2-none".to_string()))
+    );
+}
+
+/// Mid-stream global update: a later record sees the latest global value after
+/// the global store is re-`pipe_global`'d with a new value for the same key.
+#[test]
+fn dsl_global_join_sees_midstream_update() {
+    use crabka_client_streams::GlobalKTable;
+    let b = StreamsBuilder::new();
+    let g: GlobalKTable<String, String> = b.global_table(
+        "global",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("global-store"),
+    );
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .join_global(
+            &g,
+            |_k: &String, v: &String| v.clone(),
+            |sv: &String, gv: &String| format!("{sv}{gv}"),
+        )
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(g);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // First value, first record → "v1G1".
+    d.pipe_global("global-store", "v1".to_string(), "G1".to_string());
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "v1".to_string(),
+        0,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "v1G1".to_string()))
+    );
+    // Update the same global key, then re-drive → sees the NEW value "G2".
+    d.pipe_global("global-store", "v1".to_string(), "G2".to_string());
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "v1".to_string(),
+        1,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "v1G2".to_string()))
+    );
+}
+
+/// Key-mapper to a key derived from BOTH stream key and value (neither alone): the
+/// lookup key is `"<k>:<v>"`, distinct from the stream key, the value, and the
+/// emitted output key (which stays the stream key).
+#[test]
+fn dsl_global_join_key_mapper_derives_compound_key() {
+    use crabka_client_streams::GlobalKTable;
+    let b = StreamsBuilder::new();
+    let g: GlobalKTable<String, String> = b.global_table(
+        "global",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("global-store"),
+    );
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .join_global(
+            &g,
+            |k: &String, v: &String| format!("{k}:{v}"),
+            |sv: &String, gv: &String| format!("{sv}{gv}"),
+        )
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(g);
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_global("global-store", "k1:v1".to_string(), "G".to_string());
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k1".to_string()),
+        "v1".to_string(),
+        0,
+    );
+    // Output key is the stream key "k1", value is joiner(sv="v1", gv="G").
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k1".to_string()), "v1G".to_string()))
+    );
+}

@@ -27,9 +27,19 @@ impl TopologyTestDriver {
     /// invalid (propagates `instantiate`'s error).
     pub fn new(built: &BuiltTopology) -> Result<Self, ProcessorError> {
         let source_topics: HashSet<String> = built.list_source_topics().into_iter().collect();
-        let mut graph = pollster::block_on(
-            built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
-        )?;
+        let backend = crate::store::backend::StoreBackend::InMemory;
+        let mut graph = pollster::block_on(built.instantiate(&backend, "app"))?;
+        // G-i: the TopologyTestDriver materializes global stores into the per-task
+        // registry so a stream-globaltable join can look them up, and tests can
+        // populate them directly. The real shared global consumer is a later task,
+        // so `BuiltTopology::instantiate` deliberately skips these (a global store
+        // is fully replicated, not task-partitioned).
+        for (store_name, (changelog_override, factory)) in built.global_store_factories_for_test() {
+            // A global store has no changelog; the override is `None` → empty string.
+            let changelog = changelog_override.clone().unwrap_or_default();
+            let bytes = pollster::block_on(backend.open("app", store_name));
+            graph.stores.insert(factory(store_name, changelog, bytes));
+        }
         pollster::block_on(graph.init_processors())?;
         Ok(Self {
             graph,
@@ -108,6 +118,25 @@ impl TopologyTestDriver {
     ) -> Option<V> {
         let s = self.graph.stores.get_kv::<K, V>(store)?;
         pollster::block_on(s.get(key))
+    }
+
+    /// Populate a GLOBAL store directly (test-only). In a real app the global
+    /// consumer reads all partitions of the source topic and applies them to the
+    /// fully-replicated global store; this slice has no global-update processor in
+    /// the executable graph, so the test driver injects values straight into the
+    /// materialized global store so a stream-globaltable join can look them up.
+    #[allow(clippy::needless_pass_by_value)] // owned K/V is the natural API
+    pub fn pipe_global<K, V>(&mut self, store_name: &str, key: K, value: V)
+    where
+        K: Send + Sync + 'static,
+        V: Send + 'static,
+    {
+        let s = self
+            .graph
+            .stores
+            .get_kv::<K, V>(store_name)
+            .expect("global store not found");
+        pollster::block_on(s.put(key, value));
     }
 
     /// Pop + deserialize the next output record for `topic`.

@@ -363,3 +363,28 @@ fn repartition_merge_matches_jvm() {
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "repartition_merge");
 }
+
+#[test]
+fn global_table_join_matches_jvm() {
+    use crabka_client_streams::{GlobalKTable, Materialized};
+    // Mirrors Capture.java `globalTableJoin()`: a KStream joined to a GlobalKTable
+    // by a key-mapper. The global store/source/processor are INVISIBLE in the wire
+    // but the global source consumes subtopology index 0, so the stream subtopology
+    // emits as id "1". One subtopology, source_topics=["in"], everything else empty.
+    let b = StreamsBuilder::new();
+    let g: GlobalKTable<String, String> = b.global_table(
+        "global",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde),
+    );
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .join_global(
+            &g,
+            |_k: &String, v: &String| v.clone(),
+            |sv: &String, gv: &String| format!("{sv}{gv}"),
+        )
+        .to("out", Produced::with(StringSerde, StringSerde));
+    drop(g); // release the GlobalKTable's Rc clone so build can unwrap it
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "global_table_join");
+}

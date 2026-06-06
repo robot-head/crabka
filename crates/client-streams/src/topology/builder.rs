@@ -7,7 +7,7 @@ use std::marker::PhantomData;
 
 /// Factory that builds a fresh erased [`StateStore`] given the store name, pre-derived
 /// changelog topic, and an already-opened byte backend. The factory only owns the serdes.
-type StoreFactory = Box<
+pub(crate) type StoreFactory = Box<
     dyn Fn(
             &str,
             String,
@@ -860,11 +860,38 @@ impl Topology {
             source_topics.insert(g.id.clone(), all);
         }
 
-        // ── Build node specs for instantiation ────────────────────────────────
+        // ── Identify the GlobalKTable source + update-processor nodes ─────────
+        // A `GlobalKTable` source/processor is invisible in the wire AND has no
+        // per-task runtime factory (the fully-replicated global store is built by
+        // the shared global manager — a later task — or populated directly by the
+        // TestDriver, NOT by per-task `instantiate`). Excluding them from
+        // `node_specs` keeps `instantiate` from trying to build a node it has no
+        // factory for. A node is global if it reads a global source topic, or if
+        // any predecessor is global (nodes are in topological insertion order, so
+        // one forward pass suffices).
+        let mut global_nodes: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for n in &self.reg.nodes {
+            let is_global = match &n.kind {
+                NodeKind::Source { topics } => topics
+                    .iter()
+                    .any(|t| self.reg.global_source_topics.contains(t)),
+                NodeKind::Processor { predecessors } | NodeKind::Sink { predecessors, .. } => {
+                    predecessors
+                        .iter()
+                        .any(|p| global_nodes.contains(p.as_str()))
+                }
+            };
+            if is_global {
+                global_nodes.insert(n.name.as_str());
+            }
+        }
+
+        // ── Build node specs for instantiation (excluding global nodes) ───────
         let node_specs: Vec<NodeSpec> = self
             .reg
             .nodes
             .iter()
+            .filter(|n| !global_nodes.contains(n.name.as_str()))
             .map(|n| {
                 let (predecessors, kind_str, st, sink_t) = match &n.kind {
                     NodeKind::Source { topics } => (Vec::new(), "source", topics.clone(), None),
@@ -950,8 +977,10 @@ pub struct BuiltTopology {
     store_factories: HashMap<String, (Option<String>, StoreFactory)>,
     /// `GlobalKTable` store factories (separate from `store_factories`): NOT built
     /// by per-task `instantiate`. The fully-replicated global-store runtime (a
-    /// later task) reads these to build + restore each global store once.
-    #[allow(dead_code)] // consumed by the global-store runtime in a later task
+    /// later task) reads these to build + restore each global store once; the
+    /// [`TopologyTestDriver`] reads them via
+    /// [`global_store_factories_for_test`](Self::global_store_factories_for_test)
+    /// to materialize global stores directly for join tests.
     global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
 }
 
@@ -976,6 +1005,18 @@ impl BuiltTopology {
     #[must_use]
     pub(crate) fn to_wire_request(&self) -> WireTopology {
         self.wire.clone()
+    }
+
+    /// The `GlobalKTable` store factories, keyed by store name (test-only). The
+    /// [`TopologyTestDriver`] materializes these directly into its per-task store
+    /// registry so a stream-globaltable join can find them; the real runtime
+    /// builds them once in a shared global manager (a later task), NOT per task.
+    ///
+    /// [`TopologyTestDriver`]: crate::TopologyTestDriver
+    pub(crate) fn global_store_factories_for_test(
+        &self,
+    ) -> &HashMap<String, (Option<String>, StoreFactory)> {
+        &self.global_store_factories
     }
 
     /// The external + repartition source topics a subtopology's tasks read.
