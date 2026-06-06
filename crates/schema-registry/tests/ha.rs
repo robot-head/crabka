@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use axum::Router;
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::config::RegistryConfig;
+use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
 use crabka_schema_registry::election::{Election, PrimaryState};
 use crabka_schema_registry::kafkastore::KafkaStore;
 use crabka_schema_registry::rest::{self, AppState, forward::ForwardState};
@@ -20,6 +20,7 @@ fn cfg(bootstrap: &str, port: i32) -> RegistryConfig {
         advertised_url: format!("http://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
+        security: SecurityConfig::default(),
     }
 }
 

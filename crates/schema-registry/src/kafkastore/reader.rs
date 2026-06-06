@@ -5,7 +5,7 @@
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
 
-use crabka_client_core::{Connection, ConnectionOptions, fetch_partition};
+use crabka_client_core::{ClientSecurity, Connection, ConnectionOptions, fetch_partition};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 use parking_lot::RwLock;
 use tokio::sync::watch;
@@ -62,7 +62,12 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
 /// Spawn the reader. Returns the shared store + an offset watch immediately; the
 /// background task runs until `cancel` fires.
 #[must_use]
-pub fn spawn(cfg: &RegistryConfig, topic_id: WireUuid, cancel: CancellationToken) -> StoreReader {
+pub fn spawn(
+    cfg: &RegistryConfig,
+    topic_id: WireUuid,
+    security: Option<ClientSecurity>,
+    cancel: CancellationToken,
+) -> StoreReader {
     let store = Arc::new(RwLock::new(StoreState::default()));
     let (applied_tx, applied_rx) = watch::channel(-1_i64);
     let topic = cfg.schemas_topic.clone();
@@ -82,6 +87,7 @@ pub fn spawn(cfg: &RegistryConfig, topic_id: WireUuid, cancel: CancellationToken
         };
         let opts = ConnectionOptions {
             client_id,
+            security: security.map(Box::new),
             ..Default::default()
         };
         let conn = match Connection::connect_with_options(addr, opts).await {

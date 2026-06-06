@@ -19,6 +19,12 @@ crabka-client-core = { version = "0.2", path = "../client-core" }
 crabka-client-admin = { version = "0.2", path = "../client-admin" }
 crabka-client-producer = { version = "0.2", path = "../client-producer" }
 crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
+crabka-security = { version = "0.2", path = "../security" }
+arc-swap = { workspace = true }
+base64 = { workspace = true }
+bcrypt = "0.15"
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
 axum = { workspace = true, features = ["query"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
 tokio-util = { workspace = true, features = ["rt"] }

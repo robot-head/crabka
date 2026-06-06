@@ -6,7 +6,7 @@ use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
-use crabka_schema_registry::config::RegistryConfig;
+use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
 use crabka_schema_registry::kafkastore::KafkaStore;
 use crabka_schema_registry::rest::{self, AppState};
 
@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| format!("http://{}", args.listen_addr)),
         group_id: args.group_id.clone(),
         leader_eligibility: args.leader_eligibility,
+        security: SecurityConfig::default(),
     };
     info!(
         listen = %args.listen_addr,

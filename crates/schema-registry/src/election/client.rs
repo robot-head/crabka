@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use crabka_client_core::Client;
+use crabka_client_core::{Client, ClientSecurity};
 use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
 use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
 use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
@@ -41,6 +41,9 @@ pub(super) struct ElectionClient {
     pub group_id: String,
     pub identity: SchemaRegistryIdentity,
     pub tx: watch::Sender<PrimaryState>,
+    /// SR-to-broker Kafka-client security for the coordinator connections.
+    /// `None` = plaintext (the pre-security default).
+    pub security: Option<ClientSecurity>,
 }
 
 impl ElectionClient {
@@ -130,6 +133,7 @@ impl ElectionClient {
         let boot = Client::builder()
             .bootstrap(self.bootstrap.clone())
             .client_id(self.client_id.clone())
+            .maybe_security(self.security.clone())
             .build()
             .await?;
         let fc = boot
@@ -152,6 +156,7 @@ impl ElectionClient {
         Ok(Client::builder()
             .bootstrap(format!("{host}:{port}"))
             .client_id(self.client_id.clone())
+            .maybe_security(self.security.clone())
             .build()
             .await?)
     }
