@@ -81,6 +81,17 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
     if let Some(ct) = parts.headers.get(header::CONTENT_TYPE) {
         rb = rb.header(header::CONTENT_TYPE, ct);
     }
+    // Carry the caller's credential to the primary so its `auth_layer` re-derives
+    // the same `Principal`. Without this, a forwarded request reaches the primary
+    // credential-less and is rejected with `401` whenever `require_auth` is on.
+    // The primary's `authz_layer` still skips re-authorization via `FORWARD_HEADER`
+    // (it was already authorized at this ingress node); forwarding the credential
+    // simply preserves the principal end-to-end, mirroring the gateway's
+    // on-behalf-of forward. SECURITY: this trusts the inter-node link, which the
+    // `FORWARD_HEADER` authz-skip already does — operators MUST isolate it.
+    if let Some(authz) = parts.headers.get(header::AUTHORIZATION) {
+        rb = rb.header(header::AUTHORIZATION, authz);
+    }
     rb = rb.header(FORWARD_HEADER, &fwd.node_id);
     match rb.send().await {
         Ok(resp) => {
