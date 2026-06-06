@@ -1548,6 +1548,7 @@ dependencies = [
  "hyper-util",
  "jsonpath-rust",
  "pbjson",
+ "prometheus-client",
  "prost",
  "reqwest 0.13.4",
  "rustls",
@@ -1873,6 +1874,20 @@ dependencies = [
  "tokio",
  "tracing",
  "x509-parser",
+]
+
+[[package]]
+name = "crabka-telemetry"
+version = "0.2.0"
+dependencies = [
+ "assert2",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "thiserror",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]
