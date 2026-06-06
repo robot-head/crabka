@@ -402,6 +402,39 @@ mod tests {
         }
     }
 
+    /// The `_schemas` SCHEMA value `references` byte-shape must match cp 7.4.0
+    /// exactly (pinned against tests/fixtures/references/records.json): the
+    /// `references` array sits after `id`/`schemaType` and before `schema`, each
+    /// ref is `{name,subject,version}`, and it is omitted entirely when empty.
+    #[test]
+    fn references_value_shape_matches_cp_capture() {
+        // Avro referrer (no schemaType) — records.json offset 3.
+        let refs = vec![SchemaReference {
+            name: "Money".into(),
+            subject: "av_money".into(),
+            version: 1,
+        }];
+        let (_k, v) = encode_schema("av_order", 1, 2, SchemaType::Avro, "S", &refs);
+        assert_eq!(
+            String::from_utf8(v).unwrap(),
+            r#"{"subject":"av_order","version":1,"id":2,"references":[{"name":"Money","subject":"av_money","version":1}],"schema":"S","deleted":false}"#
+        );
+        // Protobuf referrer (schemaType before references) — records.json offset 5.
+        let pbrefs = vec![SchemaReference {
+            name: "money.proto".into(),
+            subject: "pb_money".into(),
+            version: 1,
+        }];
+        let (_k, pv) = encode_schema("pb_order", 1, 4, SchemaType::Protobuf, "S", &pbrefs);
+        assert_eq!(
+            String::from_utf8(pv).unwrap(),
+            r#"{"subject":"pb_order","version":1,"id":4,"schemaType":"PROTOBUF","references":[{"name":"money.proto","subject":"pb_money","version":1}],"schema":"S","deleted":false}"#
+        );
+        // Empty references → field omitted (cp base schemas carry no `references`).
+        let (_k, ev) = encode_schema("av_money", 1, 1, SchemaType::Avro, "S", &[]);
+        assert!(!String::from_utf8(ev).unwrap().contains("references"));
+    }
+
     #[test]
     fn clear_subjects_and_delete_subject_tombstone_are_noop() {
         let cs = br#"{"keytype":"CLEAR_SUBJECTS","subject":"s","magic":0}"#;
