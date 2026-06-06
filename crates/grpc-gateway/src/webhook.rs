@@ -30,6 +30,7 @@ use crabka_security::{AuthMethod, Principal};
 use serde::Serialize;
 use serde_json::Value;
 
+use crate::codec::{CodecError, SchemaSelector};
 use crate::error::GatewayError;
 use crate::handlers::anonymous_principal;
 use crate::metrics::metrics;
@@ -164,12 +165,26 @@ pub async fn webhook_handler(
         None => None,
     };
 
-    // 7. Build the transport-agnostic record.
+    // 7. Build the transport-agnostic record. When the endpoint is bound to a
+    //    schema subject, produce the body as a STRUCTURED record: the produce
+    //    path's codec validates+serializes the JSON against the subject's schema
+    //    and Confluent-frames it. Without a registry (`RawCodec`), the structured
+    //    body's JSON passes through unchanged, so this is inert.
+    let body_structured = cfg.schema_subject.as_ref().map(|subject| {
+        (
+            body.clone(),
+            SchemaSelector {
+                subject: Some(subject.clone()),
+                id: None,
+                format: cfg.schema_format,
+            },
+        )
+    });
     let rec = GatewayRecord {
         topic: cfg.target_topic.clone(),
         key: key.map(|k| Bytes::from(k.into_bytes())),
         value: body,
-        body_structured: None,
+        body_structured,
         headers: vec![],
         partition: None,
         timestamp_ms: None,
@@ -279,9 +294,19 @@ async fn produce_and_respond(
             metrics().record_webhook_in("unauthorized");
             StatusCode::FORBIDDEN.into_response()
         }
-        Err(GatewayError::Unavailable) => {
+        // Broker or registry unreachable: retriable ⇒ 503 so the caller can
+        // resend. Both variants map to the same status and metric label.
+        Err(GatewayError::Unavailable | GatewayError::Codec(CodecError::Registry(_))) => {
             metrics().record_webhook_in("error");
             StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+        // A schema-bound body that fails validation/serialization/framing is the
+        // caller's fault: the same bytes will never validate ⇒ 400 (not retried).
+        Err(GatewayError::Codec(
+            CodecError::Validate(_) | CodecError::Serialize(_) | CodecError::Framing(_),
+        )) => {
+            metrics().record_webhook_in("bad_request");
+            StatusCode::BAD_REQUEST.into_response()
         }
         Err(_) => {
             metrics().record_webhook_in("error");
@@ -313,10 +338,29 @@ mod tests {
 
     use super::*;
     use crate::authz::GatewayAuthz;
-    use crate::codec::RawCodec;
+    use crate::codec::{Decoded, EncodeBody, RawCodec, RecordCodec};
     use crate::config::GatewayConfig;
     use crate::produce::ProduceCore;
     use crate::webhook_config::{CompiledWebhook, SigEncoding};
+
+    /// A codec stub that rejects every `encode` with a fixed [`CodecError`],
+    /// exercising the produce path's error→HTTP-status mapping without a
+    /// registry. `decode` is unused on the inbound path.
+    struct FailingEncodeCodec(fn(String) -> CodecError);
+
+    #[async_trait::async_trait]
+    impl RecordCodec for FailingEncodeCodec {
+        async fn encode(&self, _topic: &str, _body: EncodeBody) -> Result<Bytes, CodecError> {
+            Err((self.0)("stub rejects".to_string()))
+        }
+        async fn decode(&self, _topic: &str, value: Bytes) -> Result<Decoded, CodecError> {
+            Ok(Decoded {
+                value,
+                schema: None,
+                json: None,
+            })
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -348,6 +392,8 @@ mod tests {
             idempotency_source: None,
             key_source: None,
             max_body_bytes: 1024 * 1024,
+            schema_subject: None,
+            schema_format: SchemaFormat::Json,
         }
     }
 
@@ -365,6 +411,8 @@ mod tests {
             idempotency_source: None,
             key_source: None,
             max_body_bytes: 64,
+            schema_subject: None,
+            schema_format: SchemaFormat::Json,
         }
     }
 
@@ -374,9 +422,19 @@ mod tests {
     /// work without a running broker. Tests that exercise the produce path see
     /// a 500/503 transport error, which is the expected assertion in those cases.
     async fn state_with_webhooks(webhooks: HashMap<String, CompiledWebhook>) -> Arc<AppState> {
+        state_with_webhooks_codec(webhooks, Arc::new(RawCodec)).await
+    }
+
+    /// As [`state_with_webhooks`] but with a caller-supplied codec wired into the
+    /// `ProduceCore` (so a codec that errors on `encode` exercises the produce
+    /// path's error→status mapping).
+    async fn state_with_webhooks_codec(
+        webhooks: HashMap<String, CompiledWebhook>,
+        codec: Arc<dyn RecordCodec>,
+    ) -> Arc<AppState> {
         // Port 1 gives immediate ECONNREFUSED so produce-path tests complete
         // quickly; the route-guard tests return before ever calling produce.
-        let produce = ProduceCore::new_for_test("127.0.0.1:1", "webhook-test", Arc::new(RawCodec))
+        let produce = ProduceCore::new_for_test("127.0.0.1:1", "webhook-test", codec)
             .await
             .expect("non-idempotent producer builds without connecting");
         Arc::new(AppState {
@@ -533,6 +591,101 @@ mod tests {
             .unwrap();
         let resp = oneshot(app, req).await;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // -----------------------------------------------------------------------
+    // webhook_handler: schema-bound (structured) body
+    // -----------------------------------------------------------------------
+
+    /// A schema-bound endpoint builds a STRUCTURED `GatewayRecord`: the body
+    /// bytes plus a `SchemaSelector` carrying the configured subject/format.
+    #[test]
+    fn schema_bound_builds_structured_record() {
+        let mut cfg = unsigned_cfg("orders");
+        cfg.schema_subject = Some("orders-value".to_string());
+        cfg.schema_format = SchemaFormat::Avro;
+
+        // Mirror the construction in `webhook_handler` step 7.
+        let body = Bytes::from_static(br#"{"id":1}"#);
+        let body_structured = cfg.schema_subject.as_ref().map(|subject| {
+            (
+                body.clone(),
+                SchemaSelector {
+                    subject: Some(subject.clone()),
+                    id: None,
+                    format: cfg.schema_format,
+                },
+            )
+        });
+
+        let (json, sel) = body_structured.expect("schema_subject ⇒ structured body");
+        assert_eq!(json, body, "structured body carries the raw request bytes");
+        assert_eq!(sel.subject.as_deref(), Some("orders-value"));
+        assert_eq!(sel.id, None);
+        assert_eq!(sel.format, SchemaFormat::Avro);
+    }
+
+    /// With `RawCodec` (no registry) a schema-bound endpoint is inert: the
+    /// structured body's JSON passes through unchanged, so the request reaches
+    /// the produce layer and fails with the transport error (no broker) — i.e.
+    /// the schema binding did not reject the payload.
+    #[tokio::test]
+    async fn schema_bound_raw_codec_passes_through_to_produce() {
+        let mut cfg = unsigned_cfg("orders");
+        cfg.max_body_bytes = 1024;
+        cfg.schema_subject = Some("orders-value".to_string());
+        let state = state_with_webhooks(make_webhook("orders", cfg)).await;
+        let app = webhook_router(state);
+        let req = Request::post("/v1/webhooks/orders")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"id":1}"#))
+            .unwrap();
+        let resp = oneshot(app, req).await;
+        // RawCodec did NOT reject ⇒ produce was attempted ⇒ transport failure
+        // (ECONNREFUSED at 127.0.0.1:1) maps to 500/503, never 400.
+        assert!(
+            resp.status() == StatusCode::INTERNAL_SERVER_ERROR
+                || resp.status() == StatusCode::SERVICE_UNAVAILABLE,
+            "RawCodec passthrough must reach produce, got {}",
+            resp.status()
+        );
+    }
+
+    /// A codec that rejects `encode` with `CodecError::Validate` (the
+    /// registry's response to a body that fails schema validation) maps to
+    /// HTTP 400.
+    #[tokio::test]
+    async fn schema_validation_failure_returns_400() {
+        let mut cfg = unsigned_cfg("orders");
+        cfg.max_body_bytes = 1024;
+        cfg.schema_subject = Some("orders-value".to_string());
+        let codec = Arc::new(FailingEncodeCodec(CodecError::Validate));
+        let state = state_with_webhooks_codec(make_webhook("orders", cfg), codec).await;
+        let app = webhook_router(state);
+        let req = Request::post("/v1/webhooks/orders")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"id":"not-an-int"}"#))
+            .unwrap();
+        let resp = oneshot(app, req).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// A codec that fails with `CodecError::Registry` (registry unreachable)
+    /// maps to HTTP 503 (retriable), distinct from a 400 validation failure.
+    #[tokio::test]
+    async fn schema_registry_unavailable_returns_503() {
+        let mut cfg = unsigned_cfg("orders");
+        cfg.max_body_bytes = 1024;
+        cfg.schema_subject = Some("orders-value".to_string());
+        let codec = Arc::new(FailingEncodeCodec(CodecError::Registry));
+        let state = state_with_webhooks_codec(make_webhook("orders", cfg), codec).await;
+        let app = webhook_router(state);
+        let req = Request::post("/v1/webhooks/orders")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"id":1}"#))
+            .unwrap();
+        let resp = oneshot(app, req).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     // -----------------------------------------------------------------------
