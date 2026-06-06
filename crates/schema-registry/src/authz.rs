@@ -37,18 +37,27 @@ const KAFKA_CLUSTER: &str = "kafka-cluster";
 /// cluster-global endpoints map to `ResourceType::Cluster` named
 /// [`KAFKA_CLUSTER`].
 // One arm per REST endpoint keeps this a readable routing table; several
-// distinct paths legitimately map to the same (Cluster, Describe) decision, so
+// distinct paths/methods legitimately map to the same decision (e.g. multiple
+// reads -> (Cluster, Read); PUT and DELETE on /mode/{subject} both -> Alter), so
 // `match_same_arms` (which would coalesce them and drop the per-path comments)
 // is intentionally allowed here.
 #[allow(clippy::match_same_arms)]
 #[must_use]
 pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String, AclOperation)> {
-    // Split into non-empty segments. The subject segment is taken raw (the vast
-    // majority of subjects are unencoded; `percent-encoding` is not a workspace
-    // dependency, so we do not decode here).
+    // Split into non-empty segments.
     let seg: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
-    let topic = |name: &str, op| Some((ResourceType::Topic, name.to_string(), op));
+    // Percent-decode a subject segment before using it as the resource name. The
+    // handlers receive the subject via axum `Path<String>`, which percent-decodes
+    // it (e.g. `foo%2Fbar` -> `foo/bar`); authz MUST evaluate the same resource,
+    // or an `Allow Topic:foo/bar` over-denies and a `Deny Topic:foo/bar` is
+    // evadable via the encoded form.
+    let topic = |seg: &str, op| {
+        let name = percent_encoding::percent_decode_str(seg)
+            .decode_utf8_lossy()
+            .into_owned();
+        Some((ResourceType::Topic, name, op))
+    };
     let cluster = |op| Some((ResourceType::Cluster, KAFKA_CLUSTER.to_string(), op));
 
     match seg.as_slice() {
@@ -62,10 +71,13 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
             Method::DELETE => topic(subject, AclOperation::Delete),
             _ => None,
         },
+        // GET /subjects/{subject}/versions — list the version numbers (read).
         // POST /subjects/{subject}/versions — register a new schema version.
-        ["subjects", subject, "versions"] if method == Method::POST => {
-            topic(subject, AclOperation::Write)
-        }
+        ["subjects", subject, "versions"] => match *method {
+            Method::GET => topic(subject, AclOperation::Read),
+            Method::POST => topic(subject, AclOperation::Write),
+            _ => None,
+        },
         // GET /subjects/{subject}/versions/{version} — read a version.
         // DELETE /subjects/{subject}/versions/{version} — delete a version.
         ["subjects", subject, "versions", _version] => match *method {
@@ -97,10 +109,20 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
         },
 
         // ---- /mode ... ----------------------------------------------------
-        // Global mode.
-        ["mode"] if method == Method::GET => cluster(AclOperation::Describe),
-        // Per-subject mode override; DELETE clears it (a mutation → Alter).
-        ["mode", subject] if method == Method::DELETE => topic(subject, AclOperation::Alter),
+        // Global mode (mirrors /config: PUT = Alter, GET = Describe).
+        ["mode"] => match *method {
+            Method::PUT => cluster(AclOperation::Alter),
+            Method::GET => cluster(AclOperation::Describe),
+            _ => None,
+        },
+        // Per-subject mode override (mirrors /config/{subject}); PUT sets and
+        // DELETE clears it (both mutations → Alter), GET reads → Describe.
+        ["mode", subject] => match *method {
+            Method::PUT => topic(subject, AclOperation::Alter),
+            Method::DELETE => topic(subject, AclOperation::Alter),
+            Method::GET => topic(subject, AclOperation::Describe),
+            _ => None,
+        },
 
         // ---- /compatibility ... -------------------------------------------
         // Test a candidate schema against an existing version (read-only).
@@ -113,6 +135,8 @@ pub fn authz_target(method: &Method, path: &str) -> Option<(ResourceType, String
         ["schemas", "types"] if method == Method::GET => cluster(AclOperation::Describe),
         // GET /schemas/ids/{id} and GET /schemas — read schemas by id / list all.
         ["schemas", "ids", _] | ["schemas"] if method == Method::GET => cluster(AclOperation::Read),
+        // GET /schemas/ids/{id}/versions — subjects/versions using a schema id.
+        ["schemas", "ids", _, "versions"] if method == Method::GET => cluster(AclOperation::Read),
 
         // Root, health, and anything unrecognized carry no authz requirement.
         _ => None,
@@ -266,6 +290,12 @@ pub async fn authz_layer(
     req: Request,
     next: Next,
 ) -> Response {
+    // SECURITY: a request carrying the inter-node forward header skips authz — the
+    // ingress node already authorized it. This trusts the inter-node link: a CLIENT
+    // that sets `X-Forwarded-For-Registry` directly bypasses authz on this node.
+    // Operators MUST isolate the inter-node forwarding link (network policy /
+    // inter-node mTLS) so external clients cannot reach it. (Approved design; see
+    // the slice-6 security spec "Interaction with slice-5 forwarding".)
     if req
         .headers()
         .contains_key(crate::rest::forward::FORWARD_HEADER)
@@ -468,6 +498,58 @@ mod tests {
                 "kafka-cluster".to_string(),
                 AclOperation::Describe
             ))
+        );
+    }
+
+    #[test]
+    fn put_global_mode_is_alter_cluster() {
+        assert_eq!(
+            t("PUT", "/mode"),
+            Some((
+                ResourceType::Cluster,
+                "kafka-cluster".into(),
+                AclOperation::Alter
+            ))
+        );
+    }
+
+    #[test]
+    fn subject_mode_put_is_alter_get_is_describe() {
+        assert_eq!(
+            t("PUT", "/mode/s"),
+            Some((ResourceType::Topic, "s".into(), AclOperation::Alter))
+        );
+        assert_eq!(
+            t("GET", "/mode/s"),
+            Some((ResourceType::Topic, "s".into(), AclOperation::Describe))
+        );
+    }
+
+    #[test]
+    fn list_versions_is_read_topic() {
+        assert_eq!(
+            t("GET", "/subjects/s/versions"),
+            Some((ResourceType::Topic, "s".into(), AclOperation::Read))
+        );
+    }
+
+    #[test]
+    fn schemas_id_versions_is_read_cluster() {
+        assert_eq!(
+            t("GET", "/schemas/ids/1/versions"),
+            Some((
+                ResourceType::Cluster,
+                "kafka-cluster".into(),
+                AclOperation::Read
+            ))
+        );
+    }
+
+    #[test]
+    fn subject_is_percent_decoded() {
+        assert_eq!(
+            t("POST", "/subjects/foo%2Fbar/versions"),
+            Some((ResourceType::Topic, "foo/bar".into(), AclOperation::Write))
         );
     }
 

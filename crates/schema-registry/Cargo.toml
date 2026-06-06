@@ -41,6 +41,7 @@ tracing-subscriber.workspace = true
 clap = { workspace = true, features = ["env", "derive"] }
 uuid = { workspace = true }
 parking_lot = { workspace = true }
+percent-encoding = "2"
 apache-avro = { workspace = true }
 protox-parse = "0.9"
 prost-reflect = { workspace = true }

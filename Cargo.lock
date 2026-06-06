@@ -1853,6 +1853,7 @@ dependencies = [
  "crabka-security",
  "hex",
  "parking_lot",
+ "percent-encoding",
  "prost-reflect",
  "protox-parse",
  "reqwest 0.13.4",
