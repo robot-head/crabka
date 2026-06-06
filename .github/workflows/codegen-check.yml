@@ -1,16 +1,35 @@
 name: codegen-check
 on:
   pull_request:
+    paths:
+      - 'crates/protocol/**'
+      - 'crates/protocol-codegen/**'
+      - 'deploy/crds/**'
+      - 'tools/regenerate.sh'
+      - 'tools/regen-crds.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/codegen-check.yml'
   push:
     branches: [main]
+    paths:
+      - 'crates/protocol/**'
+      - 'crates/protocol-codegen/**'
+      - 'deploy/crds/**'
+      - 'tools/regenerate.sh'
+      - 'tools/regen-crds.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/codegen-check.yml'
 
 concurrency:
   group: codegen-check-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   drift:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

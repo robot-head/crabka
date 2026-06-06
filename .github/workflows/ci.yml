@@ -4,13 +4,162 @@ on:
   push:
     branches: [main]
 
-# Cancel superseded PR runs; let pushes to main run to completion.
+# Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+      jvm_differential: ${{ steps.filter.outputs.jvm_differential }}
+      cargo_deny: ${{ steps.filter.outputs.cargo_deny }}
+      helm_lint: ${{ steps.filter.outputs.helm_lint }}
+      client_core: ${{ steps.filter.outputs.client_core }}
+      log: ${{ steps.filter.outputs.log }}
+      client_consumer: ${{ steps.filter.outputs.client_consumer }}
+      client_streams: ${{ steps.filter.outputs.client_streams }}
+      grpc_gateway: ${{ steps.filter.outputs.grpc_gateway }}
+      schema_registry: ${{ steps.filter.outputs.schema_registry }}
+      broker_jvm: ${{ steps.filter.outputs.broker_jvm }}
+      broker_integration: ${{ steps.filter.outputs.broker_integration }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dorny/paths-filter@v4
+        id: filter
+        with:
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/ci.yml'
+            jvm_differential:
+              - 'crates/protocol/**'
+              - 'crates/protocol-codegen/**'
+              - 'crates/records-legacy/**'
+              - 'crates/metadata/**'
+              - 'crates/broker/**'
+              - 'tools/oracle/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            cargo_deny:
+              - 'deny.toml'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'crates/**/Cargo.toml'
+              - '.github/workflows/ci.yml'
+            helm_lint:
+              - 'charts/**'
+              - 'deploy/**'
+              - 'crates/operator/**'
+              - 'crates/rebalancer/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            client_core:
+              - 'crates/client-core/**'
+              - 'crates/protocol/**'
+              - 'crates/compression/**'
+              - 'crates/security/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            log:
+              - 'crates/log/**'
+              - 'crates/compression/**'
+              - 'crates/records-legacy/**'
+              - 'crates/remote-storage/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            client_consumer:
+              - 'crates/client-consumer/**'
+              - 'crates/client-core/**'
+              - 'crates/protocol/**'
+              - 'crates/metadata/**'
+              - 'crates/compression/**'
+              - 'crates/security/**'
+              - 'crates/broker/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            client_streams:
+              - 'crates/client-streams/**'
+              - 'crates/client-core/**'
+              - 'crates/protocol/**'
+              - 'crates/metadata/**'
+              - 'crates/compression/**'
+              - 'crates/security/**'
+              - 'crates/broker/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            grpc_gateway:
+              - 'crates/grpc-gateway/**'
+              - 'crates/client-consumer/**'
+              - 'crates/client-producer/**'
+              - 'crates/client-core/**'
+              - 'crates/protocol/**'
+              - 'crates/metadata/**'
+              - 'crates/compression/**'
+              - 'crates/security/**'
+              - 'crates/broker/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            schema_registry:
+              - 'crates/schema-registry/**'
+              - 'crates/client-admin/**'
+              - 'crates/client-core/**'
+              - 'crates/protocol/**'
+              - 'crates/metadata/**'
+              - 'crates/compression/**'
+              - 'crates/security/**'
+              - 'crates/broker/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            broker_jvm:
+              - 'crates/authz/**'
+              - 'crates/broker/**'
+              - 'crates/compression/**'
+              - 'crates/log/**'
+              - 'crates/metadata/**'
+              - 'crates/protocol/**'
+              - 'crates/raft/**'
+              - 'crates/records-legacy/**'
+              - 'crates/remote-storage/**'
+              - 'crates/security/**'
+              - 'tools/oracle/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+            broker_integration:
+              - 'crates/authz/**'
+              - 'crates/broker/**'
+              - 'crates/client-admin/**'
+              - 'crates/compression/**'
+              - 'crates/log/**'
+              - 'crates/metadata/**'
+              - 'crates/protocol/**'
+              - 'crates/raft/**'
+              - 'crates/records-legacy/**'
+              - 'crates/remote-storage/**'
+              - 'crates/security/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
+
   rust:
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -51,7 +200,10 @@ jobs:
           fail_ci_if_error: false
 
   jvm-differential:
+    needs: changes
+    if: ${{ needs.changes.outputs.jvm_differential == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -95,7 +247,10 @@ jobs:
           fail_ci_if_error: false
 
   cargo-deny:
+    needs: changes
+    if: ${{ needs.changes.outputs.cargo_deny == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -103,7 +258,10 @@ jobs:
           command: check advisories bans sources licenses
 
   helm-lint:
+    needs: changes
+    if: ${{ needs.changes.outputs.helm_lint == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: azure/setup-helm@v5
@@ -138,7 +296,10 @@ jobs:
 
   # Real-broker integration smoke test against testcontainers-spawned Kafka.
   client-core-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.client_core == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -163,7 +324,10 @@ jobs:
   # crabka-log integration: docker cp a JVM-produced partition dir out of
   # a Kafka container and re-read it with crabka-log.
   log-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.log == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -190,7 +354,10 @@ jobs:
   # `--lib --bins` walk never descends into these `tests/` binaries, so the
   # consumer's close()/coordinator-lifecycle code is only exercised here.
   client-consumer-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.client_consumer == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -218,7 +385,10 @@ jobs:
   # never descends into these `tests/` binaries, so StreamsMembership::start and
   # the heartbeat-coordinator lifecycle are only exercised here.
   client-streams-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.client_streams == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -246,7 +416,10 @@ jobs:
   # `tests/` binaries, so the `unit` flag's `--lib --bins` walk never covers it.
   # (The Docker-only `jvm_differential` test is `#[ignore]` and skipped here.)
   grpc-gateway-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.grpc_gateway == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -275,7 +448,10 @@ jobs:
   # `--lib --bins` walk never descends into `tests/` binaries, so this job
   # provides the only line-level coverage for those paths.
   schema-registry-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.schema_registry == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -308,13 +484,15 @@ jobs:
   # made a hung test waste >1.5h before surfacing. If a single test stalls
   # for more than half an hour something is wedged — fail fast and re-run.
   broker-jvm-acceptance:
+    needs: changes
+    if: ${{ needs.changes.outputs.broker_jvm == 'true' }}
     runs-on: ubuntu-latest
-    # 60-minute budget: the suite grew (next-gen consumer-group + KIP-595
+    # 45-minute budget: the suite grew (next-gen consumer-group + KIP-595
     # multi-voter cases) and runs serially under `llvm-cov` instrumentation
     # (~2x slowdown), so the ~25 docker-driven acceptance tests no longer fit
     # the old 30-minute wall. A genuinely wedged test still surfaces well
-    # inside an hour. (Per-test stalls are caught by the in-test timeouts.)
-    timeout-minutes: 60
+    # inside the CI cap. (Per-test stalls are caught by the in-test timeouts.)
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       # llvm-cov profraw + two preloaded Kafka images + the cargo target dir
@@ -369,6 +547,8 @@ jobs:
   # in the patch view. Two `--no-report` runs share a profraw set,
   # then a single `report` produces the lcov.
   broker-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.broker_integration == 'true' }}
     runs-on: ubuntu-latest
     # 30-minute budget: this runs the whole non-ignored broker suite (plus
     # client-admin) twice under llvm-cov instrumentation (~2-3x slowdown), and
@@ -411,3 +591,26 @@ jobs:
           disable_search: true
           flags: broker-integration
           fail_ci_if_error: false
+
+  gatekeeper:
+    needs:
+      - changes
+      - rust
+      - jvm-differential
+      - cargo-deny
+      - helm-lint
+      - client-core-integration
+      - log-integration
+      - client-consumer-integration
+      - client-streams-integration
+      - grpc-gateway-integration
+      - schema-registry-integration
+      - broker-jvm-acceptance
+      - broker-integration
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check dynamic CI job results
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
