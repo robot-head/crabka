@@ -23,6 +23,7 @@ path = "src/bin/broker.rs"
 
 [dependencies]
 crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
+crabka-telemetry = { version = "0.2", path = "../telemetry" }
 crabka-records-legacy = { version = "0.2", path = "../records-legacy" }
 crabka-log = { version = "0.2", path = "../log" }
 crabka-compression = { version = "0.2", path = "../compression", default-features = false }
@@ -51,11 +52,7 @@ regex = { workspace = true }
 tracing = { workspace = true }
 rustix = { workspace = true }
 tracing-subscriber = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry_sdk = { workspace = true }
-opentelemetry-otlp = { workspace = true }
 opentelemetry-proto = { workspace = true }
-tracing-opentelemetry = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 uuid = { workspace = true }
 futures-util = { workspace = true }
