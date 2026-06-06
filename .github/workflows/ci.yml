@@ -4,13 +4,14 @@ on:
   push:
     branches: [main]
 
-# Cancel superseded PR runs; let pushes to main run to completion.
+# Cancel superseded runs on the same ref.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   rust:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +53,7 @@ jobs:
 
   jvm-differential:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -96,6 +98,7 @@ jobs:
 
   cargo-deny:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -104,6 +107,7 @@ jobs:
 
   helm-lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: azure/setup-helm@v5
@@ -139,6 +143,7 @@ jobs:
   # Real-broker integration smoke test against testcontainers-spawned Kafka.
   client-core-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -164,6 +169,7 @@ jobs:
   # a Kafka container and re-read it with crabka-log.
   log-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -191,6 +197,7 @@ jobs:
   # consumer's close()/coordinator-lifecycle code is only exercised here.
   client-consumer-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -219,6 +226,7 @@ jobs:
   # the heartbeat-coordinator lifecycle are only exercised here.
   client-streams-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -247,6 +255,7 @@ jobs:
   # (The Docker-only `jvm_differential` test is `#[ignore]` and skipped here.)
   grpc-gateway-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -276,6 +285,7 @@ jobs:
   # provides the only line-level coverage for those paths.
   schema-registry-integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -309,12 +319,12 @@ jobs:
   # for more than half an hour something is wedged — fail fast and re-run.
   broker-jvm-acceptance:
     runs-on: ubuntu-latest
-    # 60-minute budget: the suite grew (next-gen consumer-group + KIP-595
+    # 45-minute budget: the suite grew (next-gen consumer-group + KIP-595
     # multi-voter cases) and runs serially under `llvm-cov` instrumentation
     # (~2x slowdown), so the ~25 docker-driven acceptance tests no longer fit
     # the old 30-minute wall. A genuinely wedged test still surfaces well
-    # inside an hour. (Per-test stalls are caught by the in-test timeouts.)
-    timeout-minutes: 60
+    # inside the CI cap. (Per-test stalls are caught by the in-test timeouts.)
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
       # llvm-cov profraw + two preloaded Kafka images + the cargo target dir

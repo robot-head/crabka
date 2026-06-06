@@ -7,10 +7,10 @@ on:
 permissions:
   contents: read
 
-# Cancel superseded PR runs; let pushes to main run to completion.
+# Cancel superseded runs on the same ref.
 concurrency:
   group: operator-e2e-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   # Detect whether the PR touches operator-relevant code. Used to gate

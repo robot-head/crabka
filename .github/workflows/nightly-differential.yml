@@ -10,10 +10,14 @@ on:
 # var is a no-op today. The nightly run on --release is still valuable as a
 # regression check on the optimised build against the JVM oracle.
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   nightly:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 45
     env:
       PROPTEST_CASES: "256"
     steps:

@@ -15,12 +15,13 @@ permissions:
 
 concurrency:
   group: codspeed-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   codspeed:
     name: Run benchmarks
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
 
