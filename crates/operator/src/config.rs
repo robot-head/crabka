@@ -40,6 +40,10 @@ pub struct OperatorConfig {
     /// Default broker image used when `Kafka.spec.image` is unset.
     #[arg(long, env = "DEFAULT_BROKER_IMAGE")]
     pub default_broker_image: Option<String>,
+
+    /// Default gateway image used when `KafkaGrpcGateway.spec.image` is unset.
+    #[arg(long, env = "DEFAULT_GATEWAY_IMAGE")]
+    pub default_gateway_image: Option<String>,
 }
 
 impl OperatorConfig {

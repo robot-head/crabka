@@ -9,6 +9,12 @@ brokerImage:
   tag: "0.1.1"
   pullPolicy: IfNotPresent
 
+# Default gateway image used when a KafkaGrpcGateway CR doesn't override it.
+gatewayImage:
+  repository: ghcr.io/robot-head/crabka-grpc-gateway
+  tag: ""
+  pullPolicy: IfNotPresent
+
 replicaCount: 1
 
 watchNamespaces: []  # empty = cluster-scoped

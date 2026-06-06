@@ -30,6 +30,7 @@ spec:
           args:
             - run
             - --default-broker-image={{ .Values.brokerImage.repository }}:{{ .Values.brokerImage.tag }}
+            - --default-gateway-image={{ .Values.gatewayImage.repository }}:{{ .Values.gatewayImage.tag | default .Chart.AppVersion }}
             {{- if .Values.watchNamespaces }}
             - --watch-namespaces={{ join "," .Values.watchNamespaces }}
             {{- end }}

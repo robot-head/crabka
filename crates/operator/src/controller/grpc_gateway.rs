@@ -980,13 +980,12 @@ pub async fn reconcile(
     let bootstrap = format!("{parent_name}-broker-headless.{ns}.svc.cluster.local:9092");
     let broker_sni = format!("{parent_name}-broker-headless.{ns}.svc.cluster.local");
 
-    // Image: spec override > built-in default. Task 5 threads the operator's
-    // `--default-gateway-image` (`ctx.config.default_gateway_image`) in between
-    // these two once that config field exists.
+    // Image: spec override > operator default (--default-gateway-image) > built-in default.
     let image = gw
         .spec
         .image
         .clone()
+        .or_else(|| ctx.config.default_gateway_image.clone())
         .unwrap_or_else(|| DEFAULT_GATEWAY_IMAGE.into());
 
     let dep = deployment(&gw, &parent_name, &image, &bootstrap, &broker_sni)?;
