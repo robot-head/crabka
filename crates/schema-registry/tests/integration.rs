@@ -820,3 +820,135 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
 fn av(n: &str) -> String {
     format!("{{\"type\":\"record\",\"name\":\"{n}\",\"fields\":[]}}")
 }
+
+// ── REST: delete + mode + lookup endpoints (slice 3) ─────────────────────────
+
+fn req_delete(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_delete_version_lifecycle_and_deleted_query() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    // NONE compat so two distinct schemas register as v1+v2 (isolates delete lifecycle)
+    assert_eq!(
+        app.clone()
+            .oneshot(req_put("/config/av", r#"{"compatibility":"NONE"}"#))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let body = |n: &str| format!(r#"{{"schema":{:?}}}"#, av(n));
+    register(&app, "av", &body("A")).await;
+    register(&app, "av", &body("B")).await;
+    // soft-delete v1 → body is the bare int 1
+    let r = app
+        .clone()
+        .oneshot(req_delete("/subjects/av/versions/1"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(body_json(r).await, serde_json::json!(1));
+    assert_eq!(
+        get_json(&app, "/subjects/av/versions").await,
+        serde_json::json!([2])
+    );
+    assert_eq!(
+        get_json(&app, "/subjects/av/versions?deleted=true").await,
+        serde_json::json!([1, 2])
+    );
+    // GET v1 hidden, ?deleted shows it
+    let hidden = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/subjects/av/versions/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
+    let shown = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/subjects/av/versions/1?deleted=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(shown.status(), StatusCode::OK);
+    // permanent
+    let p = app
+        .clone()
+        .oneshot(req_delete("/subjects/av/versions/1?permanent=true"))
+        .await
+        .unwrap();
+    assert_eq!(p.status(), StatusCode::OK);
+    let gone = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/subjects/av/versions/1?deleted=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::NOT_FOUND);
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_mode_and_lookup_endpoints() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    register(&app, "a", &format!(r#"{{"schema":{:?}}}"#, av("A"))).await;
+    // GET /mode default
+    assert_eq!(
+        get_json(&app, "/mode").await,
+        serde_json::json!({"mode": "READWRITE"})
+    );
+    // PUT /mode/a READONLY then register → 422 / 42205
+    let pm = app
+        .clone()
+        .oneshot(req_put("/mode/a", r#"{"mode":"READONLY"}"#))
+        .await
+        .unwrap();
+    assert_eq!(pm.status(), StatusCode::OK);
+    let blocked = app
+        .clone()
+        .oneshot(req_post(
+            "/subjects/a/versions",
+            &format!(r#"{{"schema":{:?}}}"#, av("B")),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(blocked).await["error_code"], 42205);
+    // GET /mode/a → READONLY ; DELETE clears
+    assert_eq!(
+        get_json(&app, "/mode/a").await,
+        serde_json::json!({"mode": "READONLY"})
+    );
+    let dm = app.clone().oneshot(req_delete("/mode/a")).await.unwrap();
+    assert_eq!(dm.status(), StatusCode::OK);
+    // lookups
+    let ids = get_json(&app, "/schemas/ids/1/versions").await;
+    assert_eq!(ids, serde_json::json!([{"subject": "a", "version": 1}]));
+    let all = get_json(&app, "/schemas").await;
+    assert_eq!(all.as_array().unwrap().len(), 1);
+    let refby = get_json(&app, "/subjects/a/versions/1/referencedby").await;
+    assert_eq!(refby, serde_json::json!([]));
+    cancel.cancel();
+    broker.shutdown().await;
+}
