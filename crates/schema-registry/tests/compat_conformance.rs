@@ -2,8 +2,9 @@
 
 //! No-Docker conformance gate: drive the compatibility engine directly against
 //! the golden cp-schema-registry verdicts in `tests/fixtures/compat/*_matrix.json`
-//! (21 Avro cases, 88 Protobuf cases, all captured from real cp 7.4.0). cp is the
-//! authority; this gate fails if our engine diverges from a single verdict.
+//! (21 Avro cases, 88 Protobuf cases, 92 JSON cases, all captured from real
+//! cp 7.4.0). cp is the authority; this gate fails if our engine diverges from a
+//! single verdict.
 
 use crabka_schema_registry::compat;
 use crabka_schema_registry::format::SchemaType;
@@ -83,4 +84,14 @@ fn engine_matches_cp_protobuf_verdicts() {
         SchemaType::Protobuf,
         &known_divergences,
     );
+}
+
+#[test]
+fn engine_matches_cp_json_verdicts() {
+    // (case, level) pairs where our JSON Schema engine is KNOWN to diverge from
+    // cp-schema-registry, with the reason documented in
+    // `tests/fixtures/compat/README.md`. Empty == we match cp on all 92 cases.
+    let known_divergences: std::collections::HashMap<(&str, &str), bool> =
+        std::collections::HashMap::from([]);
+    assert_matrix_matches_cp("json_matrix.json", SchemaType::Json, &known_divergences);
 }

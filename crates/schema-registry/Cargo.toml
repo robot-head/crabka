@@ -67,3 +67,6 @@ name = "compat_conformance"
 
 [[test]]
 name = "capture_protobuf_fixtures"
+
+[[test]]
+name = "capture_json_fixtures"
