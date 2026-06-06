@@ -283,7 +283,7 @@ async fn our_store_decodes_cp_schema_registry_records() {
     // The reader is live and will have caught up by the time we poll.
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let subjects = store.store.read().subjects();
+        let subjects = store.store.read().subjects(false);
         if subjects.contains(&"av-value".to_string()) {
             eprintln!("INTEROP store has av-value after replay");
             break;

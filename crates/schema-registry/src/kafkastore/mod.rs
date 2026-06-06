@@ -66,7 +66,11 @@ impl KafkaStore {
         // Normalise before dedup check: `syntax = "proto3"; message ...`
         // needs to deduplicate against the same proto in normalised form.
         let schema = &format::normalized_storage_form(ty, schema)?;
-        if let Some(existing) = self.store.read().find_under_subject(subject, ty, schema) {
+        if let Some(existing) = self
+            .store
+            .read()
+            .find_under_subject(subject, ty, schema, false)
+        {
             return Ok(existing);
         }
         // Slice 2: enforce compatibility against existing versions per the

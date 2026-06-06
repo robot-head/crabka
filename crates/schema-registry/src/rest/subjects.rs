@@ -44,13 +44,15 @@ pub async fn lookup(
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
     let s = st.store.store.read();
-    if s.versions(&subject).is_none() {
+    if s.versions(&subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    let Some(found) = s.find_under_subject(&subject, ty, &req.schema) else {
+    let Some(found) = s.find_under_subject(&subject, ty, &req.schema, false) else {
         return Err(SrError::SchemaNotFound);
     };
-    let (sty, schema) = s.schema_by_id(found.id).ok_or(SrError::SchemaNotFound)?;
+    let (sty, schema) = s
+        .schema_by_id(found.id, false)
+        .ok_or(SrError::SchemaNotFound)?;
     let mut m = serde_json::Map::new();
     m.insert("subject".into(), subject.into());
     m.insert("id".into(), found.id.into());
@@ -66,7 +68,7 @@ pub async fn lookup(
 // axum requires async handlers even when the body is synchronous.
 #[allow(clippy::unused_async)]
 pub async fn list(State(st): State<AppState>) -> Response {
-    ok_json(&st.store.store.read().subjects())
+    ok_json(&st.store.store.read().subjects(false))
 }
 
 /// GET /subjects/{subject}/versions
@@ -78,7 +80,7 @@ pub async fn versions(
         .store
         .store
         .read()
-        .versions(&subject)
+        .versions(&subject, false)
         .ok_or_else(|| SrError::SubjectNotFound(subject.clone()))?;
     Ok(ok_json(&vs))
 }
@@ -100,10 +102,12 @@ pub async fn get_version(
 ) -> Result<Response, SrError> {
     let want = parse_version(&version)?;
     let s = st.store.store.read();
-    if s.versions(&subject).is_none() {
+    if s.versions(&subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    let (id, ver, ty, schema) = s.version(&subject, want).ok_or(SrError::VersionNotFound)?;
+    let (id, ver, ty, schema) = s
+        .version(&subject, want, false)
+        .ok_or(SrError::VersionNotFound)?;
     let mut m = serde_json::Map::new();
     m.insert("subject".into(), subject.into());
     m.insert("version".into(), ver.into());
@@ -122,9 +126,11 @@ pub async fn get_version_schema(
 ) -> Result<Response, SrError> {
     let want = parse_version(&version)?;
     let s = st.store.store.read();
-    if s.versions(&subject).is_none() {
+    if s.versions(&subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    let (_, _, _, schema) = s.version(&subject, want).ok_or(SrError::VersionNotFound)?;
+    let (_, _, _, schema) = s
+        .version(&subject, want, false)
+        .ok_or(SrError::VersionNotFound)?;
     Ok(ok_raw(schema))
 }

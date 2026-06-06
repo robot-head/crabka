@@ -42,4 +42,22 @@ impl SchemaWriter {
             .map_err(|_| anyhow::anyhow!("producer dropped ack"))??;
         Ok(meta.offset)
     }
+
+    /// Produce a tombstone (null value) for `key`; return the assigned offset.
+    /// Used for permanent deletes and mode-clears (compaction reclaims the key).
+    pub async fn produce_tombstone(&self, key: Vec<u8>) -> anyhow::Result<i64> {
+        let rx = self
+            .producer
+            .send(ProducerRecord {
+                topic: self.topic.clone(),
+                key: Some(Bytes::from(key)),
+                value: None,
+                ..Default::default()
+            })
+            .await;
+        let meta = rx
+            .await
+            .map_err(|_| anyhow::anyhow!("producer dropped ack"))??;
+        Ok(meta.offset)
+    }
 }

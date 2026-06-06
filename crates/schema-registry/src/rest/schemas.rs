@@ -15,7 +15,7 @@ pub async fn get_by_id(
         .store
         .store
         .read()
-        .schema_by_id(id)
+        .schema_by_id(id, false)
         .ok_or(SrError::SchemaNotFound)?;
     let mut body = serde_json::Map::new();
     if let Some(t) = ty.wire_name() {

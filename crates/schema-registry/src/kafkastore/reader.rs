@@ -26,6 +26,28 @@ pub struct StoreReader {
 pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
     match rec {
         SchemaRecord::Schema(k, v) => store.write().apply_schema(&k, &v),
+        SchemaRecord::Tombstone(k) => {
+            store
+                .write()
+                .permanent_delete_version(&k.subject, k.version);
+        }
+        SchemaRecord::DeleteSubject(k, _v) => {
+            store.write().soft_delete_subject(&k.subject);
+        }
+        SchemaRecord::Mode(k, Some(v)) => {
+            let mut s = store.write();
+            match k.subject {
+                Some(subj) => s.set_subject_mode(&subj, v.mode),
+                None => s.set_global_mode(v.mode),
+            }
+        }
+        SchemaRecord::Mode(k, None) => {
+            let mut s = store.write();
+            match k.subject {
+                Some(subj) => s.clear_subject_mode(&subj),
+                None => s.clear_global_mode(),
+            }
+        }
         SchemaRecord::Config(k, v) => {
             let mut s = store.write();
             match k.subject {
@@ -126,9 +148,9 @@ mod tests {
         };
         apply_record(&store, SchemaRecord::Schema(k, v));
         apply_record(&store, SchemaRecord::Noop);
-        assert_eq!(store.read().versions("av-value").unwrap(), vec![1]);
+        assert_eq!(store.read().versions("av-value", false).unwrap(), vec![1]);
         assert_eq!(
-            store.read().schema_by_id(1).unwrap().1,
+            store.read().schema_by_id(1, false).unwrap().1,
             "{\"type\":\"int\"}"
         );
     }
