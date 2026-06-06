@@ -36,6 +36,8 @@ jobs:
             operator:
               - 'crates/operator/**'
               - 'crates/broker/**'
+              - 'crates/schema-registry/**'
+              - 'charts/**'
               - 'deploy/**'
               - 'helm/**'
               - 'packaging/melange/**'
@@ -78,7 +80,7 @@ jobs:
         run: |
           mkdir -p packages
           melange keygen
-          for recipe in crabka-operator crabka-broker; do
+          for recipe in crabka-operator crabka-broker crabka-schema-registry; do
             melange build "packaging/melange/${recipe}.yaml" \
               --source-dir . \
               --signing-key melange.rsa \
@@ -99,6 +101,7 @@ jobs:
           path: |
             crabka-operator.tar
             crabka-broker.tar
+            crabka-schema-registry.tar
           retention-days: 1
           if-no-files-found: error
 
