@@ -1,1 +1,231 @@
-//! The `"sr"` group-membership loop (implemented in Task 2).
+//! The `"sr"` group-membership loop: `FindCoordinator` → `JoinGroup` → (leader:
+//! select+assign) `SyncGroup` → `Heartbeat`, rejoining on rebalance and leaving
+//! on shutdown. Generic over `protocol_type` + opaque JSON metadata/assignment;
+//! models `client-consumer`'s coordinator loop without consumer semantics.
+
+use std::time::Duration;
+
+use bytes::Bytes;
+use crabka_client_core::Client;
+use crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest;
+use crabka_protocol::owned::heartbeat_request::HeartbeatRequest;
+use crabka_protocol::owned::join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol};
+use crabka_protocol::owned::leave_group_request::{LeaveGroupRequest, MemberIdentity};
+use crabka_protocol::owned::sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment};
+use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
+
+use super::PrimaryState;
+use super::protocol::{
+    SR_PROTOCOL_NAME, SR_PROTOCOL_TYPE, SchemaRegistryGroupAssignment, SchemaRegistryIdentity,
+    select_master,
+};
+
+// Kafka group error codes (defined locally to avoid a crabka-broker dependency).
+const NONE: i16 = 0;
+const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
+const COORDINATOR_NOT_AVAILABLE: i16 = 15;
+const NOT_COORDINATOR: i16 = 16;
+const ILLEGAL_GENERATION: i16 = 22;
+const UNKNOWN_MEMBER_ID: i16 = 25;
+const REBALANCE_IN_PROGRESS: i16 = 27;
+const MEMBER_ID_REQUIRED: i16 = 79;
+
+const SESSION_TIMEOUT_MS: i32 = 10_000;
+const REBALANCE_TIMEOUT_MS: i32 = 30_000;
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+
+pub(super) struct ElectionClient {
+    pub bootstrap: String,
+    pub client_id: String,
+    pub group_id: String,
+    pub identity: SchemaRegistryIdentity,
+    pub tx: watch::Sender<PrimaryState>,
+}
+
+impl ElectionClient {
+    /// Run until `cancel` fires. Reconnects + rejoins on any error; publishes
+    /// `PrimaryState` after each successful `SyncGroup`.
+    pub async fn run(self, cancel: CancellationToken) {
+        let mut member_id = String::new();
+        loop {
+            if cancel.is_cancelled() {
+                return;
+            }
+            match self.connect_and_run(&mut member_id, &cancel).await {
+                Ok(()) => return, // cancelled mid-loop
+                Err(e) => {
+                    tracing::warn!(error = %e, "election: reconnecting after error");
+                    // unknown member on reconnect: rejoin from scratch
+                    member_id.clear();
+                    let _ = self.tx.send(PrimaryState::default());
+                    if cancel
+                        .run_until_cancelled(tokio::time::sleep(Duration::from_millis(500)))
+                        .await
+                        .is_none()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn connect_and_run(
+        &self,
+        member_id: &mut String,
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<()> {
+        let coord = self.connect_coordinator().await?;
+        loop {
+            let (generation, assignment) = self.join_and_sync(&coord, member_id).await?;
+            self.publish(&assignment);
+            // heartbeat until a rebalance/error forces a rejoin
+            loop {
+                tokio::select! {
+                    () = cancel.cancelled() => {
+                        let _ = coord.send(LeaveGroupRequest {
+                            group_id: self.group_id.clone(),
+                            member_id: member_id.clone(),
+                            members: vec![MemberIdentity { member_id: member_id.clone(), ..Default::default() }],
+                            ..Default::default()
+                        }).await;
+                        return Ok(());
+                    }
+                    () = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+                        let hb = coord.send(HeartbeatRequest {
+                            group_id: self.group_id.clone(),
+                            generation_id: generation,
+                            member_id: member_id.clone(),
+                            ..Default::default()
+                        }).await?;
+                        match hb.error_code {
+                            NONE => {} // healthy: keep heartbeating
+                            REBALANCE_IN_PROGRESS | ILLEGAL_GENERATION => break, // rejoin (keep member_id)
+                            UNKNOWN_MEMBER_ID => { member_id.clear(); break; }   // rejoin from scratch
+                            NOT_COORDINATOR | COORDINATOR_NOT_AVAILABLE | COORDINATOR_LOAD_IN_PROGRESS => {
+                                anyhow::bail!("heartbeat coordinator error {}", hb.error_code); // reconnect
+                            }
+                            other => { tracing::debug!(code = other, "heartbeat transient"); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `FindCoordinator` via the bootstrap, then a `Client` to the coordinator.
+    async fn connect_coordinator(&self) -> anyhow::Result<Client> {
+        let boot = Client::builder()
+            .bootstrap(self.bootstrap.clone())
+            .client_id(self.client_id.clone())
+            .build()
+            .await?;
+        let fc = boot
+            .send(FindCoordinatorRequest {
+                key: self.group_id.clone(),
+                key_type: 0, // group
+                coordinator_keys: vec![self.group_id.clone()],
+                ..Default::default()
+            })
+            .await?;
+        let (host, port) = fc
+            .coordinators
+            .first()
+            .map(|c| (c.host.clone(), c.port))
+            .filter(|(h, _)| !h.is_empty())
+            .or_else(|| (!fc.host.is_empty()).then(|| (fc.host.clone(), fc.port)))
+            .ok_or_else(|| anyhow::anyhow!("no coordinator for group {}", self.group_id))?;
+        Ok(Client::builder()
+            .bootstrap(format!("{host}:{port}"))
+            .client_id(self.client_id.clone())
+            .build()
+            .await?)
+    }
+
+    /// `JoinGroup` (+ `MEMBER_ID_REQUIRED` two-step) then `SyncGroup`; as
+    /// leader, select the master and assign it to every member. Returns
+    /// (generation, our assignment bytes).
+    async fn join_and_sync(
+        &self,
+        coord: &Client,
+        member_id: &mut String,
+    ) -> anyhow::Result<(i32, Bytes)> {
+        let metadata = Bytes::from(serde_json::to_vec(&self.identity)?);
+        let mk_join = |mid: String| JoinGroupRequest {
+            group_id: self.group_id.clone(),
+            session_timeout_ms: SESSION_TIMEOUT_MS,
+            rebalance_timeout_ms: REBALANCE_TIMEOUT_MS,
+            member_id: mid,
+            protocol_type: SR_PROTOCOL_TYPE.to_string(),
+            protocols: vec![JoinGroupRequestProtocol {
+                name: SR_PROTOCOL_NAME.to_string(),
+                metadata: metadata.clone(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut jg = coord.send(mk_join(member_id.clone())).await?;
+        if jg.error_code == MEMBER_ID_REQUIRED {
+            member_id.clone_from(&jg.member_id);
+            jg = coord.send(mk_join(member_id.clone())).await?;
+        }
+        if jg.error_code != NONE {
+            anyhow::bail!("JoinGroup error {}", jg.error_code);
+        }
+        member_id.clone_from(&jg.member_id);
+        let assignments = if jg.leader == jg.member_id {
+            // leader: decode identities, select master, assign to all members
+            let ids: Vec<(String, SchemaRegistryIdentity)> = jg
+                .members
+                .iter()
+                .filter_map(|m| {
+                    serde_json::from_slice(&m.metadata)
+                        .ok()
+                        .map(|id| (m.member_id.clone(), id))
+                })
+                .collect();
+            let master = select_master(&ids);
+            let assign = Bytes::from(serde_json::to_vec(&SchemaRegistryGroupAssignment {
+                error: 0,
+                master,
+            })?);
+            jg.members
+                .iter()
+                .map(|m| SyncGroupRequestAssignment {
+                    member_id: m.member_id.clone(),
+                    assignment: assign.clone(),
+                    ..Default::default()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let sg = coord
+            .send(SyncGroupRequest {
+                group_id: self.group_id.clone(),
+                generation_id: jg.generation_id,
+                member_id: member_id.clone(),
+                protocol_type: Some(SR_PROTOCOL_TYPE.to_string()),
+                protocol_name: jg.protocol_name.clone(),
+                assignments,
+                ..Default::default()
+            })
+            .await?;
+        if sg.error_code != NONE {
+            anyhow::bail!("SyncGroup error {}", sg.error_code);
+        }
+        Ok((jg.generation_id, sg.assignment))
+    }
+
+    fn publish(&self, assignment: &Bytes) {
+        let parsed: SchemaRegistryGroupAssignment =
+            serde_json::from_slice(assignment).unwrap_or_default();
+        let is_primary = parsed.master.as_ref() == Some(&self.identity);
+        let primary_url = parsed.master.as_ref().map(SchemaRegistryIdentity::url);
+        let _ = self.tx.send(PrimaryState {
+            is_primary,
+            primary_url,
+        });
+    }
+}
