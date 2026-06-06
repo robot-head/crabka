@@ -42,9 +42,7 @@ pub(crate) struct Graph {
     /// schedule stamps its first fire from. Init `i64::MIN`.
     pub stream_time: i64,
     /// Last wall-clock value seen; the base a wall-clock schedule stamps its
-    /// first fire from. Init `0`.
-    // read by wall-clock punctuation firing in T6
-    #[allow(dead_code)]
+    /// first fire from. Init `0`. Read by [`Graph::punctuate_wall_clock`].
     pub wall_clock: i64,
 }
 
@@ -180,6 +178,18 @@ impl Graph {
         self.punctuate(
             crate::processor::punctuation::PunctuationType::StreamTime,
             now,
+        )
+        .await
+    }
+
+    /// Fire all due `WALL_CLOCK_TIME` schedules at `now_ms` (each at most once).
+    /// Setting `self.wall_clock = now_ms` first means a `schedule()` called from
+    /// a punctuator (or a later `process`) stamps its base from the current clock.
+    pub async fn punctuate_wall_clock(&mut self, now_ms: i64) -> Result<(), ProcessorError> {
+        self.wall_clock = now_ms;
+        self.punctuate(
+            crate::processor::punctuation::PunctuationType::WallClockTime,
+            now_ms,
         )
         .await
     }

@@ -231,3 +231,181 @@ fn punctuator_reads_and_writes_store() {
         "store counter equals the number of stream-time fires"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Wall-clock punctuation (Task 6).
+//
+// Ground truth is the `=== wall ===` section of `behavior.json`: a wall-clock
+// schedule (interval 10) with the TTD mock clock starting at 0. The steps
+// `advanceWallClockTime(+3, +3, +4, +100)` bring the clock to `{3, 6, 10, 110}`
+// and fire the punctuator at `{10, 110}` — first-fire at `0 (clock in init) +
+// interval = 10`, no sub-interval fires (3, 6), and the +100 jump fires ONCE at
+// 110 (no catch-up to 20/30/…). The wall clock is independent of stream-time:
+// piping records advances stream-time only, and `advance_wall_clock_time`
+// advances wall-time only.
+// ---------------------------------------------------------------------------
+
+/// A processor that, in `init`, schedules `LoggingPunctuator` on `WALL_CLOCK_TIME`
+/// with the given interval, logging fired timestamps into a shared slot. Records
+/// pass through unchanged (they advance stream-time, never the wall clock).
+struct WallSchedulingProc {
+    fired: Arc<Mutex<Vec<i64>>>,
+    interval_ms: u64,
+}
+
+#[async_trait]
+impl Processor<String, i64, String, i64> for WallSchedulingProc {
+    async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>) {
+        ctx.schedule(
+            Duration::from_millis(self.interval_ms),
+            PunctuationType::WallClockTime,
+            LoggingPunctuator {
+                fired: self.fired.clone(),
+            },
+        );
+    }
+
+    async fn process(
+        &mut self,
+        ctx: &mut ProcessorContext<'_, '_, String, i64>,
+        r: Record<String, i64>,
+    ) {
+        ctx.forward(r);
+    }
+}
+
+/// Build `source("in") -> proc -> sink("out")` with `proc` scheduling a
+/// wall-clock punctuator (interval `interval_ms`). Returns the driver plus the
+/// shared fired-log. The wall fired-log is populated by `advance_wall_clock_time`,
+/// not by `pipe_input`.
+fn build_wall_driver(interval_ms: u64) -> (TopologyTestDriver, Arc<Mutex<Vec<i64>>>) {
+    let fired = Arc::new(Mutex::new(Vec::new()));
+
+    let mut t = Topology::new();
+    let src = t.add_source("in", ["in"], Consumed::with(StringSerde, I64Serde));
+    let proc_fired = fired.clone();
+    let proc = t.add_processor(
+        "proc",
+        move || WallSchedulingProc {
+            fired: proc_fired.clone(),
+            interval_ms,
+        },
+        [&src],
+    );
+    t.add_sink("out", "out", [&proc], Produced::with(StringSerde, I64Serde));
+
+    let driver = TopologyTestDriver::new(&t.build("app").unwrap()).unwrap();
+    (driver, fired)
+}
+
+#[test]
+fn wall_clock_fires_on_boundary_at_clock_value() {
+    // Mirrors the `=== wall ===` section of behavior.json. The mock clock starts
+    // at 0; init stamps first-fire at 0 + interval = 10. The advance steps bring
+    // the clock to {3, 6, 10, 110}; the punctuator fires at {10, 110} — value is
+    // the current clock, NOT the first advance value, and the +100 jump fires ONCE.
+    let (mut driver, fired) = build_wall_driver(10);
+
+    driver.advance_wall_clock_time(Duration::from_millis(3)); // clock 3 — no fire
+    driver.advance_wall_clock_time(Duration::from_millis(3)); // clock 6 — no fire
+    driver.advance_wall_clock_time(Duration::from_millis(4)); // clock 10 — fire 10
+    driver.advance_wall_clock_time(Duration::from_millis(100)); // clock 110 — fire 110
+
+    assert_eq!(
+        *fired.lock().unwrap(),
+        vec![10, 110],
+        "wall fired-log must equal the captured JVM sequence (first-fire at interval; +100 fires once)"
+    );
+
+    // The punctuator forwards each fired ts downstream; confirm {10, 110} surface
+    // via read_output (no pass-through records were piped here).
+    assert_eq!(drain_fires(&mut driver), vec![10, 110]);
+}
+
+#[test]
+fn wall_clock_catch_up_fires_once() {
+    // advance(10) fires at clock 10; advance(55) brings the clock to 65 and fires
+    // ONCE at 65 (the current clock), not at every 10ms boundary in between.
+    let (mut driver, fired) = build_wall_driver(10);
+
+    driver.advance_wall_clock_time(Duration::from_millis(10)); // clock 10 — fire 10
+    driver.advance_wall_clock_time(Duration::from_millis(55)); // clock 65 — single catch-up fire at 65
+
+    assert_eq!(*fired.lock().unwrap(), vec![10, 65]);
+}
+
+#[test]
+fn stream_and_wall_fire_independently() {
+    // ONE processor scheduling BOTH a stream-time and a wall-clock punctuator
+    // (interval 10 each), logging into two separate shared logs. Piping records
+    // advances stream-time only (STREAM log fires, WALL stays empty); advancing
+    // the wall clock advances wall-time only (WALL log fires, STREAM unchanged).
+    struct BothScheduler {
+        stream_log: Arc<Mutex<Vec<i64>>>,
+        wall_log: Arc<Mutex<Vec<i64>>>,
+    }
+    #[async_trait]
+    impl Processor<String, i64, String, i64> for BothScheduler {
+        async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>) {
+            ctx.schedule(
+                Duration::from_millis(10),
+                PunctuationType::StreamTime,
+                LoggingPunctuator {
+                    fired: self.stream_log.clone(),
+                },
+            );
+            ctx.schedule(
+                Duration::from_millis(10),
+                PunctuationType::WallClockTime,
+                LoggingPunctuator {
+                    fired: self.wall_log.clone(),
+                },
+            );
+        }
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, i64>,
+            r: Record<String, i64>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+
+    let stream_log = Arc::new(Mutex::new(Vec::new()));
+    let wall_log = Arc::new(Mutex::new(Vec::new()));
+
+    let mut t = Topology::new();
+    let src = t.add_source("in", ["in"], Consumed::with(StringSerde, I64Serde));
+    let s_log = stream_log.clone();
+    let w_log = wall_log.clone();
+    let proc = t.add_processor(
+        "proc",
+        move || BothScheduler {
+            stream_log: s_log.clone(),
+            wall_log: w_log.clone(),
+        },
+        [&src],
+    );
+    t.add_sink("out", "out", [&proc], Produced::with(StringSerde, I64Serde));
+    let mut driver = TopologyTestDriver::new(&t.build("app").unwrap()).unwrap();
+
+    // Pipe at stream-times {0, 10}: STREAM fires {0, 10}; WALL stays empty
+    // (piping doesn't advance the wall clock).
+    pipe_at(&mut driver, 0);
+    pipe_at(&mut driver, 10);
+    assert_eq!(*stream_log.lock().unwrap(), vec![0, 10]);
+    assert_eq!(
+        *wall_log.lock().unwrap(),
+        Vec::<i64>::new(),
+        "piping advances stream-time only — wall clock untouched"
+    );
+
+    // Advance the wall clock by 10: WALL fires {10}; STREAM unchanged.
+    driver.advance_wall_clock_time(Duration::from_millis(10));
+    assert_eq!(*wall_log.lock().unwrap(), vec![10]);
+    assert_eq!(
+        *stream_log.lock().unwrap(),
+        vec![0, 10],
+        "advancing the wall clock doesn't fire stream-time punctuators"
+    );
+}
