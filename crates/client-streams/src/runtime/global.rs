@@ -45,7 +45,6 @@ impl GlobalStateManager {
     /// Apply one consumed record into the named global store (raw bytes — the
     /// consumer's path). `value = None` deletes (tombstone).
     // Consumed by app wiring in T8b/T9.
-    #[allow(dead_code)]
     pub(crate) async fn apply(&self, store: &str, key: Bytes, value: Option<Bytes>) {
         let mut g = self.stores.lock().await;
         if let Some(s) = g.get_mut(store) {
@@ -81,14 +80,15 @@ impl GlobalStateManager {
     }
 
     /// The `(store_name, source_topic)` pairs the consumer must bootstrap.
-    // Consumed by the global consumer in T7.
+    // `bootstrap`/`poll_once` iterate `self.topics` directly; this accessor exists
+    // for the unit test only.
     #[allow(dead_code)]
     pub(crate) fn store_topics(&self) -> &HashMap<String, String> {
         &self.topics
     }
 
     /// Whether there are no global stores (the common case — skip the consumer).
-    // Consumed by the dispatch wiring in T8.
+    // The thread guards live-poll on `global_offsets.is_empty()`, not this; test-only.
     #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.topics.is_empty()
@@ -99,7 +99,6 @@ impl GlobalStateManager {
     /// per-`(topic, partition)` next-offset map so a live poll can resume. Blocks
     /// until every partition is drained.
     // Consumed by the app wiring in T8.
-    #[allow(dead_code)]
     pub(crate) async fn bootstrap(
         &self,
         fetcher: &dyn RecordFetcher,
@@ -150,7 +149,6 @@ impl GlobalStateManager {
     /// each `(topic, partition)` and apply them, advancing the offsets in place.
     /// Fetches one batch per partition (not to end-of-log); the caller repeats.
     // Consumed by the app wiring in T8.
-    #[allow(dead_code)]
     pub(crate) async fn poll_once(
         &self,
         fetcher: &dyn RecordFetcher,

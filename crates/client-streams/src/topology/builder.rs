@@ -1037,8 +1037,6 @@ impl BuiltTopology {
     /// which topic feeds each store. Invisible in the wire output.
     ///
     /// [`GlobalStateManager`]: crate::runtime::global::GlobalStateManager
-    // Consumed by the global consumer / dispatch wiring in T7/T8.
-    #[allow(dead_code)]
     pub(crate) fn global_store_topics(&self) -> HashMap<String, String> {
         self.global_store_topics.clone()
     }

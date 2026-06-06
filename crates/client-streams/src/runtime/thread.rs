@@ -28,6 +28,10 @@ pub(crate) struct StreamThread {
     /// Whether `globals` has been built + bootstrapped yet. Guards the one-time
     /// lazy build at the top of `apply_assignment`.
     globals_ready: bool,
+    /// Per-`(global topic, partition)` next-offset, seeded by the bootstrap read and
+    /// advanced by each `poll_all` live-update pass. Empty when the topology declares
+    /// no `GlobalKTable`.
+    global_offsets: std::collections::HashMap<(String, i32), i64>,
 }
 
 impl StreamThread {
@@ -43,6 +47,7 @@ impl StreamThread {
             application_id,
             globals: crate::runtime::global::GlobalStateManager::default(),
             globals_ready: false,
+            global_offsets: std::collections::HashMap::new(),
         }
     }
 
@@ -73,10 +78,10 @@ impl StreamThread {
                     &self.application_id,
                 )
                 .await;
-                // Bootstrap from all partitions BEFORE any task processes. The
-                // returned resume-offset map is ignored here (no live-poll loop —
-                // bootstrap-before-process is the required behavior).
-                self.globals.bootstrap(&*self.fetcher).await?;
+                // Bootstrap from all partitions BEFORE any task processes
+                // (bootstrap-before-process is the required behavior); the returned
+                // resume offsets seed the live-update poll in `poll_all`.
+                self.global_offsets = self.globals.bootstrap(&*self.fetcher).await?;
             }
             self.globals_ready = true;
         }
@@ -144,6 +149,14 @@ impl StreamThread {
         &mut self,
         fetcher: &dyn RecordFetcher,
     ) -> Result<(), StreamsClientError> {
+        // Apply any new global-topic records to the shared global store(s) before
+        // processing, so stream-globaltable joins see live updates (Kafka keeps the
+        // global store current after the initial bootstrap). No-op without globals.
+        if !self.global_offsets.is_empty() {
+            self.globals
+                .poll_once(fetcher, &mut self.global_offsets)
+                .await?;
+        }
         for task in self.tasks.values_mut() {
             task.process_once(fetcher).await?;
         }
