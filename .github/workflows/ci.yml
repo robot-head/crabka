@@ -591,3 +591,26 @@ jobs:
           disable_search: true
           flags: broker-integration
           fail_ci_if_error: false
+
+  gatekeeper:
+    needs:
+      - changes
+      - rust
+      - jvm-differential
+      - cargo-deny
+      - helm-lint
+      - client-core-integration
+      - log-integration
+      - client-consumer-integration
+      - client-streams-integration
+      - grpc-gateway-integration
+      - schema-registry-integration
+      - broker-jvm-acceptance
+      - broker-integration
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check dynamic CI job results
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1

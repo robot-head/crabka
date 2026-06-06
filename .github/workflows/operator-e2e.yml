@@ -4096,3 +4096,23 @@ jobs:
           path: /tmp/oauth-diag/
           retention-days: 14
           if-no-files-found: ignore
+
+  gatekeeper:
+    needs:
+      - changes
+      - build-images
+      - kind
+      - kind-network-policy
+      - kind-kafkatopic
+      - kind-listener-auth
+      - kind-kafkauser-delegation-token
+      - kind-opa-authorization
+      - kind-oauth
+      - kind-oauth-introspection
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check dynamic e2e job results
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
