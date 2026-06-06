@@ -13,7 +13,7 @@ use axum::routing::post;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::config::GatewayConfig;
+use crabka_grpc_gateway::config::{ClientAuthMode, GatewayConfig, TlsSettings};
 use crabka_grpc_gateway::dedup::DedupEngine;
 use crabka_grpc_gateway::dedup::store::DedupStore;
 use crabka_grpc_gateway::error::GatewayError;
@@ -214,6 +214,107 @@ async fn forward_handler_error_arm_returns_retriable() {
     assert!(
         result.error.unwrap().retriable,
         "Unavailable from produce_local must be retriable"
+    );
+
+    broker.shutdown().await;
+}
+
+/// The `/internal/v1/forward` gate: when `config.tls` is `Some` and NO
+/// principal extension is present (anonymous caller), the handler returns
+/// `403 FORBIDDEN` with `retriable: false` — before any broker interaction.
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_handler_rejects_anonymous_when_tls_enabled() {
+    // Consts before any statements (clippy::items_after_statements).
+    const N: u32 = 4;
+    const DEDUP: &str = "__crabka_grpc_dedup_fh_tls";
+
+    // Boot a real broker so ProduceCore::new can connect (gate fires before
+    // any broker round-trip, but ProduceCore::new requires the connection).
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let store = Arc::new(DedupStore::new(N));
+    let engine = Arc::new(DedupEngine::new(
+        &bootstrap,
+        "fh-tls",
+        "fh-tls-dedup",
+        DEDUP.into(),
+        N,
+        store,
+    ));
+    let produce = ProduceCore::new(&bootstrap, "fh-tls", Arc::new(RawCodec))
+        .await
+        .unwrap()
+        .with_dedup(engine);
+
+    // Dummy TlsSettings — the cert files don't exist, but the gate fires
+    // before any crypto work, so the paths are never read.
+    let tls = Some(TlsSettings {
+        cert_chain_path: "/nonexistent/cert.pem".into(),
+        private_key_path: "/nonexistent/key.pem".into(),
+        trust_roots_path: None,
+        client_ca_path: None,
+        client_auth: ClientAuthMode::Disabled,
+        reload_interval_secs: 30,
+    });
+
+    let state = Arc::new(AppState {
+        produce: Arc::new(produce),
+        config: Arc::new(GatewayConfig {
+            bootstrap: bootstrap.clone(),
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            client_id: "fh-tls".into(),
+            dedup_topic: DEDUP.into(),
+            dedup_partitions: N,
+            dedup_window_ms: 3_600_000,
+            dedup_txn_id_prefix: "fh-tls-dedup".into(),
+            advertised_addr: "127.0.0.1:0".into(),
+            membership_topic: "__crabka_grpc_gateway_membership_fh_tls".into(),
+            tls,
+        }),
+    });
+
+    let app = forward_router(state);
+
+    let fr = ForwardRecord {
+        topic: "t".into(),
+        key: None,
+        value: vec![1],
+        headers: vec![],
+        partition: None,
+        timestamp_ms: None,
+        idempotency_key: Some("k".into()),
+    };
+
+    // No principal extension on the request — anonymous caller.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/v1/forward")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&fr).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: ForwardResult = serde_json::from_slice(&bytes).unwrap();
+
+    // The gate returns an error with retriable: false — no broker round-trip.
+    assert!(result.error.is_some(), "expected an error in ForwardResult");
+    let err = result.error.unwrap();
+    assert!(
+        !err.retriable,
+        "anonymous-reject must be non-retriable (permanent auth failure)"
     );
 
     broker.shutdown().await;
