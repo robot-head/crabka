@@ -11,6 +11,7 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::dsl::builder::InternalStreamsBuilder;
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
@@ -28,6 +29,45 @@ use crate::dsl::processors::table::{
 use crate::processor::serde::Serde;
 use crate::topology::NodeHandle;
 
+/// A serde-carrying closure that registers a `SuppressBytesStore` for a `suppress`
+/// node during lowering. Attached to a `KTable` by the producing op (windowed/
+/// session aggregation or `builder.table`), which alone knows the concrete serdes.
+///
+/// Called as `factory(state, store_name, processor_name, logging)`: it registers
+/// the suppress store (with the captured serdes) under `store_name`, connected to
+/// `processor_name`, with the changelog gated by `logging`. Type-erased (the
+/// concrete `K`/`V`/serdes are baked into the closure) so the `KTable` field is
+/// non-generic. `Arc` + `Send + Sync` because the lowering thunk that clones it in
+/// is itself `Send` (the captured serdes are `Send + Sync`: the `Serde` supertrait).
+pub(crate) type SuppressStoreFactory = Arc<dyn Fn(&mut LowerState, &str, &str, bool) + Send + Sync>;
+
+/// Build a non-windowed [`SuppressStoreFactory`] from a table's key/value serdes
+/// (plain aggregations + `builder.table`). Registers a `SuppressBytesStore<K, V>`
+/// with the JVM 1-day default changelog retention. (Windowed/session aggregations
+/// use their own factories wrapping `TimeWindowedSerde`/`SessionWindowedSerde`.)
+pub(crate) fn kv_suppress_factory<K, V, KS, VS>(
+    key_serde: KS,
+    value_serde: VS,
+) -> SuppressStoreFactory
+where
+    K: Any + Send + Sync + Clone,
+    V: Any + Send + Clone,
+    KS: Serde<K> + Clone + 'static,
+    VS: Serde<V> + Clone + 'static,
+{
+    Arc::new(
+        move |state: &mut LowerState, store_name: &str, proc_name: &str, logging: bool| {
+            state.topology.add_suppress_store::<K, V, KS, VS>(
+                store_name.to_string(),
+                key_serde.clone(),
+                value_serde.clone(),
+                logging,
+                [proc_name.to_string()],
+            );
+        },
+    )
+}
+
 /// A changelog-backed table handle. `store_name` is the materialized store this
 /// table reads/writes (used to derive changelog topics + reuse the store in
 /// downstream materialized ops). `source_topic` is the Kafka topic this table
@@ -43,6 +83,10 @@ pub struct KTable<K, V> {
     /// For windowed tables: the upstream window's grace (suppress closes a window
     /// at `window.end + window_grace_ms`). `None` for non-windowed tables.
     window_grace_ms: Option<i64>,
+    /// Set by serde-carrying producers (aggregations, `builder.table`); read by
+    /// `suppress` to register its store with the right serdes. `None` on derived
+    /// tables whose value type changed (`map_values`) — `suppress` then panics.
+    suppress_store_factory: Option<SuppressStoreFactory>,
     _pd: PhantomData<fn() -> (K, V)>,
 }
 
@@ -59,6 +103,7 @@ impl<K, V> KTable<K, V> {
             store_name,
             source_topic,
             window_grace_ms: None,
+            suppress_store_factory: None,
             _pd: PhantomData,
         }
     }
@@ -82,6 +127,15 @@ impl<K, V> KTable<K, V> {
     #[must_use]
     pub(crate) fn with_window_grace(mut self, grace_ms: Option<i64>) -> Self {
         self.window_grace_ms = grace_ms;
+        self
+    }
+
+    /// Attach (or propagate) the serde-carrying suppress-store factory. Set by
+    /// aggregations / `builder.table`; propagated through value-preserving ops
+    /// (`filter`, `suppress` itself). Read by `suppress`.
+    #[must_use]
+    pub(crate) fn with_suppress_factory(mut self, factory: Option<SuppressStoreFactory>) -> Self {
+        self.suppress_store_factory = factory;
         self
     }
 }
@@ -234,6 +288,9 @@ where
         P: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,
     {
         let grace = self.window_grace_ms;
+        // filter preserves V → suppress can still register a store with the same
+        // serdes; propagate the factory.
+        let suppress_factory = self.suppress_store_factory.clone();
         let store_name = mint_table_store(&self.builder, &materialized, names::TABLE_FILTER);
         let crate::dsl::config::Materialized {
             key_serde,
@@ -278,7 +335,9 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None).with_window_grace(grace)
+        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
+            .with_window_grace(grace)
+            .with_suppress_factory(suppress_factory)
     }
 
     /// `join` (inner KTable-KTable join): for each key, the join row exists only
@@ -470,12 +529,17 @@ where
 
 impl<K, V> KTable<K, V>
 where
-    K: Any + Send + Sync + Clone + Eq + std::hash::Hash,
+    K: Any + Send + Sync + Clone,
     V: Any + Send + Clone,
 {
     /// `suppress(Suppressed)`: buffer updates and emit on a delay. `until_window_closes`
     /// (windowed tables) emits each window's final value once it closes;
     /// `until_time_limit` rate-limits any table to one update per key per wait.
+    ///
+    /// The buffer is a registered [`SuppressBytesStore`](crate::store::suppress_store)
+    /// — durable (changelog + restore) when `logging` is on. The serdes come from
+    /// the producing op's [`SuppressStoreFactory`]; calling `suppress` on a table
+    /// that changed its value type (`map_values`) panics (no serde factory).
     #[must_use]
     pub fn suppress(&self, suppressed: crate::dsl::suppress::Suppressed<K>) -> KTable<K, V> {
         let wait_ms = match suppressed.wait {
@@ -484,10 +548,22 @@ where
         };
         let buffer_time = suppressed.buffer_time;
         let max_records = suppressed.buffer.record_cap();
+        let max_bytes = suppressed.buffer.byte_cap();
         let emit_early = suppressed.buffer.is_emit_early();
+        let logging = suppressed.logging;
+        // The serde-carrying factory that registers the suppress store. Required:
+        // suppress needs the table's serdes to (de)serialize the buffered changes.
+        let factory = self.suppress_store_factory.clone().expect(
+            "suppress requires a serde-carrying KTable (a windowed/session aggregation \
+             or builder.table); a mapValues-derived view has no value serde for the buffer",
+        );
         let parent_id = self.node;
         let mut g = self.builder.borrow_mut();
         let name = g.new_processor_name(names::KTABLE_SUPPRESS);
+        // The JVM mints the buffer store via `newStoreName(SUPPRESS_NAME)` right after
+        // the processor name → `KTABLE-SUPPRESS-STATE-STORE-<index+1>` (consecutive).
+        let store_name = g.new_processor_name(names::KTABLE_SUPPRESS_STORE);
+        let store_for_thunk = store_name.clone();
         let id = g.graph.add(
             name.clone(),
             GraphNodeKind::TableProcessor { store_name: None },
@@ -496,25 +572,35 @@ where
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent =
                 NodeHandle::<K, Change<V>>::from_name(state.handle_name[&parent_id].clone());
+            let store_for_proc = store_for_thunk.clone();
             let h = state
                 .topology
                 .add_processor::<K, Change<V>, K, Change<V>, _, _, _>(
                     name.clone(),
                     move || {
                         crate::dsl::processors::suppress::KTableSuppressProcessor::<K, V>::new(
+                            store_for_proc.clone(),
                             wait_ms,
                             buffer_time,
                             max_records,
+                            max_bytes,
                             emit_early,
                         )
                     },
                     [parent],
                 );
-            state.handle_name.insert(id, h.name().to_string());
+            let proc_name = h.name().to_string();
+            // Register the suppress store (with the producer's serdes), connected to
+            // this processor; `logging` gates whether a changelog topic is emitted.
+            factory(state, &store_for_thunk, &proc_name, logging);
+            state.handle_name.insert(id, proc_name);
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, None, None)
+        // suppress preserves K/V → propagate the grace + factory so a downstream
+        // suppress/filter can register against the same serdes.
+        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
             .with_window_grace(self.window_grace_ms)
+            .with_suppress_factory(self.suppress_store_factory.clone())
     }
 }
 

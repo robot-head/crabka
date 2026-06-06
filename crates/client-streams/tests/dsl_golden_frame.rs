@@ -33,10 +33,9 @@ fn windowed_count_matches_jvm() {
     //     .toStream().to("out")
     //
     // No selectKey → no key change → no repartition. The aggregate store is a
-    // WINDOW store (auto-named, with the `count` name-burn), so its changelog gets
-    // cleanup.policy=compact,delete + retention.ms = 60_000 + 0 + 86_400_000 =
-    // 86_460_000. Store lands at index 1 (source=0, store=1): the burn consumes a
-    // later (wire-invisible) index. UNNAMED store → KSTREAM-AGGREGATE-STATE-STORE-0000000001.
+    // WINDOW store (auto-named), so its changelog gets cleanup.policy=compact,delete
+    // + retention.ms = 60_000 + 0 + 86_400_000 = 86_460_000. Store lands at index 1
+    // (source=0, store=1). UNNAMED store → KSTREAM-AGGREGATE-STATE-STORE-0000000001.
     let b = StreamsBuilder::new();
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .group_by_key(Grouped::with(StringSerde, StringSerde))
@@ -146,11 +145,39 @@ fn suppress_until_window_closes_matches_jvm() {
     use crabka_client_streams::{
         BufferConfig, Grouped, I64Serde, Materialized, Suppressed, TimeWindowedSerde, TimeWindows,
     };
-    // Mirrors Capture.java `suppressUntilWindowCloses()`. With logging disabled the
-    // suppress buffer adds no changelog → the wire is byte-identical to
+    // Mirrors Capture.java `suppressUntilWindowCloses()` (logging DISABLED). With the
+    // suppress buffer's changelog off it adds no topic → the wire is byte-identical to
     // windowed_count (the suppress processor is not wire-visible, and the aggregate
-    // store naming/counter is unperturbed). Pins that the suppress DSL introduces no
-    // spurious topic.
+    // store naming/counter is unperturbed). Pins that a logging-off suppress introduces
+    // no spurious topic. (Default logging is ON as of slice D — see fixture #14.)
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(60_000))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .suppress(
+            Suppressed::until_window_closes(BufferConfig::unbounded()).with_logging_disabled(),
+        )
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "suppress_until_window_closes");
+}
+
+#[test]
+fn suppress_until_window_closes_logged_matches_jvm() {
+    use crabka_client_streams::{
+        BufferConfig, Grouped, I64Serde, Materialized, Suppressed, TimeWindowedSerde, TimeWindows,
+    };
+    // Mirrors Capture.java `suppressUntilWindowClosesLogged()` — identical to the #13
+    // app but with the suppress buffer's changelog ENABLED (the slice-D default). The
+    // buffer's changelog topic now appears in the wire:
+    // `app-KTABLE-SUPPRESS-STATE-STORE-0000000004-changelog` (a plain compacted KV
+    // changelog). Pins the suppress store name (consecutive index after the processor)
+    // + the changelog config.
     let b = StreamsBuilder::new();
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .group_by_key(Grouped::with(StringSerde, StringSerde))
@@ -163,7 +190,7 @@ fn suppress_until_window_closes_matches_jvm() {
             Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
         );
     let wire = b.build_optimized("app").unwrap().to_wire();
-    assert_matches_fixture(&wire, "suppress_until_window_closes");
+    assert_matches_fixture(&wire, "suppress_until_window_closes_logged");
 }
 
 #[test]

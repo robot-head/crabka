@@ -1,0 +1,34 @@
+{
+  "epoch": 0,
+  "subtopologies": [
+    {
+      "subtopology_id": "0",
+      "source_topics": ["in"],
+      "source_topic_regex": [],
+      "repartition_sink_topics": [],
+      "repartition_source_topics": [],
+      "state_changelog_topics": [
+        {
+          "name": "app-KSTREAM-AGGREGATE-STATE-STORE-0000000001-changelog",
+          "partitions": 0,
+          "replication_factor": -1,
+          "topic_configs": [
+            { "key": "cleanup.policy", "value": "compact,delete" },
+            { "key": "message.timestamp.type", "value": "CreateTime" },
+            { "key": "retention.ms", "value": "86460000" }
+          ]
+        },
+        {
+          "name": "app-KTABLE-SUPPRESS-STATE-STORE-0000000004-changelog",
+          "partitions": 0,
+          "replication_factor": -1,
+          "topic_configs": [
+            { "key": "cleanup.policy", "value": "compact" },
+            { "key": "message.timestamp.type", "value": "CreateTime" }
+          ]
+        }
+      ],
+      "copartition_groups": []
+    }
+  ]
+}

@@ -73,6 +73,19 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::session::SessionStore<K, V>)
     }
 
+    /// Typed mutable access: downcast the erased store to the suppress store
+    /// of the requested types. `None` if absent or the types don't match.
+    pub(crate) fn get_suppress<K: Send + Sync + 'static, V: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::suppress_store::SuppressStore<K, V>> {
+        let store = self.stores.get_mut(name)?;
+        let concrete = store
+            .as_any_mut()
+            .downcast_mut::<crate::store::suppress_store::SuppressBytesStore<K, V>>()?;
+        Some(concrete as &mut dyn crate::store::suppress_store::SuppressStore<K, V>)
+    }
+
     /// Mutable erased access by name — the `StateStore` trait surface
     /// (`changelog_topic` / `take_changelog` / `apply_changelog` / `set_logging`) is
     /// available on the returned `&mut dyn StateStore`.

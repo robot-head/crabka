@@ -249,6 +249,10 @@ where
             logging,
             ..
         } = materialized;
+        let suppress_factory = crate::dsl::ktable::kv_suppress_factory::<K, VA, KS, VS>(
+            key_serde.clone(),
+            value_serde.clone(),
+        );
         let parent = self.parent;
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
@@ -307,6 +311,7 @@ where
 
         drop(g);
         KTable::new(Rc::clone(&self.builder), agg_id, Some(store_name), None)
+            .with_suppress_factory(Some(suppress_factory))
     }
 
     /// Record the (optional) repartition node + a `KStreamReduceProcessor`
@@ -328,6 +333,10 @@ where
             logging,
             ..
         } = materialized;
+        let suppress_factory = crate::dsl::ktable::kv_suppress_factory::<K, V, KS, VS>(
+            key_serde.clone(),
+            value_serde.clone(),
+        );
         let parent = self.parent;
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
@@ -381,6 +390,7 @@ where
 
         drop(g);
         KTable::new(Rc::clone(&self.builder), red_id, Some(store_name), None)
+            .with_suppress_factory(Some(suppress_factory))
     }
 
     /// If the upstream is key-changing, record a `Repartition` node

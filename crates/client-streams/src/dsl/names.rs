@@ -77,5 +77,9 @@ pub(crate) const KSTREAM_WINDOWED: &str = "KSTREAM-WINDOWED-";
 pub(crate) const KSTREAM_OUTERSHARED: &str = "KSTREAM-OUTERSHARED-";
 /// The JVM `KTableImpl.suppress` processor node prefix.
 pub(crate) const KTABLE_SUPPRESS: &str = "KTABLE-SUPPRESS-";
+/// The suppress buffer's store name prefix (JVM `newStoreName(SUPPRESS_NAME)` =
+/// `KTABLE-SUPPRESS-` + `STATE-STORE-` + index, minted right after the suppress
+/// processor name so the index is consecutive).
+pub(crate) const KTABLE_SUPPRESS_STORE: &str = "KTABLE-SUPPRESS-STATE-STORE-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";
