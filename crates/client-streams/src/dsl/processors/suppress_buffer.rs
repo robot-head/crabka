@@ -68,7 +68,6 @@ impl<K: Eq + Hash + Clone, V> TimeOrderedKeyValueBuffer<K, V> {
 
     /// Pop and return the single lowest-`(buffer_time, seq)` entry (used by
     /// emit-early overflow). `None` if empty.
-    #[allow(dead_code)] // wired in T2 (KTableSuppressProcessor::process)
     pub(crate) fn evict_oldest(&mut self) -> Option<(K, V, i64)> {
         let (&slot, _) = self.entries.iter().next()?;
         let entry = self.entries.remove(&slot).expect("slot present");
@@ -76,7 +75,6 @@ impl<K: Eq + Hash + Clone, V> TimeOrderedKeyValueBuffer<K, V> {
         Some((entry.key, entry.value, entry.record_ts))
     }
 
-    #[allow(dead_code)] // used by tests (and Slice B accounting)
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }

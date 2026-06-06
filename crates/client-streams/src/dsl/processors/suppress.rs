@@ -337,4 +337,67 @@ mod tests {
         }
         assert_eq!(buffer.len(), 2); // a@[0,10] and b@[0,10] emitted
     }
+
+    #[tokio::test]
+    async fn until_time_limit_newer_record_resets_timer() {
+        let mut stores = StoreRegistry::default();
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+        // Rate-limiter, wait 50: buffer_time = record ts (any key).
+        let mut proc =
+            KTableSuppressProcessor::<String, i64>::new(50, |_k: &String, ts| ts, None, false);
+
+        // "a"@10 buffers (old timer would fire at 10+50=60). "a"@40 replaces it,
+        // re-stamping buffer_time to 40 → new timer 90. "b"@60 advances stream-time
+        // to 60 (threshold 10): a@40 is NOT due, proving the old 60 timer was reset.
+        for (k, change, ts) in [
+            ("a", Change::update(None, 1), 10i64),
+            ("a", Change::update(Some(1), 2), 40),
+            ("b", Change::update(None, 1), 60),
+        ] {
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut d);
+            proc.process(&mut ctx, Record::new(Some(k.to_string()), change, ts))
+                .await;
+        }
+        assert!(
+            buffer.is_empty(),
+            "old timer (60) must not fire after the reset"
+        );
+
+        // stream-time 90 (threshold 40): a@40 is now due → emits the NEWER value (2).
+        {
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut d);
+            proc.process(
+                &mut ctx,
+                Record::new(Some("c".to_string()), Change::update(None, 1), 90),
+            )
+            .await;
+        }
+        assert_eq!(buffer.len(), 1);
+        let (_, rec) = buffer.pop_front().unwrap();
+        assert_eq!(rec.key.unwrap().downcast::<String>().unwrap().as_str(), "a");
+        // The newest value (2), not the stale 1 → the reset kept the latest update.
+        assert_eq!(rec.value.downcast::<Change<i64>>().unwrap().new, Some(2));
+    }
 }
