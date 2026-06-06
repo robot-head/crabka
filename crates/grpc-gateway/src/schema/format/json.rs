@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn validate_missing_required() {
-        let err = validate(SCHEMA, br#"{}"#).unwrap_err();
+        let err = validate(SCHEMA, br"{}").unwrap_err();
         assert!(matches!(err, CodecError::Validate(_)));
     }
 
@@ -118,6 +118,6 @@ mod tests {
 
     #[test]
     fn deserialize_rejects_invalid() {
-        assert!(deserialize(SCHEMA, br#"{}"#).is_err());
+        assert!(deserialize(SCHEMA, br"{}").is_err());
     }
 }
