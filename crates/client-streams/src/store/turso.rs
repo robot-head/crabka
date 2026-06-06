@@ -14,6 +14,14 @@ fn blob(v: turso::Value) -> Vec<u8> {
     }
 }
 
+// `COUNT(*)` and other integer columns arrive as `Value::Integer`.
+fn integer(v: turso::Value) -> i64 {
+    match v {
+        turso::Value::Integer(n) => n,
+        other => panic!("expected INTEGER column, got {other:?}"),
+    }
+}
+
 pub(crate) struct TursoBytes {
     conn: Connection,
 }
@@ -90,6 +98,36 @@ impl ByteKeyValueStore for TursoBytes {
             out.push((Bytes::from(k), Bytes::from(v)));
         }
         out
+    }
+
+    async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
+        let mut rows = self
+            .conn
+            .query("SELECT k, v FROM kv ORDER BY k", ())
+            .await
+            .expect("turso scan_all");
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.expect("turso scan_all row") {
+            let k = blob(row.get_value(0).expect("k"));
+            let v = blob(row.get_value(1).expect("v"));
+            out.push((Bytes::from(k), Bytes::from(v)));
+        }
+        out
+    }
+
+    async fn approx_len(&self) -> u64 {
+        let mut rows = self
+            .conn
+            .query("SELECT COUNT(*) FROM kv", ())
+            .await
+            .expect("turso approx_len");
+        let row = rows
+            .next()
+            .await
+            .expect("turso approx_len row")
+            .expect("count row present");
+        // `COUNT(*)` is non-negative; the fallback never triggers.
+        u64::try_from(integer(row.get_value(0).expect("count"))).unwrap_or(0)
     }
 }
 

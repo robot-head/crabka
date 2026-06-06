@@ -19,6 +19,10 @@ pub(crate) trait ByteKeyValueStore: Send + Sync {
     async fn delete(&mut self, key: &[u8]) -> Option<Bytes>;
     #[allow(dead_code)] // used by 4d-ii window store
     async fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, Bytes)>;
+    /// Every entry in ascending memcmp key order (for `all()` / IQ full scans).
+    async fn scan_all(&self) -> Vec<(Bytes, Bytes)>;
+    /// Entry count (exact for in-memory; `approximateNumEntries` for IQ).
+    async fn approx_len(&self) -> u64;
 }
 
 /// In-memory backend over a `BTreeMap` (ordered → serves `range`).
@@ -45,6 +49,15 @@ impl ByteKeyValueStore for InMemoryBytes {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
+    async fn scan_all(&self) -> Vec<(Bytes, Bytes)> {
+        self.map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+    async fn approx_len(&self) -> u64 {
+        self.map.len() as u64
+    }
 }
 
 #[cfg(test)]
@@ -67,5 +80,23 @@ mod tests {
         check!(r[0].1 == Bytes::from_static(b"a")); // ordered
         check!(s.delete(&[1, 0]).await == Some(Bytes::from_static(b"a")));
         check!(s.get(&[1, 0]).await == None);
+    }
+
+    #[tokio::test]
+    async fn scan_all_and_len_inmemory() {
+        let mut s = InMemoryBytes::default();
+        s.put(Bytes::from_static(b"b"), Bytes::from_static(b"2"))
+            .await;
+        s.put(Bytes::from_static(b"a"), Bytes::from_static(b"1"))
+            .await;
+        let all = s.scan_all().await;
+        assert_eq!(
+            all,
+            vec![
+                (Bytes::from_static(b"a"), Bytes::from_static(b"1")),
+                (Bytes::from_static(b"b"), Bytes::from_static(b"2")),
+            ]
+        );
+        assert_eq!(s.approx_len().await, 2);
     }
 }

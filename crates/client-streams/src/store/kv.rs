@@ -84,6 +84,35 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
     fn set_logging(&mut self, on: bool) {
         self.logging = on;
     }
+    fn as_iq(&self) -> Option<&dyn crate::store::iq::IqQueryable> {
+        Some(self)
+    }
+}
+
+// The store struct holds only `Box<dyn Serde<_>>` + byte buffers (no bare `K`/`V`
+// fields), so it is `Send + Sync` for *any* `K`/`V` — no `Sync` bound needed here.
+#[async_trait::async_trait]
+impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for KeyValueBytesStore<K, V> {
+    fn kind(&self) -> crate::store::iq::StoreKind {
+        crate::store::iq::StoreKind::KeyValue
+    }
+    async fn iq_kv_get(&self, key: &[u8]) -> Option<bytes::Bytes> {
+        self.backend.get(key).await
+    }
+    async fn iq_kv_range(&self, lo: &[u8], hi: &[u8]) -> Vec<(bytes::Bytes, bytes::Bytes)> {
+        // JVM `range` is inclusive `[lo, hi]`; the byte backend is half-open
+        // `[lo, hi)`. `hi ++ 0x00` is the least key strictly greater than `hi`,
+        // so `[lo, hi ++ 0x00)` == inclusive `[lo, hi]`.
+        let mut hi_succ = hi.to_vec();
+        hi_succ.push(0);
+        self.backend.range(lo, &hi_succ).await
+    }
+    async fn iq_kv_all(&self) -> Vec<(bytes::Bytes, bytes::Bytes)> {
+        self.backend.scan_all().await
+    }
+    async fn iq_kv_approx_count(&self) -> u64 {
+        self.backend.approx_len().await
+    }
 }
 
 #[async_trait]

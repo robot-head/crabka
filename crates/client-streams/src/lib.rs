@@ -459,6 +459,7 @@ pub use processor::{
     RecordContext, Serde, SerdeError, StringSerde,
 };
 pub use runtime::{KafkaStreams, KafkaStreamsState};
+pub use store::iq::StoreKind;
 pub use store::{KeyValueBytesStore, KeyValueStore, StateStore, StoreBackend};
 pub use test_driver::TopologyTestDriver;
 pub use topology::{BuiltTopology, NodeHandle, Topology, TopologyError};

@@ -2,6 +2,7 @@
 pub mod api;
 pub mod backend;
 pub(crate) mod byte;
+pub mod iq;
 pub mod join_window;
 pub mod kv;
 pub(crate) mod registry;
