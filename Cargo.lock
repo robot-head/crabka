@@ -1303,15 +1303,13 @@ dependencies = [
  "crabka-remote-storage",
  "crabka-remote-storage-topic",
  "crabka-security",
+ "crabka-telemetry",
  "crc32c",
  "dashmap",
  "futures-util",
  "jsonpath-rust",
  "lru 0.18.0",
- "opentelemetry",
- "opentelemetry-otlp",
  "opentelemetry-proto",
- "opentelemetry_sdk",
  "pbkdf2 0.13.0-rc.10",
  "prometheus-client",
  "prost",
@@ -1337,7 +1335,6 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
- "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
  "wincode",
@@ -1540,6 +1537,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
+ "crabka-telemetry",
  "dashmap",
  "futures-util",
  "hex",
@@ -1548,6 +1546,7 @@ dependencies = [
  "hyper-util",
  "jsonpath-rust",
  "pbjson",
+ "prometheus-client",
  "prost",
  "reqwest 0.13.4",
  "rustls",
@@ -1873,6 +1872,20 @@ dependencies = [
  "tokio",
  "tracing",
  "x509-parser",
+]
+
+[[package]]
+name = "crabka-telemetry"
+version = "0.2.0"
+dependencies = [
+ "assert2",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "thiserror",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
 ]
 
 [[package]]

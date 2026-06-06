@@ -140,9 +140,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         |k| std::env::var(k).ok(),
         &args.broker_id.to_string(),
         env!("CARGO_PKG_VERSION"),
+        "crabka-broker",
     );
-    let telemetry =
-        crabka_broker::telemetry::init(otlp, "crabka_broker=info,crabka_log=info,info")?;
+    let telemetry = crabka_broker::telemetry::init(
+        otlp,
+        "crabka_broker=info,crabka_log=info,info",
+        "info,crabka_broker::request=debug,crabka_log=info",
+        "crabka-broker",
+    )?;
     let file_config: Option<crabka_broker::file_config::FileConfig> =
         match args.config_file.as_ref() {
             Some(p) => {

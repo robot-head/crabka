@@ -154,14 +154,21 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .ok();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "crabka_grpc_gateway=info,info".into()),
-        )
-        .init();
-
     let args = Args::parse();
+
+    let otlp = crabka_telemetry::OtlpConfig::from_env(
+        |k| std::env::var(k).ok(),
+        &args.client_id,
+        env!("CARGO_PKG_VERSION"),
+        "crabka-grpc-gateway",
+    );
+    let telemetry = crabka_telemetry::init(
+        otlp,
+        "crabka_grpc_gateway=info,info",
+        "info,gateway::audit=debug",
+        "crabka-grpc-gateway",
+    )
+    .expect("telemetry init");
     info!(
         listen = %args.listen_addr,
         bootstrap = %args.bootstrap_servers,
@@ -215,7 +222,9 @@ async fn main() -> anyhow::Result<()> {
 
     let bearer = build_bearer(&args)?;
 
-    run(config, bearer).await
+    let result = run(config, bearer).await;
+    telemetry.shutdown();
+    result
 }
 
 /// Build [`AuthzSettings`] from CLI args, or `None` when `--authz off`.
@@ -385,6 +394,7 @@ async fn run(
         .merge(health::router(readiness))
         .merge(forward::forward_router(state.clone()))
         .merge(crabka_grpc_gateway::webhook::webhook_router(state.clone()))
+        .merge(crabka_grpc_gateway::metrics::router())
         .layer(axum::middleware::from_fn(
             crabka_grpc_gateway::authz::auth_layer::resolve_principal,
         ));

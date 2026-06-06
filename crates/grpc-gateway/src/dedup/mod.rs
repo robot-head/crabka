@@ -84,6 +84,7 @@ impl DedupEngine {
     /// EOS produce: fast-path map hit returns the cached offset; a miss takes
     /// the partition's transactional producer and writes the data record +
     /// claim atomically, then updates the local map.
+    #[tracing::instrument(skip_all)]
     pub async fn dedup_produce(
         &self,
         rec: &GatewayRecord,
@@ -102,6 +103,7 @@ impl DedupEngine {
 
         // Fast path: already claimed.
         if let Some(c) = self.store.get(key) {
+            crate::metrics::metrics().record_dedup_hit();
             return Ok(RecordOutcome {
                 partition: c.partition,
                 offset: c.offset,
@@ -113,6 +115,7 @@ impl DedupEngine {
 
         // Re-check under the lock (another task may have just claimed it).
         if let Some(c) = self.store.get(key) {
+            crate::metrics::metrics().record_dedup_hit();
             return Ok(RecordOutcome {
                 partition: c.partition,
                 offset: c.offset,
@@ -130,6 +133,7 @@ impl DedupEngine {
             Err(e) => {
                 if let Some(producer) = slot.as_ref() {
                     let _ = producer.abort_transaction().await;
+                    crate::metrics::metrics().record_txn("abort");
                 }
                 *slot = None;
                 Err(e)
@@ -198,6 +202,7 @@ impl DedupEngine {
             .map_err(GatewayError::Producer)?;
 
         producer.commit_transaction().await?;
+        crate::metrics::metrics().record_txn("commit");
 
         // Single-owner: update the local map directly.
         self.store.apply(key.to_string(), claim);
