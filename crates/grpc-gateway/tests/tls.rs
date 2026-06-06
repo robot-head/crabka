@@ -202,6 +202,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             tls: Some(settings.clone()),
             authz: None,
             webhooks: std::collections::HashMap::new(),
+            outbound: Vec::new(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,

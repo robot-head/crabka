@@ -121,6 +121,7 @@ async fn app_state(bootstrap: &str, client: &str, authz: Arc<GatewayAuthz>) -> A
             tls: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
+            outbound: Vec::new(),
         }),
         authz,
     })
@@ -505,98 +506,107 @@ async fn forwarding_owner_reauthorizes_caller() {
 ///    `tracing` layer scoped to the `gateway::audit` target and assert an event
 ///    with the principal + `allowed` field is emitted.
 ///
-///    The audit `tracing::info!` is synchronous, fired inside the per-record
-///    authz check at the head of `handlers::send` — before the first `.await`
-///    (the produce). We capture it deterministically by installing the capturing
-///    subscriber as this thread's default via a `set_default` GUARD held across
-///    the `.await`, then awaiting the handler directly on the test's own runtime.
-///    The test future is the runtime's top-level (`block_on`) future, so it never
-///    hops worker threads; the handler's first poll — where the synchronous audit
-///    event is emitted — runs inline on this thread, which owns the thread-local
-///    subscriber. No nested runtime, no `block_in_place`, no race.
+///    Capture is via a PROCESS-GLOBAL capturing subscriber installed once
+///    (`set_global_default`). A thread-local `set_default` is *not* reliable
+///    here: callsite interest is process-global, and on a multi-thread runtime
+///    the synchronous audit `info!` can be emitted on a worker thread that does
+///    not own the thread-local subscriber — so the event is silently missed
+///    (the historical flake). A global subscriber fixes both: interest is
+///    rebuilt under the capturing layer, and capture works from any thread.
+///    To keep this immune to concurrent sibling tests writing into the shared
+///    global capture, we produce under a UNIQUE principal and assert only its
+///    own event.
 #[allow(clippy::items_after_statements, clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audit_log_emitted() {
-    use std::sync::Mutex;
+    use std::sync::{Mutex, OnceLock};
 
     use tracing::field::{Field, Visit};
     use tracing_subscriber::Layer;
     use tracing_subscriber::layer::Context;
     use tracing_subscriber::prelude::*;
 
+    // Process-global capture of `gateway::audit` events as (principal, allowed),
+    // filled by a global subscriber so it is thread-agnostic and immune to
+    // callsite-interest caching. The test filters by its unique principal, so
+    // concurrent sibling tests' audit events never affect the assertion.
+    type AuditEvents = Mutex<Vec<(String, Option<bool>)>>;
+    static AUDIT_EVENTS: OnceLock<AuditEvents> = OnceLock::new();
+    fn events() -> &'static AuditEvents {
+        AUDIT_EVENTS.get_or_init(|| Mutex::new(Vec::new()))
+    }
+
+    struct Cap;
+    impl<S: tracing::Subscriber> Layer<S> for Cap {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            if event.metadata().target() != "gateway::audit" {
+                return;
+            }
+            // `principal = %name` records through the Display-as-Debug wrapper,
+            // so it lands in `record_debug` (not `record_str`); `{:?}` is the
+            // bare name.
+            struct V(Option<String>, Option<bool>);
+            impl Visit for V {
+                fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
+                    if f.name() == "principal" {
+                        self.0 = Some(format!("{v:?}"));
+                    }
+                }
+                fn record_bool(&mut self, f: &Field, v: bool) {
+                    if f.name() == "allowed" {
+                        self.1 = Some(v);
+                    }
+                }
+            }
+            let mut v = V(None, None);
+            event.record(&mut v);
+            if let Some(principal) = v.0 {
+                events().lock().unwrap().push((principal, v.1));
+            }
+        }
+    }
+
+    // Install the global capturing subscriber exactly once for this test binary.
+    // `set_global_default` rebuilds the callsite-interest cache under the
+    // capturing layer, so the `gateway::audit` event reaches it regardless of
+    // which worker thread fires it. Nothing else in this binary installs a
+    // global subscriber (boot() does not init tracing), so this never conflicts.
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    INSTALLED.get_or_init(|| {
+        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(Cap))
+            .expect("install global audit-capturing subscriber");
+    });
+
     let (broker, bootstrap, _dir) = boot().await;
     create_topic(&bootstrap, "audit-topic").await;
     let authz = Arc::new(GatewayAuthz::new(Arc::new(AllowAllAuthorizer)));
     let state = app_state(&bootstrap, "audit", authz).await;
 
-    // Captured fields from a `gateway::audit` event.
-    #[derive(Default)]
-    struct Captured {
-        target_seen: bool,
-        principal: Option<String>,
-        allowed: Option<bool>,
-    }
-    struct V<'a>(&'a mut Captured);
-    impl Visit for V<'_> {
-        // `principal = %name` records through the Display-as-Debug wrapper, so
-        // it lands here (not `record_str`); its `{:?}` is the bare name.
-        fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
-            if f.name() == "principal" {
-                self.0.principal = Some(format!("{v:?}"));
-            }
-        }
-        fn record_bool(&mut self, f: &Field, v: bool) {
-            if f.name() == "allowed" {
-                self.0.allowed = Some(v);
-            }
-        }
-    }
-    struct Cap(Arc<Mutex<Captured>>);
-    impl<S: tracing::Subscriber> Layer<S> for Cap {
-        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-            if event.metadata().target() == "gateway::audit" {
-                let mut g = self.0.lock().unwrap();
-                g.target_seen = true;
-                event.record(&mut V(&mut g));
-            }
-        }
-    }
-
-    let captured = Arc::new(Mutex::new(Captured::default()));
-    let subscriber = tracing_subscriber::registry().with(Cap(captured.clone()));
-
-    // Install the capturing subscriber as this thread's default and hold the
-    // guard across the `.await`. The test future is the runtime's top-level
-    // (`block_on`) future, so it stays on this thread; awaiting `handlers::send`
-    // polls it inline here, and the synchronous audit `info!` — fired before the
-    // handler's first `.await` — is emitted on the thread that owns the
-    // thread-local subscriber. So the capture is deterministic.
-    let alice = principal("alice");
-    let result: pb::RecordResult = {
-        let _guard = tracing::subscriber::set_default(subscriber);
-        let resp: ConnectResponse<pb::SendResponse> = handlers::send(
-            Extension(state.clone()),
-            Some(Extension(alice.clone())),
-            None,
-            ConnectRequest(send_one("audit-topic", b"audit-me")),
-        )
-        .await
-        .expect("handler returned Err");
-        resp.0.results.into_iter().next().unwrap()
-    };
+    // Unique principal so concurrent sibling tests' audits can't satisfy (or
+    // race) this assertion in the shared global capture.
+    let probe = principal("audit-probe");
+    let resp: ConnectResponse<pb::SendResponse> = handlers::send(
+        Extension(state.clone()),
+        Some(Extension(probe.clone())),
+        None,
+        ConnectRequest(send_one("audit-topic", b"audit-me")),
+    )
+    .await
+    .expect("handler returned Err");
+    let result = resp.0.results.into_iter().next().unwrap();
     // AllowAll ⇒ produced, no error.
     assert!(result.error.is_none());
 
-    {
-        let g = captured.lock().unwrap();
-        assert!(g.target_seen, "no gateway::audit event was emitted");
-        assert_eq!(g.principal.as_deref(), Some("alice"));
-        assert_eq!(
-            g.allowed,
-            Some(true),
-            "AllowAll decision should record allowed=true"
-        );
-    }
+    let found = {
+        let g = events().lock().unwrap();
+        g.iter().find(|(p, _)| p == "audit-probe").cloned()
+    };
+    let (_, allowed) = found.expect("no gateway::audit event for principal audit-probe");
+    assert_eq!(
+        allowed,
+        Some(true),
+        "AllowAll decision should record allowed=true"
+    );
 
     broker.shutdown().await;
 }
@@ -745,6 +755,7 @@ async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
             tls: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
+            outbound: Vec::new(),
         }),
         authz,
     });

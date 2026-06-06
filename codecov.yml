@@ -37,6 +37,11 @@ ignore:
   # the (Docker-gated) jvm_differential test, not the integration suite, so
   # holding its 60+ wiring lines to patch coverage just blocks new-crate PRs.
   - "crates/grpc-gateway/src/bin/**"
+  # Same rationale for the schema-registry binary: the unit-testable config
+  # assembly (CLI flags -> SecurityConfig) lives in the `cli` lib module and is
+  # covered there; what remains in main() is arg-parsing + the serve/election
+  # loop, exercised end-to-end by the in-process ha.rs / security.rs tests.
+  - "crates/schema-registry/src/bin/**"
 
 flags:
   unit:

@@ -165,8 +165,27 @@ impl WebhooksFile {
 }
 
 // ---------------------------------------------------------------------------
-// Runtime helpers (pub(crate) — used by webhook.rs)
+// Runtime helpers (pub(crate) — used by webhook.rs + outbound.rs)
 // ---------------------------------------------------------------------------
+
+/// Compute HMAC-SHA256(`secret`, `body`) and return the digest as a lowercase
+/// hex string. Used by the outbound webhook delivery layer to sign every
+/// `X-Crabka-Signature` header.
+#[allow(dead_code)] // used by outbound.rs (Task 2)
+pub(crate) fn sign_hmac_hex(secret: &[u8], body: &[u8]) -> String {
+    let mut mac = <Hmac<Sha256>>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(body);
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Compute HMAC-SHA256(`secret`, `body`) and return the digest as a
+/// standard base64 string (padding included).
+#[allow(dead_code)] // used by outbound.rs (Task 2)
+pub(crate) fn sign_hmac_base64(secret: &[u8], body: &[u8]) -> String {
+    let mut mac = <Hmac<Sha256>>::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(body);
+    B64STD.encode(mac.finalize().into_bytes())
+}
 
 /// Verify an HMAC-SHA256 signature over `body` using `secret`.
 ///
@@ -267,6 +286,42 @@ mod tests {
         let mut mac = <Hmac<Sha256>>::new_from_slice(secret).unwrap();
         mac.update(body);
         B64STD.encode(mac.finalize().into_bytes())
+    }
+
+    // -----------------------------------------------------------------------
+    // sign_hmac_hex / sign_hmac_base64 round-trip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn sign_hex_round_trips_verify() {
+        let secret = b"outbound-secret";
+        let body = b"{\"topic\":\"events\",\"offset\":42}";
+        let sig = sign_hmac_hex(secret, body);
+        assert!(
+            verify_signature(secret, body, &sig, &SigEncoding::Hex, None),
+            "sign_hmac_hex output must verify via verify_signature"
+        );
+    }
+
+    #[test]
+    fn sign_base64_round_trips_verify() {
+        let secret = b"another-secret";
+        let body = b"hello world";
+        let sig = sign_hmac_base64(secret, body);
+        assert!(
+            verify_signature(secret, body, &sig, &SigEncoding::Base64, None),
+            "sign_hmac_base64 output must verify via verify_signature"
+        );
+    }
+
+    #[test]
+    fn sign_hex_wrong_body_does_not_verify() {
+        let secret = b"sec";
+        let sig = sign_hmac_hex(secret, b"correct body");
+        assert!(
+            !verify_signature(secret, b"wrong body", &sig, &SigEncoding::Hex, None),
+            "signature over different body must not verify"
+        );
     }
 
     // -----------------------------------------------------------------------

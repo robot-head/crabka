@@ -42,6 +42,7 @@ impl Election {
             group_id: cfg.group_id.clone(),
             identity,
             tx,
+            security: cfg.security.client.clone(),
         };
         tokio::spawn(client.run(cancel));
         Ok(rx)

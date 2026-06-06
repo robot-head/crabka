@@ -128,6 +128,7 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             tls: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
+            outbound: Vec::new(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,

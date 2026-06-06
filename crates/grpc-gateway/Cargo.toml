@@ -16,11 +16,13 @@ path = "src/bin/gateway.rs"
 
 [dependencies]
 crabka-authz = { version = "0.2", path = "../authz" }
+crabka-telemetry = { version = "0.2", path = "../telemetry" }
 crabka-client-producer = { version = "0.2", path = "../client-producer" }
 crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
 crabka-client-admin = { version = "0.2", path = "../client-admin" }
 crabka-metadata = { version = "0.2", path = "../metadata" }
 arc-swap = { workspace = true }
+prometheus-client = { workspace = true }
 connectrpc-axum.workspace = true
 prost.workspace = true
 pbjson.workspace = true
@@ -60,6 +62,10 @@ connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
 [dev-dependencies]
 assert2 = { workspace = true }
 crabka-broker = { version = "0.2", path = "../broker", features = ["test-helpers"] }
+# Raw Fetch + v2 RecordBatch decode in tests/outbound.rs to read the DLQ
+# record's `x-crabka-dlq-source` header (the group Consumer drops headers).
+crabka-client-core = { version = "0.2", path = "../client-core" }
+crabka-protocol = { version = "0.2", path = "../protocol" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
 # `UnboundedReceiverStream` to drive the Subscribe control stream in tests/streaming.rs.
