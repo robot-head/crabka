@@ -58,6 +58,160 @@ fn ready_kafka_body(name: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn kafka_present_but_not_ready_gates_with_no_children() {
+    // Labeled CR + a Kafka that is NOT Ready -> internal_listener_bootstrap
+    // returns None -> KafkaNotReady gate; NO child resources are applied
+    // (no Service/Deployment mock rules, so any apply attempt would 404 and
+    // fail the reconcile).
+    let not_ready = serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1", "kind": "Kafka",
+        "metadata": { "name": CLUSTER, "namespace": NS },
+        "spec": { "kafkaVersion": "3.7.0" },
+        "status": {
+            "conditions": [{ "type": "Ready", "status": "False", "reason": "Progressing",
+                "message": "starting", "lastTransitionTime": "2026-01-01T00:00:00Z" }],
+            "listeners": []
+        }
+    });
+    let rules = vec![
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkas/demo".into(),
+            response: json_response(200, &not_ready),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/schemaregistries/sr1/status".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({
+                    "apiVersion": "crabka.io/v1alpha1", "kind": "SchemaRegistry",
+                    "metadata": { "name": "sr1", "namespace": NS }, "spec": { "replicas": 1 }
+                }),
+            ),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    reconcile(Arc::new(sr("sr1", Some(CLUSTER))), ctx)
+        .await
+        .unwrap();
+
+    let observed = state.take_observed();
+    // The gate must fire BEFORE any child is applied.
+    assert!(
+        !observed
+            .iter()
+            .any(|r| r.uri().to_string().contains("/services/"))
+    );
+    assert!(
+        !observed
+            .iter()
+            .any(|r| r.uri().to_string().contains("/deployments/"))
+    );
+    let patch = observed
+        .iter()
+        .find(|r| r.uri().to_string().contains("/schemaregistries/sr1/status"))
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(patch.body()).unwrap();
+    let conds = body["status"]["conditions"].as_array().unwrap();
+    let kr = conds.iter().find(|c| c["type"] == "KafkaReady").unwrap();
+    assert!(kr["status"] == "False");
+    assert!(kr["reason"] == "KafkaNotReady");
+}
+
+#[tokio::test]
+async fn optional_topic_group_and_bearer_render_to_args() {
+    // Exercise the optional schemas-topic / group-id arg branches and the
+    // (unsecured) Bearer authn branch. bootstrap override skips the Kafka GET.
+    let mut cr = sr("sr1", Some(CLUSTER));
+    cr.spec.bootstrap_servers = Some("ext:9092".into());
+    cr.spec.schemas_topic = Some("custom-schemas".into());
+    cr.spec.group_id = Some("sr-grp".into());
+    cr.spec.authentication = Some(crabka_operator::crd::SchemaRegistryAuthn {
+        require_auth: false,
+        realm: None,
+        basic: None,
+        bearer: Some(crabka_operator::crd::BearerAuthn {
+            mode: crabka_operator::crd::BearerMode::Unsecured,
+            principal_claim: Some("email".into()),
+        }),
+    });
+    // kube-rs deserializes each SSA response into its typed object, which
+    // requires `metadata` (ObjectMeta is non-optional) — include it.
+    let rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr-headless".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr-headless"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/schemaregistries/sr1/status".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"SchemaRegistry","metadata":{"name":"sr1"},"spec":{"replicas":1}}),
+            ),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+
+    reconcile(Arc::new(cr), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let dep = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/deployments/sr1-sr")
+        })
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(dep.body()).unwrap();
+    let args = body["spec"]["template"]["spec"]["containers"][0]["args"]
+        .as_array()
+        .unwrap();
+    let joined = args
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(joined.contains("--schemas-topic=custom-schemas"));
+    assert!(joined.contains("--group-id=sr-grp"));
+    assert!(joined.contains("--bearer=unsecured"));
+    assert!(joined.contains("--bearer-principal-claim=email"));
+}
+
+#[tokio::test]
 async fn missing_cluster_label_sets_status() {
     let rules = vec![MockRule {
         method: Method::PATCH,
