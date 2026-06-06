@@ -12,7 +12,7 @@ mod task;
 mod thread;
 
 pub use app::{KafkaStreams, KafkaStreamsState};
-pub use io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
+pub use io::{FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer};
 pub use iq_view::ReadOnlyKeyValueStore;
 pub use iq_view::ReadOnlySessionStore;
 pub use iq_view::ReadOnlyWindowStore;

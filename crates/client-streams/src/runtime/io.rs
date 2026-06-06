@@ -30,15 +30,29 @@ impl FetchBatch {
     }
 }
 
+/// Fetch isolation level (Kafka `Fetch.isolation_level`).
+///
+/// Under EOS-v2, changelog restore must read `ReadCommitted` so that aborted
+/// writes (records that were produced inside a transaction that later aborted)
+/// are excluded — the restored store reflects only committed state. Normal
+/// source processing and global-store bootstrap use `ReadUncommitted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IsolationLevel {
+    #[default]
+    ReadUncommitted,
+    ReadCommitted,
+}
+
 #[async_trait::async_trait]
 pub trait RecordFetcher: Send + Sync + 'static {
-    /// Fetch records for `(topic, partition)` starting at `offset`. An empty
-    /// batch means nothing new yet.
+    /// Fetch records for `(topic, partition)` starting at `offset`, at the given
+    /// `isolation` level. An empty batch means nothing new yet.
     async fn fetch(
         &self,
         topic: &str,
         partition: i32,
         offset: i64,
+        isolation: IsolationLevel,
     ) -> Result<FetchBatch, StreamsClientError>;
 
     /// The partition indices of `topic`. The global consumer reads all of them to

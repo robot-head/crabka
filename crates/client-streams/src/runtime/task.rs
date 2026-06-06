@@ -8,7 +8,8 @@ use std::sync::Arc;
 use crate::error::StreamsClientError;
 use crate::membership::TopicPartition;
 use crate::processor::graph::Graph;
-use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
+use crate::runtime::eos::ProcessingGuarantee;
+use crate::runtime::io::{IsolationLevel, OffsetStore, RecordFetcher, RecordProducer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskRole {
@@ -30,6 +31,9 @@ pub(crate) struct StreamTask {
     pub(crate) store: Arc<dyn OffsetStore>,
     pub(crate) role: TaskRole,
     pub(crate) changelog_offsets: HashMap<String, i64>,
+    /// Delivery guarantee for this task. Under [`ProcessingGuarantee::ExactlyOnceV2`]
+    /// the changelog restore reads `READ_COMMITTED` so aborted writes are excluded.
+    pub(crate) guarantee: ProcessingGuarantee,
 }
 
 impl StreamTask {
@@ -40,6 +44,7 @@ impl StreamTask {
         producer: Arc<dyn RecordProducer>,
         store: Arc<dyn OffsetStore>,
         role: TaskRole,
+        guarantee: ProcessingGuarantee,
     ) -> Self {
         let partition = sources.first().map_or(0, |tp| tp.partition);
         let positions = sources
@@ -56,6 +61,7 @@ impl StreamTask {
             store,
             role,
             changelog_offsets: HashMap::new(),
+            guarantee,
         }
     }
 
@@ -79,7 +85,17 @@ impl StreamTask {
 
     /// Restore each store from its changelog topic (reads from offset 0 until
     /// an empty batch). Changelog logging is disabled for the duration.
+    ///
+    /// Under [`ProcessingGuarantee::ExactlyOnceV2`] the changelog is read at
+    /// `READ_COMMITTED` so aborted writes (records from a transaction that later
+    /// aborted) are excluded — the restored store reflects only committed state.
+    /// At-least-once reads `READ_UNCOMMITTED` (behaviour unchanged).
     pub async fn restore(&mut self, fetcher: &dyn RecordFetcher) -> Result<(), StreamsClientError> {
+        let isolation = if self.guarantee == ProcessingGuarantee::ExactlyOnceV2 {
+            IsolationLevel::ReadCommitted
+        } else {
+            IsolationLevel::ReadUncommitted
+        };
         self.graph.set_logging(false);
         let names = self.graph.stores.names();
         for name in names {
@@ -93,7 +109,7 @@ impl StreamTask {
                 .or_insert(0);
             loop {
                 let batch = fetcher
-                    .fetch(&changelog_topic, self.partition, offset)
+                    .fetch(&changelog_topic, self.partition, offset, isolation)
                     .await?;
                 if batch.records.is_empty() {
                     break;
@@ -130,6 +146,11 @@ impl StreamTask {
         &mut self,
         fetcher: &dyn RecordFetcher,
     ) -> Result<(), StreamsClientError> {
+        let isolation = if self.guarantee == ProcessingGuarantee::ExactlyOnceV2 {
+            IsolationLevel::ReadCommitted
+        } else {
+            IsolationLevel::ReadUncommitted
+        };
         self.graph.set_logging(false);
         let names = self.graph.stores.names();
         for name in names {
@@ -142,7 +163,7 @@ impl StreamTask {
                 .entry(changelog_topic.clone())
                 .or_insert(0);
             let batch = fetcher
-                .fetch(&changelog_topic, self.partition, offset)
+                .fetch(&changelog_topic, self.partition, offset, isolation)
                 .await?;
             let mut next_offset = offset;
             for rec in &batch.records {
@@ -226,7 +247,10 @@ impl StreamTask {
         let keys: Vec<(String, i32)> = self.positions.keys().cloned().collect();
         for (topic, partition) in keys {
             let offset = self.positions[&(topic.clone(), partition)];
-            let batch = fetcher.fetch(&topic, partition, offset).await?;
+            // Source records: normal processing reads READ_UNCOMMITTED.
+            let batch = fetcher
+                .fetch(&topic, partition, offset, IsolationLevel::ReadUncommitted)
+                .await?;
             for rec in &batch.records {
                 self.graph
                     .pipe(
@@ -351,7 +375,9 @@ mod tests {
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
     use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
-    use crate::runtime::io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
+    use crate::runtime::io::{
+        FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+    };
     use crate::topology::Topology;
     use assert2::check;
     use std::collections::HashMap;
@@ -407,6 +433,7 @@ mod tests {
             t: &str,
             p: i32,
             o: i64,
+            _isolation: IsolationLevel,
         ) -> Result<FetchBatch, crate::StreamsClientError> {
             Ok(self
                 .scripts
@@ -455,6 +482,7 @@ mod tests {
             _t: &str,
             _p: i32,
             _o: i64,
+            _isolation: IsolationLevel,
         ) -> Result<FetchBatch, crate::StreamsClientError> {
             Ok(self.batch.lock().unwrap().take().unwrap_or_default())
         }
@@ -570,6 +598,8 @@ mod tests {
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
             TaskRole::Active,
+            ProcessingGuarantee::AtLeastOnce,
+        );
         );
         task.seek_to_start().await.unwrap(); // no committed → earliest (0)
         task.process_once(&fetcher).await.unwrap(); // fetch+pipe+produce
@@ -616,6 +646,8 @@ mod tests {
             std::sync::Arc::clone(&producer_a) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store_a) as std::sync::Arc<dyn OffsetStore>,
             TaskRole::Active,
+            ProcessingGuarantee::AtLeastOnce,
+        );
         );
         task_a.init().await.unwrap();
         task_a.process_once(&fetcher_a).await.unwrap();
@@ -667,6 +699,8 @@ mod tests {
             std::sync::Arc::clone(&producer_b) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store_b) as std::sync::Arc<dyn OffsetStore>,
             TaskRole::Active,
+            ProcessingGuarantee::AtLeastOnce,
+        );
         );
         task_b.restore(&fetcher_b).await.unwrap();
 
@@ -820,7 +854,11 @@ mod tests {
             }],
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+<<<<<<< HEAD
             TaskRole::Active,
+=======
+            ProcessingGuarantee::AtLeastOnce,
+>>>>>>> 5d8b2e20 (feat(streams): read_committed changelog restore under EOS (RecordFetcher isolation level))
         );
         task.init().await.unwrap();
         task.process_once(&fetcher).await.unwrap();
@@ -882,6 +920,7 @@ mod tests {
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
             TaskRole::Standby,
+            ProcessingGuarantee::AtLeastOnce,
         );
 
         // Run a single restore step.
@@ -924,6 +963,7 @@ mod tests {
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
             TaskRole::Warmup,
+            ProcessingGuarantee::AtLeastOnce,
         );
 
         // Warmup: current offset is tracked changelog offset (initially 0).
@@ -943,5 +983,114 @@ mod tests {
         let (curr, end) = task.compute_changelog_offsets().await.unwrap();
         check!(curr == 15);
         check!(end == 15);
+    }
+
+    /// A fetcher that returns DIFFERENT changelog batches depending on the
+    /// requested [`IsolationLevel`]. For the `app-counts-changelog` topic at
+    /// offset 0:
+    /// - `ReadUncommitted` returns `[committed("a"→5), aborted("b"→99)]`
+    /// - `ReadCommitted`   returns `[committed("a"→5)]` only (the aborted write
+    ///   from a rolled-back transaction is excluded, mirroring the broker's LSO
+    ///   filtering).
+    ///
+    /// All other fetches return empty.
+    struct IsolationFetcher;
+
+    impl IsolationFetcher {
+        fn changelog_value(n: i64) -> bytes::Bytes {
+            bytes::Bytes::copy_from_slice(&n.to_be_bytes())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RecordFetcher for IsolationFetcher {
+        async fn fetch(
+            &self,
+            t: &str,
+            p: i32,
+            o: i64,
+            isolation: IsolationLevel,
+        ) -> Result<FetchBatch, crate::StreamsClientError> {
+            if t == "app-counts-changelog" && p == 0 && o == 0 {
+                let committed = FetchedRec {
+                    offset: 0,
+                    key: Some(bytes::Bytes::copy_from_slice(b"a")),
+                    value: Some(Self::changelog_value(5)),
+                    timestamp: -1,
+                };
+                let aborted = FetchedRec {
+                    offset: 1,
+                    key: Some(bytes::Bytes::copy_from_slice(b"b")),
+                    value: Some(Self::changelog_value(99)),
+                    timestamp: -1,
+                };
+                let records = match isolation {
+                    // READ_COMMITTED excludes the aborted write.
+                    IsolationLevel::ReadCommitted => vec![committed],
+                    // READ_UNCOMMITTED sees both.
+                    IsolationLevel::ReadUncommitted => vec![committed, aborted],
+                };
+                Ok(FetchBatch { records })
+            } else {
+                Ok(FetchBatch::default())
+            }
+        }
+    }
+
+    /// Build a stateful `Counter`-topology task with the given guarantee, restore
+    /// it from the [`IsolationFetcher`] changelog, and return the task so the
+    /// caller can inspect the restored `counts` store.
+    async fn restore_counter_task(guarantee: ProcessingGuarantee) -> StreamTask {
+        let producer = std::sync::Arc::new(CollectProducer::default());
+        let store = std::sync::Arc::new(MemStore::default());
+        let mut task = StreamTask::new(
+            "0".into(),
+            stateful_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
+            vec![TopicPartition {
+                topic: "in".into(),
+                partition: 0,
+            }],
+            std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
+            std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Active,
+            guarantee,
+        );
+        task.restore(&IsolationFetcher).await.unwrap();
+        task
+    }
+
+    /// EOS-v2 restore reads the changelog at `READ_COMMITTED`, so the aborted
+    /// write ("b"→99) is excluded — only the committed record ("a"→5) seeds the
+    /// store.
+    #[tokio::test]
+    async fn eos_restore_reads_committed_only() {
+        let mut task = restore_counter_task(ProcessingGuarantee::ExactlyOnceV2).await;
+        check!(
+            task.store_get_i64("counts", &"a".to_string()).await == Some(5),
+            "EOS restore must seed the committed changelog record"
+        );
+        check!(
+            task.store_get_i64("counts", &"b".to_string()).await == None,
+            "EOS restore (READ_COMMITTED) must exclude the aborted write"
+        );
+    }
+
+    /// At-least-once restore reads the changelog at `READ_UNCOMMITTED`, so it sees
+    /// BOTH records (the committed "a"→5 and the "aborted" "b"→99). This pins the
+    /// non-EOS behaviour as unchanged.
+    #[tokio::test]
+    async fn alo_restore_reads_uncommitted_sees_both() {
+        let mut task = restore_counter_task(ProcessingGuarantee::AtLeastOnce).await;
+        check!(
+            task.store_get_i64("counts", &"a".to_string()).await == Some(5),
+            "ALO restore must seed the committed changelog record"
+        );
+        check!(
+            task.store_get_i64("counts", &"b".to_string()).await == Some(99),
+            "ALO restore (READ_UNCOMMITTED) must see the uncommitted write too"
+        );
     }
 }

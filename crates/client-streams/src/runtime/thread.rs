@@ -229,6 +229,7 @@ impl StreamThread {
                 Arc::clone(producer),
                 Arc::clone(store),
                 desired_role,
+                self.guarantee,
             );
             if desired_role == TaskRole::Active {
                 // Seek positions to committed offsets (or earliest) BEFORE restore so
@@ -466,7 +467,9 @@ mod tests {
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
     use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
-    use crate::runtime::io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
+    use crate::runtime::io::{
+        FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+    };
     use crate::topology::Topology;
     use assert2::check;
     use std::collections::HashMap;
@@ -589,6 +592,7 @@ mod tests {
             t: &str,
             p: i32,
             o: i64,
+            _isolation: IsolationLevel,
         ) -> Result<FetchBatch, crate::StreamsClientError> {
             Ok(self
                 .scripts
@@ -610,6 +614,7 @@ mod tests {
             _t: &str,
             _p: i32,
             _o: i64,
+            _isolation: IsolationLevel,
         ) -> Result<FetchBatch, crate::StreamsClientError> {
             Ok(self.batch.lock().unwrap().take().unwrap_or_default())
         }
@@ -1331,6 +1336,7 @@ mod tests {
                 t: &str,
                 p: i32,
                 o: i64,
+                _isolation: IsolationLevel,
             ) -> Result<FetchBatch, crate::StreamsClientError> {
                 if t == "in" && p == 0 && o == 0 {
                     Ok(FetchBatch {

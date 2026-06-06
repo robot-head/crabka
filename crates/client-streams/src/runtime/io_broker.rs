@@ -21,7 +21,7 @@ use bytes::Bytes;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
-use crabka_client_core::{Client, Connection, ConnectionOptions, fetch_partition};
+use crabka_client_core::{Client, Connection, ConnectionOptions, fetch_partition_with_isolation};
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
@@ -38,7 +38,9 @@ use crabka_protocol::owned::offset_fetch_request::{
 
 use crate::error::StreamsClientError;
 use crate::runtime::eos::{StreamsGroupMeta, TransactionalProducer};
-use crate::runtime::io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
+use crate::runtime::io::{
+    FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+};
 
 // ─── BrokerFetcher ────────────────────────────────────────────────────────────
 
@@ -66,10 +68,18 @@ impl RecordFetcher for BrokerFetcher {
         topic: &str,
         partition: i32,
         offset: i64,
+        isolation: IsolationLevel,
     ) -> Result<FetchBatch, StreamsClientError> {
         let topic_id = self.resolve_topic_id(topic).await?;
 
-        let fetched = fetch_partition(
+        // Map the runtime isolation level to the Kafka `Fetch.isolation_level`
+        // wire value (READ_UNCOMMITTED = 0, READ_COMMITTED = 1).
+        let isolation_level: i8 = match isolation {
+            IsolationLevel::ReadUncommitted => 0,
+            IsolationLevel::ReadCommitted => 1,
+        };
+
+        let fetched = fetch_partition_with_isolation(
             &self.conn,
             topic,
             topic_id,
@@ -77,6 +87,7 @@ impl RecordFetcher for BrokerFetcher {
             offset,
             self.max_wait_ms,
             self.partition_max_bytes,
+            isolation_level,
         )
         .await?;
 
