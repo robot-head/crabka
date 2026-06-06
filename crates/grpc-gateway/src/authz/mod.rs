@@ -1,6 +1,9 @@
 //! Gateway trusted-proxy authorization: holds the `crabka_authz::Authorizer`
 //! and an `ArcSwap`'d `AclCache` refreshed by polling the broker's `DescribeAcls`.
 
+pub mod auth_layer;
+pub use auth_layer::{BearerValidator, anonymous, resolve_principal};
+
 use std::sync::Arc;
 use std::time::Duration;
 

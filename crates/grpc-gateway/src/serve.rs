@@ -68,6 +68,11 @@ async fn serve_tls(
                     let app = app.clone();
                     let principal = principal.clone();
                     async move {
+                        // Always inject the peer address so authz / audit handlers
+                        // can do host-based ACL matching.  `peer_or_default` in
+                        // `authz::auth_layer` returns `0.0.0.0:0` for plaintext
+                        // connections that don't go through this TLS path.
+                        req.extensions_mut().insert(peer);
                         if let Some(p) = principal {
                             req.extensions_mut().insert(p);
                         }
