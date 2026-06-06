@@ -1,15 +1,15 @@
 codecov:
   notify:
-    # Wait for all ten coverage uploads (one per CI flag) before posting
+    # Wait for all eleven coverage uploads (one per CI flag) before posting
     # status checks or PR comments. Otherwise the first upload triggers a
     # report against the partial coverage, which shows a misleading drop
     # until the rest of the matrix lands. The flags below must match the
     # `flags:` values in .github/workflows/ci.yml.
-    after_n_builds: 10
+    after_n_builds: 11
     wait_for_ci: true
 
 comment:
-  after_n_builds: 10
+  after_n_builds: 11
   require_changes: false
 
 coverage:
@@ -63,4 +63,6 @@ flags:
   grpc-gateway-integration:
     carryforward: true
   schema-registry-integration:
+    carryforward: true
+  operator-integration:
     carryforward: true
