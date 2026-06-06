@@ -1,0 +1,417 @@
+//! Reconcile-level tests for the `KafkaGrpcGateway` controller.
+//!
+//! FIFO rule order matches the exact call sequence in
+//! `crates/operator/src/controller/grpc_gateway.rs::reconcile`:
+//!
+//!   1. GET kafkas/<parent>                    — fetch parent, version gate
+//!   2. PATCH kafkausers/<gw>-broker           — SSA child `KafkaUser`
+//!   3. GET secrets/<gw>-broker                — cert-issued gate
+//!   4. GET secrets/<gw>-serving               — check existing serving cert
+//!   5. GET secrets/<parent>-cluster-ca        — cluster-CA key (for signing)
+//!   6. GET secrets/<parent>-cluster-ca-cert   — cluster-CA cert (for signing)
+//!   7. PATCH secrets/<gw>-serving             — issue new serving cert
+//!   8. PATCH secrets/<gw>-config              — apply rendered config Secret
+//!   9. PATCH deployments/<gw>                 — apply Deployment
+//!  10. PATCH services/<gw>                    — apply Service
+//!  11. GET deployments/<gw>                   — read back ready-replica count
+//!  12. PATCH kafkagrpcgateways/<gw>/status    — write final status
+
+use assert2::assert;
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use crabka_operator::controller::grpc_gateway::reconcile;
+use crabka_operator::crd::grpc_gateway::{KafkaGrpcGateway, KafkaGrpcGatewaySpec};
+use http::{Method, Response};
+
+#[path = "shared/mod.rs"]
+mod shared;
+
+use shared::{
+    MockRule, build_ctx, fake_broker_user_secret, fake_cluster_ca_cert_secret,
+    fake_cluster_ca_key_secret, fake_config_secret, fake_deployment_body, fake_gateway_body,
+    fake_kafkauser_body, fake_parent_kafka_body, fake_service_body, fake_serving_secret,
+    json_response, not_found_body,
+};
+
+const NS: &str = "default";
+const KAFKA: &str = "demo";
+const GW: &str = "my-gw";
+
+/// Construct a minimal `KafkaGrpcGateway` CR with the `crabka.io/cluster`
+/// label pointing at `KAFKA`.
+fn gw_cr(name: &str) -> KafkaGrpcGateway {
+    let mut gw = KafkaGrpcGateway::new(
+        name,
+        KafkaGrpcGatewaySpec {
+            replicas: None,
+            image: None,
+            resources: None,
+            dedup: None,
+            tls: None,
+            authz: None,
+            webhooks: vec![],
+            outbound_subscriptions: vec![],
+            allowed_targets: vec![],
+            telemetry: None,
+        },
+    );
+    gw.metadata.namespace = Some(NS.into());
+    gw.metadata.uid = Some("gw-uid".into());
+    gw.metadata.generation = Some(1);
+    let mut labels = BTreeMap::new();
+    labels.insert("crabka.io/cluster".into(), KAFKA.into());
+    gw.metadata.labels = Some(labels);
+    gw
+}
+
+// ---------------------------------------------------------------------------
+// Happy-path reconcile
+// ---------------------------------------------------------------------------
+
+/// Full reconcile: all child objects created from scratch, broker cert
+/// already present (`KafkaUser` reconciler ran first), 1 replica ready.
+///
+/// Asserts:
+/// - Returns `Action::requeue(30s)`.
+/// - Deployment PATCH body carries exactly 5 volume mounts (serving,
+///   broker-client, cluster-ca, clients-ca, config).
+/// - Deployment PATCH body includes the broker-TLS args pointing at the
+///   mounted paths.
+/// - `KafkaUser` PATCH body has `authentication.type = "tls"`.
+/// - Final status carries `Ready=True reason=Available`.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn happy_path_all_objects_created_ready() {
+    // Generate a real cluster CA so ensure_serving_cert can sign with it.
+    let cluster_ca =
+        crabka_security::ca::generate_cluster_ca("demo-cluster-ca", 365).expect("CA gen");
+
+    let broker_user_name = format!("{GW}-broker");
+    let serving_name = format!("{GW}-serving");
+    let config_name = format!("{GW}-config");
+    let cluster_ca_key_name = format!("{KAFKA}-cluster-ca");
+    let cluster_ca_cert_name = format!("{KAFKA}-cluster-ca-cert");
+
+    let rules = vec![
+        // 1. GET parent Kafka → 200, version valid
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{KAFKA}"),
+            response: json_response(200, &fake_parent_kafka_body(KAFKA, NS)),
+        },
+        // 2. PATCH child KafkaUser (SSA) → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{broker_user_name}"),
+            response: json_response(200, &fake_kafkauser_body(&broker_user_name, NS)),
+        },
+        // 3. GET broker cert Secret → 200 (cert issued, don't wait)
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{broker_user_name}"),
+            response: json_response(200, &fake_broker_user_secret(GW, NS)),
+        },
+        // 4. GET serving cert Secret → 404 (first reconcile, need to issue)
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{serving_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404 builds"),
+        },
+        // 5. GET cluster-CA key Secret → 200 (real PEM for signing)
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_key_name}"),
+            response: json_response(
+                200,
+                &fake_cluster_ca_key_secret(KAFKA, NS, &cluster_ca.key_pem),
+            ),
+        },
+        // 6. GET cluster-CA cert Secret → 200 (real PEM for signing)
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_cert_name}"),
+            response: json_response(
+                200,
+                &fake_cluster_ca_cert_secret(KAFKA, NS, &cluster_ca.cert_pem),
+            ),
+        },
+        // 7. PATCH serving cert Secret (newly issued) → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{serving_name}"),
+            response: json_response(200, &fake_serving_secret(GW, NS)),
+        },
+        // 8. PATCH config Secret → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{config_name}"),
+            response: json_response(200, &fake_config_secret(GW, NS)),
+        },
+        // 9. PATCH Deployment → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/deployments/{GW}"),
+            response: json_response(200, &fake_deployment_body(GW, NS, Some(1))),
+        },
+        // 10. PATCH Service → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/services/{GW}"),
+            response: json_response(200, &fake_service_body(GW, NS)),
+        },
+        // 11. GET Deployment (status read-back) → 200, 1/1 ready
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/deployments/{GW}"),
+            response: json_response(200, &fake_deployment_body(GW, NS, Some(1))),
+        },
+        // 12. PATCH gateway status → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkagrpcgateways/{GW}/status"),
+            response: json_response(200, &fake_gateway_body(GW, NS, KAFKA)),
+        },
+    ];
+
+    let (ctx, state) = build_ctx(NS, rules);
+    let gw = gw_cr(GW);
+    let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
+
+    // Action must be a 30-second requeue.
+    assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
+        "expected requeue(30s), got {action:?}"
+    );
+
+    let observed = state.take_observed();
+
+    // --- Assert KafkaUser PATCH body has TLS authentication ---
+    let user_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkausers/{broker_user_name}"))
+        })
+        .expect("KafkaUser PATCH must have been captured");
+    let user_body: serde_json::Value =
+        serde_json::from_slice(user_patch.body()).expect("KafkaUser PATCH body is JSON");
+    let auth_type = user_body
+        .pointer("/spec/authentication/type")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            panic!("KafkaUser PATCH missing spec.authentication.type; body = {user_body}")
+        });
+    assert!(
+        auth_type == "tls",
+        "KafkaUser must have authentication.type=tls; got {auth_type}"
+    );
+
+    // --- Assert Deployment PATCH body has exactly 5 volume mounts ---
+    let dep_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri().to_string().contains(&format!("/deployments/{GW}"))
+        })
+        .expect("Deployment PATCH must have been captured");
+    let dep_body: serde_json::Value =
+        serde_json::from_slice(dep_patch.body()).expect("Deployment PATCH body is JSON");
+    let mounts = dep_body
+        .pointer("/spec/template/spec/containers/0/volumeMounts")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("Deployment PATCH missing volumeMounts; body = {dep_body}"));
+    let mount_names: Vec<&str> = mounts
+        .iter()
+        .filter_map(|m| m.get("name").and_then(|v| v.as_str()))
+        .collect();
+    assert!(
+        mounts.len() == 5,
+        "Deployment must have exactly 5 volumeMounts, got {}: {:?}",
+        mounts.len(),
+        mount_names
+    );
+    for want in [
+        "serving",
+        "broker-client",
+        "cluster-ca",
+        "clients-ca",
+        "config",
+    ] {
+        assert!(
+            mount_names.contains(&want),
+            "Deployment volumeMounts must include '{want}'; got {mount_names:?}"
+        );
+    }
+
+    // --- Assert Deployment PATCH body has broker-TLS CLI args ---
+    let args = dep_body
+        .pointer("/spec/template/spec/containers/0/args")
+        .and_then(|v| v.as_array())
+        .unwrap_or_else(|| panic!("Deployment PATCH missing args; body = {dep_body}"));
+    let args_joined: String = args
+        .iter()
+        .filter_map(|a| a.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        args_joined.contains("--broker-tls-cert=/etc/crabka-gw/broker-client/user.crt"),
+        "Deployment args must include broker-tls-cert; args = {args_joined}"
+    );
+    assert!(
+        args_joined.contains("--broker-tls-key=/etc/crabka-gw/broker-client/user.key"),
+        "Deployment args must include broker-tls-key; args = {args_joined}"
+    );
+    assert!(
+        args_joined.contains("--broker-tls-ca=/etc/crabka-gw/cluster-ca/ca.crt"),
+        "Deployment args must include broker-tls-ca; args = {args_joined}"
+    );
+    assert!(
+        args_joined.contains("--tls-cert=/etc/crabka-gw/serving/tls.crt"),
+        "Deployment args must include tls-cert; args = {args_joined}"
+    );
+
+    // --- Assert final status carries Ready=True / Available ---
+    let status_patch = observed
+        .iter()
+        .rev()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkagrpcgateways/{GW}/status"))
+        })
+        .expect("gateway status PATCH must have been captured");
+    let status_body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    let conds = status_body["status"]["conditions"]
+        .as_array()
+        .expect("status must have conditions array");
+    let ready = conds
+        .iter()
+        .find(|c| c["type"] == "Ready")
+        .unwrap_or_else(|| panic!("Ready condition missing; body = {status_body}"));
+    assert!(
+        ready["status"] == "True",
+        "Ready condition must be True when 1/1 replicas ready; body = {status_body}"
+    );
+    assert!(
+        ready["reason"] == "Available",
+        "Ready reason must be Available; body = {status_body}"
+    );
+
+    // All 12 rules must have been consumed.
+    assert!(
+        state.remaining_rules() == 0,
+        "all FIFO rules must be consumed, {} remaining",
+        state.remaining_rules()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Version-gate early-return
+// ---------------------------------------------------------------------------
+
+/// Parent Kafka has no `KafkaVersionValid` condition and no
+/// `status.metadataVersion` → reconcile must patch `Ready=False
+/// reason=WaitingForVersionValidation` on the gateway and return without
+/// creating any child objects (Deployment, Service, `KafkaUser`, Secrets).
+#[tokio::test]
+async fn version_gate_blocks_when_kafka_not_validated() {
+    // A Kafka body with no version conditions and no metadataVersion.
+    let unvalidated_kafka = serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "Kafka",
+        "metadata": { "name": KAFKA, "namespace": NS, "uid": "kafka-uid" },
+        "spec": { "kafkaVersion": "0.1.1" },
+        "status": {
+            "conditions": [],
+            // no metadataVersion → version_gate returns Some(cond) → early return
+        }
+    });
+
+    let rules = vec![
+        // 1. GET parent Kafka → unvalidated
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{KAFKA}"),
+            response: json_response(200, &unvalidated_kafka),
+        },
+        // 2. PATCH gateway status (version gate early return)
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkagrpcgateways/{GW}/status"),
+            response: json_response(200, &fake_gateway_body(GW, NS, KAFKA)),
+        },
+        // No further rules: the reconcile must return after the status PATCH.
+    ];
+
+    let (ctx, state) = build_ctx(NS, rules);
+    let gw = gw_cr(GW);
+    let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
+
+    // Returns a 30-second requeue (waiting for version validation).
+    assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
+        "expected requeue(30s) from version gate, got {action:?}"
+    );
+
+    let observed = state.take_observed();
+
+    // The status PATCH must carry WaitingForVersionValidation.
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkagrpcgateways/{GW}/status"))
+        })
+        .expect("gateway status PATCH must have been captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    let conds = body["status"]["conditions"]
+        .as_array()
+        .expect("status must have conditions array");
+    let ready = conds
+        .iter()
+        .find(|c| c["type"] == "Ready")
+        .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
+    assert!(
+        ready["status"] == "False",
+        "Ready must be False when version-gated; body = {body}"
+    );
+    assert!(
+        ready["reason"] == "WaitingForVersionValidation",
+        "reason must be WaitingForVersionValidation; body = {body}"
+    );
+
+    // NO Deployment, Service, or KafkaUser PATCHes must have happened.
+    let unexpected: Vec<_> = observed
+        .iter()
+        .filter(|r| {
+            r.method() == Method::PATCH
+                && (r.uri().to_string().contains("/deployments/")
+                    || r.uri().to_string().contains("/services/")
+                    || r.uri().to_string().contains("/kafkausers/"))
+        })
+        .map(|r| r.uri().to_string())
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "version gate must prevent child object creation; unexpected PATCHes: {unexpected:?}"
+    );
+
+    // Both rules consumed (GET + PATCH status).
+    assert!(
+        state.remaining_rules() == 0,
+        "all FIFO rules must be consumed, {} remaining",
+        state.remaining_rules()
+    );
+}
