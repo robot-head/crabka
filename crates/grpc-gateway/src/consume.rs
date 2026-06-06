@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord, IsolationLevel};
 
-use crate::codec::{RawCodec, RecordCodec};
+use crate::codec::RecordCodec;
 use crate::error::GatewayError;
 
 pub struct ConsumeSession {
@@ -25,6 +25,7 @@ impl ConsumeSession {
         client_id: &str,
         topics: Vec<String>,
         security: Option<crabka_client_core::security::ClientSecurity>,
+        codec: Arc<dyn RecordCodec>,
     ) -> Result<Self, GatewayError> {
         let consumer = Consumer::builder()
             .bootstrap(bootstrap.to_string())
@@ -38,7 +39,7 @@ impl ConsumeSession {
             .await?;
         Ok(Self {
             consumer: Some(consumer),
-            codec: Arc::new(RawCodec),
+            codec,
         })
     }
 

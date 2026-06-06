@@ -135,10 +135,12 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
         ))),
+        codec: Arc::new(RawCodec),
     });
 
     // Serve Connect + forward routes (health omitted — not needed here).

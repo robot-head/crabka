@@ -123,8 +123,10 @@ async fn app_state(bootstrap: &str, client: &str, authz: Arc<GatewayAuthz>) -> A
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz,
+        codec: Arc::new(RawCodec),
     })
 }
 
@@ -765,8 +767,10 @@ async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz,
+        codec: Arc::new(RawCodec),
     });
 
     {

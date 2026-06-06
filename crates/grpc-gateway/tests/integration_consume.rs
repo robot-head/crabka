@@ -70,6 +70,7 @@ async fn subscribe_receives_then_commits() {
         "gw-c",
         vec!["consume-itest".to_string()],
         None,
+        Arc::new(RawCodec),
     )
     .await
     .unwrap();
