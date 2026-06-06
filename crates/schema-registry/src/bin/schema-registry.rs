@@ -1,14 +1,28 @@
 //! crabka-schema-registry: Confluent Schema Registry-compatible REST service.
+//!
+//! This binary is a thin `clap` → lib shim: it parses CLI flags into an
+//! [`Args`], maps them into a [`SecurityCliInput`], and hands that to
+//! [`crabka_schema_registry::cli::build_security`] for validation/assembly (kept
+//! in the lib so it is unit-testable). The remaining glue (serve wiring,
+//! election, ACL-refresh task) lives here.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+use crabka_client_admin::AdminClient;
+use crabka_schema_registry::auth::AuthState;
+use crabka_schema_registry::auth::basic::BasicAuthStore;
+use crabka_schema_registry::authz::SchemaRegistryAuthz;
+use crabka_schema_registry::cli::SecurityCliInput;
 use crabka_schema_registry::config::RegistryConfig;
 use crabka_schema_registry::kafkastore::KafkaStore;
-use crabka_schema_registry::rest::{self, AppState};
+use crabka_schema_registry::rest::serve::{serve_http, serve_https};
+use crabka_schema_registry::rest::{self, AppState, SecurityLayers};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -53,10 +67,110 @@ struct Args {
         default_value_t = true
     )]
     leader_eligibility: bool,
+
+    // ── Authentication ──────────────────────────────────────────────────────
+    /// Reject unauthenticated (anonymous) requests with 401.
+    #[arg(long, env = "SCHEMA_REGISTRY_REQUIRE_AUTH", default_value_t = false)]
+    require_auth: bool,
+    /// `WWW-Authenticate: basic realm="<realm>"` realm advertised on 401. The
+    /// default matches the realm `cp-schema-registry` emits under the standard
+    /// `PropertyFileLoginModule` BASIC setup (the JAAS entry name).
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_AUTH_REALM",
+        default_value = "SchemaRegistry-Props"
+    )]
+    realm: String,
+    /// htpasswd-style `user:cred` file (one per line) for HTTP Basic. The cred
+    /// is a plaintext password or a `$2…` bcrypt hash.
+    #[arg(long, env = "SCHEMA_REGISTRY_BASIC_AUTH_FILE")]
+    basic_auth_file: Option<PathBuf>,
+    /// Inline Basic credential as `user:cred` (repeatable). Same cred format as
+    /// `--basic-auth-file`. Enables Basic auth even without a file.
+    #[arg(long = "basic-user", value_name = "USER:CRED")]
+    basic_users: Vec<String>,
+
+    // ── Bearer (OAuth) ──────────────────────────────────────────────────────
+    /// Bearer-token mode: `off` | `unsecured`. `unsecured` accepts unsigned
+    /// JWTs (dev only), mirroring the gateway's `--bearer`.
+    #[arg(long, env = "SCHEMA_REGISTRY_BEARER", default_value = "off")]
+    bearer: String,
+    /// JWT claim whose value becomes the principal name (Bearer mode).
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_BEARER_PRINCIPAL_CLAIM",
+        default_value = "sub"
+    )]
+    bearer_principal_claim: String,
+
+    // ── Server TLS / mTLS ───────────────────────────────────────────────────
+    /// Server cert chain (PEM). Enables HTTPS when set together with --tls-key.
+    #[arg(long, env = "SCHEMA_REGISTRY_TLS_CERT")]
+    tls_cert: Option<PathBuf>,
+    /// Server private key (PEM).
+    #[arg(long, env = "SCHEMA_REGISTRY_TLS_KEY")]
+    tls_key: Option<PathBuf>,
+    /// CA(s) used to verify incoming client certs (mTLS). Required when
+    /// --tls-client-auth != disabled.
+    #[arg(long, env = "SCHEMA_REGISTRY_TLS_CLIENT_CA")]
+    tls_client_ca: Option<PathBuf>,
+    /// Client-cert mode: `disabled` | `optional` | `required`.
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_TLS_CLIENT_AUTH",
+        default_value = "disabled"
+    )]
+    tls_client_auth: String,
+
+    // ── Authorization (topic ACLs) ──────────────────────────────────────────
+    /// Enable topic-ACL authorization (sourced from the broker's `DescribeAcls`).
+    #[arg(long, env = "SCHEMA_REGISTRY_AUTHZ", default_value_t = false)]
+    authz: bool,
+    /// Super-user principal name that bypasses ACL checks (repeatable).
+    #[arg(long = "super-user", value_name = "NAME")]
+    super_users: Vec<String>,
+    /// ACL-cache refresh interval (seconds).
+    #[arg(long, env = "SCHEMA_REGISTRY_ACL_REFRESH_SECS", default_value_t = 30)]
+    acl_refresh_secs: u64,
+
+    // ── SR → broker client security ─────────────────────────────────────────
+    /// Kafka client protocol to the broker: `PLAINTEXT` | `SSL` |
+    /// `SASL_PLAINTEXT` | `SASL_SSL`.
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_KAFKA_SECURITY_PROTOCOL",
+        default_value = "PLAINTEXT"
+    )]
+    kafka_security_protocol: String,
+    /// SASL mechanism: `PLAIN` | `SCRAM-SHA-256` | `SCRAM-SHA-512`.
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_KAFKA_SASL_MECHANISM",
+        default_value = "PLAIN"
+    )]
+    kafka_sasl_mechanism: String,
+    /// SASL username (PLAIN / SCRAM).
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_USERNAME")]
+    kafka_sasl_username: Option<String>,
+    /// SASL password (PLAIN / SCRAM).
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD")]
+    kafka_sasl_password: Option<String>,
+    /// CA(s) (PEM) the client trusts for the broker's server cert (SSL /
+    /// `SASL_SSL`).
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_TLS_CA")]
+    kafka_tls_ca: Option<PathBuf>,
+    /// TLS SNI / server name for the broker connection (SSL / `SASL_SSL`).
+    #[arg(long, env = "SCHEMA_REGISTRY_KAFKA_TLS_SERVER_NAME")]
+    kafka_tls_server_name: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install the ring crypto provider before any TLS work (server or client).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -65,43 +179,140 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    let security = crabka_schema_registry::cli::build_security(&args.security_input())?;
     let cfg = RegistryConfig {
-        bootstrap: args.bootstrap_servers,
-        schemas_topic: args.schemas_topic,
+        bootstrap: args.bootstrap_servers.clone(),
+        schemas_topic: args.schemas_topic.clone(),
         schemas_topic_rf: args.schemas_topic_rf,
-        client_id: args.client_id,
+        client_id: args.client_id.clone(),
         advertised_url: args
             .advertised_url
             .clone()
             .unwrap_or_else(|| format!("http://{}", args.listen_addr)),
         group_id: args.group_id.clone(),
         leader_eligibility: args.leader_eligibility,
+        security,
     };
     info!(
         listen = %args.listen_addr,
         bootstrap = %cfg.bootstrap,
         topic = %cfg.schemas_topic,
+        tls = cfg.security.tls.is_some(),
+        require_auth = cfg.security.require_auth,
+        authz = cfg.security.authz.as_ref().is_some_and(|a| a.enabled),
         "crabka-schema-registry starting"
     );
 
     let shutdown = CancellationToken::new();
     let store = KafkaStore::start(&cfg, shutdown.clone()).await?;
     let primary = crabka_schema_registry::election::Election::start(&cfg, shutdown.clone()).await?;
+
+    // ── Authentication state ────────────────────────────────────────────────
+    let basic = match &cfg.security.basic {
+        Some(b) => {
+            Some(Arc::new(BasicAuthStore::load(b).map_err(|e| {
+                anyhow::anyhow!("load basic-auth credentials: {e}")
+            })?))
+        }
+        None => None,
+    };
+    let bearer = cfg.security.bearer.as_ref().map(|b| b.validator.clone());
+    let auth = AuthState {
+        basic,
+        bearer,
+        require_auth: cfg.security.require_auth,
+        realm: cfg.security.realm.clone(),
+    };
+
+    // ── Authorization (+ ACL refresh task) ──────────────────────────────────
+    let authz = match &cfg.security.authz {
+        Some(a) if a.enabled => {
+            let az = Arc::new(SchemaRegistryAuthz::new(a.super_users.clone(), true));
+            let admin = AdminClient::connect_secured(
+                &split_bootstrap(&cfg.bootstrap),
+                cfg.security.client.clone(),
+            )
+            .await?;
+            let az_for_task = az.clone();
+            let refresh = a.acl_refresh;
+            let shutdown_for_task = shutdown.clone();
+            tokio::spawn(async move {
+                az_for_task
+                    .run_acl_refresh(admin, refresh, shutdown_for_task)
+                    .await;
+            });
+            Some(az)
+        }
+        _ => None,
+    };
+
     let fwd = rest::forward::ForwardState {
         primary,
         http: reqwest::Client::new(),
         node_id: cfg.advertised_url.clone(),
     };
-    let app = rest::router_with_forwarding(AppState { store }, fwd);
+    let layers = SecurityLayers {
+        auth,
+        authz,
+        forward: fwd,
+    };
+    let app = rest::router_with_security(AppState { store }, layers);
+
+    // ctrl-c → cancel shutdown.
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            tokio::signal::ctrl_c().await.ok();
+            shutdown.cancel();
+        });
+    }
 
     let listener = tokio::net::TcpListener::bind(args.listen_addr).await?;
-    info!(addr = %listener.local_addr()?, "listening");
-    let shutdown_for_axum = shutdown.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c().await.ok();
-            shutdown_for_axum.cancel();
-        })
-        .await?;
+    info!(addr = %listener.local_addr()?, tls = cfg.security.tls.is_some(), "listening");
+    if let Some(tls) = &cfg.security.tls {
+        serve_https(listener, app, tls, shutdown).await?;
+    } else {
+        serve_http(listener, app, shutdown).await?;
+    }
     Ok(())
+}
+
+impl Args {
+    /// Map the parsed clap flags into the clap-free [`SecurityCliInput`] the lib
+    /// validates/assembles. Pure field-shuffling — the security semantics live
+    /// in [`crabka_schema_registry::cli::build_security`].
+    fn security_input(&self) -> SecurityCliInput {
+        SecurityCliInput {
+            require_auth: self.require_auth,
+            realm: self.realm.clone(),
+            basic_auth_file: self.basic_auth_file.clone(),
+            basic_users: self.basic_users.clone(),
+            bearer: self.bearer.clone(),
+            bearer_principal_claim: self.bearer_principal_claim.clone(),
+            tls_cert: self.tls_cert.clone(),
+            tls_key: self.tls_key.clone(),
+            tls_client_ca: self.tls_client_ca.clone(),
+            tls_client_auth: self.tls_client_auth.clone(),
+            authz: self.authz,
+            super_users: self.super_users.clone(),
+            acl_refresh_secs: self.acl_refresh_secs,
+            kafka_security_protocol: self.kafka_security_protocol.clone(),
+            kafka_sasl_mechanism: self.kafka_sasl_mechanism.clone(),
+            kafka_sasl_username: self.kafka_sasl_username.clone(),
+            kafka_sasl_password: self.kafka_sasl_password.clone(),
+            kafka_tls_ca: self.kafka_tls_ca.clone(),
+            kafka_tls_server_name: self.kafka_tls_server_name.clone(),
+        }
+    }
+}
+
+/// Split a comma-separated `host:port,host:port` bootstrap string into the
+/// `Vec<String>` the admin/connect APIs expect.
+fn split_bootstrap(bootstrap: &str) -> Vec<String> {
+    bootstrap
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }

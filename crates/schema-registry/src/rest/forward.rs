@@ -81,6 +81,12 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
     if let Some(ct) = parts.headers.get(header::CONTENT_TYPE) {
         rb = rb.header(header::CONTENT_TYPE, ct);
     }
+    // SECURITY: do NOT forward the caller's `Authorization` header. The ingress
+    // node already authenticated AND authorized this request; the primary trusts
+    // the forward via `FORWARD_HEADER` (both `auth_layer` and `authz_layer` skip
+    // for it). Forwarding the credential would leak it over the inter-node hop and
+    // could not work for mTLS anyway (a client cert can't be carried on this
+    // server-to-server `reqwest` call). See the slice-6 security spec.
     rb = rb.header(FORWARD_HEADER, &fwd.node_id);
     match rb.send().await {
         Ok(resp) => {

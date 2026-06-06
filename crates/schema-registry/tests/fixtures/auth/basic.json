@@ -1,0 +1,29 @@
+[
+  {
+    "body": {
+      "error_code": 401,
+      "message": "Unauthorized"
+    },
+    "case": "no_credentials",
+    "credentials": null,
+    "status": 401,
+    "www_authenticate": "basic realm=\"SchemaRegistry-Props\""
+  },
+  {
+    "body": {
+      "error_code": 401,
+      "message": "Unauthorized"
+    },
+    "case": "wrong_password",
+    "credentials": "alice",
+    "status": 401,
+    "www_authenticate": "basic realm=\"SchemaRegistry-Props\""
+  },
+  {
+    "body": [],
+    "case": "good_credentials",
+    "credentials": "alice",
+    "status": 200,
+    "www_authenticate": null
+  }
+]
