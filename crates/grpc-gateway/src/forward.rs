@@ -2,12 +2,16 @@
 //! `/internal/v1/forward` endpoint that receives a forwarded record and
 //! produces it LOCALLY (the receiver is the partition's owner).
 //!
-//! Transport is plain JSON over HTTP on the gateway's own listener (TLS is a
-//! later phase). This INTERNAL protocol is deliberately separate from the
-//! public Connect `Send` API so the two evolve independently.
+//! Transport is JSON over HTTP on the gateway's own listener — plaintext by
+//! default, or mutually-authenticated https (mTLS) when the gateway runs with
+//! TLS (the forwarder presents the gateway's own client cert and the receiver
+//! requires a cert-authenticated peer). This INTERNAL protocol is deliberately
+//! separate from the public Connect `Send` API so the two evolve independently.
 
 use std::sync::Arc;
 
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Extension, Json, Router};
 use serde::{Deserialize, Serialize};
@@ -82,14 +86,34 @@ pub struct ForwardError {
 /// reqwest client that forwards a record to the owning replica.
 pub struct Forwarder {
     http: reqwest::Client,
+    scheme: &'static str,
 }
 
 impl Forwarder {
+    /// Plaintext forwarder (http://). Used when the gateway runs without TLS.
     #[must_use]
     pub fn new() -> Self {
         Self {
             http: reqwest::Client::new(),
+            scheme: "http",
         }
+    }
+
+    /// mTLS forwarder (https://) presenting `client_config`'s identity and
+    /// trusting its roots — the gateway's own cert authenticates it to the
+    /// owning replica.
+    ///
+    /// # Errors
+    /// Returns `GatewayError::Forward` if the reqwest client cannot be built.
+    pub fn with_tls(client_config: Arc<rustls::ClientConfig>) -> Result<Self, GatewayError> {
+        let http = reqwest::Client::builder()
+            .use_preconfigured_tls(Some(Arc::unwrap_or_clone(client_config)))
+            .build()
+            .map_err(|e| GatewayError::Forward(format!("build tls forward client: {e}")))?;
+        Ok(Self {
+            http,
+            scheme: "https",
+        })
     }
 
     /// POST the record to `owner_addr`'s internal forward endpoint. Transport
@@ -100,7 +124,7 @@ impl Forwarder {
         owner_addr: &str,
         rec: &GatewayRecord,
     ) -> Result<RecordOutcome, GatewayError> {
-        let url = format!("http://{owner_addr}/internal/v1/forward");
+        let url = format!("{}://{}/internal/v1/forward", self.scheme, owner_addr);
         let body = ForwardRecord::from_record(rec);
         let resp = self
             .http
@@ -148,8 +172,27 @@ pub fn forward_router(state: Arc<AppState>) -> Router {
 /// which the origin retries). Never re-forwards, so there are no forward loops.
 async fn forward_handler(
     Extension(state): Extension<Arc<AppState>>,
+    principal: Option<Extension<crabka_security::Principal>>,
     Json(req): Json<ForwardRecord>,
-) -> Json<ForwardResult> {
+) -> Response {
+    // When TLS is configured, the internal forward endpoint only accepts a
+    // cert-authenticated peer (an mTLS principal must be present). Plaintext
+    // mode (no TLS) skips this so existing non-TLS forwarding still works.
+    if state.config.tls.is_some() && principal.is_none() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ForwardResult {
+                partition: -1,
+                offset: -1,
+                deduplicated: false,
+                error: Some(ForwardError {
+                    message: "forward requires an authenticated mTLS peer".into(),
+                    retriable: false,
+                }),
+            }),
+        )
+            .into_response();
+    }
     let rec = req.into_record();
     match state.produce.produce_local(rec).await {
         Ok(o) => Json(ForwardResult {
@@ -157,7 +200,8 @@ async fn forward_handler(
             offset: o.offset,
             deduplicated: o.deduplicated,
             error: None,
-        }),
+        })
+        .into_response(),
         Err(e) => {
             let retriable = matches!(e, GatewayError::Unavailable);
             Json(ForwardResult {
@@ -169,6 +213,7 @@ async fn forward_handler(
                     retriable,
                 }),
             })
+            .into_response()
         }
     }
 }
