@@ -2101,3 +2101,80 @@ fn dsl_suppress_until_window_closes_emits_final_only() {
     // The [60000,120000) window is still buffered -> no further output.
     assert_eq!(d.read_output("out", out), None);
 }
+
+/// Suppress closing multiple buffered windows at once: two keys buffered in window
+/// [0,60000) are both emitted (in buffer order) when a later-window record advances
+/// stream-time past 60000. Exercises the end-to-end multi-entry eviction path.
+#[test]
+fn dsl_suppress_closes_multiple_windows_in_order() {
+    use crabka_client_streams::{
+        BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows, Window, Windowed,
+    };
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(60_000))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    let out = Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde);
+    // "a" and "b" both land in window [0,60000) → two buffered entries, no output.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("a".to_string()),
+        "x".to_string(),
+        1_000,
+    );
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("b".to_string()),
+        "x".to_string(),
+        2_000,
+    );
+    assert_eq!(d.read_output("out", out), None);
+    // "a" in window [60000,120000) advances stream-time to 70000 ≥ 60000 → both
+    // [0,60000) entries close, emitted in buffer (insertion) order: a then b.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("a".to_string()),
+        "x".to_string(),
+        70_000,
+    );
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window {
+                    start: 0,
+                    end: 60_000
+                }
+            }),
+            1
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "b".into(),
+                window: Window {
+                    start: 0,
+                    end: 60_000
+                }
+            }),
+            1
+        ))
+    );
+    // The [60000,120000) "a" entry stays buffered → no further output.
+    assert_eq!(d.read_output("out", out), None);
+}

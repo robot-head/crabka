@@ -77,16 +77,12 @@ impl<K, V> KTable<K, V> {
     }
 
     /// Tag this table with its upstream window's grace (set by windowed/session
-    /// aggregations; propagated through `Change`-preserving ops). Read by `suppress`.
+    /// aggregations; propagated through `Change`-preserving ops). Read by `suppress`
+    /// (which accesses the `window_grace_ms` field directly).
     #[must_use]
     pub(crate) fn with_window_grace(mut self, grace_ms: Option<i64>) -> Self {
         self.window_grace_ms = grace_ms;
         self
-    }
-
-    #[allow(dead_code)] // read by golden/execution tests in later tasks
-    pub(crate) fn window_grace_ms(&self) -> Option<i64> {
-        self.window_grace_ms
     }
 }
 
