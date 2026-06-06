@@ -1,7 +1,9 @@
 //! Generate the operator CRD reference pages from `K::crd()`.
 
 use crate::schema_md::render_field_table;
-use crabka_operator::crd::{Kafka, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser};
+use crabka_operator::crd::{
+    Kafka, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser, SchemaRegistry,
+};
 use kube::CustomResourceExt;
 use serde_json::Value;
 
@@ -21,6 +23,7 @@ pub fn crd_pages() -> Vec<CrdPage> {
         page::<KafkaTopic>(),
         page::<KafkaUser>(),
         page::<KafkaRebalance>(),
+        page::<SchemaRegistry>(),
     ]
 }
 
@@ -89,7 +92,7 @@ mod tests {
             "expected kafkaVersion field in kafka spec table:\n{}",
             kafka.body
         );
-        assert!(pages.len() == 5);
+        assert!(pages.len() == 6);
         let slugs: Vec<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
         for e in [
             "kafka",
@@ -97,6 +100,7 @@ mod tests {
             "kafkatopic",
             "kafkauser",
             "kafkarebalance",
+            "schemaregistry",
         ] {
             assert!(slugs.contains(&e), "missing {e}");
         }
