@@ -6,6 +6,7 @@
 
 pub mod compat;
 pub mod config;
+pub mod election;
 pub mod error;
 pub mod format;
 pub mod kafkastore;

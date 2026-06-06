@@ -273,6 +273,9 @@ async fn our_store_decodes_cp_schema_registry_records() {
         schemas_topic: "_schemas".into(),
         schemas_topic_rf: 1,
         client_id: "sr-interop".into(),
+        advertised_url: "http://127.0.0.1:0".into(),
+        group_id: "schema-registry".into(),
+        leader_eligibility: true,
     };
     let cancel = CancellationToken::new();
     let store = KafkaStore::start(&cfg, cancel.clone())

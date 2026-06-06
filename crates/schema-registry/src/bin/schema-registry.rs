@@ -56,6 +56,9 @@ async fn main() -> anyhow::Result<()> {
         schemas_topic: args.schemas_topic,
         schemas_topic_rf: args.schemas_topic_rf,
         client_id: args.client_id,
+        advertised_url: format!("http://{}", args.listen_addr),
+        group_id: "schema-registry".into(),
+        leader_eligibility: true,
     };
     info!(
         listen = %args.listen_addr,
