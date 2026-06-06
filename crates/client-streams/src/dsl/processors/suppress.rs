@@ -21,6 +21,7 @@ pub(crate) struct KTableSuppressProcessor<KInner, V> {
     pub buffer: TimeOrderedKeyValueBuffer<Windowed<KInner>, Change<V>>,
     pub observed_stream_time: i64,
     pub grace_ms: i64,
+    pub max_records: Option<usize>,
     pub _pd: Marker<(KInner, V)>,
 }
 
@@ -28,11 +29,12 @@ impl<KInner, V> KTableSuppressProcessor<KInner, V>
 where
     KInner: Eq + std::hash::Hash + Clone,
 {
-    pub(crate) fn new(grace_ms: i64) -> Self {
+    pub(crate) fn new(grace_ms: i64, max_records: Option<usize>) -> Self {
         Self {
             buffer: TimeOrderedKeyValueBuffer::new(),
             observed_stream_time: i64::MIN,
             grace_ms,
+            max_records,
             _pd: PhantomData,
         }
     }
@@ -58,6 +60,17 @@ where
         let threshold = self.observed_stream_time - self.grace_ms;
         for (k, change, rts) in self.buffer.evict_while(threshold) {
             ctx.forward(Record::new(Some(k), change, rts));
+        }
+
+        // shutDownWhenFull: checked AFTER close-eviction, so windows that
+        // buffer-then-immediately-close don't count — only genuinely-open buffered
+        // windows do. Over capacity → fatal (the JVM throws StreamsException + the
+        // thread dies; panic is the Rust analog).
+        if let Some(cap) = self.max_records {
+            assert!(
+                self.buffer.len() <= cap,
+                "suppress buffer exceeded its max capacity of {cap} records (shutDownWhenFull)"
+            );
         }
     }
 }
@@ -93,7 +106,7 @@ mod tests {
             timestamp: 0,
         };
 
-        let mut proc = KTableSuppressProcessor::<String, i64>::new(0);
+        let mut proc = KTableSuppressProcessor::<String, i64>::new(0, None);
 
         // Two updates for window [0,10): count 1 then 2. ts in [0,10) < window end.
         for (cnt, ts) in [(1i64, 1i64), (2, 3)] {
@@ -156,7 +169,7 @@ mod tests {
             timestamp: 0,
         };
 
-        let mut proc = KTableSuppressProcessor::<String, i64>::new(5); // grace 5
+        let mut proc = KTableSuppressProcessor::<String, i64>::new(5, None); // grace 5
 
         {
             let mut d = Dispatch {
@@ -216,5 +229,89 @@ mod tests {
                 .window,
             Window { start: 0, end: 10 }
         );
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "max capacity")]
+    async fn exceeding_max_records_shuts_down() {
+        let mut stores = StoreRegistry::default();
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+        let mut proc = KTableSuppressProcessor::<String, i64>::new(0, Some(2)); // cap 2
+        // Three distinct keys in the SAME open window [0,10) (ts < 10 → none close).
+        for (k, ts) in [("a", 1i64), ("b", 2), ("c", 3)] {
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
+            // the third put brings len() to 3 > cap 2 → panic
+            proc.process(
+                &mut ctx,
+                Record::new(Some(windowed(k, 0, 10)), Change::update(None, 1), ts),
+            )
+            .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn at_capacity_does_not_panic_and_closes_normally() {
+        let mut stores = StoreRegistry::default();
+        let children = [0usize];
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        let mut output = Vec::new();
+        let rc = RecordContext {
+            topic: "in".into(),
+            partition: 0,
+            offset: 0,
+            timestamp: 0,
+        };
+        let mut proc = KTableSuppressProcessor::<String, i64>::new(0, Some(2)); // cap 2
+        // Two keys in [0,10): len == cap, not over → no panic.
+        for (k, ts) in [("a", 1i64), ("b", 2)] {
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
+            proc.process(
+                &mut ctx,
+                Record::new(Some(windowed(k, 0, 10)), Change::update(None, 1), ts),
+            )
+            .await;
+        }
+        assert!(buffer.is_empty()); // nothing closed yet
+        // A record in window [10,20) at ts=15 closes [0,10): the close-eviction runs
+        // BEFORE the cap check, so len drops to 1 (the new window) → no panic, and
+        // both [0,10) entries emit.
+        {
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: &mut output,
+                record_ctx: &rc,
+                stores: &mut stores,
+            };
+            let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
+            proc.process(
+                &mut ctx,
+                Record::new(Some(windowed("z", 10, 20)), Change::update(None, 1), 15),
+            )
+            .await;
+        }
+        assert_eq!(buffer.len(), 2); // a@[0,10] and b@[0,10] emitted
     }
 }
