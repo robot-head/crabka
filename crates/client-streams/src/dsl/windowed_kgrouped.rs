@@ -242,6 +242,7 @@ where
 
         drop(g);
         KTable::new(Rc::clone(&self.builder), agg_id, Some(store_name), None)
+            .with_window_grace(Some(windows.grace_ms))
     }
 
     /// Record the (optional) repartition node + a windowed
@@ -317,5 +318,6 @@ where
 
         drop(g);
         KTable::new(Rc::clone(&self.builder), red_id, Some(store_name), None)
+            .with_window_grace(Some(windows.grace_ms))
     }
 }
