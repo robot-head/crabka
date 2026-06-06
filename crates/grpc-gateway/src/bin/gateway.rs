@@ -12,7 +12,7 @@ use tracing::info;
 use tokio_util::sync::CancellationToken;
 
 use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::config::GatewayConfig;
+use crabka_grpc_gateway::config::{GatewayConfig, TlsSettings};
 use crabka_grpc_gateway::dedup::DedupEngine;
 use crabka_grpc_gateway::dedup::membership::{MembershipPublisher, MembershipStore};
 use crabka_grpc_gateway::dedup::store::DedupStore;
@@ -91,12 +91,40 @@ struct Args {
         default_value = "__crabka_grpc_gateway_membership"
     )]
     membership_topic: String,
+
+    /// Server cert chain (PEM). Enables TLS when set together with --tls-key.
+    #[arg(long, env = "CRABKA_GATEWAY_TLS_CERT")]
+    tls_cert: Option<std::path::PathBuf>,
+    /// Server private key (PEM).
+    #[arg(long, env = "CRABKA_GATEWAY_TLS_KEY")]
+    tls_key: Option<std::path::PathBuf>,
+    /// CA(s) used to verify incoming client certs (mTLS). Required if --tls-client-auth != disabled.
+    #[arg(long, env = "CRABKA_GATEWAY_TLS_CLIENT_CA")]
+    tls_client_ca: Option<std::path::PathBuf>,
+    /// Client-cert mode: disabled | optional | required.
+    #[arg(
+        long,
+        env = "CRABKA_GATEWAY_TLS_CLIENT_AUTH",
+        default_value = "disabled"
+    )]
+    tls_client_auth: String,
+    /// CA(s) the forwarder trusts for peer gateway server certs (defaults to --tls-client-ca).
+    #[arg(long, env = "CRABKA_GATEWAY_TLS_TRUST_ROOTS")]
+    tls_trust_roots: Option<std::path::PathBuf>,
+    /// Cert hot-reload poll interval (seconds).
+    #[arg(long, env = "CRABKA_GATEWAY_TLS_RELOAD_SECS", default_value_t = 30)]
+    tls_reload_secs: u64,
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Step 1: install the ring crypto provider before any TLS work.
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -111,6 +139,31 @@ async fn main() -> anyhow::Result<()> {
         "crabka-grpc-gateway starting"
     );
 
+    // Step 3: build TlsSettings from CLI args (requires both cert+key or neither).
+    let tls = match (args.tls_cert.clone(), args.tls_key.clone()) {
+        (Some(cert_chain_path), Some(private_key_path)) => {
+            let client_auth = match args.tls_client_auth.as_str() {
+                "disabled" => crabka_grpc_gateway::config::ClientAuthMode::Disabled,
+                "optional" => crabka_grpc_gateway::config::ClientAuthMode::Optional,
+                "required" => crabka_grpc_gateway::config::ClientAuthMode::Required,
+                other => anyhow::bail!("invalid --tls-client-auth: {other}"),
+            };
+            Some(TlsSettings {
+                cert_chain_path,
+                private_key_path,
+                trust_roots_path: args
+                    .tls_trust_roots
+                    .clone()
+                    .or_else(|| args.tls_client_ca.clone()),
+                client_ca_path: args.tls_client_ca.clone(),
+                client_auth,
+                reload_interval_secs: args.tls_reload_secs,
+            })
+        }
+        (None, None) => None,
+        _ => anyhow::bail!("--tls-cert and --tls-key must be set together"),
+    };
+
     let config = GatewayConfig {
         bootstrap: args.bootstrap_servers.clone(),
         listen_addr: args.listen_addr,
@@ -121,7 +174,7 @@ async fn main() -> anyhow::Result<()> {
         dedup_txn_id_prefix: args.dedup_txn_id_prefix.clone(),
         advertised_addr: args.advertised_addr.clone(),
         membership_topic: args.membership_topic.clone(),
-        tls: None, // wired in Task 5
+        tls: tls.clone(),
     };
 
     run(config).await
@@ -176,12 +229,25 @@ async fn run(config: GatewayConfig) -> anyhow::Result<()> {
         config.dedup_partitions,
         store,
     ));
+
+    // Step 4: build the forwarder — mTLS https when TLS is configured, plaintext http otherwise.
+    let forwarder = match config.tls.as_ref() {
+        Some(t) => {
+            let client_cfg = t
+                .to_security()
+                .build_client_config_with_identity()
+                .map_err(|e| anyhow::anyhow!("build forward client tls: {e}"))?;
+            Arc::new(Forwarder::with_tls(client_cfg)?)
+        }
+        None => Arc::new(Forwarder::new()),
+    };
+
     let produce = ProduceCore::new(&config.bootstrap, &config.client_id, Arc::new(RawCodec))
         .await?
         .with_dedup(engine)
         .with_forwarding(
-            membership,
-            Arc::new(Forwarder::new()),
+            membership.clone(),
+            forwarder,
             config.advertised_addr.clone(),
         );
     let state = Arc::new(AppState {
@@ -193,14 +259,30 @@ async fn run(config: GatewayConfig) -> anyhow::Result<()> {
         .merge(health::router(readiness))
         .merge(forward::forward_router(state.clone()));
 
-    let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
-    info!(addr = %listener.local_addr()?, "gateway listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
+    // Step 5: spawn ctrl-c → cancel, build optional dynamic TLS, then serve.
+    {
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
             tokio::signal::ctrl_c().await.ok();
             shutdown.cancel();
-        })
-        .await?;
+        });
+    }
+
+    let tls_dynamic = match config.tls.as_ref() {
+        Some(t) => Some(
+            crabka_grpc_gateway::serve::build_and_watch_tls(
+                t.to_security(),
+                t.reload_interval_secs,
+                shutdown.clone(),
+            )
+            .map_err(|e| anyhow::anyhow!("build tls server config: {e}"))?,
+        ),
+        None => None,
+    };
+
+    let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
+    info!(addr = %listener.local_addr()?, tls = tls_dynamic.is_some(), "gateway listening");
+    crabka_grpc_gateway::serve::serve(listener, app, tls_dynamic, shutdown).await?;
     Ok(())
 }
 
