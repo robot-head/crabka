@@ -58,6 +58,29 @@ case "$MODE" in
       '
     ;;
 
+  --bufval)
+    # Dump the JVM suppress-buffer changelog VALUE bytes (BufferValue.serialize)
+    # as hex into testdata/suppress_bufval/, for the Rust suppress_bufval codec.
+    # Mount the parent tests/ dir so the output persists to the host (like --gradle).
+    TESTS_DIR="$(cd "$HERE/.." && pwd)"
+    docker run --rm \
+      -v "$TESTS_DIR":/tests -w /tests/jvm-capture \
+      "$JDK_IMAGE" bash -c '
+        set -euo pipefail
+        M=https://repo1.maven.org/maven2
+        J=/tmp/j; mkdir -p "$J"
+        get() { f=$(basename "$2"); [ -f "$J/$f" ] || curl -sSfL "$M/$1/$2" -o "$J/$f"; }
+        get org/apache/kafka/kafka-streams/'"$KAFKA_VERSION"' kafka-streams-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-clients/'"$KAFKA_VERSION"' kafka-clients-'"$KAFKA_VERSION"'.jar
+        get org/slf4j/slf4j-api/1.7.36 slf4j-api-1.7.36.jar
+        CP="$J/kafka-streams-'"$KAFKA_VERSION"'.jar:$J/kafka-clients-'"$KAFKA_VERSION"'.jar"
+        RT="$CP:$J/slf4j-api-1.7.36.jar"
+        mkdir -p /tmp/build /tests/testdata/suppress_bufval
+        javac -cp "$CP" -d /tmp/build src/main/java/crabka/capture/BufferValueCapture.java
+        java -cp "/tmp/build:$RT" crabka.capture.BufferValueCapture /tests/testdata/suppress_bufval
+      '
+    ;;
+
   --verify-broker)
     # Mechanism B: stand up a real Kafka 4.1 broker (KRaft, streams groups enabled),
     # run the count topology with group.protocol=streams, dump the live rebalance data.

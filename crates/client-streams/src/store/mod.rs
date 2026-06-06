@@ -7,6 +7,7 @@ pub mod kv;
 pub(crate) mod registry;
 pub mod session;
 pub(crate) mod session_schema;
+pub(crate) mod suppress_bufval;
 pub(crate) mod turso;
 pub mod window;
 pub(crate) mod window_schema;
