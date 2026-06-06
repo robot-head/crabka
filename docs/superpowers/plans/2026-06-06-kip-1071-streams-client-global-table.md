@@ -139,9 +139,9 @@ pub(crate) const GLOBALTABLE_SOURCE: &str = "<from capture>";
 pub(crate) const GLOBALTABLE_PROCESSOR: &str = "<from capture>";
 ```
 
-- [ ] **Step 3: `NodeRegistry` global marker** (`src/topology/node.rs`). Add a way to record a global store/source so grouping + wire emit it per the captured shape. Minimal: a `global_stores: Vec<GlobalStoreEntry>` where `GlobalStoreEntry { store_name, source_topic, processor }`, plus `add_global_store(...)`. (Sized to the capture — if the JVM emits a dedicated subtopology with just the source topic, this is what grouping consumes.)
+- [ ] **Step 3: `NodeRegistry` global marker** (`src/topology/node.rs`). **T1 CAPTURE RESULT (ground truth):** a GlobalKTable is **invisible** in the wire — NO source topic, NO changelog, NO subtopology. BUT the global node group **consumes a subtopology index**: declared first, it takes index 0, so the stream subtopology is emitted as `subtopology_id "1"` (a normal single-subtopology app is "0"). So the marker records the global source/store/processor as a **distinct node group that is assigned an index by the grouping pass but excluded from the emitted `subtopologies`**. Minimal: a `global_groups: Vec<GlobalGroup>` (`{ source_topic, store_name, processor }`) the grouping pass numbers + the wire layer skips.
 
-- [ ] **Step 4: `Topology::add_global_store`** (`src/topology/builder.rs`). Mirror `add_state_store` but: register a global KV store factory (a `KeyValueBytesStore<K,V>` with **empty changelog topic** — no changelog), and record the global source/processor in the `NodeRegistry` global list (not a normal store entry). The global store goes into a SEPARATE store map (`global_store_factories`) so per-task `instantiate` does NOT build it (G-ii builds it in the `GlobalStateManager`); for G-i the TestDriver builds it directly.
+- [ ] **Step 4: `Topology::add_global_store`** (`src/topology/builder.rs`). Mirror `add_state_store` but: register a global KV store factory (a `KeyValueBytesStore<K,V>` with **empty changelog topic** — no changelog), and record the global source/store/processor as a global node group (not a normal store entry). The global store goes into a SEPARATE store map (`global_store_factories`) so per-task `instantiate` does NOT build it (G-ii builds it in the `GlobalStateManager`); for G-i the TestDriver builds it directly.
 
 ```rust
 pub fn add_global_store<K, V, KS, VS>(
@@ -155,7 +155,7 @@ pub fn add_global_store<K, V, KS, VS>(
 where K: Send + 'static, V: Send + 'static, KS: Serde<K> + Clone, VS: Serde<V> + Clone { /* ... */ }
 ```
 
-- [ ] **Step 5: wire emission** (`src/topology/grouping.rs` + `src/topology/wire.rs`). Emit the global subtopology(ies) **to match `global_table_join.topology.json` byte-for-byte** (the structure recorded in T1 Step 3). No changelog topic for the global store.
+- [ ] **Step 5: wire emission** (`src/topology/grouping.rs` + `src/topology/wire.rs`). The grouping pass assigns the global node group an index (global-first → 0); the wire layer **excludes** global groups from `subtopologies` while **preserving the index bump** (the stream subtopology emits as id "1"). Match `global_table_join.topology.json` byte-for-byte: a single subtopology `{id:"1", source_topics:["in"], all-others empty}`.
 
 - [ ] **Step 6: unit test** the wire shape against the fixture is deferred to T5's golden; here add a focused `NodeRegistry`/`add_global_store` unit test (store registered in the global list, no changelog entry produced). `cargo test -p crabka-client-streams --lib global` + clippy/fmt.
 
