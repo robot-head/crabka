@@ -12,7 +12,7 @@ pub async fn get_by_id(
     Path(id): Path<i32>,
     Query(q): Query<DeletedQ>,
 ) -> Result<Response, SrError> {
-    let (ty, schema, _references) = st
+    let (ty, schema, references) = st
         .store
         .store
         .read()
@@ -23,6 +23,12 @@ pub async fn get_by_id(
         body.insert("schemaType".into(), t.into());
     }
     body.insert("schema".into(), schema.into());
+    if !references.is_empty() {
+        body.insert(
+            "references".into(),
+            serde_json::to_value(&references).expect("refs serialise"),
+        );
+    }
     Ok(ok_json(&serde_json::Value::Object(body)))
 }
 

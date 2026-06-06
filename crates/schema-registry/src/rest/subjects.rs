@@ -17,7 +17,7 @@ struct RegisterBody {
     #[serde(rename = "schemaType", default)]
     schema_type: Option<String>,
     #[serde(default)]
-    references: Vec<serde_json::Value>,
+    references: Vec<crate::kafkastore::record::SchemaReference>,
     #[serde(default)]
     id: Option<i32>,
     #[serde(default)]
@@ -32,11 +32,17 @@ pub async fn register(
 ) -> Result<Response, SrError> {
     let req: RegisterBody =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
-    let _ = &req.references; // slice 1 ignores references
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
     let reg = st
         .store
-        .register(&subject, ty, &req.schema, req.id, req.version)
+        .register(
+            &subject,
+            ty,
+            &req.schema,
+            &req.references,
+            req.id,
+            req.version,
+        )
         .await?;
     Ok(ok_json(&serde_json::json!({ "id": reg.id })))
 }
@@ -55,7 +61,8 @@ pub async fn lookup(
     if s.versions(&subject, q.deleted).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    let Some(found) = s.find_under_subject(&subject, ty, &req.schema, &[], q.deleted) else {
+    let Some(found) = s.find_under_subject(&subject, ty, &req.schema, &req.references, q.deleted)
+    else {
         return Err(SrError::SchemaNotFound);
     };
     let (sty, schema, _references) = s
@@ -115,7 +122,7 @@ pub async fn get_version(
     if s.versions(&subject, q.deleted).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    let (id, ver, ty, schema, _references) = s
+    let (id, ver, ty, schema, references) = s
         .version(&subject, want, q.deleted)
         .ok_or(SrError::VersionNotFound)?;
     let mut m = serde_json::Map::new();
@@ -126,6 +133,12 @@ pub async fn get_version(
         m.insert("schemaType".into(), t.into());
     }
     m.insert("schema".into(), schema.into());
+    if !references.is_empty() {
+        m.insert(
+            "references".into(),
+            serde_json::to_value(&references).expect("refs serialise"),
+        );
+    }
     Ok(ok_json(&serde_json::Value::Object(m)))
 }
 
@@ -146,7 +159,8 @@ pub async fn get_version_schema(
     Ok(ok_raw(schema))
 }
 
-/// GET /subjects/{subject}/versions/{version}/referencedby -> [] (slice 4 adds real data)
+/// GET /subjects/{subject}/versions/{version}/referencedby -> ids of the live
+/// schemas that reference this `(subject, version)` (ascending; empty if none).
 pub async fn referencedby(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
@@ -156,7 +170,11 @@ pub async fn referencedby(
     if s.versions(&subject, true).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    s.version(&subject, want, true)
+    // Resolve `latest`/numeric to a concrete version (404 if absent), matching
+    // slice-3 behaviour, then list its live referrers.
+    let (_, concrete, _, _, _) = s
+        .version(&subject, want, true)
         .ok_or(SrError::VersionNotFound)?;
-    Ok(ok_json(&serde_json::json!([])))
+    let ids = s.referenced_by(&subject, concrete, false);
+    Ok(ok_json(&ids))
 }

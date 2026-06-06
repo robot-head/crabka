@@ -43,7 +43,7 @@ fn assert_matrix_matches_cp(
         snap.set_subject_compat("s", c.level.clone());
         snap.register("s", ty, &c.writer, &[])
             .expect("writer registers");
-        let got = compat::check_against_version(&snap, "s", ty, &c.reader, None)
+        let got = compat::check_against_version(&snap, "s", ty, &c.reader, &[], None)
             .expect("verdict")
             .is_compatible;
         let expected = *known_divergences

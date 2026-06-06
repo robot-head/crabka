@@ -14,6 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::RegistryConfig;
 use crate::error::SrError;
 use crate::format::{self, SchemaType};
+use crate::kafkastore::record::SchemaReference;
 use crate::store::{Registered, StoreState};
 
 /// Valid `mode` strings for the global / per-subject mode endpoints.
@@ -81,6 +82,7 @@ impl KafkaStore {
         subject: &str,
         ty: SchemaType,
         schema: &str,
+        references: &[SchemaReference],
         import_id: Option<i32>,
         import_version: Option<i32>,
     ) -> Result<Registered, SrError> {
@@ -89,17 +91,21 @@ impl KafkaStore {
         if mode == "READONLY" {
             return Err(SrError::OperationNotPermitted(subject.to_string()));
         }
+        // Resolve the candidate's references once (propagating ReferenceNotFound
+        // / 42201 if any named version is absent) and reuse the closure for
+        // normalisation, dedup, compat, and the parse below.
+        let resolved = self.store.read().resolve_closure(references)?;
         // Normalise before dedup check: `syntax = "proto3"; message ...`
         // needs to deduplicate against the same proto in normalised form.
-        let schema = &format::normalized_storage_form(ty, schema, &[])?;
+        let schema = &format::normalized_storage_form(ty, schema, &resolved)?;
         if mode == "IMPORT" {
             let (Some(id), Some(version)) = (import_id, import_version) else {
                 return Err(SrError::InvalidSchema(
                     "IMPORT mode requires explicit id and version".into(),
                 ));
             };
-            format::parse(ty, schema, &[])?; // 42201 if unparseable
-            let (key, value) = record::encode_schema(subject, version, id, ty, schema, &[]);
+            format::parse(ty, schema, &resolved)?; // 42201 if unparseable
+            let (key, value) = record::encode_schema(subject, version, id, ty, schema, references);
             let offset = self
                 .writer
                 .produce(key, value)
@@ -108,24 +114,26 @@ impl KafkaStore {
             self.await_applied(offset).await;
             return Ok(Registered { id, version });
         }
-        if let Some(existing) =
-            self.store
-                .read()
-                .find_under_subject(subject, ty, schema, &[], false)
+        if let Some(existing) = self
+            .store
+            .read()
+            .find_under_subject(subject, ty, schema, references, false)
         {
             return Ok(existing);
         }
         // Slice 2: enforce compatibility against existing versions per the
         // subject's effective level. First version / NONE => no-op. Incompatible
-        // => SrError::Incompatible (409); nothing is persisted.
-        crate::compat::check_registration(&self.store.read(), subject, ty, schema)?;
+        // => SrError::Incompatible (409); nothing is persisted. Ref-aware: both
+        // the candidate's and each existing version's references are resolved.
+        crate::compat::check_registration(&self.store.read(), subject, ty, schema, &resolved)?;
         // Genuinely new under this subject: decide id/version on a throwaway
         // clone (the reader is the sole mutator of the live store).
         let reg = {
             let mut probe = self.store.read().clone();
-            probe.register(subject, ty, schema, &[])?
+            probe.register(subject, ty, schema, references)?
         };
-        let (key, value) = record::encode_schema(subject, reg.version, reg.id, ty, schema, &[]);
+        let (key, value) =
+            record::encode_schema(subject, reg.version, reg.id, ty, schema, references);
         let offset = self
             .writer
             .produce(key, value)
@@ -179,6 +187,15 @@ impl KafkaStore {
             s.version(subject, Some(version), true)
                 .ok_or(SrError::VersionNotFound)?
         };
+        // Reference-protection: a live referrer blocks deletion (42206).
+        if !self
+            .store
+            .read()
+            .referenced_by(subject, version, false)
+            .is_empty()
+        {
+            return Err(SrError::ReferencedByOthers(format!("{subject}:{version}")));
+        }
         let (key, value) =
             record::encode_schema_deleted(subject, ver, id, ty, &schema, &references);
         let offset = self
@@ -210,6 +227,15 @@ impl KafkaStore {
                 return Err(SrError::VersionNotSoftDeleted(subject.to_string(), version));
             }
         }
+        // Reference-protection: a live referrer blocks deletion (42206).
+        if !self
+            .store
+            .read()
+            .referenced_by(subject, version, false)
+            .is_empty()
+        {
+            return Err(SrError::ReferencedByOthers(format!("{subject}:{version}")));
+        }
         let key = record::encode_tombstone(subject, version);
         let offset = self
             .writer
@@ -236,6 +262,17 @@ impl KafkaStore {
                 None => return Err(SrError::SubjectNotFound(subject.to_string())),
             }
         };
+        // Reference-protection: any live referrer of a live version blocks (42206).
+        for v in &versions {
+            if !self
+                .store
+                .read()
+                .referenced_by(subject, *v, false)
+                .is_empty()
+            {
+                return Err(SrError::ReferencedByOthers(format!("{subject}:{v}")));
+            }
+        }
         let max = versions.iter().copied().max().unwrap_or(0);
         let (key, value) = record::encode_delete_subject(subject, max);
         let offset = self
@@ -262,6 +299,17 @@ impl KafkaStore {
             }
             all
         };
+        // Reference-protection: any live referrer of any version blocks (42206).
+        for v in &all_versions {
+            if !self
+                .store
+                .read()
+                .referenced_by(subject, *v, false)
+                .is_empty()
+            {
+                return Err(SrError::ReferencedByOthers(format!("{subject}:{v}")));
+            }
+        }
         let mut last_offset = -1;
         for v in &all_versions {
             let key = record::encode_tombstone(subject, *v);
