@@ -1,0 +1,42 @@
+[
+  {
+    "key": "{\"keytype\":\"NOOP\",\"magic\":0}",
+    "offset": 0,
+    "value": null
+  },
+  {
+    "key": "{\"keytype\":\"NOOP\",\"magic\":0}",
+    "offset": 1,
+    "value": null
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"av_money\",\"version\":1,\"magic\":1}",
+    "offset": 2,
+    "value": "{\"subject\":\"av_money\",\"version\":1,\"id\":1,\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"Money\\\",\\\"fields\\\":[{\\\"name\\\":\\\"cents\\\",\\\"type\\\":\\\"long\\\"}]}\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"av_order\",\"version\":1,\"magic\":1}",
+    "offset": 3,
+    "value": "{\"subject\":\"av_order\",\"version\":1,\"id\":2,\"references\":[{\"name\":\"Money\",\"subject\":\"av_money\",\"version\":1}],\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"Order\\\",\\\"fields\\\":[{\\\"name\\\":\\\"price\\\",\\\"type\\\":\\\"Money\\\"}]}\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"pb_money\",\"version\":1,\"magic\":1}",
+    "offset": 4,
+    "value": "{\"subject\":\"pb_money\",\"version\":1,\"id\":3,\"schemaType\":\"PROTOBUF\",\"schema\":\"syntax = \\\"proto3\\\";\\npackage m;\\n\\nmessage Money {\\n  int64 cents = 1;\\n}\\n\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"pb_order\",\"version\":1,\"magic\":1}",
+    "offset": 5,
+    "value": "{\"subject\":\"pb_order\",\"version\":1,\"id\":4,\"schemaType\":\"PROTOBUF\",\"references\":[{\"name\":\"money.proto\",\"subject\":\"pb_money\",\"version\":1}],\"schema\":\"syntax = \\\"proto3\\\";\\n\\nimport \\\"money.proto\\\";\\n\\nmessage Order {\\n  m.Money price = 1;\\n}\\n\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"js_amount\",\"version\":1,\"magic\":1}",
+    "offset": 6,
+    "value": "{\"subject\":\"js_amount\",\"version\":1,\"id\":5,\"schemaType\":\"JSON\",\"schema\":\"{\\\"type\\\":\\\"integer\\\",\\\"maximum\\\":10}\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"js_order\",\"version\":1,\"magic\":1}",
+    "offset": 7,
+    "value": "{\"subject\":\"js_order\",\"version\":1,\"id\":6,\"schemaType\":\"JSON\",\"references\":[{\"name\":\"Amount\",\"subject\":\"js_amount\",\"version\":1}],\"schema\":\"{\\\"type\\\":\\\"object\\\",\\\"properties\\\":{\\\"a\\\":{\\\"$ref\\\":\\\"Amount\\\"}}}\",\"deleted\":false}"
+  }
+]

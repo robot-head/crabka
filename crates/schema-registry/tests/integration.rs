@@ -758,11 +758,11 @@ async fn facade_soft_then_permanent_delete_version() {
     // match); NONE bypasses so we can register two versions to delete.
     store.set_subject_compat("av", "NONE".into()).await.unwrap();
     store
-        .register("av", SchemaType::Avro, &av("A"), None, None)
+        .register("av", SchemaType::Avro, &av("A"), &[], None, None)
         .await
         .unwrap();
     store
-        .register("av", SchemaType::Avro, &av("B"), None, None)
+        .register("av", SchemaType::Avro, &av("B"), &[], None, None)
         .await
         .unwrap();
     assert_eq!(store.soft_delete_version("av", 1).await.unwrap(), 1);
@@ -780,7 +780,7 @@ async fn facade_soft_then_permanent_delete_version() {
 async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
     let (broker, store, cancel, _dir) = boot_registry(1).await;
     store
-        .register("ro", SchemaType::Avro, &av("A"), None, None)
+        .register("ro", SchemaType::Avro, &av("A"), &[], None, None)
         .await
         .unwrap();
     store
@@ -788,7 +788,7 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
         .await
         .unwrap();
     let err = store
-        .register("ro", SchemaType::Avro, &av("B"), None, None)
+        .register("ro", SchemaType::Avro, &av("B"), &[], None, None)
         .await
         .unwrap_err();
     assert_eq!(err.error_code(), 42205);
@@ -797,7 +797,7 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
         .await
         .unwrap();
     let reg = store
-        .register("imp", SchemaType::Avro, &av("C"), Some(42), Some(5))
+        .register("imp", SchemaType::Avro, &av("C"), &[], Some(42), Some(5))
         .await
         .unwrap();
     assert_eq!((reg.id, reg.version), (42, 5));
@@ -808,7 +808,7 @@ async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
     // IMPORT requires BOTH id and version: providing only one is rejected.
     assert!(
         store
-            .register("imp", SchemaType::Avro, &av("D"), Some(7), None)
+            .register("imp", SchemaType::Avro, &av("D"), &[], Some(7), None)
             .await
             .is_err(),
         "IMPORT with id but no version must error"
@@ -1256,6 +1256,268 @@ async fn rest_admin_edge_and_error_branches() {
     assert_eq!(rod.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body_json(rod).await["error_code"], 42205);
 
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+// ── REST: schema references (slice 4) ────────────────────────────────────────
+
+/// A self-contained Avro record (its single field is a primitive, NOT a named
+/// reference) — so it parses pre-Task-4. Reference *bookkeeping* (validation,
+/// referencedby, delete-protection, GET) is format-agnostic and works now.
+fn av_named(name: &str, field_type: &str) -> String {
+    format!(
+        r#"{{"type":"record","name":"{name}","fields":[{{"name":"f","type":"{field_type}"}}]}}"#
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_references_lifecycle_avro() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    register(
+        &app,
+        "base",
+        &format!(r#"{{"schema":{:?}}}"#, av_named("Base", "int")),
+    )
+    .await;
+    let body = format!(
+        r#"{{"schema":{:?},"references":[{{"name":"Base","subject":"base","version":1}}]}}"#,
+        av_named("Dep", "long")
+    );
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/dep/versions", &body))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let dep_id = body_json(r).await["id"].as_i64().unwrap();
+    // referencedby lists the referrer's id
+    let refby = get_json(&app, "/subjects/base/versions/1/referencedby").await;
+    assert_eq!(refby, serde_json::json!([dep_id]));
+    // GET the referrer includes references
+    let got = get_json(&app, "/subjects/dep/versions/1").await;
+    assert_eq!(got["references"][0]["subject"], "base");
+    // delete-protection: deleting base v1 while referenced is rejected (422/42206)
+    let blocked = app
+        .clone()
+        .oneshot(req_delete("/subjects/base/versions/1"))
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(blocked).await["error_code"], 42206);
+    // remove the referrer, then base deletes fine
+    assert_eq!(
+        app.clone()
+            .oneshot(req_delete("/subjects/dep/versions/1"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(req_delete("/subjects/base/versions/1"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_reference_not_found_rejected() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    let body = format!(
+        r#"{{"schema":{:?},"references":[{{"name":"Nope","subject":"nope","version":1}}]}}"#,
+        av_named("Dep", "int")
+    );
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/dep/versions", &body))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(r).await["error_code"], 42201);
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_avro_reference_resolves_end_to_end() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    let money = r#"{"type":"record","name":"Money","fields":[{"name":"cents","type":"long"}]}"#;
+    register(
+        &app,
+        "money",
+        &serde_json::json!({ "schema": money }).to_string(),
+    )
+    .await;
+    // Order uses Money by name; without the reference it would not parse.
+    let order = r#"{"type":"record","name":"Order","fields":[{"name":"price","type":"Money"}]}"#;
+    let body = serde_json::json!({
+        "schema": order,
+        "references": [{ "name": "Money", "subject": "money", "version": 1 }]
+    })
+    .to_string();
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/order/versions", &body))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "Order resolves Money via reference"
+    );
+    // And without the reference, the same Order is rejected (unresolved type).
+    let no_ref = serde_json::json!({ "schema": order }).to_string();
+    let bad = app
+        .clone()
+        .oneshot(req_post("/subjects/order2/versions", &no_ref))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_protobuf_reference_resolves_end_to_end() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    let money = "syntax = \"proto3\"; package m; message Money { int64 cents = 1; }";
+    register(
+        &app,
+        "money",
+        &serde_json::json!({ "schemaType": "PROTOBUF", "schema": money }).to_string(),
+    )
+    .await;
+    let order = "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
+    let body = serde_json::json!({
+        "schemaType": "PROTOBUF",
+        "schema": order,
+        "references": [{ "name": "money.proto", "subject": "money", "version": 1 }]
+    })
+    .to_string();
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/order/versions", &body))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "Order links money.proto via reference"
+    );
+    // Without the reference, the unresolved import is rejected.
+    let no_ref = serde_json::json!({ "schemaType": "PROTOBUF", "schema": order }).to_string();
+    let bad = app
+        .clone()
+        .oneshot(req_post("/subjects/order2/versions", &no_ref))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_json_reference_resolves_end_to_end() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    // The referenced schema: an integer with an upper bound.
+    let amount = r#"{"type":"integer","maximum":10}"#;
+    register(
+        &app,
+        "amount",
+        &serde_json::json!({ "schemaType": "JSON", "schema": amount }).to_string(),
+    )
+    .await;
+    // Order's property `a` points at the referenced schema via `$ref: "Amount"`.
+    // JSON refs are not inlined into the canonical form; the reference only feeds
+    // the compatibility diff, so registration succeeds and the link is recorded.
+    let order = r#"{"type":"object","properties":{"a":{"$ref":"Amount"}}}"#;
+    let body = serde_json::json!({
+        "schemaType": "JSON",
+        "schema": order,
+        "references": [{ "name": "Amount", "subject": "amount", "version": 1 }]
+    })
+    .to_string();
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/order/versions", &body))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "JSON $ref resolves via reference"
+    );
+    let order_id = body_json(r).await["id"].as_i64().unwrap();
+    // referencedby lists the referrer's id.
+    let refby = get_json(&app, "/subjects/amount/versions/1/referencedby").await;
+    assert_eq!(refby, serde_json::json!([order_id]));
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+// GET-by-id includes references, GET /schemas carries schemaType, and
+// soft-deleting a whole referenced SUBJECT is reference-protected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_references_get_by_id_list_and_subject_delete_protection() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    register(
+        &app,
+        "base",
+        &format!(r#"{{"schema":{:?}}}"#, av_named("Base", "int")),
+    )
+    .await;
+    let body = format!(
+        r#"{{"schema":{:?},"references":[{{"name":"Base","subject":"base","version":1}}]}}"#,
+        av_named("Dep", "long")
+    );
+    let dep_id = body_json(
+        app.clone()
+            .oneshot(req_post("/subjects/dep/versions", &body))
+            .await
+            .unwrap(),
+    )
+    .await["id"]
+        .as_i64()
+        .unwrap();
+    // GET /schemas/ids/{referrer_id} includes the references array.
+    let by_id = get_json(&app, &format!("/schemas/ids/{dep_id}")).await;
+    assert_eq!(by_id["references"][0]["name"], "Base");
+    assert_eq!(by_id["references"][0]["subject"], "base");
+    // GET /schemas surfaces a non-Avro schema's schemaType.
+    register(
+        &app,
+        "pb",
+        r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { int32 id = 1; }"}"#,
+    )
+    .await;
+    let all = get_json(&app, "/schemas").await;
+    assert!(
+        all.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["schemaType"] == "PROTOBUF"),
+        "GET /schemas should carry schemaType for non-Avro rows"
+    );
+    // Soft-deleting the WHOLE referenced subject is rejected (42206).
+    let blocked = app
+        .clone()
+        .oneshot(req_delete("/subjects/base"))
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(blocked).await["error_code"], 42206);
     cancel.cancel();
     broker.shutdown().await;
 }

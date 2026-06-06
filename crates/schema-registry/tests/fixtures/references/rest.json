@@ -1,0 +1,193 @@
+[
+  {
+    "body": {
+      "id": 1
+    },
+    "method": "POST",
+    "op": "avro_register_base",
+    "path": "/subjects/av_money/versions",
+    "status": 200
+  },
+  {
+    "body": {
+      "id": 2
+    },
+    "method": "POST",
+    "op": "avro_register_referrer",
+    "path": "/subjects/av_order/versions",
+    "status": 200
+  },
+  {
+    "body": {
+      "references": [
+        {
+          "name": "Money",
+          "subject": "av_money",
+          "version": 1
+        }
+      ],
+      "schema": "{\"type\":\"record\",\"name\":\"Order\",\"fields\":[{\"name\":\"price\",\"type\":\"Money\"}]}"
+    },
+    "method": "GET",
+    "op": "avro_get_referrer_by_id",
+    "path": "/schemas/ids/2",
+    "status": 200
+  },
+  {
+    "body": [
+      2
+    ],
+    "method": "GET",
+    "op": "avro_base_v1_referencedby",
+    "path": "/subjects/av_money/versions/1/referencedby",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 42206,
+      "message": "One or more references exist to the schema {magic=1,keytype=SCHEMA,subject=av_money,version=1}."
+    },
+    "method": "DELETE",
+    "op": "avro_delete_referenced_base",
+    "path": "/subjects/av_money/versions/1",
+    "status": 422
+  },
+  {
+    "body": {
+      "error_code": 42201,
+      "message": "Invalid schema {subject=av_bad,version=0,id=-1,schemaType=AVRO,references=[{name='Missing', subject='nope', version=1}],metadata=null,ruleSet=null,schema={\"type\":\"record\",\"name\":\"Bad\",\"fields\":[{\"name\":\"x\",\"type\":\"Missing\"}]}} with refs [{name='Missing', subject='nope', version=1}] of type AVRO, details: No schema reference found for subject \"nope\" and version 1"
+    },
+    "method": "POST",
+    "op": "avro_register_missing_ref",
+    "path": "/subjects/av_bad/versions",
+    "status": 422
+  },
+  {
+    "body": {
+      "id": 3
+    },
+    "method": "POST",
+    "op": "protobuf_register_base",
+    "path": "/subjects/pb_money/versions",
+    "status": 200
+  },
+  {
+    "body": {
+      "id": 4
+    },
+    "method": "POST",
+    "op": "protobuf_register_referrer",
+    "path": "/subjects/pb_order/versions",
+    "status": 200
+  },
+  {
+    "body": {
+      "references": [
+        {
+          "name": "money.proto",
+          "subject": "pb_money",
+          "version": 1
+        }
+      ],
+      "schema": "syntax = \"proto3\";\n\nimport \"money.proto\";\n\nmessage Order {\n  m.Money price = 1;\n}\n",
+      "schemaType": "PROTOBUF"
+    },
+    "method": "GET",
+    "op": "protobuf_get_referrer_by_id",
+    "path": "/schemas/ids/4",
+    "status": 200
+  },
+  {
+    "body": [
+      4
+    ],
+    "method": "GET",
+    "op": "protobuf_base_v1_referencedby",
+    "path": "/subjects/pb_money/versions/1/referencedby",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 42206,
+      "message": "One or more references exist to the schema {magic=1,keytype=SCHEMA,subject=pb_money,version=1}."
+    },
+    "method": "DELETE",
+    "op": "protobuf_delete_referenced_base",
+    "path": "/subjects/pb_money/versions/1",
+    "status": 422
+  },
+  {
+    "body": {
+      "error_code": 42201,
+      "message": "Invalid schema {subject=pb_bad,version=0,id=-1,schemaType=PROTOBUF,references=[{name='missing.proto', subject='nope', version=1}],metadata=null,ruleSet=null,schema=syntax=\"proto3\"; import \"missing.proto\"; message Bad{m.Missing x=1;}} with refs [{name='missing.proto', subject='nope', version=1}] of type PROTOBUF, details: No schema reference found for subject \"nope\" and version 1"
+    },
+    "method": "POST",
+    "op": "protobuf_register_missing_ref",
+    "path": "/subjects/pb_bad/versions",
+    "status": 422
+  },
+  {
+    "body": {
+      "id": 5
+    },
+    "method": "POST",
+    "op": "json_register_base",
+    "path": "/subjects/js_amount/versions",
+    "status": 200
+  },
+  {
+    "body": {
+      "id": 6
+    },
+    "method": "POST",
+    "op": "json_register_referrer",
+    "path": "/subjects/js_order/versions",
+    "status": 200
+  },
+  {
+    "body": {
+      "references": [
+        {
+          "name": "Amount",
+          "subject": "js_amount",
+          "version": 1
+        }
+      ],
+      "schema": "{\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"Amount\"}}}",
+      "schemaType": "JSON"
+    },
+    "method": "GET",
+    "op": "json_get_referrer_by_id",
+    "path": "/schemas/ids/6",
+    "status": 200
+  },
+  {
+    "body": [
+      6
+    ],
+    "method": "GET",
+    "op": "json_base_v1_referencedby",
+    "path": "/subjects/js_amount/versions/1/referencedby",
+    "status": 200
+  },
+  {
+    "body": {
+      "error_code": 42206,
+      "message": "One or more references exist to the schema {magic=1,keytype=SCHEMA,subject=js_amount,version=1}."
+    },
+    "method": "DELETE",
+    "op": "json_delete_referenced_base",
+    "path": "/subjects/js_amount/versions/1",
+    "status": 422
+  },
+  {
+    "body": {
+      "error_code": 42201,
+      "message": "Invalid schema {subject=js_bad,version=0,id=-1,schemaType=JSON,references=[{name='Missing', subject='nope', version=1}],metadata=null,ruleSet=null,schema={\"type\":\"object\",\"properties\":{\"a\":{\"$ref\":\"Missing\"}}}} with refs [{name='Missing', subject='nope', version=1}] of type JSON, details: No schema reference found for subject \"nope\" and version 1"
+    },
+    "method": "POST",
+    "op": "json_register_missing_ref",
+    "path": "/subjects/js_bad/versions",
+    "status": 422
+  }
+]

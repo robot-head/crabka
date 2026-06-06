@@ -15,6 +15,8 @@ struct Body {
     schema: String,
     #[serde(rename = "schemaType", default)]
     schema_type: Option<String>,
+    #[serde(default)]
+    references: Vec<crate::kafkastore::record::SchemaReference>,
 }
 
 #[derive(Deserialize, Default)]
@@ -33,12 +35,14 @@ pub async fn check(
     let req: Body =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
-    // 42201 if the candidate itself is unparseable (matches Confluent).
-    crate::format::parse(ty, &req.schema)?;
     let want = parse_version(&version)?;
     let verdict = {
         let snap = st.store.store.read();
-        compat::check_against_version(&snap, &subject, ty, &req.schema, want)?
+        // Resolve the candidate's references (42201 on a missing ref), then
+        // validate it parses with them (42201 if unparseable, matches Confluent).
+        let resolved = snap.resolve_closure(&req.references)?;
+        crate::format::parse(ty, &req.schema, &resolved)?;
+        compat::check_against_version(&snap, &subject, ty, &req.schema, &resolved, want)?
     };
     if q.verbose {
         Ok(ok_json(&serde_json::json!({

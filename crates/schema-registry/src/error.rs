@@ -47,6 +47,12 @@ pub enum SrError {
     /// GET/DELETE `/mode/{subject}` when the subject has no mode override.
     #[error("Subject '{0}' does not have subject-level mode configured")]
     SubjectModeNotConfigured(String),
+    /// A registration referenced a (subject, version) that does not exist.
+    #[error("Reference {0} not found.")]
+    ReferenceNotFound(String),
+    /// A delete was blocked because a live schema still references the target.
+    #[error("One or more references exist to the schema {0}.")]
+    ReferencedByOthers(String),
 }
 
 impl SrError {
@@ -56,7 +62,8 @@ impl SrError {
             Self::SubjectNotFound(_) => 40401,
             Self::VersionNotFound => 40402,
             Self::SchemaNotFound => 40403,
-            Self::InvalidSchema(_) => 42201,
+            // cp uses 42201 for both an unparseable schema and a missing reference.
+            Self::InvalidSchema(_) | Self::ReferenceNotFound(_) => 42201,
             Self::InvalidVersion(_) => 42202,
             Self::InvalidCompatibilityLevel(_) => 42203,
             Self::Backend(_) => 50001,
@@ -67,6 +74,7 @@ impl SrError {
             Self::InvalidMode(_) => 42204,
             Self::SubjectSoftDeleted(_) => 40404,
             Self::SubjectModeNotConfigured(_) => 40409,
+            Self::ReferencedByOthers(_) => 42206,
         }
     }
 
@@ -84,7 +92,9 @@ impl SrError {
             | Self::InvalidVersion(_)
             | Self::InvalidCompatibilityLevel(_)
             | Self::OperationNotPermitted(_)
-            | Self::InvalidMode(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | Self::InvalidMode(_)
+            | Self::ReferenceNotFound(_)
+            | Self::ReferencedByOthers(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Backend(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Incompatible(_) => StatusCode::CONFLICT,
         }
@@ -167,6 +177,19 @@ mod tests {
         assert_eq!(
             SrError::SubjectModeNotConfigured("s".into()).error_code(),
             40409
+        );
+    }
+
+    #[test]
+    fn references_codes() {
+        assert_eq!(SrError::ReferenceNotFound("r".into()).error_code(), 42201);
+        assert_eq!(
+            SrError::ReferencedByOthers("s:1".into()).error_code(),
+            42206
+        );
+        assert_eq!(
+            SrError::ReferencedByOthers("s:1".into()).http_status(),
+            StatusCode::UNPROCESSABLE_ENTITY
         );
     }
 

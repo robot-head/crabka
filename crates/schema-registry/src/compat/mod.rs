@@ -82,16 +82,18 @@ fn effective_level(snap: &StoreState, subject: &str) -> CompatibilityLevel {
 fn check_pair(
     ty: SchemaType,
     candidate: &str,
+    candidate_refs: &[crate::format::ResolvedReference],
     existing: &str,
+    existing_refs: &[crate::format::ResolvedReference],
     dirs: &[Direction],
     out: &mut Vec<String>,
 ) {
     for dir in dirs {
-        let (reader, writer) = match dir {
-            Direction::NewReadsOld => (candidate, existing),
-            Direction::OldReadsNew => (existing, candidate),
+        let (reader, writer, reader_refs, writer_refs) = match dir {
+            Direction::NewReadsOld => (candidate, existing, candidate_refs, existing_refs),
+            Direction::OldReadsNew => (existing, candidate, existing_refs, candidate_refs),
         };
-        if let Err(msgs) = format::check(ty, reader, writer) {
+        if let Err(msgs) = format::check(ty, reader, writer, reader_refs, writer_refs) {
             out.extend(msgs);
         }
     }
@@ -104,6 +106,7 @@ pub fn check_registration(
     subject: &str,
     ty: SchemaType,
     candidate: &str,
+    candidate_refs: &[crate::format::ResolvedReference],
 ) -> Result<(), SrError> {
     let level = effective_level(snap, subject);
     let dirs = level.directions();
@@ -114,14 +117,29 @@ pub fn check_registration(
     if versions.is_empty() {
         return Ok(());
     }
-    let targets: &[(SchemaType, String)] = if level.is_transitive() {
+    let targets: &[(
+        SchemaType,
+        String,
+        Vec<crate::kafkastore::record::SchemaReference>,
+    )] = if level.is_transitive() {
         &versions
     } else {
         &versions[versions.len() - 1..]
     };
     let mut msgs = Vec::new();
-    for (_vty, vschema) in targets {
-        check_pair(ty, candidate, vschema, dirs, &mut msgs);
+    for (_vty, vschema, v_refs) in targets {
+        // An already-stored version was valid at register time, so its closure
+        // resolves; tolerate failure defensively (empty refs).
+        let existing_resolved = snap.resolve_closure(v_refs).unwrap_or_default();
+        check_pair(
+            ty,
+            candidate,
+            candidate_refs,
+            vschema,
+            &existing_resolved,
+            dirs,
+            &mut msgs,
+        );
     }
     if msgs.is_empty() {
         Ok(())
@@ -138,12 +156,13 @@ pub fn check_against_version(
     subject: &str,
     ty: SchemaType,
     candidate: &str,
+    candidate_refs: &[crate::format::ResolvedReference],
     version: Option<i32>,
 ) -> Result<Verdict, SrError> {
     if snap.versions(subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject.to_string()));
     }
-    let (_, _, _vty, vschema) = snap
+    let (_, _, _vty, vschema, v_refs) = snap
         .version(subject, version, false)
         .ok_or(SrError::VersionNotFound)?;
     let level = effective_level(snap, subject);
@@ -154,8 +173,19 @@ pub fn check_against_version(
             messages: Vec::new(),
         });
     }
+    // The stored version's closure resolves (valid at register time); tolerate
+    // failure defensively.
+    let existing_resolved = snap.resolve_closure(&v_refs).unwrap_or_default();
     let mut msgs = Vec::new();
-    check_pair(ty, candidate, &vschema, dirs, &mut msgs);
+    check_pair(
+        ty,
+        candidate,
+        candidate_refs,
+        &vschema,
+        &existing_resolved,
+        dirs,
+        &mut msgs,
+    );
     Ok(Verdict {
         is_compatible: msgs.is_empty(),
         messages: msgs,
@@ -191,51 +221,51 @@ mod tests {
     #[test]
     fn first_version_and_none_always_ok() {
         let snap = StoreState::default();
-        assert!(check_registration(&snap, "s", SchemaType::Avro, &av(ID)).is_ok());
+        assert!(check_registration(&snap, "s", SchemaType::Avro, &av(ID), &[]).is_ok());
     }
 
     #[test]
     fn backward_rejects_added_required_field() {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", "BACKWARD".into());
-        snap.register("s", SchemaType::Avro, &av(ID)).unwrap();
+        snap.register("s", SchemaType::Avro, &av(ID), &[]).unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
         assert!(matches!(
-            check_registration(&snap, "s", SchemaType::Avro, &bad),
+            check_registration(&snap, "s", SchemaType::Avro, &bad, &[]),
             Err(crate::error::SrError::Incompatible(_))
         ));
         let good = av(&format!(
             "{ID},{{\"name\":\"x\",\"type\":\"int\",\"default\":0}}"
         ));
-        assert!(check_registration(&snap, "s", SchemaType::Avro, &good).is_ok());
+        assert!(check_registration(&snap, "s", SchemaType::Avro, &good, &[]).is_ok());
     }
 
     #[test]
     fn none_level_bypasses() {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", "NONE".into());
-        snap.register("s", SchemaType::Avro, &av(ID)).unwrap();
+        snap.register("s", SchemaType::Avro, &av(ID), &[]).unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
-        assert!(check_registration(&snap, "s", SchemaType::Avro, &bad).is_ok());
+        assert!(check_registration(&snap, "s", SchemaType::Avro, &bad, &[]).is_ok());
     }
 
     #[test]
     fn check_against_version_verdict() {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", "BACKWARD".into());
-        snap.register("s", SchemaType::Avro, &av(ID)).unwrap();
+        snap.register("s", SchemaType::Avro, &av(ID), &[]).unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
-        let v = check_against_version(&snap, "s", SchemaType::Avro, &bad, None).unwrap();
+        let v = check_against_version(&snap, "s", SchemaType::Avro, &bad, &[], None).unwrap();
         assert!(!v.is_compatible);
         assert!(!v.messages.is_empty());
         let good = av(&format!(
             "{ID},{{\"name\":\"x\",\"type\":\"int\",\"default\":0}}"
         ));
         assert!(
-            check_against_version(&snap, "s", SchemaType::Avro, &good, None)
+            check_against_version(&snap, "s", SchemaType::Avro, &good, &[], None)
                 .unwrap()
                 .is_compatible
         );
-        assert!(check_against_version(&snap, "nope", SchemaType::Avro, &good, None).is_err());
+        assert!(check_against_version(&snap, "nope", SchemaType::Avro, &good, &[], None).is_err());
     }
 }
