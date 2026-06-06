@@ -19,7 +19,9 @@ use std::fmt::Write as _;
 use super::ParsedSchema;
 use crate::error::SrError;
 
+use prost_reflect::DescriptorPool;
 use prost_reflect::prost::Message;
+use prost_reflect::prost_types::FileDescriptorSet;
 use prost_reflect::prost_types::field_descriptor_proto::Label;
 use prost_reflect::prost_types::field_descriptor_proto::Type as FieldType;
 use prost_reflect::prost_types::{DescriptorProto, FieldDescriptorProto, FileDescriptorProto};
@@ -33,14 +35,20 @@ pub struct ProtobufSchema {
 /// Return the normalised `.proto` text for a `FileDescriptorProto`, matching
 /// the format cp-schema-registry uses when echoing schemas back.
 ///
-/// Format observed in the golden fixtures:
+/// Format (verified against cp-schema-registry 7.4.0):
 /// ```text
 /// syntax = "proto3";
+/// package m;
 ///
-/// message User {
-///   int32 id = 1;
+/// import "money.proto";
+///
+/// message Order {
+///   m.Money price = 1;
 /// }
 /// ```
+/// The `package` line (when present) follows the `syntax` line with no blank
+/// line between them; each `import` and each top-level `message` is then a
+/// blank-line-separated block.
 #[must_use]
 pub fn normalize(fdp: &FileDescriptorProto) -> String {
     let mut out = String::new();
@@ -49,6 +57,20 @@ pub fn normalize(fdp: &FileDescriptorProto) -> String {
     // even if the proto2 syntax is used.  For slice-1 we only support proto3.
     let syntax = fdp.syntax.as_deref().unwrap_or("proto3");
     let _ = writeln!(out, "syntax = \"{syntax}\";");
+
+    // Package declaration (if any) directly under the syntax line — cp emits it
+    // with no intervening blank line. Keeping it is required for cross-file
+    // type resolution (an imported `m.Money` only links if `package m;` survives).
+    if let Some(pkg) = fdp.package.as_deref().filter(|p| !p.is_empty()) {
+        let _ = writeln!(out, "package {pkg};");
+    }
+
+    // Imports, each a blank-line-separated block. The reference `name` IS the
+    // import path, so preserving these is what links resolved references.
+    for dep in &fdp.dependency {
+        out.push('\n');
+        let _ = writeln!(out, "import \"{dep}\";");
+    }
 
     for msg in &fdp.message_type {
         out.push('\n');
@@ -110,9 +132,25 @@ fn proto_type_name(field: &FieldDescriptorProto) -> String {
     .to_string()
 }
 
-pub fn parse(schema: &str, _refs: &[super::ResolvedReference]) -> Result<ProtobufSchema, SrError> {
+pub fn parse(schema: &str, refs: &[super::ResolvedReference]) -> Result<ProtobufSchema, SrError> {
     let descriptor = protox_parse::parse("schema.proto", schema)
         .map_err(|e| SrError::InvalidSchema(format!("Protobuf: {e}")))?;
+    // Link the candidate + its (protobuf) references so imports resolve and
+    // cross-file types validate. The reference `name` IS the import path.
+    // Trigger linking whenever the candidate declares imports (so an unresolved
+    // import is caught) or references are supplied.
+    if !descriptor.dependency.is_empty() || !refs.is_empty() {
+        let mut files: Vec<FileDescriptorProto> = Vec::with_capacity(refs.len() + 1);
+        for r in refs.iter().filter(|r| r.ty == super::SchemaType::Protobuf) {
+            let dep = protox_parse::parse(&r.name, &r.schema).map_err(|e| {
+                SrError::InvalidSchema(format!("Protobuf reference {}: {e}", r.name))
+            })?;
+            files.push(dep);
+        }
+        files.push(descriptor.clone());
+        DescriptorPool::from_file_descriptor_set(FileDescriptorSet { file: files })
+            .map_err(|e| SrError::InvalidSchema(format!("Protobuf link: {e}")))?;
+    }
     let normalised = normalize(&descriptor);
     Ok(ProtobufSchema {
         descriptor,
@@ -138,11 +176,11 @@ impl ProtobufSchema {
 pub fn check(
     reader: &str,
     writer: &str,
-    _reader_refs: &[super::ResolvedReference],
-    _writer_refs: &[super::ResolvedReference],
+    reader_refs: &[super::ResolvedReference],
+    writer_refs: &[super::ResolvedReference],
 ) -> Result<(), Vec<String>> {
-    let reader_d = parse(reader, &[]).map_err(|e| vec![format!("reader: {e}")])?;
-    let writer_d = parse(writer, &[]).map_err(|e| vec![format!("writer: {e}")])?;
+    let reader_d = parse(reader, reader_refs).map_err(|e| vec![format!("reader: {e}")])?;
+    let writer_d = parse(writer, writer_refs).map_err(|e| vec![format!("writer: {e}")])?;
     let diffs = diff::compare(writer_d.descriptor(), reader_d.descriptor());
     let incompatible: Vec<&diff::Difference> = diffs
         .iter()
@@ -332,6 +370,51 @@ mod tests {
         let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
         let r = "syntax = \"proto3\"; enum E { A = 0; } message U { E id = 1; }";
         assert!(check(r, w, &[], &[]).is_ok());
+    }
+
+    // ── Task 5: reference resolution ─────────────────────────────────────────
+
+    #[test]
+    fn protobuf_resolves_import_reference() {
+        use crate::format::{ResolvedReference, SchemaType};
+        let dep = "syntax = \"proto3\"; package m; message Money { int64 cents = 1; }";
+        let candidate =
+            "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
+        // With the import provided as a reference (name = import path), it links.
+        let refs = vec![ResolvedReference {
+            name: "money.proto".into(),
+            ty: SchemaType::Protobuf,
+            schema: dep.into(),
+        }];
+        assert!(parse(candidate, &refs).is_ok(), "import resolves");
+        // An import with NO matching reference must error (unresolved import).
+        assert!(parse(candidate, &[]).is_err(), "unresolved import rejected");
+    }
+
+    #[test]
+    fn normalize_emits_package_and_imports_cp_exact() {
+        use crate::format::{ResolvedReference, SchemaType};
+        // Packaged schema: `package` follows `syntax` with no blank line, then a
+        // blank line precedes the message (verified against cp-schema-registry 7.4.0).
+        let money = "syntax = \"proto3\"; package m; message Money { int64 cents = 1; }";
+        let m = parse(money, &[]).unwrap();
+        assert_eq!(
+            m.normalized_form(),
+            "syntax = \"proto3\";\npackage m;\n\nmessage Money {\n  int64 cents = 1;\n}\n"
+        );
+        // Importing schema: blank line, `import`, blank line, message (cp-exact).
+        let order =
+            "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
+        let refs = vec![ResolvedReference {
+            name: "money.proto".into(),
+            ty: SchemaType::Protobuf,
+            schema: money.into(),
+        }];
+        let o = parse(order, &refs).unwrap();
+        assert_eq!(
+            o.normalized_form(),
+            "syntax = \"proto3\";\n\nimport \"money.proto\";\n\nmessage Order {\n  m.Money price = 1;\n}\n"
+        );
     }
 
     #[test]

@@ -1385,3 +1385,43 @@ async fn rest_avro_reference_resolves_end_to_end() {
     cancel.cancel();
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_protobuf_reference_resolves_end_to_end() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    let money = "syntax = \"proto3\"; package m; message Money { int64 cents = 1; }";
+    register(
+        &app,
+        "money",
+        &serde_json::json!({ "schemaType": "PROTOBUF", "schema": money }).to_string(),
+    )
+    .await;
+    let order = "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
+    let body = serde_json::json!({
+        "schemaType": "PROTOBUF",
+        "schema": order,
+        "references": [{ "name": "money.proto", "subject": "money", "version": 1 }]
+    })
+    .to_string();
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/order/versions", &body))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "Order links money.proto via reference"
+    );
+    // Without the reference, the unresolved import is rejected.
+    let no_ref = serde_json::json!({ "schemaType": "PROTOBUF", "schema": order }).to_string();
+    let bad = app
+        .clone()
+        .oneshot(req_post("/subjects/order2/versions", &no_ref))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    cancel.cancel();
+    broker.shutdown().await;
+}
