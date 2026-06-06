@@ -16,6 +16,11 @@
 //!     `protocol_type == ""`, settling the `unwrap_or_default()` projection in
 //!     `handlers/describe_groups.rs`.
 //!
+//! Scope: CLASSIC groups only. cp-kafka 7.4.0 is Kafka 3.4 server-side, which
+//! predates KIP-848 — a next-gen (consumer-protocol) group's `member_metadata`
+//! via classic `DescribeGroups` needs a next-gen-capable image (Kafka 3.7+) and
+//! is deferred.
+//!
 //! The capture is written to
 //! `tests/fixtures/describe_groups/real_kafka_classic.json` (string fields
 //! verbatim, byte fields as hex + UTF-8-lossy). Re-running regenerates it.
