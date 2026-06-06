@@ -6,10 +6,12 @@ on:
 
 concurrency:
   group: release-plz-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   release-plz:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     permissions:
       contents: write
       pull-requests: write
