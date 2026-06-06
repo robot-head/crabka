@@ -169,14 +169,33 @@ pub async fn start_n_node(
 
     let n_usize = usize::try_from(n).unwrap();
 
-    // Pre-bind concrete client + controller ports for every broker. The broker
-    // self-registers its advertised client `host:port` into the controller
-    // image *before* binding its listeners, so a `:0` advertised port would
-    // register port 0 and break the inter-broker heartbeat / replication dial.
-    // The controller ports must be concrete up front too: they go into the
-    // shared static voter set so peers can dial each other. The bind-and-drop
-    // trick avoids the TIME_WAIT trap of fixed ports across back-to-back boots.
-    let (client_addrs, controller_addrs) = bind_and_drop_ports(n_usize).await;
+    // Reserve concrete client + controller ports for every broker by binding
+    // ephemeral loopback listeners and *holding them live* until each broker
+    // adopts its pair via `Broker::start_with_listeners`. The ports must be
+    // concrete up front: each controller addr goes into the shared static
+    // voter set so peers can dial it, and each broker self-registers its
+    // advertised client `host:port` into the controller image *before* it
+    // binds its data-plane listener — a `:0` there would register port 0 and
+    // break the inter-broker heartbeat / replication dial.
+    //
+    // Unlike the bind-and-drop trick (`bind_and_drop_ports`), these sockets are
+    // never dropped before the broker re-binds them, so there is no TOCTOU
+    // window for a concurrently-running test to steal a just-released port —
+    // the `AddrInUse` flake under parallel `cargo test` / `cargo llvm-cov`.
+    let mut client_listeners = Vec::with_capacity(n_usize);
+    let mut controller_listeners = Vec::with_capacity(n_usize);
+    for _ in 0..n_usize {
+        client_listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await?);
+        controller_listeners.push(tokio::net::TcpListener::bind("127.0.0.1:0").await?);
+    }
+    let client_addrs: Vec<SocketAddr> = client_listeners
+        .iter()
+        .map(tokio::net::TcpListener::local_addr)
+        .collect::<std::io::Result<_>>()?;
+    let controller_addrs: Vec<SocketAddr> = controller_listeners
+        .iter()
+        .map(tokio::net::TcpListener::local_addr)
+        .collect::<std::io::Result<_>>()?;
 
     // The shared static voter set every node is configured with.
     let voters: Vec<(u64, SocketAddr)> = (0..n_usize)
@@ -184,7 +203,7 @@ pub async fn start_n_node(
         .collect();
 
     // Start all n brokers in Bootstrap mode with the same voter set,
-    // *concurrently*. `Broker::start` blocks until the cold-boot controller
+    // *concurrently*. `Broker::start*` blocks until the cold-boot controller
     // sees a committed leader (step 2: it waits on `watch_leader` before
     // submitting its self-registration), and a leader can only be elected once
     // a majority of the static voter set is up and dialable. So a sequential
@@ -192,7 +211,11 @@ pub async fn start_n_node(
     // alone. Spawn every broker's `start` and join them.
     let mut starts = Vec::with_capacity(n_usize);
     let mut metas: Vec<(BrokerConfig, TempDir)> = Vec::with_capacity(n_usize);
-    for i in 0..n_usize {
+    for (i, (data_listener, controller_listener)) in client_listeners
+        .into_iter()
+        .zip(controller_listeners)
+        .enumerate()
+    {
         let dir = TempDir::new().unwrap();
         let cfg = static_voter_broker_config(
             i,
@@ -202,9 +225,14 @@ pub async fn start_n_node(
             dir.path(),
         );
         let cfg_for_spawn = cfg.clone();
-        starts.push(tokio::spawn(
-            async move { Broker::start(cfg_for_spawn).await },
-        ));
+        starts.push(tokio::spawn(async move {
+            Broker::start_with_listeners(
+                cfg_for_spawn,
+                Some(controller_listener),
+                Some(data_listener),
+            )
+            .await
+        }));
         metas.push((cfg, dir));
     }
 
