@@ -316,9 +316,9 @@ pub mod test_driver;
 pub mod topology;
 
 pub use dsl::{
-    BranchedStream, Grouped, JoinWindows, KGroupedStream, KTable, Materialized, Repartitioned,
-    SessionWindowedSerde, SessionWindows, StreamJoined, StreamsBuilder, TimeWindowedSerde,
-    TimeWindows, Window, Windowed,
+    BranchedStream, BufferConfig, Grouped, JoinWindows, KGroupedStream, KTable, Materialized,
+    Repartitioned, SessionWindowedSerde, SessionWindows, StreamJoined, StreamsBuilder, Suppressed,
+    TimeWindowedSerde, TimeWindows, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{
