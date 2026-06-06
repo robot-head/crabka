@@ -656,4 +656,97 @@ mod tests {
             AclOperation::Describe
         ));
     }
+
+    // ---- authz_layer middleware ------------------------------------------
+    //
+    // Driven over a tiny `Router` + `oneshot` (the auth-layer test pattern).
+    // NOTE: `run_acl_refresh` needs a live admin/broker and is exercised by the
+    // `tests/security.rs` integration test, so it is intentionally NOT unit-
+    // tested here; these cover the pure request-gating branches.
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::{get, post};
+    use tower::ServiceExt as _; // for `oneshot`
+
+    /// A router with `authz_layer` over `az`, exposing `/` (no authz target),
+    /// `GET /subjects` (cluster Describe) and `POST /subjects/{s}/versions`
+    /// (topic Write). The handler echoes `ok` so a pass-through is `200`.
+    fn authz_app(az: SchemaRegistryAuthz) -> Router {
+        Router::new()
+            .route("/", get(|| async { "ok" }))
+            .route("/subjects", get(|| async { "ok" }))
+            .route("/subjects/{subject}/versions", post(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(az),
+                authz_layer,
+            ))
+    }
+
+    #[tokio::test]
+    async fn authz_layer_denies_principal_without_acl() {
+        // enabled, no ACLs, non-super-user, non-forwarded → 403 on a gated path.
+        let app = authz_app(with_acls(HashSet::new(), true, vec![]));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/subjects/orders-value/versions")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn authz_layer_allows_matching_acl() {
+        // An ACL granting Write on Topic:"orders-value" → the principal passes.
+        // The middleware falls back to the anonymous principal (no auth layer in
+        // this router), so the ACL is written for "User:ANONYMOUS".
+        let acl = AclEntry {
+            resource_type: ResourceType::Topic,
+            resource_name: "orders-value".into(),
+            pattern_type: PatternType::Literal,
+            principal: "User:ANONYMOUS".into(),
+            host: "*".into(),
+            operation: AclOperation::Write,
+            permission_type: PermissionType::Allow,
+        };
+        let app = authz_app(with_acls(HashSet::new(), true, vec![acl]));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/subjects/orders-value/versions")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authz_layer_passes_path_with_no_target() {
+        // `GET /` maps to `None` in authz_target → no authz requirement → passes
+        // even when enabled with no ACLs.
+        let app = authz_app(with_acls(HashSet::new(), true, vec![]));
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn authz_layer_skips_forwarded_request() {
+        // A trusted intra-cluster forward (FORWARD_HEADER present) skips authz
+        // entirely — even on a gated path that would otherwise 403.
+        let app = authz_app(with_acls(HashSet::new(), true, vec![]));
+        let req = Request::builder()
+            .method("POST")
+            .uri("/subjects/orders-value/versions")
+            .header(crate::rest::forward::FORWARD_HEADER, "ingress-node")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "forwarded request must skip authz"
+        );
+    }
 }

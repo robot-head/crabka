@@ -1,6 +1,11 @@
 //! crabka-schema-registry: Confluent Schema Registry-compatible REST service.
+//!
+//! This binary is a thin `clap` → lib shim: it parses CLI flags into an
+//! [`Args`], maps them into a [`SecurityCliInput`], and hands that to
+//! [`crabka_schema_registry::cli::build_security`] for validation/assembly (kept
+//! in the lib so it is unit-testable). The remaining glue (serve wiring,
+//! election, ACL-refresh task) lives here.
 
-use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -10,20 +15,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crabka_client_admin::AdminClient;
-use crabka_client_core::ClientSecurity;
-use crabka_client_core::security::{SaslCredentials, TlsConnectorConfig};
 use crabka_schema_registry::auth::AuthState;
 use crabka_schema_registry::auth::basic::BasicAuthStore;
 use crabka_schema_registry::authz::SchemaRegistryAuthz;
-use crabka_schema_registry::config::{
-    AuthzConfig, BasicAuthConfig, BearerAuthConfig, RegistryConfig, SecurityConfig,
-};
+use crabka_schema_registry::cli::SecurityCliInput;
+use crabka_schema_registry::config::RegistryConfig;
 use crabka_schema_registry::kafkastore::KafkaStore;
 use crabka_schema_registry::rest::serve::{serve_http, serve_https};
 use crabka_schema_registry::rest::{self, AppState, SecurityLayers};
-use crabka_security::{
-    ClientAuthMode, ListenerProtocol, OAuthBearerValidator, SaslMechanism, TlsConfig,
-};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -180,7 +179,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let security = build_security(&args)?;
+    let security = crabka_schema_registry::cli::build_security(&args.security_input())?;
     let cfg = RegistryConfig {
         bootstrap: args.bootstrap_servers.clone(),
         schemas_topic: args.schemas_topic.clone(),
@@ -278,165 +277,32 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Assemble [`SecurityConfig`] from CLI args. The all-defaults case (no TLS, no
-/// auth, no authz, plaintext broker client) yields the fully-open
-/// [`SecurityConfig::default`] behaviour.
-fn build_security(args: &Args) -> anyhow::Result<SecurityConfig> {
-    Ok(SecurityConfig {
-        require_auth: args.require_auth,
-        realm: args.realm.clone(),
-        basic: build_basic(args),
-        bearer: build_bearer(args)?,
-        tls: build_tls(args)?,
-        authz: build_authz(args),
-        client: build_client_security(args)?,
-    })
-}
-
-/// Build [`BasicAuthConfig`] from `--basic-auth-file` / repeated `--basic-user`.
-/// Returns `None` when neither is supplied (Basic disabled).
-fn build_basic(args: &Args) -> Option<BasicAuthConfig> {
-    if args.basic_auth_file.is_none() && args.basic_users.is_empty() {
-        return None;
-    }
-    let mut users = HashMap::new();
-    for entry in &args.basic_users {
-        if let Some((u, c)) = entry.split_once(':') {
-            users.insert(u.to_string(), c.to_string());
-        } else {
-            tracing::warn!(entry = %entry, "ignoring malformed --basic-user (want user:cred)");
+impl Args {
+    /// Map the parsed clap flags into the clap-free [`SecurityCliInput`] the lib
+    /// validates/assembles. Pure field-shuffling — the security semantics live
+    /// in [`crabka_schema_registry::cli::build_security`].
+    fn security_input(&self) -> SecurityCliInput {
+        SecurityCliInput {
+            require_auth: self.require_auth,
+            realm: self.realm.clone(),
+            basic_auth_file: self.basic_auth_file.clone(),
+            basic_users: self.basic_users.clone(),
+            bearer: self.bearer.clone(),
+            bearer_principal_claim: self.bearer_principal_claim.clone(),
+            tls_cert: self.tls_cert.clone(),
+            tls_key: self.tls_key.clone(),
+            tls_client_ca: self.tls_client_ca.clone(),
+            tls_client_auth: self.tls_client_auth.clone(),
+            authz: self.authz,
+            super_users: self.super_users.clone(),
+            acl_refresh_secs: self.acl_refresh_secs,
+            kafka_security_protocol: self.kafka_security_protocol.clone(),
+            kafka_sasl_mechanism: self.kafka_sasl_mechanism.clone(),
+            kafka_sasl_username: self.kafka_sasl_username.clone(),
+            kafka_sasl_password: self.kafka_sasl_password.clone(),
+            kafka_tls_ca: self.kafka_tls_ca.clone(),
+            kafka_tls_server_name: self.kafka_tls_server_name.clone(),
         }
-    }
-    Some(BasicAuthConfig {
-        users,
-        file: args.basic_auth_file.clone(),
-    })
-}
-
-/// Build [`BearerAuthConfig`] from `--bearer`. `off` ⇒ `None`; `unsecured` ⇒ a
-/// dev `UnsecuredJwsValidator` (mirrors the gateway). Signed/`JWKS` validators
-/// are supported by the config struct but not yet CLI-exposed.
-fn build_bearer(args: &Args) -> anyhow::Result<Option<BearerAuthConfig>> {
-    match args.bearer.as_str() {
-        "off" => Ok(None),
-        "unsecured" => {
-            let validator =
-                OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
-                    principal_claim_name: args.bearer_principal_claim.clone(),
-                    ..Default::default()
-                });
-            Ok(Some(BearerAuthConfig {
-                validator: Arc::new(validator),
-            }))
-        }
-        other => anyhow::bail!("invalid --bearer: {other} (want off|unsecured)"),
-    }
-}
-
-/// Build server [`TlsConfig`] from the `--tls-*` flags. Requires both cert+key
-/// or neither; `None` ⇒ plain HTTP.
-fn build_tls(args: &Args) -> anyhow::Result<Option<TlsConfig>> {
-    match (args.tls_cert.clone(), args.tls_key.clone()) {
-        (Some(cert_chain_path), Some(private_key_path)) => {
-            let client_auth = match args.tls_client_auth.as_str() {
-                "disabled" => ClientAuthMode::Disabled,
-                "optional" => ClientAuthMode::Optional,
-                "required" => ClientAuthMode::Required,
-                other => anyhow::bail!("invalid --tls-client-auth: {other}"),
-            };
-            Ok(Some(TlsConfig {
-                cert_chain_path,
-                private_key_path,
-                trust_roots_path: args.tls_client_ca.clone(),
-                client_ca_path: args.tls_client_ca.clone(),
-                client_auth,
-            }))
-        }
-        (None, None) => Ok(None),
-        _ => anyhow::bail!("--tls-cert and --tls-key must be set together"),
-    }
-}
-
-/// Build [`AuthzConfig`] from the `--authz` / `--super-user` flags.
-fn build_authz(args: &Args) -> Option<AuthzConfig> {
-    if !args.authz {
-        return None;
-    }
-    let super_users: HashSet<String> = args.super_users.iter().cloned().collect();
-    Some(AuthzConfig {
-        enabled: true,
-        super_users,
-        acl_refresh: std::time::Duration::from_secs(args.acl_refresh_secs),
-    })
-}
-
-/// Build SR → broker [`ClientSecurity`] from `--kafka-*`. `PLAINTEXT` ⇒ `None`
-/// (plaintext, the pre-security default). PLAIN/SCRAM + TLS-CA are covered;
-/// GSSAPI and client-cert (mTLS to the broker) are config-struct-supported but
-/// not yet CLI-exposed.
-fn build_client_security(args: &Args) -> anyhow::Result<Option<ClientSecurity>> {
-    let protocol = match args.kafka_security_protocol.to_ascii_uppercase().as_str() {
-        "PLAINTEXT" => return Ok(None),
-        "SSL" => ListenerProtocol::Ssl,
-        "SASL_PLAINTEXT" => ListenerProtocol::SaslPlaintext,
-        "SASL_SSL" => ListenerProtocol::SaslSsl,
-        other => anyhow::bail!(
-            "invalid --kafka-security-protocol: {other} (want PLAINTEXT|SSL|SASL_PLAINTEXT|SASL_SSL)"
-        ),
-    };
-
-    let tls = if protocol.requires_tls() {
-        Some(TlsConnectorConfig {
-            trust_roots_pem: args.kafka_tls_ca.clone(),
-            server_name: args
-                .kafka_tls_server_name
-                .clone()
-                .unwrap_or_else(|| "localhost".to_string()),
-        })
-    } else {
-        None
-    };
-
-    let sasl = if protocol.requires_sasl() {
-        Some(build_sasl(args)?)
-    } else {
-        None
-    };
-
-    Ok(Some(ClientSecurity {
-        protocol,
-        tls,
-        sasl,
-        sasl_host: None,
-    }))
-}
-
-/// Build the SASL credential set for a `SASL_*` broker protocol.
-fn build_sasl(args: &Args) -> anyhow::Result<SaslCredentials> {
-    let username = args
-        .kafka_sasl_username
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("--kafka-sasl-username required for SASL_* protocols"))?;
-    let password = args
-        .kafka_sasl_password
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("--kafka-sasl-password required for SASL_* protocols"))?;
-    match args.kafka_sasl_mechanism.to_ascii_uppercase().as_str() {
-        "PLAIN" => Ok(SaslCredentials::Plain { username, password }),
-        "SCRAM-SHA-256" => Ok(SaslCredentials::Scram {
-            mechanism: SaslMechanism::ScramSha256,
-            username,
-            password,
-        }),
-        "SCRAM-SHA-512" => Ok(SaslCredentials::Scram {
-            mechanism: SaslMechanism::ScramSha512,
-            username,
-            password,
-        }),
-        other => anyhow::bail!(
-            "invalid --kafka-sasl-mechanism: {other} (want PLAIN|SCRAM-SHA-256|SCRAM-SHA-512); \
-             GSSAPI is not yet CLI-exposed"
-        ),
     }
 }
 

@@ -119,4 +119,46 @@ mod tests {
         // File-only entries (no inline override) still load.
         assert!(store.verify("bob", "bobpw"), "file-only entry preserved");
     }
+
+    #[test]
+    fn load_file_skips_comments_and_blank_lines() {
+        // A file-ONLY load (no inline users): comments (`#`), blank lines, and a
+        // colon-less malformed line are all skipped; valid `user:cred` lines load.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "crabka-sr-basic-parse-{}.htpasswd",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "# leading comment\n\n  \nalice:pw\nmalformed-no-colon\n  bob:bpw  \n",
+        )
+        .unwrap();
+
+        let cfg = crate::config::BasicAuthConfig {
+            users: HashMap::new(),
+            file: Some(path.clone()),
+        };
+        let store = BasicAuthStore::load(&cfg).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert!(store.verify("alice", "pw"));
+        assert!(store.verify("bob", "bpw"), "leading/trailing ws trimmed");
+        // The colon-less line produced no entry, so nothing matches it.
+        assert!(!store.verify("malformed-no-colon", ""));
+    }
+
+    #[test]
+    fn load_missing_file_is_io_err() {
+        // `cfg.file` points at a path that does not exist → the underlying
+        // io::Error propagates (NotFound).
+        let cfg = crate::config::BasicAuthConfig {
+            users: HashMap::new(),
+            file: Some(std::path::PathBuf::from(
+                "/nonexistent/crabka-sr-basic-missing.htpasswd",
+            )),
+        };
+        let err = BasicAuthStore::load(&cfg).expect_err("missing file must error");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    }
 }

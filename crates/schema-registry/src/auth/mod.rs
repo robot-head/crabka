@@ -271,6 +271,89 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn bearer_presented_but_not_configured_is_unauthorized() {
+        // bearer=None but the request carries `Authorization: Bearer …` → 401
+        // (a presented credential whose scheme isn't configured is rejected,
+        // even with require_auth off).
+        let st = AuthState {
+            basic: None,
+            bearer: None,
+            require_auth: false,
+            realm: "schema-registry".to_string(),
+        };
+        let decision = resolve(&header_map(Some("Bearer some.jwt.token")), None, &st, 0).await;
+        assert_eq!(decision, AuthDecision::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn bearer_with_validator_authenticates() {
+        // bearer=Some(unsecured validator): a JWT whose `sub` claim is the
+        // principal name resolves to that principal (exercises the configured-
+        // validator success branch of `resolve`).
+        use base64::Engine as _;
+        let validator = OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
+            principal_claim_name: "sub".to_string(),
+            ..Default::default()
+        });
+        let st = AuthState {
+            basic: None,
+            bearer: Some(Arc::new(validator)),
+            require_auth: true,
+            realm: "schema-registry".to_string(),
+        };
+        // Minimal unsigned JWT: header.payload.signature (empty sig for
+        // `alg:none`). The validator requires an `exp` claim in the future, so
+        // set one far ahead (year 2100, in seconds) and evaluate at now_ms=0.
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        let token = format!(
+            "{}.{}.",
+            b64(br#"{"alg":"none"}"#),
+            b64(br#"{"sub":"svc-account","exp":4102444800}"#),
+        );
+        match resolve(&header_map(Some(&format!("Bearer {token}"))), None, &st, 0).await {
+            AuthDecision::Authn(p) => assert_eq!(p.name, "svc-account"),
+            AuthDecision::Unauthorized => panic!("expected svc-account Authn"),
+        }
+    }
+
+    #[tokio::test]
+    async fn basic_presented_but_not_configured_is_unauthorized() {
+        // basic=None but the request carries `Authorization: Basic …` → 401.
+        let st = AuthState {
+            basic: None,
+            bearer: None,
+            require_auth: false,
+            realm: "schema-registry".to_string(),
+        };
+        let decision = resolve(&header_map(Some(&basic_b64("alice", "pw"))), None, &st, 0).await;
+        assert_eq!(decision, AuthDecision::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn malformed_basic_base64_is_unauthorized() {
+        // `Basic <not-valid-base64>` → decode fails → 401.
+        let st = state_with_basic(false);
+        let decision = resolve(&header_map(Some("Basic !!!not-base64!!!")), None, &st, 0).await;
+        assert_eq!(decision, AuthDecision::Unauthorized);
+    }
+
+    #[tokio::test]
+    async fn basic_without_colon_is_unauthorized() {
+        // Valid base64 but the decoded text has no `user:pass` separator → 401.
+        use base64::Engine as _;
+        let no_colon = base64::engine::general_purpose::STANDARD.encode("justauser");
+        let st = state_with_basic(false);
+        let decision = resolve(
+            &header_map(Some(&format!("Basic {no_colon}"))),
+            None,
+            &st,
+            0,
+        )
+        .await;
+        assert_eq!(decision, AuthDecision::Unauthorized);
+    }
+
+    #[tokio::test]
     async fn mtls_principal_wins() {
         // mTLS principal present + any/no header → that principal, regardless of
         // require_auth or the Authorization header.

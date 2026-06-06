@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod authz;
+pub mod cli;
 pub mod compat;
 pub mod config;
 pub mod election;
