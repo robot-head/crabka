@@ -115,6 +115,7 @@ mod tests {
             offset: 0,
             timestamp: 0,
         };
+        let mut scheds = Vec::new();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
@@ -122,6 +123,10 @@ mod tests {
             record_ctx: &rc,
             stores,
             globals: &globals,
+            node_idx: 0,
+            schedules: &mut scheds,
+            sched_stream_time: i64::MIN,
+            sched_wall_clock: 0,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
         proc.process(&mut ctx, Record::new(Some(key.to_string()), value, 0))

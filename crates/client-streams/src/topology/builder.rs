@@ -1187,6 +1187,9 @@ impl BuiltTopology {
             // and assigns the shared GlobalStateManager. `instantiate` produces a
             // per-task graph and never owns the fully-replicated global stores.
             globals: crate::runtime::global::GlobalStateManager::default(),
+            schedules: Vec::new(),
+            stream_time: i64::MIN,
+            wall_clock: 0,
         })
     }
 }

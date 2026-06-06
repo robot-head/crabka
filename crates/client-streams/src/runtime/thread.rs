@@ -32,6 +32,9 @@ pub(crate) struct StreamThread {
     /// advanced by each `poll_all` live-update pass. Empty when the topology declares
     /// no `GlobalKTable`.
     global_offsets: std::collections::HashMap<(String, i32), i64>,
+    /// Wall-clock source driving wall-clock punctuation between polls. Defaults to
+    /// `SystemClock`; tests inject a `ManualClock` via `with_clock` for determinism.
+    clock: Arc<dyn crate::runtime::clock::Clock>,
 }
 
 impl StreamThread {
@@ -48,7 +51,17 @@ impl StreamThread {
             globals: crate::runtime::global::GlobalStateManager::default(),
             globals_ready: false,
             global_offsets: std::collections::HashMap::new(),
+            clock: Arc::new(crate::runtime::clock::SystemClock),
         }
+    }
+
+    /// Test-only: swap in a deterministic clock (e.g. `ManualClock`) so wall-clock
+    /// punctuation can be driven without real time passing.
+    #[cfg(test)]
+    #[must_use]
+    pub fn with_clock(mut self, clock: Arc<dyn crate::runtime::clock::Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     #[cfg(test)]
@@ -160,6 +173,13 @@ impl StreamThread {
         for task in self.tasks.values_mut() {
             task.process_once(fetcher).await?;
         }
+        // Wall-clock punctuation tick: read the clock once, then fire every task's
+        // due WALL_CLOCK_TIME punctuators. Forwarded records are produced through
+        // each task's own producer (same plumbing as `process_once`).
+        let now = self.clock.now_ms();
+        for task in self.tasks.values_mut() {
+            task.punctuate_wall_clock(now).await?;
+        }
         Ok(())
     }
 
@@ -245,6 +265,44 @@ mod tests {
         let c = t.add_processor("c", || Counter, [&src]);
         t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
         t.add_sink("out", "out", [&c], Produced::with(StringSerde, I64Serde));
+        t.build("app").unwrap()
+    }
+
+    // ─── wall-clock punctuator scheduler ──────────────────────────────────────
+
+    struct EmitTs;
+    #[async_trait::async_trait]
+    impl crate::processor::punctuation::Punctuator<String, i64> for EmitTs {
+        async fn punctuate(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>, ts: i64) {
+            ctx.forward(Record::new(None, ts, ts));
+        }
+    }
+
+    /// Schedules a `WALL_CLOCK_TIME` punctuator (interval 100ms) in `init`; no-op on
+    /// records (so any sink output is from the wall-clock punctuator).
+    struct WallClockScheduler;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, i64> for WallClockScheduler {
+        async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>) {
+            ctx.schedule(
+                std::time::Duration::from_millis(100),
+                crate::processor::punctuation::PunctuationType::WallClockTime,
+                EmitTs,
+            );
+        }
+        async fn process(
+            &mut self,
+            _ctx: &mut ProcessorContext<'_, '_, String, i64>,
+            _r: Record<String, String>,
+        ) {
+        }
+    }
+
+    fn wall_clock_built() -> crate::topology::BuiltTopology {
+        let mut t = Topology::new();
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let p = t.add_processor("p", || WallClockScheduler, [&src]);
+        t.add_sink("out", "out", [&p], Produced::with(StringSerde, I64Serde));
         t.build("app").unwrap()
     }
 
@@ -389,6 +447,66 @@ mod tests {
     }
 
     // ─── tests ────────────────────────────────────────────────────────────────
+
+    /// `poll_all` must fire due `WALL_CLOCK_TIME` punctuators between polls, driven
+    /// by the injected `Clock`. We use a `ManualClock` over a shared atomic so we
+    /// can advance wall time deterministically:
+    ///   - `init` schedules the punctuator at base `wall_clock`=0 → next fire = 100.
+    ///   - clock=0: first `poll_all` → now=0 < 100, no fire.
+    ///   - advance clock to 150: second `poll_all` → now=150 >= 100, fires ONCE,
+    ///     emitting value = now = 150 to the "out" sink.
+    #[tokio::test]
+    async fn poll_all_fires_wall_clock_punctuation_via_manual_clock() {
+        use std::sync::atomic::AtomicI64;
+
+        let producer_c = Arc::new(CollectProducer::default());
+        let store_c = Arc::new(MemStore::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
+        let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
+        let built = wall_clock_built();
+
+        let now = Arc::new(AtomicI64::new(0));
+        let clock: Arc<dyn crate::runtime::clock::Clock> =
+            Arc::new(crate::runtime::clock::ManualClock(Arc::clone(&now)));
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        )
+        .with_clock(clock);
+        thread
+            .apply_assignment(&assignment(), &built, &producer, &store)
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        // clock=0 → no record source, no wall-clock fire yet (now=0 < next=100).
+        thread.poll_all(&*empty_fetcher()).await.unwrap();
+        check!(
+            !producer_c
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(t, _p, _k, _v)| t == "out"),
+            "no wall-clock punctuation should fire before the interval elapses"
+        );
+
+        // Advance wall time past one interval; the next poll must fire the
+        // punctuator (value = now = 150) and produce it to "out".
+        now.store(150, std::sync::atomic::Ordering::SeqCst);
+        thread.poll_all(&*empty_fetcher()).await.unwrap();
+        check!(
+            producer_c
+                .sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(t, _p, _k, v)| t == "out"
+                    && v.as_deref() == Some(150i64.to_be_bytes().as_ref())),
+            "wall-clock punctuator must fire from poll_all once the ManualClock passes the interval, emitting value=150"
+        );
+    }
 
     #[tokio::test]
     async fn apply_assignment_creates_task_polls_commits() {

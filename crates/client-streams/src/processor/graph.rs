@@ -34,6 +34,16 @@ pub(crate) struct Graph {
     /// lent into each dispatch. Default-empty until the app wiring (T8b) or the
     /// `TopologyTestDriver` populates it; stream-globaltable joins read it.
     pub globals: crate::runtime::global::GlobalStateManager,
+    /// Live punctuation schedules registered via `ProcessorContext::schedule`,
+    /// tagged by node index. Written here (lent into each dispatch); fired by
+    /// `punctuate_stream_time`.
+    pub schedules: Vec<crate::processor::punctuation::ScheduleEntry>,
+    /// Observed max record timestamp (stream-time); the base a stream-time
+    /// schedule stamps its first fire from. Init `i64::MIN`.
+    pub stream_time: i64,
+    /// Last wall-clock value seen; the base a wall-clock schedule stamps its
+    /// first fire from. Init `0`. Read by [`Graph::punctuate_wall_clock`].
+    pub wall_clock: i64,
 }
 
 impl Graph {
@@ -46,6 +56,7 @@ impl Graph {
         value: &[u8],
         timestamp: i64,
     ) -> Result<(), ProcessorError> {
+        self.stream_time = self.stream_time.max(timestamp);
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let rc = RecordContext {
             topic: topic.to_string(),
@@ -65,7 +76,18 @@ impl Graph {
             }
         }
 
-        // Drain. `mem::take` the child list so we can borrow `self.nodes` and
+        self.drain(buffer, &rc).await
+    }
+
+    /// Drive the buffer of `(node_idx, ErasedRecord)` to completion, appending
+    /// sink outputs to `self.output`. Shared by `pipe` (record processing) and
+    /// `fire_schedule` (punctuator-forwarded records).
+    async fn drain(
+        &mut self,
+        mut buffer: VecDeque<(usize, ErasedRecord)>,
+        rc: &RecordContext,
+    ) -> Result<(), ProcessorError> {
+        // `mem::take` the child list so we can borrow `self.nodes` and
         // `self.output` as disjoint fields while the node processes.
         while let Some((idx, rec)) = buffer.pop_front() {
             // Take this node's child list out temporarily to satisfy the borrow
@@ -76,21 +98,130 @@ impl Graph {
                 // Bind disjoint fields as separate locals so rustc can see
                 // they don't alias: nodes[idx], output, and stores are three
                 // distinct fields of `self`.
+                // Copy the i64 clocks into locals FIRST so reading them doesn't
+                // conflict with the `&mut self.schedules` borrow below.
+                let (st, wc) = (self.stream_time, self.wall_clock);
                 let node = &mut self.nodes[idx];
                 let out = &mut self.output;
                 let stores = &mut self.stores;
+                let scheds = &mut self.schedules;
                 let mut d = Dispatch {
                     buffer: &mut buffer,
                     children: &children,
                     output: out,
-                    record_ctx: &rc,
+                    record_ctx: rc,
                     stores,
                     globals: &self.globals,
+                    node_idx: idx,
+                    schedules: scheds,
+                    sched_stream_time: st,
+                    sched_wall_clock: wc,
                 };
                 node.process(&mut d, rec).await
             };
             self.children[idx] = children;
             res?;
+        }
+        Ok(())
+    }
+
+    /// Fire one schedule's punctuator positioned at its node, then drain any
+    /// records it forwarded. `ts` is the timestamp passed to `punctuate`.
+    async fn fire_schedule(&mut self, sched_idx: usize, ts: i64) -> Result<(), ProcessorError> {
+        let node_idx = self.schedules[sched_idx].node_idx;
+        let rc = RecordContext {
+            topic: String::new(),
+            partition: -1,
+            offset: -1,
+            timestamp: ts,
+        };
+        let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
+        // Take the punctuator out so the Dispatch can borrow `self.schedules`
+        // (for re-scheduling) without aliasing the entry being fired.
+        let mut punct = std::mem::replace(
+            &mut self.schedules[sched_idx].punctuator,
+            Box::new(NoopPunctuator),
+        );
+        let children = std::mem::take(&mut self.children[node_idx]);
+        {
+            let (st, wc) = (self.stream_time, self.wall_clock);
+            let out = &mut self.output;
+            let stores = &mut self.stores;
+            let scheds = &mut self.schedules;
+            let mut d = Dispatch {
+                buffer: &mut buffer,
+                children: &children,
+                output: out,
+                record_ctx: &rc,
+                stores,
+                globals: &self.globals,
+                node_idx,
+                schedules: scheds,
+                sched_stream_time: st,
+                sched_wall_clock: wc,
+            };
+            punct.fire(&mut d, ts).await;
+        }
+        self.children[node_idx] = children;
+        self.schedules[sched_idx].punctuator = punct;
+        self.drain(buffer, &rc).await
+    }
+
+    /// Fire all due `STREAM_TIME` schedules at the current stream-time (each at
+    /// most once). Bumps stream-time to `max(.., stream_time)` first.
+    pub async fn punctuate_stream_time(&mut self, stream_time: i64) -> Result<(), ProcessorError> {
+        self.stream_time = self.stream_time.max(stream_time);
+        let now = self.stream_time;
+        self.punctuate(
+            crate::processor::punctuation::PunctuationType::StreamTime,
+            now,
+        )
+        .await
+    }
+
+    /// Fire all due `WALL_CLOCK_TIME` schedules at `now_ms` (each at most once).
+    /// Setting `self.wall_clock = now_ms` first means a `schedule()` called from
+    /// a punctuator (or a later `process`) stamps its base from the current clock.
+    pub async fn punctuate_wall_clock(&mut self, now_ms: i64) -> Result<(), ProcessorError> {
+        self.wall_clock = now_ms;
+        self.punctuate(
+            crate::processor::punctuation::PunctuationType::WallClockTime,
+            now_ms,
+        )
+        .await
+    }
+
+    /// Shared firing pass: fire every due schedule of type `ty` at `now`,
+    /// AT MOST ONCE each (no catch-up loop), then resync each fired entry's
+    /// `next_time`. The fired value is `now` (the current clock), matching the
+    /// JVM capture for both stream-time and wall-clock punctuation.
+    async fn punctuate(
+        &mut self,
+        ty: crate::processor::punctuation::PunctuationType,
+        now: i64,
+    ) -> Result<(), ProcessorError> {
+        self.schedules.retain(|e| !e.is_cancelled());
+        let n = self.schedules.len();
+        for i in 0..n {
+            if self.schedules[i].ty != ty || self.schedules[i].is_cancelled() {
+                continue;
+            }
+            let next = self.schedules[i].next_time;
+            if now >= next {
+                let interval = self.schedules[i].interval_ms;
+                self.fire_schedule(i, now).await?; // value = now, fire AT MOST ONCE
+                // Resync: if we fell more than one interval behind, jump to
+                // `now + interval`; else advance by one interval. Saturating to
+                // stay overflow-safe when `next` is near `i64::MIN` (a stream
+                // schedule's first `next_time` is `MIN + interval`). The
+                // comparison `now - next >= interval` is rewritten as the
+                // overflow-safe `now >= next + interval`.
+                self.schedules[i].next_time = if now >= next.saturating_add(interval) {
+                    now.saturating_add(interval)
+                } else {
+                    next.saturating_add(interval)
+                };
+            }
         }
         Ok(())
     }
@@ -112,9 +243,13 @@ impl Graph {
                 offset: -1,
                 timestamp: -1,
             };
+            // Copy the i64 clocks into locals FIRST so reading them doesn't
+            // conflict with the `&mut self.schedules` borrow below.
+            let (st, wc) = (self.stream_time, self.wall_clock);
             let node = &mut self.nodes[idx];
             let stores = &mut self.stores;
             let globals = &self.globals;
+            let scheds = &mut self.schedules;
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &[],
@@ -122,6 +257,10 @@ impl Graph {
                 record_ctx: &rc,
                 stores,
                 globals,
+                node_idx: idx,
+                schedules: scheds,
+                sched_stream_time: st,
+                sched_wall_clock: wc,
             };
             node.init(&mut d).await?;
         }
@@ -173,6 +312,15 @@ impl Graph {
     }
 }
 
+/// Placeholder swapped into a `ScheduleEntry` while its real punctuator is taken
+/// out to fire (so the firing `Dispatch` can borrow `self.schedules` without
+/// aliasing the entry). `fire` is never actually called on it.
+struct NoopPunctuator;
+#[async_trait::async_trait]
+impl crate::processor::punctuation::ErasedPunctuator for NoopPunctuator {
+    async fn fire(&mut self, _d: &mut Dispatch<'_>, _ts: i64) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +366,9 @@ mod tests {
             output: Vec::new(),
             stores: crate::store::registry::StoreRegistry::default(),
             globals: crate::runtime::global::GlobalStateManager::default(),
+            schedules: Vec::new(),
+            stream_time: i64::MIN,
+            wall_clock: 0,
         };
         graph.pipe("in", Some(b"k"), b"hi", 7).await.unwrap();
         let out = graph.take_output();
@@ -235,6 +386,9 @@ mod tests {
             output: Vec::new(),
             stores: crate::store::registry::StoreRegistry::default(),
             globals: crate::runtime::global::GlobalStateManager::default(),
+            schedules: Vec::new(),
+            stream_time: i64::MIN,
+            wall_clock: 0,
         };
         graph.pipe("nope", None, b"x", 0).await.unwrap();
         check!(graph.take_output().is_empty());
@@ -302,6 +456,9 @@ mod tests {
             output: Vec::new(),
             stores,
             globals: crate::runtime::global::GlobalStateManager::default(),
+            schedules: Vec::new(),
+            stream_time: i64::MIN,
+            wall_clock: 0,
         };
 
         // pipe "in"/"a" twice — counter should accumulate to 2
@@ -312,5 +469,89 @@ mod tests {
         check!(out.len() == 2);
         // last output value bytes should be big-endian i64(2) = [0,0,0,0,0,0,0,2]
         check!(out[1].value.as_ref().unwrap().as_ref() == [0u8, 0, 0, 0, 0, 0, 0, 2]);
+    }
+
+    #[tokio::test]
+    async fn stream_time_punctuator_fires_once_at_current_stream_time() {
+        use crate::processor::punctuation::{PunctuationType, Punctuator};
+        use crate::processor::serde::I64Serde;
+        use std::time::Duration;
+
+        // A punctuator that, when fired at `ts`, forwards a record whose value is
+        // that fired timestamp (`Record::new(None, ts, ts)`), so the sink emits
+        // the i64 value we can assert on.
+        struct EmitTs;
+        #[async_trait]
+        impl Punctuator<String, i64> for EmitTs {
+            async fn punctuate(
+                &mut self,
+                ctx: &mut ProcessorContext<'_, '_, String, i64>,
+                ts: i64,
+            ) {
+                ctx.forward(Record::new(None, ts, ts));
+            }
+        }
+
+        // A processor that schedules a STREAM_TIME punctuator (interval 10ms) in
+        // `init`, and is otherwise a no-op on records.
+        struct Scheduler;
+        #[async_trait]
+        impl Processor<String, String, String, i64> for Scheduler {
+            async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>) {
+                ctx.schedule(
+                    Duration::from_millis(10),
+                    PunctuationType::StreamTime,
+                    EmitTs,
+                );
+            }
+            async fn process(
+                &mut self,
+                _ctx: &mut ProcessorContext<'_, '_, String, i64>,
+                _r: Record<String, String>,
+            ) {
+            }
+        }
+
+        // nodes: index 0 = scheduler processor, index 1 = sink
+        let proc_node =
+            Box::new(ProcessorNode::new("proc".into(), &(|| Scheduler))) as Box<dyn ErasedNode>;
+        let sink_node = Box::new(SinkNode::new(
+            "out".into(),
+            "out-topic".into(),
+            StringSerde,
+            I64Serde,
+        )) as Box<dyn ErasedNode>;
+        let src_node = SourceNode::new("src".into(), StringSerde, StringSerde);
+        let source = GraphSource {
+            topic: "in".into(),
+            deserialize: Box::new(move |k, v, ts| src_node.deserialize(k, v, ts)),
+            children: vec![0],
+        };
+
+        let mut graph = Graph {
+            nodes: vec![proc_node, sink_node],
+            children: vec![vec![1], vec![]], // proc -> sink ; sink -> none
+            sources: vec![source],
+            output: Vec::new(),
+            stores: crate::store::registry::StoreRegistry::default(),
+            globals: crate::runtime::global::GlobalStateManager::default(),
+            schedules: Vec::new(),
+            stream_time: i64::MIN,
+            wall_clock: 0,
+        };
+
+        // init schedules the punctuator: stream base i64::MIN -> next = MIN + 10.
+        graph.init_processors().await.unwrap();
+        // a record at ts=5 (no forward in `process`).
+        graph.pipe("in", Some(b"k"), b"v", 5).await.unwrap();
+        // punctuate at stream-time 25: now=25 >= next=MIN+10 -> fire ONCE with
+        // value=now=25; next resyncs to 35 (now - next >= interval).
+        graph.punctuate_stream_time(25).await.unwrap();
+
+        let out = graph.take_output();
+        check!(out.len() == 1);
+        check!(out[0].topic == "out-topic");
+        // value = i64(25) big-endian
+        check!(out[0].value.as_ref().unwrap().as_ref() == 25i64.to_be_bytes());
     }
 }

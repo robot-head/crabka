@@ -20,6 +20,10 @@ pub struct TopologyTestDriver {
     graph: Graph,
     source_topics: HashSet<String>,
     output: HashMap<String, VecDeque<OutputRecord>>,
+    /// Mock wall clock (ms), advanced by `advance_wall_clock_time`; the value
+    /// passed to `Graph::punctuate_wall_clock`. Starts at `0`, mirroring the JVM
+    /// `TopologyTestDriver` mock time at construction.
+    mock_wall_ms: i64,
 }
 
 impl TopologyTestDriver {
@@ -47,6 +51,7 @@ impl TopologyTestDriver {
             graph,
             source_topics,
             output: HashMap::new(),
+            mock_wall_ms: 0,
         })
     }
 
@@ -78,27 +83,57 @@ impl TopologyTestDriver {
         while let Some((t, k, v, ts)) = queue.pop_front() {
             // run the graph for this topic; ignore unknown topics
             let _ = pollster::block_on(self.graph.pipe(&t, k.as_deref(), &v, ts));
-            for out in self.graph.take_output() {
-                if self.source_topics.contains(&out.topic) {
-                    // internal repartition topic feeding another subtopology → loop back
-                    let vv = out.value.clone().unwrap_or_default().to_vec();
-                    queue.push_back((
-                        out.topic.clone(),
-                        out.key.as_ref().map(|b| b.to_vec()),
-                        vv,
-                        out.timestamp,
-                    ));
-                } else {
-                    self.output
-                        .entry(out.topic.clone())
-                        .or_default()
-                        .push_back(out);
-                }
-            }
-            // Drain changelog buffers so they don't grow unbounded; the test driver
-            // has no broker, so we discard them (restore is a no-op with fresh stores).
-            let _ = self.graph.drain_changelogs();
+            self.route_outputs(&mut queue);
+            // Stream-time advanced by this record → fire stream-time punctuators; their
+            // forwarded records route like any output (and may loop back to a source).
+            let _ = pollster::block_on(self.graph.punctuate_stream_time(self.graph.stream_time));
+            self.route_outputs(&mut queue);
         }
+    }
+
+    /// Advance the mock wall clock by `by`, firing wall-clock punctuators (each at
+    /// most once, value = the new clock) — mirrors JVM `TopologyTestDriver.advanceWallClockTime`.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn advance_wall_clock_time(&mut self, by: std::time::Duration) {
+        self.mock_wall_ms += i64::try_from(by.as_millis()).unwrap_or(i64::MAX);
+        let mut queue: VecDeque<PendingRecord> = VecDeque::new();
+        let _ = pollster::block_on(self.graph.punctuate_wall_clock(self.mock_wall_ms));
+        self.route_outputs(&mut queue);
+        // Drain any loopback the punctuators produced (and fire stream-time for those).
+        while let Some((t, k, v, ts)) = queue.pop_front() {
+            let _ = pollster::block_on(self.graph.pipe(&t, k.as_deref(), &v, ts));
+            self.route_outputs(&mut queue);
+            let _ = pollster::block_on(self.graph.punctuate_stream_time(self.graph.stream_time));
+            self.route_outputs(&mut queue);
+        }
+    }
+
+    /// Drain the graph's output buffer: outputs to a source topic re-enqueue
+    /// (repartition loop-back), all others append to `self.output`. Changelog
+    /// buffers are discarded (the test driver has no broker, so restore is a
+    /// no-op with fresh stores). Shared by the record-processing and
+    /// stream-time-punctuation phases of `pipe_bytes`.
+    fn route_outputs(&mut self, queue: &mut VecDeque<PendingRecord>) {
+        for out in self.graph.take_output() {
+            if self.source_topics.contains(&out.topic) {
+                // internal repartition topic feeding another subtopology → loop back
+                let vv = out.value.clone().unwrap_or_default().to_vec();
+                queue.push_back((
+                    out.topic.clone(),
+                    out.key.as_ref().map(|b| b.to_vec()),
+                    vv,
+                    out.timestamp,
+                ));
+            } else {
+                self.output
+                    .entry(out.topic.clone())
+                    .or_default()
+                    .push_back(out);
+            }
+        }
+        // Drain changelog buffers so they don't grow unbounded; the test driver
+        // has no broker, so we discard them (restore is a no-op with fresh stores).
+        let _ = self.graph.drain_changelogs();
     }
 
     /// Inspect a state store's contents after piping (mirrors the JVM

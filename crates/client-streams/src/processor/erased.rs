@@ -66,6 +66,15 @@ pub(crate) struct Dispatch<'a> {
     /// The app-wide, fully-replicated global stores (shared across tasks). Read
     /// by stream-globaltable join processors via `ProcessorContext::global_get`.
     pub globals: &'a crate::runtime::global::GlobalStateManager,
+    /// The graph node this dispatch is positioned at (so `schedule` tags the
+    /// owning node, and a punctuator forwards to this node's children).
+    pub node_idx: usize,
+    /// Sink for `ProcessorContext::schedule`: newly-registered punctuation schedules.
+    pub schedules: &'a mut Vec<crate::processor::punctuation::ScheduleEntry>,
+    /// Current stream-time / wall-clock — the BASE `schedule` stamps a new entry's
+    /// first-fire time from (`base + interval`).
+    pub sched_stream_time: i64,
+    pub sched_wall_clock: i64,
 }
 
 #[cfg(test)]
