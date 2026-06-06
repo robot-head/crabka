@@ -102,6 +102,11 @@ pub struct Topology {
     /// global-store builder/restorer (a later task) to consume. Populated by
     /// [`Topology::add_global_store`].
     global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
+    /// `global store name -> source topic` for each `GlobalKTable`. The shared
+    /// global consumer reads each source topic (all partitions) to fully
+    /// replicate the matching store. Populated by [`Topology::add_global_store`]
+    /// alongside `global_store_factories`. Invisible in the wire output.
+    global_store_topics: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for Topology {
@@ -124,6 +129,7 @@ impl std::fmt::Debug for Topology {
                     self.global_store_factories.len()
                 ),
             )
+            .field("global_store_topics", &self.global_store_topics)
             .finish()
     }
 }
@@ -777,6 +783,7 @@ impl Topology {
                 )) as Box<dyn crate::store::api::StateStore>
             },
         );
+        self.global_store_topics.insert(store_name.clone(), topic);
         self.global_store_factories
             .insert(store_name, (None, factory));
         self
@@ -926,6 +933,7 @@ impl Topology {
             node_specs,
             store_factories: self.store_factories,
             global_store_factories: self.global_store_factories,
+            global_store_topics: self.global_store_topics,
         })
     }
 
@@ -982,6 +990,11 @@ pub struct BuiltTopology {
     /// [`global_store_factories_for_test`](Self::global_store_factories_for_test)
     /// to materialize global stores directly for join tests.
     global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
+    /// `global store name -> source topic` for each `GlobalKTable`. Read by the
+    /// shared global manager so the consumer knows which topic feeds each store.
+    // Consumed by the global consumer / dispatch wiring in T7/T8 (via the accessor).
+    #[allow(dead_code)]
+    global_store_topics: HashMap<String, String>,
 }
 
 impl std::fmt::Debug for BuiltTopology {
@@ -1017,6 +1030,17 @@ impl BuiltTopology {
         &self,
     ) -> &HashMap<String, (Option<String>, StoreFactory)> {
         &self.global_store_factories
+    }
+
+    /// The `global store name -> source topic` map for each `GlobalKTable`.
+    /// The shared [`GlobalStateManager`] reads this so the global consumer knows
+    /// which topic feeds each store. Invisible in the wire output.
+    ///
+    /// [`GlobalStateManager`]: crate::runtime::global::GlobalStateManager
+    // Consumed by the global consumer / dispatch wiring in T7/T8.
+    #[allow(dead_code)]
+    pub(crate) fn global_store_topics(&self) -> HashMap<String, String> {
+        self.global_store_topics.clone()
     }
 
     /// The external + repartition source topics a subtopology's tasks read.
