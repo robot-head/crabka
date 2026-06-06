@@ -27,6 +27,18 @@ pub(crate) struct Node {
     pub kind: NodeKind,
 }
 
+/// Which changelog topic configuration a store's changelog topic gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChangelogKind {
+    /// KV store: `cleanup.policy=compact` only.
+    Kv,
+    /// Aggregation window store: `cleanup.policy=compact,delete` + `retention.ms`.
+    AggWindow { retention_ms: i64 },
+    /// Join window store: `cleanup.policy=delete` + `retention.ms`
+    /// (retainDuplicates prevents compaction).
+    JoinWindow { retention_ms: i64 },
+}
+
 /// A registered state store: its name, the processors it connects (used to
 /// union the owning subtopology), and an optional **changelog-topic override**.
 ///
@@ -40,9 +52,8 @@ pub(crate) struct StoreEntry {
     pub name: String,
     pub processors: Vec<String>,
     pub changelog_override: Option<String>,
-    /// `Some(ms)` for windowed stores: drives `compact,delete` + `retention.ms` configs.
-    /// `None` for KV stores: drives `compact`-only configs.
-    pub windowed_retention_ms: Option<i64>,
+    /// Which changelog topic config this store's changelog gets.
+    pub changelog_kind: ChangelogKind,
 }
 
 /// The full node graph, recorded in insertion order.
@@ -134,12 +145,12 @@ impl NodeRegistry {
             name: name.to_string(),
             processors,
             changelog_override,
-            windowed_retention_ms: None,
+            changelog_kind: ChangelogKind::Kv,
         });
     }
 
-    /// Register a windowed state store. The `retention_ms` is stored and passed
-    /// to the wire layer so the changelog topic gets `compact,delete` +
+    /// Register a windowed aggregation state store. The `retention_ms` is stored
+    /// and passed to the wire layer so the changelog topic gets `compact,delete` +
     /// `retention.ms=<retention_ms>` configs instead of the KV `compact`-only set.
     pub fn add_window_store(
         &mut self,
@@ -152,7 +163,25 @@ impl NodeRegistry {
             name: name.to_string(),
             processors,
             changelog_override,
-            windowed_retention_ms: Some(retention_ms),
+            changelog_kind: ChangelogKind::AggWindow { retention_ms },
+        });
+    }
+
+    /// Register a join window state store. The changelog gets `delete`-only
+    /// policy + `retention.ms=<retention_ms>` (retainDuplicates means the store
+    /// cannot be compacted — only deleted).
+    pub fn add_join_window_store(
+        &mut self,
+        name: &str,
+        processors: Vec<String>,
+        changelog_override: Option<String>,
+        retention_ms: i64,
+    ) {
+        self.stores.push(StoreEntry {
+            name: name.to_string(),
+            processors,
+            changelog_override,
+            changelog_kind: ChangelogKind::JoinWindow { retention_ms },
         });
     }
 

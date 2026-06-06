@@ -150,13 +150,15 @@
 //! records and drops tombstones from the output stream (full null-value output
 //! is deferred to a future slice).
 //!
-//! [`KStream::join`] and [`KStream::left_join`] join a stream against a
-//! **materialized** `KTable`: the stream side drives, and for each record the
+//! [`KStream::join_table`] and [`KStream::left_join_table`] join a stream against
+//! a **materialized** `KTable`: the stream side drives, and for each record the
 //! table store is looked up by key. An inner join emits only when the table has a
 //! matching entry; a left join always emits (with `None` as the table value when
 //! absent). The stream must be **copartitioned** with the table (same key serde
 //! and partition count); a key-changing stream must be `.repartition(..)`-ed
-//! before joining — the join itself inserts no implicit repartition.
+//! before joining — the join itself inserts no implicit repartition. (The plain
+//! [`KStream::join`]/[`KStream::left_join`] names are the windowed *stream-stream*
+//! join below — Rust can't overload by argument type as the JVM does.)
 //!
 //! [`KTable::join`], [`KTable::left_join`], and [`KTable::outer_join`] join two
 //! **materialized** `KTables`. Unlike the stream-table join, a change on *either*
@@ -177,6 +179,22 @@
 //! [`Window`]-keyed store over the same pluggable backend, with a `compact,delete`
 //! changelog (`retention.ms = size + grace + 1 day`). Read the windowed output
 //! with [`TimeWindowedSerde`] (the key carries the window start).
+//!
+//! [`KStream::join`], [`KStream::left_join`], and [`KStream::outer_join`] are the
+//! windowed **stream-stream** joins: two streams join over a [`JoinWindows`] time
+//! window, configured with [`StreamJoined`] serdes. Each side buffers its records
+//! in its own `retainDuplicates` window store (so two records at the same time
+//! both survive); a record from one side joins every record on the other side
+//! within `[t - before, t + after]`, emitting `joiner(a, b)` at `max(ts)`. The two
+//! window-store changelogs use `cleanup.policy=delete` (`retention.ms = before +
+//! after + grace + 1 day`), and the two source topics form a copartition group. An
+//! inner join emits only on a match; **left**/**outer** additionally emit the
+//! null-padded result for a record that finds no match, once its window has closed
+//! (KIP-633 stream-time-driven emission — there is no wall-clock throttle). Left/
+//! outer buffer the as-yet-unmatched records in a shared `KSTREAM-OUTERSHARED-`
+//! KV store (a compact changelog) and rename their per-side processors to
+//! `KSTREAM-OUTERTHIS-`/`KSTREAM-OUTEROTHER-` to match the JVM. As with the other
+//! joins, a key-changing stream must `.repartition(..)` before joining.
 //!
 //! ```
 //! use crabka_client_streams::{
@@ -288,8 +306,8 @@ pub mod test_driver;
 pub mod topology;
 
 pub use dsl::{
-    BranchedStream, Grouped, KGroupedStream, KTable, Materialized, Repartitioned, StreamsBuilder,
-    TimeWindowedSerde, TimeWindows, Window, Windowed,
+    BranchedStream, Grouped, JoinWindows, KGroupedStream, KTable, Materialized, Repartitioned,
+    StreamJoined, StreamsBuilder, TimeWindowedSerde, TimeWindows, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{

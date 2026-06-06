@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use super::node::{NodeKind, NodeRegistry};
+use super::node::{ChangelogKind, NodeKind, NodeRegistry};
 
 /// One subtopology's resolved topic sets, keyed by its decimal-string id.
 #[derive(Debug, Clone, Default)]
@@ -18,12 +18,12 @@ pub(crate) struct GroupTopics {
     /// Internal repartition topics this subtopology writes.
     pub repartition_sink_topics: Vec<String>,
     /// Stores whose changelog topics back this subtopology, as
-    /// `(store_name, changelog_override, windowed_retention_ms)`. When the
+    /// `(store_name, changelog_override, changelog_kind)`. When the
     /// override is `None` the wire layer derives `<app>-<store>-changelog`;
     /// when `Some(topic)` (set by the `REUSE_KTABLE_SOURCE_TOPICS` pass) that
-    /// topic name is used verbatim. `windowed_retention_ms` is `Some(ms)` for
-    /// windowed stores and `None` for KV stores.
-    pub changelog_stores: Vec<(String, Option<String>, Option<i64>)>,
+    /// topic name is used verbatim. `changelog_kind` controls the topic config
+    /// (compact / compact,delete / delete).
+    pub changelog_stores: Vec<(String, Option<String>, ChangelogKind)>,
     /// Declared copartition groups whose member topics all read into this
     /// subtopology. Each is a list of member topic names; the wire layer maps
     /// them to `int16` indices into the sorted source/repartition arrays.
@@ -131,7 +131,7 @@ pub(crate) fn group_nodes(reg: &NodeRegistry) -> Vec<GroupTopics> {
                 g.changelog_stores.push((
                     store.name.clone(),
                     store.changelog_override.clone(),
-                    store.windowed_retention_ms,
+                    store.changelog_kind,
                 ));
             }
         }
@@ -161,7 +161,7 @@ pub(crate) fn group_nodes(reg: &NodeRegistry) -> Vec<GroupTopics> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topology::node::NodeRegistry;
+    use crate::topology::node::{ChangelogKind, NodeRegistry};
     use assert2::check;
 
     fn ids(groups: &[GroupTopics]) -> Vec<&str> {
@@ -209,7 +209,7 @@ mod tests {
         let mut srcs = groups[0].source_topics.clone();
         srcs.sort();
         check!(srcs == vec!["a".to_string(), "b".to_string()]);
-        check!(groups[0].changelog_stores == vec![("store".to_string(), None, None)]);
+        check!(groups[0].changelog_stores == vec![("store".to_string(), None, ChangelogKind::Kv)]);
     }
 
     #[test]

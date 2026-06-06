@@ -479,6 +479,59 @@ impl Topology {
         self
     }
 
+    /// Register a join window state store connected to the given processors.
+    ///
+    /// Like [`add_window_store`] but for join window stores (retainDuplicates).
+    /// The changelog topic carries `delete`-only configs and a `retention.ms`
+    /// derived from `before_ms + after_ms + grace_ms + 86_400_000`. Compaction is
+    /// not applicable because the store retains duplicates.
+    ///
+    /// [`add_window_store`]: Topology::add_window_store
+    #[allow(clippy::too_many_arguments)] // mirrors add_window_store + extra before_ms/after_ms split
+    pub fn add_join_window_store<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        before_ms: i64,
+        after_ms: i64,
+        grace_ms: i64,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self
+    where
+        K: Send + 'static,
+        V: Send + 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        let name: String = name.into();
+        // windowstore.changelog.additional.retention.ms default = 1 day (86_400_000 ms)
+        let retention_ms = before_ms + after_ms + grace_ms + 86_400_000;
+        let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
+        self.reg
+            .add_join_window_store(&name, procs, None, retention_ms);
+        self.store_factories.insert(
+            name.clone(),
+            (
+                None,
+                Box::new(
+                    move |store_name: &str,
+                          changelog: String,
+                          backend: Box<dyn crate::store::byte::ByteKeyValueStore>| {
+                        Box::new(crate::store::join_window::JoinWindowBytesStore::<K, V>::new(
+                            store_name.to_string(),
+                            backend,
+                            Box::new(key_serde.clone()),
+                            Box::new(value_serde.clone()),
+                            changelog,
+                        )) as Box<dyn crate::store::api::StateStore>
+                    },
+                ),
+            ),
+        );
+        self
+    }
+
     /// Register a state store **without** a changelog topic.
     ///
     /// The store is available at runtime (for in-memory state), but NO entry is

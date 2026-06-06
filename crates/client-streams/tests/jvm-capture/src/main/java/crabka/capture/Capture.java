@@ -74,8 +74,10 @@ public final class Capture {
         write(outDir, "stream_table_join", streamTableJoin());
         write(outDir, "ktable_ktable_join", ktableKtableJoin());
         write(outDir, "windowed_count", windowedCount());
+        write(outDir, "stream_stream_join", streamStreamJoin());
+        write(outDir, "stream_stream_outer_join", streamStreamOuterJoin());
 
-        System.out.println("Capture complete. Wrote 9 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 11 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -175,6 +177,45 @@ public final class Capture {
             Consumed.with(Serdes.String(), Serdes.String()),
             Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("store"));
         left.join(right, (v, vt) -> v + vt)
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 10. stream_stream_join: stream("left").join(stream("right"), joiner, JoinWindows 60s).to("out").
+     * Two retainDuplicates window stores (one per side); their changelogs are cleanup.policy=delete
+     * (NOT compact,delete) + retention.ms = before+after+grace+1day = 60s+60s+0+1day. Copartition
+     * binds "left" and "right". No outer store (inner join).
+     */
+    static Topology streamStreamJoin() {
+        StreamsBuilder b = new StreamsBuilder();
+        KStream<String, String> left = b.stream("left", Consumed.with(Serdes.String(), Serdes.String()));
+        KStream<String, String> right = b.stream("right", Consumed.with(Serdes.String(), Serdes.String()));
+        left.join(
+                right,
+                (a, c) -> a + c,
+                org.apache.kafka.streams.kstream.JoinWindows.ofTimeDifferenceWithNoGrace(java.time.Duration.ofSeconds(60)),
+                org.apache.kafka.streams.kstream.StreamJoined.with(Serdes.String(), Serdes.String(), Serdes.String()))
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 11. stream_stream_outer_join: stream("left").outerJoin(stream("right"), joiner, JoinWindows 60s).to("out").
+     * Like the inner join (two retainDuplicates window stores, cleanup.policy=delete changelogs,
+     * copartition), but KIP-633 left/outer adds a SHARED outer-join store (KSTREAM-OUTERSHARED-)
+     * that buffers non-matched records until their window closes. Its name/index and changelog
+     * config are JVM ground truth — this fixture pins them.
+     */
+    static Topology streamStreamOuterJoin() {
+        StreamsBuilder b = new StreamsBuilder();
+        KStream<String, String> left = b.stream("left", Consumed.with(Serdes.String(), Serdes.String()));
+        KStream<String, String> right = b.stream("right", Consumed.with(Serdes.String(), Serdes.String()));
+        left.outerJoin(
+                right,
+                (a, c) -> (a == null ? "" : a) + (c == null ? "" : c),
+                org.apache.kafka.streams.kstream.JoinWindows.ofTimeDifferenceWithNoGrace(java.time.Duration.ofSeconds(60)),
+                org.apache.kafka.streams.kstream.StreamJoined.with(Serdes.String(), Serdes.String(), Serdes.String()))
             .to("out", Produced.with(Serdes.String(), Serdes.String()));
         return b.build(optimizedProps());
     }

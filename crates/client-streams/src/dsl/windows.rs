@@ -70,6 +70,52 @@ impl TimeWindows {
     }
 }
 
+/// Symmetric-or-asymmetric join window: a record at `t` matches the other side's
+/// records with timestamp in `[t - before_ms, t + after_ms]`. `JoinWindows::of`
+/// is symmetric (before == after); `.before`/`.after` make it asymmetric.
+#[derive(Debug, Clone, Copy)]
+pub struct JoinWindows {
+    pub before_ms: i64,
+    pub after_ms: i64,
+    pub grace_ms: i64,
+}
+
+impl JoinWindows {
+    /// Symmetric window of `time_difference_ms` before and after (grace 0).
+    #[must_use]
+    pub fn of(time_difference_ms: i64) -> Self {
+        assert!(time_difference_ms >= 0, "time difference must be >= 0");
+        Self {
+            before_ms: time_difference_ms,
+            after_ms: time_difference_ms,
+            grace_ms: 0,
+        }
+    }
+    #[must_use]
+    pub fn before(mut self, before_ms: i64) -> Self {
+        assert!(before_ms >= 0, "before must be >= 0");
+        self.before_ms = before_ms;
+        self
+    }
+    #[must_use]
+    pub fn after(mut self, after_ms: i64) -> Self {
+        assert!(after_ms >= 0, "after must be >= 0");
+        self.after_ms = after_ms;
+        self
+    }
+    #[must_use]
+    pub fn grace(mut self, grace_ms: i64) -> Self {
+        assert!(grace_ms >= 0, "grace must be >= 0");
+        self.grace_ms = grace_ms;
+        self
+    }
+    /// Window size (= `before + after`) — the store retention basis.
+    #[must_use]
+    pub fn size(&self) -> i64 {
+        self.before_ms + self.after_ms
+    }
+}
+
 /// `Serde<Windowed<K>>` producing the JVM **output-topic** format:
 /// `inner_key_bytes ‖ windowStart : 8-byte BE` (no end, no seqnum). Carries the
 /// window `size` so `deserialize` can reconstruct `end = start + size`.
@@ -136,6 +182,16 @@ mod tests {
         let w = TimeWindows::of_size(10).advance_by(5);
         assert_eq!(w.windows_for(12), vec![5, 10]); // start0 = max(0,12-10+5)/5*5 = 5
         assert_eq!(w.windows_for(0), vec![0]);
+    }
+
+    #[test]
+    fn join_windows_before_after_size() {
+        let w = JoinWindows::of(10);
+        assert_eq!((w.before_ms, w.after_ms, w.grace_ms), (10, 10, 0));
+        assert_eq!(w.size(), 20);
+        let a = JoinWindows::of(10).before(3).after(7).grace(5);
+        assert_eq!((a.before_ms, a.after_ms, a.grace_ms), (3, 7, 5));
+        assert_eq!(a.size(), 10);
     }
 
     #[test]

@@ -54,5 +54,26 @@ pub(crate) const KTABLE_JOIN_THIS: &str = "KTABLE-JOINTHIS-";
 pub(crate) const KTABLE_JOIN_OTHER: &str = "KTABLE-JOINOTHER-";
 #[allow(dead_code)]
 pub(crate) const KTABLE_MERGE: &str = "KTABLE-MERGE-";
+/// Windowed `KStream`-`KStream` join processor names (the two per-side join
+/// nodes union into one copartitioned subtopology via their shared stores).
+pub(crate) const KSTREAM_JOINTHIS: &str = "KSTREAM-JOINTHIS-";
+pub(crate) const KSTREAM_JOINOTHER: &str = "KSTREAM-JOINOTHER-";
+/// The JVM renames the per-side join processors for left/outer joins: the THIS
+/// processor becomes `KSTREAM-OUTERTHIS-` when the *other* (right) side is outer
+/// (`rightOuter`), and the OTHER processor becomes `KSTREAM-OUTEROTHER-` when the
+/// *this* (left) side is outer (`leftOuter`). So inner → JOINTHIS/JOINOTHER, left
+/// → JOINTHIS/OUTEROTHER, outer → OUTERTHIS/OUTEROTHER. The window-store names are
+/// still `<joinProcessorName>-store`, so the prefix flows into the changelog name.
+pub(crate) const KSTREAM_OUTERTHIS: &str = "KSTREAM-OUTERTHIS-";
+pub(crate) const KSTREAM_OUTEROTHER: &str = "KSTREAM-OUTEROTHER-";
+/// The JVM's two windowed-stream processors (one per side) that put each record
+/// into its window store. Not wire-visible, but they consume counter indices, so
+/// the lowering burns two to land the join processors — and thus the
+/// `<joinProcessorName>-store` window-store names — at the JVM indices.
+pub(crate) const KSTREAM_WINDOWED: &str = "KSTREAM-WINDOWED-";
+/// The shared outer-join KV store for KIP-633 left/outer window-close emission.
+/// Only minted for left/outer joins (inner topologies are byte-unchanged). The
+/// exact JVM index/naming is pinned by Task C4's golden capture.
+pub(crate) const KSTREAM_OUTERSHARED: &str = "KSTREAM-OUTERSHARED-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";

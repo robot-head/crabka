@@ -7,12 +7,13 @@ const TS_SIZE: usize = 8;
 const SEQ_SIZE: usize = 4;
 pub(crate) const SUFFIX_SIZE: usize = TS_SIZE + SEQ_SIZE; // 12
 
-/// `WindowKeySchema.toStoreKeyBinary(key, windowStart, seqnum=0)`.
-pub(crate) fn store_key(key_bytes: &[u8], window_start: i64) -> Bytes {
+/// `WindowKeySchema.toStoreKeyBinary(key, windowStart, seqnum)`. The seqnum is the
+/// per-record value for retainDuplicates join stores, or 0 for aggregations.
+pub(crate) fn store_key(key_bytes: &[u8], window_start: i64, seqnum: u32) -> Bytes {
     let mut b = BytesMut::with_capacity(key_bytes.len() + SUFFIX_SIZE);
     b.extend_from_slice(key_bytes);
     b.put_i64(window_start);
-    b.put_u32(0); // seqnum = 0 (retainDuplicates=false for aggregations)
+    b.put_u32(seqnum);
     b.freeze()
 }
 
@@ -51,12 +52,23 @@ mod tests {
 
     #[test]
     fn store_key_layout_and_window_start() {
-        let k = store_key(b"k", 0x0102);
+        let k = store_key(b"k", 0x0102, 0);
         assert_eq!(k.len(), 13); // "k"(1) ‖ ws:8 ‖ seq:4
         assert_eq!(&k[1..9], &0x0102i64.to_be_bytes());
         assert_eq!(&k[9..13], &[0, 0, 0, 0]);
         assert_eq!(window_start_of(&k), 0x0102);
         assert_eq!(key_bytes_of(&k), b"k");
+    }
+
+    #[test]
+    fn store_key_encodes_seqnum() {
+        let k0 = store_key(b"k", 5, 0);
+        let k1 = store_key(b"k", 5, 1);
+        assert_eq!(&k0[k0.len() - 4..], &[0, 0, 0, 0]);
+        assert_eq!(&k1[k1.len() - 4..], &1u32.to_be_bytes());
+        assert!(k1 > k0); // same (key, ts), higher seqnum sorts after
+        assert_eq!(window_start_of(&k1), 5);
+        assert_eq!(key_bytes_of(&k1), b"k");
     }
 
     #[test]

@@ -58,6 +58,29 @@ fn windowed_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
     ]
 }
 
+/// Topic configs the JVM 4.x client attaches to a **join-window-store changelog**
+/// topic: `delete`-only policy + `retention.ms`. Join window stores use
+/// `retainDuplicates=true`, which prohibits compaction.
+fn join_window_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
+    vec![
+        KeyValue {
+            key: "cleanup.policy".into(),
+            value: "delete".into(),
+            ..Default::default()
+        },
+        KeyValue {
+            key: "message.timestamp.type".into(),
+            value: "CreateTime".into(),
+            ..Default::default()
+        },
+        KeyValue {
+            key: "retention.ms".into(),
+            value: retention_ms.to_string(),
+            ..Default::default()
+        },
+    ]
+}
+
 /// Build the `KeyValue` config array from `(key, value)` pairs (already in
 /// sorted order at the call site).
 fn topic_configs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<KeyValue> {
@@ -119,23 +142,26 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
     let mut state_changelog_topics: Vec<TopicInfo> = g
         .changelog_stores
         .iter()
-        .map(
-            |(store, changelog_override, windowed_retention_ms)| TopicInfo {
-                // `REUSE_KTABLE_SOURCE_TOPICS`: when the store reuses its source
-                // topic as the changelog, the override carries that topic name;
-                // otherwise the JVM-default `<app>-<store>-changelog`.
-                name: changelog_override
-                    .clone()
-                    .unwrap_or_else(|| format!("{app}-{store}-changelog")),
-                partitions: 0,
-                replication_factor: INTERNAL_TOPIC_DEFAULT_RF,
-                topic_configs: match windowed_retention_ms {
-                    Some(r) => windowed_changelog_topic_configs(*r),
-                    None => changelog_topic_configs(),
-                },
-                ..Default::default()
+        .map(|(store, changelog_override, changelog_kind)| TopicInfo {
+            // `REUSE_KTABLE_SOURCE_TOPICS`: when the store reuses its source
+            // topic as the changelog, the override carries that topic name;
+            // otherwise the JVM-default `<app>-<store>-changelog`.
+            name: changelog_override
+                .clone()
+                .unwrap_or_else(|| format!("{app}-{store}-changelog")),
+            partitions: 0,
+            replication_factor: INTERNAL_TOPIC_DEFAULT_RF,
+            topic_configs: match changelog_kind {
+                crate::topology::node::ChangelogKind::Kv => changelog_topic_configs(),
+                crate::topology::node::ChangelogKind::AggWindow { retention_ms } => {
+                    windowed_changelog_topic_configs(*retention_ms)
+                }
+                crate::topology::node::ChangelogKind::JoinWindow { retention_ms } => {
+                    join_window_changelog_topic_configs(*retention_ms)
+                }
             },
-        )
+            ..Default::default()
+        })
         .collect();
     state_changelog_topics.sort_by(|a, b| a.name.cmp(&b.name));
 
@@ -302,6 +328,7 @@ pub(crate) fn copartition_group(
 mod tests {
     use super::*;
     use crate::topology::grouping::GroupTopics;
+    use crate::topology::node::ChangelogKind;
     use assert2::check;
 
     #[test]
@@ -414,7 +441,7 @@ mod tests {
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
-            changelog_stores: vec![("store".into(), None, None)],
+            changelog_stores: vec![("store".into(), None, ChangelogKind::Kv)],
             ..Default::default()
         }];
         let topo = to_wire(&groups, "my-app");
@@ -447,7 +474,7 @@ mod tests {
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
-            changelog_stores: vec![("store".into(), Some("in".into()), None)],
+            changelog_stores: vec![("store".into(), Some("in".into()), ChangelogKind::Kv)],
             ..Default::default()
         }];
         let topo = to_wire(&groups, "my-app");
@@ -523,7 +550,13 @@ mod tests {
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
-            changelog_stores: vec![("w".into(), None, Some(86_460_000i64))],
+            changelog_stores: vec![(
+                "w".into(),
+                None,
+                ChangelogKind::AggWindow {
+                    retention_ms: 86_460_000,
+                },
+            )],
             ..Default::default()
         }];
         let topo = to_wire(&groups, "app");
@@ -553,7 +586,7 @@ mod tests {
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
-            changelog_stores: vec![("store".into(), None, None)],
+            changelog_stores: vec![("store".into(), None, ChangelogKind::Kv)],
             ..Default::default()
         }];
         let topo = to_wire(&groups, "my-app");
@@ -580,6 +613,32 @@ mod tests {
         let cg = copartition_group(&sources, &repartition, &["unknown".into()]);
         check!(cg.source_topics.is_empty());
         check!(cg.repartition_source_topics.is_empty());
+    }
+
+    #[test]
+    fn join_window_changelog_is_delete_only_with_retention() {
+        use crate::topology::node::ChangelogKind;
+        // before=60_000ms, after=60_000ms, grace=0ms → retention = 60_000 + 60_000 + 0 + 86_400_000 = 86_520_000
+        let groups = vec![GroupTopics {
+            id: "0".into(),
+            source_topics: vec!["in".into()],
+            changelog_stores: vec![(
+                "j".into(),
+                None,
+                ChangelogKind::JoinWindow {
+                    retention_ms: 86_520_000,
+                },
+            )],
+            ..Default::default()
+        }];
+        let topo = to_wire(&groups, "app");
+        let cl = &topo.subtopologies[0].state_changelog_topics[0];
+        assert_eq!(cl.name, "app-j-changelog");
+        assert_eq!(cl.topic_configs[0].key, "cleanup.policy");
+        assert_eq!(cl.topic_configs[0].value, "delete"); // NOT compact,delete
+        assert_eq!(cl.topic_configs[1].key, "message.timestamp.type");
+        assert_eq!(cl.topic_configs[2].key, "retention.ms");
+        assert_eq!(cl.topic_configs[2].value, "86520000");
     }
 
     #[test]
