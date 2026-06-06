@@ -13,6 +13,7 @@ pub mod error;
 pub mod forward;
 pub mod handlers;
 pub mod health;
+pub mod outbound_config;
 pub mod produce;
 pub mod serve;
 pub mod state;

@@ -131,6 +131,9 @@ pub struct GatewayConfig {
     /// Named webhook endpoints; compiled from a TOML config file at startup.
     /// Empty ⇒ `/v1/webhooks/{name}` returns 404 for every name.
     pub webhooks: HashMap<String, CompiledWebhook>,
+    /// Outbound webhook subscriptions; compiled from a separate TOML config
+    /// file at startup. Empty ⇒ no outbound delivery tasks are spawned.
+    pub outbound: Vec<crate::outbound_config::CompiledSubscription>,
 }
 
 impl GatewayConfig {

@@ -205,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
         tls: tls.clone(),
         authz,
         webhooks,
+        outbound: Vec::new(),
     };
 
     let bearer = build_bearer(&args)?;
