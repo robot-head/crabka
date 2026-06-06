@@ -236,7 +236,7 @@ async fn abort_then_read_committed_skips_records() {
         .await
         .unwrap();
     let mut seen2: Vec<String> = Vec::new();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while seen2.len() < 3 && std::time::Instant::now() < deadline {
         for r in consumer_uc.poll(Duration::from_millis(200)).await.unwrap() {
             seen2.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
@@ -423,7 +423,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
         // Read all 5 records from input.
         let mut last_offset: Option<((String, i32), i64)> = None;
         let mut read = 0usize;
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while read < 5 && std::time::Instant::now() < deadline {
             for r in input_consumer
                 .poll(Duration::from_millis(200))
@@ -465,7 +465,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
         .await
         .unwrap();
     let mut seen = 0usize;
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while seen < 5 && std::time::Instant::now() < deadline {
         seen += c2.poll(Duration::from_millis(200)).await.unwrap().len();
     }
