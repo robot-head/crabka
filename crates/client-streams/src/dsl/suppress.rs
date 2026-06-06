@@ -2,36 +2,74 @@
 //!
 //! Slice A implements `until_window_closes(unbounded())` (final results for
 //! windowed tables). Slice B adds `with_max_records` (bounded buffer +
-//! `shutDownWhenFull`). Slice C adds `until_time_limit`, Slice D adds the
-//! logging toggle.
+//! `shutDownWhenFull`). Slice C adds `until_time_limit` + `emit_early_when_full`
+//! overflow toggle + eager `max_records(n)` constructor + `record_cap()`/`is_emit_early()`.
+//! Slice D adds the logging toggle.
 
-/// How the suppress buffer is bounded.
+/// How the suppress buffer is bounded + what happens when it's full.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BufferConfig {
     max_records: Option<usize>,
+    /// `false` = shutDownWhenFull (strict, panic); `true` = emitEarlyWhenFull (eager).
+    emit_early: bool,
 }
 
 impl BufferConfig {
-    /// An unbounded in-memory buffer (no record cap).
+    /// Unbounded, strict (shutDownWhenFull).
     #[must_use]
     pub fn unbounded() -> Self {
-        Self { max_records: None }
+        Self {
+            max_records: None,
+            emit_early: false,
+        }
     }
 
-    /// Cap the buffer at `n` records. Exceeding the cap shuts the task down
-    /// (`shutDownWhenFull`). JVM strict path: `unbounded().withMaxRecords(n)`.
+    /// Cap at `n` records, EAGER (emit-early-when-full) — the JVM static
+    /// `BufferConfig.maxRecords(n)` (the rate-limiter default overflow).
+    #[must_use]
+    pub fn max_records(n: usize) -> Self {
+        assert!(n >= 1, "max_records must be >= 1");
+        Self {
+            max_records: Some(n),
+            emit_early: true,
+        }
+    }
+
+    /// Cap at `n` records, keeping the current overflow mode (strict on the
+    /// `unbounded()` path) — the JVM `unbounded().withMaxRecords(n)`.
     #[must_use]
     pub fn with_max_records(self, n: usize) -> Self {
         assert!(n >= 1, "max_records must be >= 1");
         Self {
             max_records: Some(n),
+            ..self
         }
     }
 
-    /// The record cap, if set (read by the suppress lowering).
-    #[allow(dead_code)] // wired in T2 (KTable::suppress)
-    pub(crate) fn max_records(&self) -> Option<usize> {
+    /// Evict + emit the oldest buffered record when full (eager).
+    #[must_use]
+    pub fn emit_early_when_full(self) -> Self {
+        Self {
+            emit_early: true,
+            ..self
+        }
+    }
+
+    /// Shut the task down when full (strict).
+    #[must_use]
+    pub fn shut_down_when_full(self) -> Self {
+        Self {
+            emit_early: false,
+            ..self
+        }
+    }
+
+    pub(crate) fn record_cap(&self) -> Option<usize> {
         self.max_records
+    }
+    #[allow(dead_code)] // wired in T2 (KTableSuppressProcessor::process)
+    pub(crate) fn is_emit_early(&self) -> bool {
+        self.emit_early
     }
 }
 
@@ -56,13 +94,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn buffer_config_record_cap() {
-        assert_eq!(BufferConfig::unbounded().max_records(), None);
-        assert_eq!(
-            BufferConfig::unbounded().with_max_records(3).max_records(),
-            Some(3)
+    fn buffer_config_caps_and_overflow() {
+        assert_eq!(BufferConfig::unbounded().record_cap(), None);
+        assert!(!BufferConfig::unbounded().is_emit_early()); // strict
+        let strict = BufferConfig::unbounded().with_max_records(3);
+        assert_eq!(strict.record_cap(), Some(3));
+        assert!(!strict.is_emit_early());
+        let eager = BufferConfig::max_records(5); // eager
+        assert_eq!(eager.record_cap(), Some(5));
+        assert!(eager.is_emit_early());
+        assert!(!eager.shut_down_when_full().is_emit_early());
+        assert!(
+            BufferConfig::unbounded()
+                .emit_early_when_full()
+                .is_emit_early()
         );
-        let s = Suppressed::until_window_closes(BufferConfig::unbounded().with_max_records(5));
-        assert_eq!(s.buffer.max_records(), Some(5));
     }
 }

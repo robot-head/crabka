@@ -482,7 +482,7 @@ where
         suppressed: crate::dsl::suppress::Suppressed,
     ) -> KTable<crate::dsl::windows::Windowed<KInner>, V> {
         let grace_ms = self.window_grace_ms.unwrap_or(0);
-        let max_records = suppressed.buffer.max_records();
+        let max_records = suppressed.buffer.record_cap();
         let parent_id = self.node;
         let mut g = self.builder.borrow_mut();
         let name = g.new_processor_name(names::KTABLE_SUPPRESS);

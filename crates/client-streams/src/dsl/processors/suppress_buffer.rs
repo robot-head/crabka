@@ -66,6 +66,16 @@ impl<K: Eq + Hash + Clone, V> TimeOrderedKeyValueBuffer<K, V> {
         out
     }
 
+    /// Pop and return the single lowest-`(buffer_time, seq)` entry (used by
+    /// emit-early overflow). `None` if empty.
+    #[allow(dead_code)] // wired in T2 (KTableSuppressProcessor::process)
+    pub(crate) fn evict_oldest(&mut self) -> Option<(K, V, i64)> {
+        let (&slot, _) = self.entries.iter().next()?;
+        let entry = self.entries.remove(&slot).expect("slot present");
+        self.index.remove(&entry.key);
+        Some((entry.key, entry.value, entry.record_ts))
+    }
+
     #[allow(dead_code)] // used by tests (and Slice B accounting)
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
@@ -107,5 +117,15 @@ mod tests {
         b.put("a".into(), 50, 1, 50);
         assert_eq!(b.evict_while(49), vec![]);
         assert_eq!(b.len(), 1);
+    }
+
+    #[test]
+    fn evict_oldest_pops_lowest_buffer_time() {
+        let mut b = TimeOrderedKeyValueBuffer::<String, i64>::new();
+        b.put("a".into(), 30, 1, 30);
+        b.put("b".into(), 10, 2, 10);
+        assert_eq!(b.evict_oldest(), Some(("b".into(), 2, 10))); // lowest buffer_time
+        assert_eq!(b.evict_oldest(), Some(("a".into(), 1, 30)));
+        assert_eq!(b.evict_oldest(), None);
     }
 }
