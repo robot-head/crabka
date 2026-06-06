@@ -75,25 +75,27 @@ The user's `Punctuator` shares mutable state with its owning `Processor` via `Ar
 
 ### 3.2 Schedule storage + `schedule()`
 
-`Dispatch` gains two fields:
+`Dispatch` gains four fields:
 ```rust
 pub(crate) struct Dispatch<'a> {
     // … existing: buffer, children, output, record_ctx, stores, globals …
     pub node_idx: usize,                         // the node this dispatch is positioned at
     pub schedules: &'a mut Vec<ScheduleEntry>,   // sink for ProcessorContext::schedule
+    pub sched_stream_time: i64,                  // current stream-time (base for a StreamTime schedule)
+    pub sched_wall_clock: i64,                   // current wall clock (base for a WallClockTime schedule)
 }
 
 pub(crate) struct ScheduleEntry {
     pub node_idx: usize,
     pub interval_ms: i64,
     pub ty: PunctuationType,
-    pub next_time: Option<i64>,                  // None until first evaluated (see §3.4)
+    pub next_time: i64,                          // stamped at schedule = base + interval (§3.4)
     pub punctuator: Box<dyn ErasedPunctuator>,
     pub cancel: Arc<AtomicBool>,
 }
 ```
 
-`ProcessorContext::schedule` builds a `TypedPunctuator`, a fresh `cancel` flag, pushes a `ScheduleEntry { node_idx: dispatch.node_idx, .. }`, and returns `Cancellable(cancel)`. Interval is `Duration` → `interval_ms` (must be ≥ 1ms; panic on 0, matching the JVM's `IllegalArgumentException`).
+`ProcessorContext::schedule` builds a `TypedPunctuator`, a fresh `cancel` flag, computes the first-fire time `next_time = base + interval_ms` where `base = if ty == StreamTime { dispatch.sched_stream_time } else { dispatch.sched_wall_clock }`, pushes a `ScheduleEntry { node_idx: dispatch.node_idx, next_time, .. }`, and returns `Cancellable(cancel)`. Interval is `Duration` → `interval_ms` (must be ≥ 1ms; panic on 0, matching the JVM's `IllegalArgumentException`). The `Graph` sets `sched_stream_time`/`sched_wall_clock` on every `Dispatch` it builds (= its current `stream_time`/`wall_clock`); at `init` (before any record) `stream_time = i64::MIN` and `wall_clock` = the task's start clock (`0` in the `TopologyTestDriver`), so a stream-time schedule first-fires on the first record and a wall-clock schedule first-fires one interval after the start clock — **matching the captured JVM behavior**.
 
 The `Graph` owns `schedules: Vec<ScheduleEntry>`. Every driver entry point that builds a `Dispatch` (`pipe`, `init_processors`, and the new punctuate paths) now passes `node_idx` and `&mut self.schedules`. After a node's `init`/`process`, newly-pushed entries are already in the `Graph` vec (the `Dispatch` borrowed it mutably).
 
@@ -113,24 +115,28 @@ Factor the `pipe` body into a private `Graph::drain(buffer)` that runs the exist
 pub async fn punctuate_stream_time(&mut self, stream_time: i64) -> Result<(), ProcessorError>;
 pub async fn punctuate_wall_clock(&mut self, now_ms: i64) -> Result<(), ProcessorError>;
 ```
-Each iterates `self.schedules` for the matching `PunctuationType`, dropping cancelled entries, and for each due entry runs the **catch-up loop**:
+Each iterates `self.schedules` for the matching `PunctuationType`, dropping cancelled entries, and fires each **due** entry **at most once** (the captured JVM `TopologyTestDriver` resyncs `next` ahead rather than firing every missed boundary):
 ```text
-let mut next = entry.next_time.unwrap_or(now + interval_ms);   // first-fire = now + interval
-while now >= next {
-    fire(entry.node_idx, next /*stream-time*/ or now /*wall-clock*/);   // §3.5 exact ts per capture
-    next += interval_ms;
+if now >= entry.next_time {
+    fire(entry.node_idx, now);   // value passed = the CURRENT time (§3.5), for BOTH types
+    entry.next_time = if now - entry.next_time >= interval_ms {
+        now + interval_ms        // ≥ one interval behind → resync to now + interval (skip missed boundaries)
+    } else {
+        entry.next_time + interval_ms   // < one interval behind → advance one interval
+    };
 }
-entry.next_time = Some(next);
 ```
-`fire(node_idx, ts)`: build a `Dispatch` positioned at `node_idx` with that node's real `children`, a punctuation `RecordContext { topic: "", partition: -1, offset: -1, timestamp: ts }`, a fresh forward buffer, `&mut self.schedules` (so a punctuator may schedule more), then call `self.nodes[node_idx]`-routed `ErasedPunctuator::fire`, then `drain(buffer)` so forwarded records flow to children. (The `ScheduleEntry` owns the `Box<dyn ErasedPunctuator>`; fire borrows it `&mut` while the node-vec is borrowed for `children` — resolve the borrow split with `mem::take`/index juggling exactly as `pipe` does today.)
+Both branches yield `next_time > now`, so a single `punctuate(now)` call fires an entry at most once. `fire(node_idx, ts)`: build a `Dispatch` positioned at `node_idx` with that node's real `children`, a punctuation `RecordContext { topic: "", partition: -1, offset: -1, timestamp: ts }`, a fresh forward buffer, `&mut self.schedules` (so a punctuator may schedule more), then call the entry's `ErasedPunctuator::fire`, then `drain(buffer)` so forwarded records flow to children. (The `ScheduleEntry` owns the `Box<dyn ErasedPunctuator>`; `mem::replace` it out with a no-op placeholder so the `Dispatch` can borrow `&mut self.schedules`, then restore it — see the plan.)
 
-`Graph` tracks `stream_time: i64` (init `i64::MIN`), bumped to `max(stream_time, record.ts)` inside `pipe`. The TTD/thread call `punctuate_stream_time(self.stream_time)`.
+`Graph` tracks `stream_time: i64` (init `i64::MIN`), bumped to `max(stream_time, record.ts)` inside `pipe`, and `wall_clock: i64` (init `0`), set to `now_ms` at the top of `punctuate_wall_clock`. The TTD/thread call `punctuate_stream_time(self.stream_time)` / `punctuate_wall_clock(now_ms)`.
 
-### 3.5 Per-type timestamp + first-fire — pinned capture-first
+### 3.5 Per-type timestamp + first-fire — PINNED by the §5 capture
 
-The exact values are confirmed against the JVM `TopologyTestDriver` (§5), but the expected model is:
-- **StreamTime**: the punctuator receives the **scheduled** timestamp (`next`), not the triggering record's. First fire at `schedule_stream_time + interval`. Catch-up advances `next += interval`.
-- **WallClockTime**: the punctuator receives the **clock's current** time (`now_ms`). First fire at `schedule_wall_time + interval`.
+Confirmed against the JVM `TopologyTestDriver` (`testdata/punctuation/behavior.json`):
+- **Both types pass the CURRENT time** to `punctuate` — stream-time passes the current `stream_time`, wall-clock passes the current `now_ms`. (NOT the scheduled boundary.)
+- **Fire at most once per driving action**, resyncing `next` ahead (no per-missed-boundary catch-up): e.g. interval 10, a stream-time jump 11→100 fires **once** at 100 (not at 20,30,…,100).
+- **First-fire** = `base + interval` where `base` = `stream_time` (`i64::MIN` at init → stream-time first-fires on the first record) or `wall_clock` (`0` at init in the TTD → wall-clock first-fires at `interval`).
+- Captured sequence (interval 10): stream pipes at ts {0,5,9,10,11,100} fire at **{0, 10, 100}**; wall advances {+3,+3,+4,+100} (clock → 3,6,10,110) fire at **{10, 110}**.
 
 ### 3.6 Test driver + thread wiring
 

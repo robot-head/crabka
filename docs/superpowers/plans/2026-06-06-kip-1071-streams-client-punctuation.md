@@ -317,8 +317,14 @@ pub(crate) struct Dispatch<'a> {
     /// Sink for `ProcessorContext::schedule`: newly-registered punctuation
     /// schedules (the `Graph` owns the backing `Vec`).
     pub schedules: &'a mut Vec<crate::processor::punctuation::ScheduleEntry>,
+    /// Current stream-time / wall-clock at this dispatch — the BASE `schedule`
+    /// stamps a new entry's first-fire time from (`base + interval`). At `init`
+    /// these are `i64::MIN` / the task start clock (per the capture).
+    pub sched_stream_time: i64,
+    pub sched_wall_clock: i64,
 }
 ```
+ALSO change `ScheduleEntry.next_time` (in `punctuation.rs`, from Task 2) from `Option<i64>` to `i64` — it is now always stamped at `schedule()` time (Task 4), never `None`. Update the Task 2 unit test that built a `ScheduleEntry { next_time: None, .. }` to `next_time: 0` (or any i64).
 
 - [ ] **Step 2: Find every construction site.** Run:
 ```
@@ -326,16 +332,17 @@ grep -rn "Dispatch {" crates/client-streams/src
 ```
 Expected sites (the lib build will pin the exact set): `processor/graph.rs` (`pipe`, `init_processors`), and `#[cfg(test)]` Dispatch builders in `processor/api.rs`, `processor/node.rs`, `processor/erased.rs` if present. Each must add `node_idx` + `schedules`. For test sites that don't exercise scheduling, pass `node_idx: 0` and a `&mut Vec::new()` bound to a local (e.g. `let mut scheds = Vec::new();` before the `Dispatch`).
 
-- [ ] **Step 3: Update `graph.rs` construction.** In `Graph::pipe`'s drain loop, set `node_idx: idx` and `schedules: &mut self.schedules` (added in Task 4 — for THIS task, add the field to `Graph` first; see Task 4 Step 1, or temporarily thread a local `&mut Vec::new()` and switch to `self.schedules` in Task 4). To keep Task 3 self-contained and compiling, add the `Graph.schedules` field now:
+- [ ] **Step 3: Update `graph.rs` construction.** In `Graph::pipe`'s drain loop, set `node_idx: idx` and `schedules: &mut self.schedules` (added in Task 4 — for THIS task, add the field to `Graph` first; see Task 4 Step 1, or temporarily thread a local `&mut Vec::new()` and switch to `self.schedules` in Task 4). To keep Task 3 self-contained and compiling, add the `Graph` fields now:
 ```rust
 // in struct Graph:
 pub schedules: Vec<crate::processor::punctuation::ScheduleEntry>,
-pub stream_time: i64,
-// in every Graph constructor / instantiate: schedules: Vec::new(), stream_time: i64::MIN,
+pub stream_time: i64,   // observed max record ts; init i64::MIN
+pub wall_clock: i64,    // last wall-clock value seen; init 0
+// in every Graph constructor / instantiate: schedules: Vec::new(), stream_time: i64::MIN, wall_clock: 0,
 ```
-Find Graph construction with `grep -rn "Graph {" crates/client-streams/src` and add the two fields (init `Vec::new()` / `i64::MIN`). In `pipe`, after seeding/draining, bump stream-time: at the top of `pipe`, `self.stream_time = self.stream_time.max(timestamp);`. In the drain-loop `Dispatch`, the borrow of `self.schedules` conflicts with `self.nodes[idx]`/`self.output`/`self.stores` — they are DISTINCT fields, so bind each as a separate local (the existing code already binds `node`/`out`/`stores` as disjoint locals; add `let scheds = &mut self.schedules;` alongside and pass `schedules: scheds, node_idx: idx`).
+Find Graph construction with `grep -rn "Graph {" crates/client-streams/src` and add the three fields (init `Vec::new()` / `i64::MIN` / `0`). In `pipe`, at the top, bump stream-time: `self.stream_time = self.stream_time.max(timestamp);`. In the drain-loop `Dispatch`, the borrow of `self.schedules` conflicts with `self.nodes[idx]`/`self.output`/`self.stores` — they are DISTINCT fields, so bind each as a separate local (the existing code already binds `node`/`out`/`stores` as disjoint locals; add `let scheds = &mut self.schedules;` alongside and pass `schedules: scheds, node_idx: idx, sched_stream_time: self.stream_time, sched_wall_clock: self.wall_clock`). NOTE: `self.stream_time`/`self.wall_clock` are `Copy` i64 reads — copy them into locals BEFORE the disjoint mutable borrows to avoid a borrow conflict.
 
-- [ ] **Step 4: Update `init_processors`** similarly: pass `node_idx: idx`, `schedules: &mut self.schedules`. (Its `children: &[]` stays — init can't forward, but it CAN schedule.) Same disjoint-field binding.
+- [ ] **Step 4: Update `init_processors`** similarly: pass `node_idx: idx`, `schedules: &mut self.schedules`, `sched_stream_time: self.stream_time` (= `i64::MIN` at init → a stream-time schedule first-fires on the first record), `sched_wall_clock: self.wall_clock` (= `0` at init → a wall-clock schedule first-fires at `interval`). (Its `children: &[]` stays — init can't forward, but it CAN schedule.) Same disjoint-field binding (copy the two i64s into locals first).
 
 - [ ] **Step 5: Verify + commit.** `cargo build -p crabka-client-streams --tests` (compiles — all Dispatch sites updated); `cargo test -p crabka-client-streams` (existing tests still green); clippy + fmt. Commit `feat(streams): Dispatch carries node_idx + schedules sink; Graph owns schedules/stream_time`.
 
@@ -361,8 +368,17 @@ pub fn schedule<P>(
 where
     P: crate::processor::punctuation::Punctuator<KOut, VOut>,
 {
+    use crate::processor::punctuation::PunctuationType;
     let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
     assert!(interval_ms >= 1, "schedule interval must be positive (>= 1ms)");
+    // First-fire = base + interval, where base is the CURRENT stream-time / wall
+    // clock at schedule time (per the captured JVM behavior). saturating_add so
+    // the i64::MIN stream-time base at init doesn't overflow.
+    let base = match ty {
+        PunctuationType::StreamTime => self.dispatch.sched_stream_time,
+        PunctuationType::WallClockTime => self.dispatch.sched_wall_clock,
+    };
+    let next_time = base.saturating_add(interval_ms);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let erased: Box<dyn crate::processor::punctuation::ErasedPunctuator> =
         Box::new(crate::processor::punctuation::TypedPunctuator::<KOut, VOut, P>::new(punctuator));
@@ -372,7 +388,7 @@ where
             node_idx: self.dispatch.node_idx,
             interval_ms,
             ty,
-            next_time: None,
+            next_time,
             punctuator: erased,
             cancel: cancel.clone(),
         });
@@ -452,9 +468,10 @@ async fn fire_schedule(&mut self, sched_idx: usize, ts: i64) -> Result<(), Proce
     self.drain(buffer, &rc).await
 }
 
-/// Fire all due STREAM_TIME schedules up to `stream_time`, with catch-up.
+/// Fire all due STREAM_TIME schedules up to `stream_time` (at most once each).
 pub async fn punctuate_stream_time(&mut self, stream_time: i64) -> Result<(), ProcessorError> {
-    self.punctuate(crate::processor::punctuation::PunctuationType::StreamTime, stream_time).await
+    self.stream_time = self.stream_time.max(stream_time);
+    self.punctuate(crate::processor::punctuation::PunctuationType::StreamTime, self.stream_time).await
 }
 
 async fn punctuate(
@@ -462,35 +479,35 @@ async fn punctuate(
     ty: crate::processor::punctuation::PunctuationType,
     now: i64,
 ) -> Result<(), ProcessorError> {
-    use crate::processor::punctuation::PunctuationType;
     // Drop cancelled schedules first.
     self.schedules.retain(|e| !e.is_cancelled());
-    // Snapshot which schedules fire at which timestamps (avoid borrow conflicts
-    // while firing, which itself may push new schedules).
+    // Index-walk so a punctuator that pushes a NEW schedule (appended) doesn't
+    // fire this pass; new entries have index >= the snapshot length.
     let n = self.schedules.len();
-    for i in 0..n.min(self.schedules.len()) {
+    for i in 0..n {
         if self.schedules[i].ty != ty || self.schedules[i].is_cancelled() {
             continue;
         }
-        let interval = self.schedules[i].interval_ms;
-        let mut next = self.schedules[i].next_time.unwrap_or(now + interval);
-        // Stream-time passes the scheduled `next`; wall-clock passes `now`.
-        while now >= next {
-            let ts = match ty {
-                PunctuationType::StreamTime => next,
-                PunctuationType::WallClockTime => now,
+        let next = self.schedules[i].next_time;
+        if now >= next {
+            let interval = self.schedules[i].interval_ms;
+            // CAPTURED JVM model: fire AT MOST ONCE per call, value = the current
+            // time (`now`) for BOTH types; resync `next` ahead (no per-boundary
+            // catch-up). Both branches yield next > now → single fire.
+            self.fire_schedule(i, now).await?;
+            self.schedules[i].next_time = if now - next >= interval {
+                now + interval
+            } else {
+                next + interval
             };
-            self.fire_schedule(i, ts).await?;
-            next += interval;
         }
-        self.schedules[i].next_time = Some(next);
     }
     Ok(())
 }
 ```
-Add a private `NoopPunctuator` (impls `ErasedPunctuator` with an empty `fire`) in `graph.rs` or export one from `punctuation.rs` for the `mem::replace` placeholder. NOTE: re-confirm the per-type `ts` (StreamTime → `next`, WallClock → `now`) + first-fire (`now + interval`) against the Task 1 `behavior.json`; adjust if the capture differs.
+Add a private `NoopPunctuator` (impls `ErasedPunctuator` with an empty `fire`) in `graph.rs` for the `mem::replace` placeholder. The `now - next >= interval` subtraction can't underflow in practice (next > some finite base); if paranoid use `now.saturating_sub(next)`. This model reproduces `behavior.json` exactly (verify in Tasks 5/6): stream pipes {0,5,9,10,11,100} → fires {0,10,100}; wall clock {3,6,10,110} → fires {10,110}.
 
-- [ ] **Step 4: Unit test** (`graph.rs` `#[cfg(test)]`): build a tiny graph with a processor that, in `init`, schedules a stream-time punctuator forwarding `Record::new(None, ts, ts)`; pipe a record at ts=5, then `punctuate_stream_time(25)`; assert the output contains the expected fired timestamps (per the model / fixture: 10, 20). Use the existing graph-construction test helpers in `graph.rs`/`node.rs`.
+- [ ] **Step 4: Unit test** (`graph.rs` `#[cfg(test)]`): build a tiny graph with a processor that, in `init`, schedules a stream-time punctuator forwarding `Record::new(None, ts, ts)` (the fired timestamp as the value). Drive it: `init_processors()` (schedules; stream base `i64::MIN` → `next = MIN+10`), `pipe("in", .., ts=5)`, then `punctuate_stream_time(25)`. Per the captured model this fires **once** with value = the current stream-time **25** (now=25 ≥ next=MIN+10 → fire(25); next resyncs to 35), so the sink output carries one record valued `25`. Assert exactly that (one output, value 25). Use the existing graph-construction test helpers in `graph.rs`/`node.rs`.
 
 - [ ] **Step 5: Verify + commit.** `cargo test -p crabka-client-streams --lib`; clippy + fmt. Commit `feat(streams): ProcessorContext::schedule + Graph stream-time punctuation firing`.
 
@@ -536,10 +553,11 @@ fn pipe_bytes(&mut self, topic: &str, key: Option<&[u8]>, value: &[u8], timestam
 **Files:**
 - Modify: `crates/client-streams/src/processor/graph.rs`, `crates/client-streams/src/test_driver.rs`, `crates/client-streams/tests/punctuation.rs`
 
-- [ ] **Step 1: `Graph::punctuate_wall_clock`** (graph.rs) — one line over the shared `punctuate`:
+- [ ] **Step 1: `Graph::punctuate_wall_clock`** (graph.rs) over the shared `punctuate`, recording the clock so a later `schedule()` in `process` stamps the right base:
 ```rust
-/// Fire all due WALL_CLOCK_TIME schedules up to `now_ms`, with catch-up.
+/// Fire all due WALL_CLOCK_TIME schedules at `now_ms` (at most once each).
 pub async fn punctuate_wall_clock(&mut self, now_ms: i64) -> Result<(), ProcessorError> {
+    self.wall_clock = now_ms;
     self.punctuate(crate::processor::punctuation::PunctuationType::WallClockTime, now_ms).await
 }
 ```
