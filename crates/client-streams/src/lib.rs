@@ -387,9 +387,10 @@ pub use membership::{
     TopicPartition,
 };
 pub use processor::{
-    BytesSerde, Consumed, FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyProcessorSupplier,
-    FixedKeyRecord, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier,
-    Produced, Record, RecordContext, Serde, SerdeError, StringSerde,
+    BytesSerde, Cancellable, Consumed, FixedKeyProcessor, FixedKeyProcessorContext,
+    FixedKeyProcessorSupplier, FixedKeyRecord, I64Serde, Processor, ProcessorContext,
+    ProcessorError, ProcessorSupplier, Produced, PunctuationType, Punctuator, Record,
+    RecordContext, Serde, SerdeError, StringSerde,
 };
 pub use runtime::{KafkaStreams, KafkaStreamsState};
 pub use store::{KeyValueBytesStore, KeyValueStore, StateStore, StoreBackend};
