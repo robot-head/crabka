@@ -78,27 +78,40 @@ impl TopologyTestDriver {
         while let Some((t, k, v, ts)) = queue.pop_front() {
             // run the graph for this topic; ignore unknown topics
             let _ = pollster::block_on(self.graph.pipe(&t, k.as_deref(), &v, ts));
-            for out in self.graph.take_output() {
-                if self.source_topics.contains(&out.topic) {
-                    // internal repartition topic feeding another subtopology → loop back
-                    let vv = out.value.clone().unwrap_or_default().to_vec();
-                    queue.push_back((
-                        out.topic.clone(),
-                        out.key.as_ref().map(|b| b.to_vec()),
-                        vv,
-                        out.timestamp,
-                    ));
-                } else {
-                    self.output
-                        .entry(out.topic.clone())
-                        .or_default()
-                        .push_back(out);
-                }
-            }
-            // Drain changelog buffers so they don't grow unbounded; the test driver
-            // has no broker, so we discard them (restore is a no-op with fresh stores).
-            let _ = self.graph.drain_changelogs();
+            self.route_outputs(&mut queue);
+            // Stream-time advanced by this record → fire stream-time punctuators; their
+            // forwarded records route like any output (and may loop back to a source).
+            let _ = pollster::block_on(self.graph.punctuate_stream_time(self.graph.stream_time));
+            self.route_outputs(&mut queue);
         }
+    }
+
+    /// Drain the graph's output buffer: outputs to a source topic re-enqueue
+    /// (repartition loop-back), all others append to `self.output`. Changelog
+    /// buffers are discarded (the test driver has no broker, so restore is a
+    /// no-op with fresh stores). Shared by the record-processing and
+    /// stream-time-punctuation phases of `pipe_bytes`.
+    fn route_outputs(&mut self, queue: &mut VecDeque<PendingRecord>) {
+        for out in self.graph.take_output() {
+            if self.source_topics.contains(&out.topic) {
+                // internal repartition topic feeding another subtopology → loop back
+                let vv = out.value.clone().unwrap_or_default().to_vec();
+                queue.push_back((
+                    out.topic.clone(),
+                    out.key.as_ref().map(|b| b.to_vec()),
+                    vv,
+                    out.timestamp,
+                ));
+            } else {
+                self.output
+                    .entry(out.topic.clone())
+                    .or_default()
+                    .push_back(out);
+            }
+        }
+        // Drain changelog buffers so they don't grow unbounded; the test driver
+        // has no broker, so we discard them (restore is a no-op with fresh stores).
+        let _ = self.graph.drain_changelogs();
     }
 
     /// Inspect a state store's contents after piping (mirrors the JVM
