@@ -5,9 +5,22 @@ use std::rc::Rc;
 use crate::dsl::graph::{GraphNodeKind, LogicalGraph};
 use crate::processor::serde::{Consumed, Serde};
 
+/// A serde-carrying thunk that registers + connects a DSL-added state store to a
+/// processor by name during lowering. Looked up + invoked by `process`/`process_values`.
+//
+// consumed by process/process_values in T3/T5 (this task only records the thunk).
+#[allow(dead_code)]
+pub(crate) type StoreConnectThunk =
+    std::sync::Arc<dyn Fn(&mut crate::dsl::graph::LowerState, &str) + Send + Sync>;
+
 pub(crate) struct InternalStreamsBuilder {
     pub graph: LogicalGraph,
     index: usize,
+    /// Serde-carrying connect thunks for DSL-added stores, keyed by store name.
+    /// Populated by [`StreamsBuilder::add_state_store`]; looked up + invoked by a
+    /// `process`/`process_values` node during lowering (T3/T5).
+    #[allow(dead_code)] // consumed by process/process_values in T3/T5
+    pub store_thunks: std::collections::HashMap<String, StoreConnectThunk>,
 }
 
 impl InternalStreamsBuilder {
@@ -15,6 +28,7 @@ impl InternalStreamsBuilder {
         Self {
             graph: LogicalGraph::default(),
             index: 0,
+            store_thunks: std::collections::HashMap::new(),
         }
     }
 
@@ -23,6 +37,12 @@ impl InternalStreamsBuilder {
         let n = format!("{prefix}{:010}", self.index);
         self.index += 1;
         n
+    }
+
+    /// The connect thunk for an added store, if any (cloned `Arc`). Used by `process`.
+    #[allow(dead_code)] // consumed by process/process_values in T3/T5
+    pub fn store_thunk(&self, name: &str) -> Option<StoreConnectThunk> {
+        self.store_thunks.get(name).cloned()
     }
 }
 
@@ -267,6 +287,46 @@ impl StreamsBuilder {
         )
     }
 
+    /// Register a state store the DSL can connect to a `process`/`process_values`
+    /// node by name. The store is registered + its (compact) changelog emitted when
+    /// a `process` call connects it. Call this BEFORE the `process` that names the
+    /// store.
+    ///
+    /// The serdes are captured into a connect thunk that, during lowering, invokes
+    /// [`Topology::add_state_store`] with the named processor as the store's
+    /// connected processor — yielding the standard `<app>-<name>-changelog` compact
+    /// changelog. The thunk is recorded under `name` and looked up by `process`.
+    ///
+    /// [`Topology::add_state_store`]: crate::topology::Topology::add_state_store
+    pub fn add_state_store<K, V, KS, VS>(
+        &self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+    ) -> &Self
+    where
+        K: std::any::Any + Send + Sync + Clone,
+        V: std::any::Any + Send + Clone,
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+    {
+        let name: String = name.into();
+        // `name` is moved into the thunk; keep a copy for the map key.
+        let key = name.clone();
+        let thunk: StoreConnectThunk = std::sync::Arc::new(
+            move |state: &mut crate::dsl::graph::LowerState, processor: &str| {
+                state.topology.add_state_store::<K, V, KS, VS>(
+                    name.clone(),
+                    key_serde.clone(),
+                    value_serde.clone(),
+                    [processor.to_string()],
+                );
+            },
+        );
+        self.internal.borrow_mut().store_thunks.insert(key, thunk);
+        self
+    }
+
     /// Build the topology with no optimizer (the JVM `NO_OPTIMIZATION` default):
     /// lower the logical graph straight to the Processor-API [`Topology`], then
     /// finalize it into a [`BuiltTopology`].
@@ -485,6 +545,15 @@ mod tests {
                 .all(|s| s.state_changelog_topics.is_empty())
         );
     }
+
+    #[test]
+    fn add_state_store_records_a_connect_thunk() {
+        use crate::processor::serde::I64Serde;
+        let b = StreamsBuilder::new();
+        // Chains (returns &Self) and records a thunk under the given name.
+        b.add_state_store::<String, i64, _, _>("counts", StringSerde, I64Serde);
+        check!(b.internal.borrow().store_thunk("counts").is_some());
+        check!(b.internal.borrow().store_thunk("missing").is_none());
 
     #[test]
     #[should_panic(expected = "outstanding KStream/KTable handles")]
