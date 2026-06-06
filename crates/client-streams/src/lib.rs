@@ -190,6 +190,13 @@
 //! emit-on-update). The session store keys by `key‖end‖start` (a third typed store
 //! over the pluggable backend); read the output with [`SessionWindowedSerde`].
 //!
+//! [`KTable::suppress`]`(`[`Suppressed`]`::until_window_closes(`[`BufferConfig`]`::unbounded()))`
+//! turns a windowed table's emit-on-update change-stream into **final results**: it
+//! buffers each window's updates and forwards the window's final value exactly once,
+//! when stream-time passes `window.end + grace` (the grace comes from the upstream
+//! windowed/session aggregation). The buffer is in-memory and time-ordered; bounded
+//! buffers, `untilTimeLimitElapsed`, and the buffer changelog are later slices.
+//!
 //! [`KStream::join`], [`KStream::left_join`], and [`KStream::outer_join`] are the
 //! windowed **stream-stream** joins: two streams join over a [`JoinWindows`] time
 //! window, configured with [`StreamJoined`] serdes. Each side buffers its records
