@@ -226,6 +226,7 @@ mod tests {
         // Two updates for window [0,10): count 1 then 2. ts in [0,10) < window end.
         for (cnt, ts) in [(1i64, 1i64), (2, 3)] {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -233,6 +234,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             let change = if cnt == 1 {
@@ -252,6 +257,7 @@ mod tests {
         // A record for window [20,30) advances stream_time to 25 ≥ 10 → [0,10) closes.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -259,6 +265,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -293,6 +303,7 @@ mod tests {
 
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -300,6 +311,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -311,6 +326,7 @@ mod tests {
         // stream_time 12 → threshold 12-5=7 < window end 10 → NOT closed.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -318,6 +334,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -330,6 +350,7 @@ mod tests {
         // stream_time 16 → threshold 11 >= 10 → [0,10) closes.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -337,6 +358,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -375,6 +400,7 @@ mod tests {
         // Three distinct keys in the SAME open window [0,10) (ts < 10 → none close).
         for (k, ts) in [("a", 1i64), ("b", 2), ("c", 3)] {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -382,6 +408,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             // the third put brings len() to 3 > cap 2 → panic
@@ -420,6 +450,7 @@ mod tests {
         );
         for (k, ts) in [("a", 1i64), ("b", 2)] {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -427,6 +458,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -454,6 +489,7 @@ mod tests {
         // Two keys in [0,10): len == cap, not over → no panic.
         for (k, ts) in [("a", 1i64), ("b", 2)] {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -461,6 +497,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -475,6 +515,7 @@ mod tests {
         // both [0,10) entries emit.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -482,6 +523,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -530,6 +575,7 @@ mod tests {
             ("b", Change::update(None, 1), 60),
         ] {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -537,6 +583,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some(k.to_string()), change, ts))
@@ -550,6 +600,7 @@ mod tests {
         // stream-time 90 (threshold 40): a@40 is now due → emits the NEWER value (2).
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -557,6 +608,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut d);
             proc.process(

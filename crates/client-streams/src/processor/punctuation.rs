@@ -98,9 +98,9 @@ pub(crate) struct ScheduleEntry {
     pub node_idx: usize,
     pub interval_ms: i64,
     pub ty: PunctuationType,
-    /// The next time to fire; `None` until first evaluated (first fire = the
-    /// evaluating clock value + `interval_ms`).
-    pub next_time: Option<i64>,
+    /// The next time to fire. Stamped at `schedule()` time as `base + interval_ms`
+    /// (the evaluating clock value when the schedule is registered).
+    pub next_time: i64,
     pub punctuator: Box<dyn ErasedPunctuator>,
     pub cancel: Arc<AtomicBool>,
 }
@@ -138,7 +138,7 @@ mod tests {
             node_idx: 0,
             interval_ms: 10,
             ty: PunctuationType::StreamTime,
-            next_time: None,
+            next_time: 0,
             punctuator: Box::new(NoOp),
             cancel: flag.clone(),
         };

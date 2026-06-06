@@ -251,6 +251,7 @@ mod tests {
         let children = [3usize, 4usize];
         let mut stores = crate::store::registry::StoreRegistry::default();
         let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut scheds = Vec::new();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
@@ -258,6 +259,10 @@ mod tests {
             record_ctx: &rc,
             stores: &mut stores,
             globals: &globals,
+            node_idx: 0,
+            schedules: &mut scheds,
+            sched_stream_time: i64::MIN,
+            sched_wall_clock: 0,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         Upper
@@ -287,6 +292,7 @@ mod tests {
         let children = [1usize];
         let mut stores = crate::store::registry::StoreRegistry::default();
         let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut scheds = Vec::new();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
@@ -294,6 +300,10 @@ mod tests {
             record_ctx: &rc,
             stores: &mut stores,
             globals: &globals,
+            node_idx: 0,
+            schedules: &mut scheds,
+            sched_stream_time: i64::MIN,
+            sched_wall_clock: 0,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         boxed.init(&mut ctx).await; // forwards to Upper's default no-op
@@ -319,6 +329,7 @@ mod tests {
         };
         let mut stores = crate::store::registry::StoreRegistry::default();
         let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut scheds = Vec::new();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &[],
@@ -326,6 +337,10 @@ mod tests {
             record_ctx: &rc,
             stores: &mut stores,
             globals: &globals,
+            node_idx: 0,
+            schedules: &mut scheds,
+            sched_stream_time: i64::MIN,
+            sched_wall_clock: 0,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         p.init(&mut ctx).await; // default no-op

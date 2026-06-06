@@ -247,6 +247,7 @@ mod tests {
         // record 1 @ ts=0 → new session [0,0] count 1, no candidates → one update.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -254,6 +255,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 0))
@@ -270,6 +275,7 @@ mod tests {
         //   tombstone [0,0], update merged [0,30] count 2.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -277,6 +283,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 30))
@@ -317,6 +327,7 @@ mod tests {
         };
         for ts in [0i64, 200] {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -324,6 +335,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), ts))
@@ -360,6 +375,7 @@ mod tests {
         // both → merged [0,100] count 3 + tombstones for [0,0] and [100,100].
         for ts in [0i64, 100] {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -367,6 +383,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), ts))
@@ -375,6 +395,7 @@ mod tests {
         buffer.clear(); // discard the two initial updates
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -382,6 +403,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 50))
@@ -453,6 +478,7 @@ mod tests {
         // update [0,30]="xy". Drain in order and check the final merged update.
         for (v, ts) in [("x", 0i64), ("y", 30)] {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -460,6 +486,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<String>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), v.into(), ts))

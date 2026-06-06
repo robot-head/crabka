@@ -193,6 +193,7 @@ mod tests {
         // record at ts=3 → window [0,10), count 1
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -200,6 +201,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 3))
@@ -216,6 +221,7 @@ mod tests {
         // record at ts=7 → same window [0,10), count 2
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -223,6 +229,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 7))
@@ -237,6 +247,7 @@ mod tests {
         // record at ts=12 → window [10,20), count 1
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -244,6 +255,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("a".into()), "x".into(), 12))

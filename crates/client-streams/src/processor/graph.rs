@@ -34,6 +34,22 @@ pub(crate) struct Graph {
     /// lent into each dispatch. Default-empty until the app wiring (T8b) or the
     /// `TopologyTestDriver` populates it; stream-globaltable joins read it.
     pub globals: crate::runtime::global::GlobalStateManager,
+    /// Live punctuation schedules registered via `ProcessorContext::schedule`,
+    /// tagged by node index. Written here (lent into each dispatch); fired by the
+    /// driver in T4.
+    // read by ProcessorContext::schedule + Graph firing in T4
+    #[allow(dead_code)]
+    pub schedules: Vec<crate::processor::punctuation::ScheduleEntry>,
+    /// Observed max record timestamp (stream-time); the base a stream-time
+    /// schedule stamps its first fire from. Init `i64::MIN`.
+    // read by ProcessorContext::schedule + Graph firing in T4
+    #[allow(dead_code)]
+    pub stream_time: i64,
+    /// Last wall-clock value seen; the base a wall-clock schedule stamps its
+    /// first fire from. Init `0`.
+    // read by ProcessorContext::schedule + Graph firing in T4
+    #[allow(dead_code)]
+    pub wall_clock: i64,
 }
 
 impl Graph {
@@ -46,6 +62,7 @@ impl Graph {
         value: &[u8],
         timestamp: i64,
     ) -> Result<(), ProcessorError> {
+        self.stream_time = self.stream_time.max(timestamp);
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let rc = RecordContext {
             topic: topic.to_string(),
@@ -76,9 +93,13 @@ impl Graph {
                 // Bind disjoint fields as separate locals so rustc can see
                 // they don't alias: nodes[idx], output, and stores are three
                 // distinct fields of `self`.
+                // Copy the i64 clocks into locals FIRST so reading them doesn't
+                // conflict with the `&mut self.schedules` borrow below.
+                let (st, wc) = (self.stream_time, self.wall_clock);
                 let node = &mut self.nodes[idx];
                 let out = &mut self.output;
                 let stores = &mut self.stores;
+                let scheds = &mut self.schedules;
                 let mut d = Dispatch {
                     buffer: &mut buffer,
                     children: &children,
@@ -86,6 +107,10 @@ impl Graph {
                     record_ctx: &rc,
                     stores,
                     globals: &self.globals,
+                    node_idx: idx,
+                    schedules: scheds,
+                    sched_stream_time: st,
+                    sched_wall_clock: wc,
                 };
                 node.process(&mut d, rec).await
             };
@@ -112,9 +137,13 @@ impl Graph {
                 offset: -1,
                 timestamp: -1,
             };
+            // Copy the i64 clocks into locals FIRST so reading them doesn't
+            // conflict with the `&mut self.schedules` borrow below.
+            let (st, wc) = (self.stream_time, self.wall_clock);
             let node = &mut self.nodes[idx];
             let stores = &mut self.stores;
             let globals = &self.globals;
+            let scheds = &mut self.schedules;
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &[],
@@ -122,6 +151,10 @@ impl Graph {
                 record_ctx: &rc,
                 stores,
                 globals,
+                node_idx: idx,
+                schedules: scheds,
+                sched_stream_time: st,
+                sched_wall_clock: wc,
             };
             node.init(&mut d).await?;
         }
@@ -218,6 +251,9 @@ mod tests {
             output: Vec::new(),
             stores: crate::store::registry::StoreRegistry::default(),
             globals: crate::runtime::global::GlobalStateManager::default(),
+            schedules: Vec::new(),
+            stream_time: i64::MIN,
+            wall_clock: 0,
         };
         graph.pipe("in", Some(b"k"), b"hi", 7).await.unwrap();
         let out = graph.take_output();
@@ -235,6 +271,9 @@ mod tests {
             output: Vec::new(),
             stores: crate::store::registry::StoreRegistry::default(),
             globals: crate::runtime::global::GlobalStateManager::default(),
+            schedules: Vec::new(),
+            stream_time: i64::MIN,
+            wall_clock: 0,
         };
         graph.pipe("nope", None, b"x", 0).await.unwrap();
         check!(graph.take_output().is_empty());
@@ -302,6 +341,9 @@ mod tests {
             output: Vec::new(),
             stores,
             globals: crate::runtime::global::GlobalStateManager::default(),
+            schedules: Vec::new(),
+            stream_time: i64::MIN,
+            wall_clock: 0,
         };
 
         // pipe "in"/"a" twice — counter should accumulate to 2
