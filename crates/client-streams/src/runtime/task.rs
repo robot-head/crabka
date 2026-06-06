@@ -155,9 +155,52 @@ impl StreamTask {
                     .send(&cl_topic, Some(self.partition), Some(key), value)
                     .await?;
             }
+            // Fire any due STREAM_TIME punctuators after this partition's batch,
+            // at the graph's current stream-time. Their forwarded records flow
+            // through the same sink-produce + changelog-drain path as records.
+            self.punctuate_stream_time().await?;
             let next = batch.next_offset(offset);
             self.positions.insert((topic.clone(), partition), next);
             self.pending.insert((topic, partition), next);
+        }
+        Ok(())
+    }
+
+    /// Fire all due `STREAM_TIME` punctuators at the graph's current stream-time,
+    /// producing any forwarded sink output + changelog entries. Driven at the end
+    /// of each `process_once` batch.
+    pub async fn punctuate_stream_time(&mut self) -> Result<(), StreamsClientError> {
+        self.graph
+            .punctuate_stream_time(self.graph.stream_time)
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+        self.drain_punctuation_output().await
+    }
+
+    /// Fire all due `WALL_CLOCK_TIME` punctuators at `now_ms`, producing any
+    /// forwarded sink output + changelog entries. Driven between polls by the
+    /// `StreamThread` wall-clock tick.
+    pub async fn punctuate_wall_clock(&mut self, now_ms: i64) -> Result<(), StreamsClientError> {
+        self.graph
+            .punctuate_wall_clock(now_ms)
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+        self.drain_punctuation_output().await
+    }
+
+    /// Route punctuator-forwarded records through the same producer plumbing
+    /// that `process_once` uses for record output: sink sends use key-hash
+    /// routing (partition None); changelog sends pin the task partition.
+    async fn drain_punctuation_output(&mut self) -> Result<(), StreamsClientError> {
+        for out in self.graph.take_output() {
+            self.producer
+                .send(&out.topic, None, out.key, out.value)
+                .await?;
+        }
+        for (cl_topic, key, value) in self.graph.drain_changelogs() {
+            self.producer
+                .send(&cl_topic, Some(self.partition), Some(key), value)
+                .await?;
         }
         Ok(())
     }
@@ -527,6 +570,88 @@ mod tests {
                 .any(|(t, _p, _k, v)| t == "out"
                     && v.as_deref() == Some(6i64.to_be_bytes().as_ref())),
             "after restore with N=5, processing 'a' must emit count = 6"
+        );
+    }
+
+    // ── stream-time punctuation driven from process_once ─────────────────────
+
+    struct EmitTs;
+    #[async_trait::async_trait]
+    impl crate::processor::punctuation::Punctuator<String, i64> for EmitTs {
+        async fn punctuate(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>, ts: i64) {
+            ctx.forward(Record::new(None, ts, ts));
+        }
+    }
+
+    /// Schedules a `STREAM_TIME` punctuator (interval 10ms) in `init`; no-op on
+    /// records (so any sink output is from the punctuator, not the record).
+    struct StreamTimeScheduler;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, i64> for StreamTimeScheduler {
+        async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>) {
+            ctx.schedule(
+                std::time::Duration::from_millis(10),
+                crate::processor::punctuation::PunctuationType::StreamTime,
+                EmitTs,
+            );
+        }
+        async fn process(
+            &mut self,
+            _ctx: &mut ProcessorContext<'_, '_, String, i64>,
+            _r: Record<String, String>,
+        ) {
+        }
+    }
+
+    fn stream_time_punct_built() -> crate::topology::BuiltTopology {
+        let mut t = Topology::new();
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let p = t.add_processor("p", || StreamTimeScheduler, [&src]);
+        t.add_sink("out", "out", [&p], Produced::with(StringSerde, I64Serde));
+        t.build("app").unwrap()
+    }
+
+    /// `process_once` must fire due `STREAM_TIME` punctuators after the batch, at
+    /// the graph's current stream-time, and produce their forwarded output. We
+    /// feed one record at ts=25 (> the 10ms interval base of `i64::MIN`+10), so the
+    /// punctuator fires once with value = stream-time (25) and the sink emits it.
+    #[tokio::test]
+    async fn process_once_fires_stream_time_punctuation() {
+        let producer = std::sync::Arc::new(CollectProducer::default());
+        let store = std::sync::Arc::new(MemStore::default());
+        let fetcher = ScriptedFetcher::new(vec![(
+            ("in".to_string(), 0, 0),
+            FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: Some("k".into()),
+                    value: Some("v".into()),
+                    timestamp: 25,
+                }],
+            },
+        )]);
+        let mut task = StreamTask::new(
+            "0".into(),
+            stream_time_punct_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
+            vec![TopicPartition {
+                topic: "in".into(),
+                partition: 0,
+            }],
+            std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
+            std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+        );
+        task.init().await.unwrap(); // schedules the punctuator (base i64::MIN)
+        task.process_once(&fetcher).await.unwrap(); // pipe ts=25 → stream-time=25 → fire
+
+        let sent = producer.sent.lock().unwrap();
+        check!(
+            sent.iter()
+                .any(|(t, _p, _k, v)| t == "out"
+                    && v.as_deref() == Some(25i64.to_be_bytes().as_ref())),
+            "stream-time punctuator must fire from process_once and emit value=25, got {sent:?}"
         );
     }
 

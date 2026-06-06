@@ -1,6 +1,7 @@
 //! Broker-backed execution runtime (sub-project #2b).
 
 mod app;
+pub(crate) mod clock;
 pub(crate) mod global;
 pub mod io;
 mod io_broker;
