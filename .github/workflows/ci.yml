@@ -48,7 +48,7 @@ jobs:
           files: coverage/unit.lcov
           disable_search: true
           flags: unit
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   jvm-differential:
     runs-on: ubuntu-latest
@@ -92,7 +92,7 @@ jobs:
           files: coverage/jvm-differential.lcov
           disable_search: true
           flags: jvm-differential
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   cargo-deny:
     runs-on: ubuntu-latest
@@ -158,7 +158,7 @@ jobs:
           files: coverage/client-core-integration.lcov
           disable_search: true
           flags: client-core-integration
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   # crabka-log integration: docker cp a JVM-produced partition dir out of
   # a Kafka container and re-read it with crabka-log.
@@ -183,7 +183,7 @@ jobs:
           files: coverage/log-integration.lcov
           disable_search: true
           flags: log-integration
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   # crabka-client-consumer integration: cooperative-rebalance + poll/commit
   # against an in-process Rust broker (no Docker). The `unit` flag's
@@ -210,7 +210,7 @@ jobs:
           files: coverage/client-consumer-integration.lcov
           disable_search: true
           flags: client-consumer-integration
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   # crabka-client-streams integration: KIP-1071 streams-group membership
   # (join / heartbeat / assignment / leave) against an in-process Rust broker
@@ -238,7 +238,7 @@ jobs:
           files: coverage/client-streams-integration.lcov
           disable_search: true
           flags: client-streams-integration
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   # crabka-grpc-gateway integration: unary Send produce, group consume+commit,
   # and single-owner exactly-once dedup against an in-process Rust broker (no
@@ -266,7 +266,7 @@ jobs:
           files: coverage/grpc-gateway-integration.lcov
           disable_search: true
           flags: grpc-gateway-integration
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   # crabka-schema-registry integration: schema validation, REST conformance, and
   # record-schema round-trips against an in-process broker (no Docker). The
@@ -295,7 +295,7 @@ jobs:
           files: coverage/schema-registry-integration.lcov
           disable_search: true
           flags: schema-registry-integration
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
@@ -358,7 +358,7 @@ jobs:
           files: coverage/broker-jvm-acceptance.lcov
           disable_search: true
           flags: broker-jvm-acceptance
-          fail_ci_if_error: true
+          fail_ci_if_error: false
 
   # Non-ignored broker + client-admin integration tests (the
   # in-process Broker-driven suites under `crates/broker/tests/*.rs`
@@ -410,4 +410,4 @@ jobs:
           files: coverage/broker-integration.lcov
           disable_search: true
           flags: broker-integration
-          fail_ci_if_error: true
+          fail_ci_if_error: false

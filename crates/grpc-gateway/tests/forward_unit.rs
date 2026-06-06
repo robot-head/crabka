@@ -191,6 +191,7 @@ async fn forward_handler_error_arm_returns_retriable() {
             tls: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
+            outbound: Vec::new(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
@@ -299,6 +300,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
             tls,
             authz: None,
             webhooks: std::collections::HashMap::new(),
+            outbound: Vec::new(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,

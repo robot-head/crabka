@@ -139,6 +139,10 @@ struct Args {
     /// Optional TOML file defining `[[webhooks.endpoints]]` for HTTP webhook inbound.
     #[arg(long, env = "CRABKA_GATEWAY_WEBHOOKS_CONFIG")]
     webhooks_config: Option<std::path::PathBuf>,
+
+    /// Optional TOML file defining `[[subscriptions]]` for HTTP webhook outbound.
+    #[arg(long, env = "CRABKA_GATEWAY_OUTBOUND_WEBHOOKS_CONFIG")]
+    outbound_webhooks_config: Option<std::path::PathBuf>,
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -191,6 +195,7 @@ async fn main() -> anyhow::Result<()> {
 
     let authz = build_authz_settings(&args)?;
     let webhooks = load_webhooks(&args)?;
+    let outbound = load_outbound(&args)?;
 
     let config = GatewayConfig {
         bootstrap: args.bootstrap_servers.clone(),
@@ -205,6 +210,7 @@ async fn main() -> anyhow::Result<()> {
         tls: tls.clone(),
         authz,
         webhooks,
+        outbound,
     };
 
     let bearer = build_bearer(&args)?;
@@ -249,6 +255,24 @@ fn load_webhooks(
                 .map_err(|e| anyhow::anyhow!("webhooks config: {e}"))
         }
         None => Ok(std::collections::HashMap::new()),
+    }
+}
+
+/// Load and compile the optional outbound webhook subscriptions TOML config file.
+fn load_outbound(
+    args: &Args,
+) -> anyhow::Result<Vec<crabka_grpc_gateway::outbound_config::CompiledSubscription>> {
+    match args.outbound_webhooks_config.as_ref() {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path).map_err(|e| {
+                anyhow::anyhow!("read outbound webhooks config {}: {e}", path.display())
+            })?;
+            let file: crabka_grpc_gateway::outbound_config::OutboundFile = toml::from_str(&raw)
+                .map_err(|e| anyhow::anyhow!("parse outbound webhooks config: {e}"))?;
+            file.compile()
+                .map_err(|e| anyhow::anyhow!("outbound config: {e}"))
+        }
+        None => Ok(Vec::new()),
     }
 }
 
@@ -317,6 +341,8 @@ async fn run(
     spawn_ownership_consumer(&config, &store, &shutdown);
     spawn_readiness_watcher(store.clone(), readiness.clone());
 
+    spawn_outbound_subscriptions(&config, &shutdown).await?;
+
     let engine = Arc::new(DedupEngine::new(
         &config.bootstrap,
         &config.client_id,
@@ -355,11 +381,6 @@ async fn run(
         authz: gateway_authz,
     });
 
-    // Layer ordering: axum applies .layer() calls outermost-last (rightmost runs
-    // first). We apply resolve_principal first (inner), then Extension(bv) outer.
-    // At request time: Extension layer runs first → inserts BearerValidator into
-    // extensions; then resolve_principal runs → reads BearerValidator and resolves
-    // the caller principal.
     let app = crabka_grpc_gateway::router(state.clone())
         .merge(health::router(readiness))
         .merge(forward::forward_router(state.clone()))
@@ -372,14 +393,11 @@ async fn run(
         None => app,
     };
 
-    // Step 5: spawn ctrl-c → cancel, build optional dynamic TLS, then serve.
-    {
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            tokio::signal::ctrl_c().await.ok();
-            shutdown.cancel();
-        });
-    }
+    let sd = shutdown.clone();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        sd.cancel();
+    });
 
     let tls_dynamic = match config.tls.as_ref() {
         Some(t) => Some(
@@ -479,6 +497,56 @@ fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
+}
+
+/// Build the DLQ producer and spawn one delivery task per outbound subscription.
+/// No-ops when `config.outbound` is empty (zero overhead for default deployments).
+async fn spawn_outbound_subscriptions(
+    config: &GatewayConfig,
+    shutdown: &CancellationToken,
+) -> anyhow::Result<()> {
+    if config.outbound.is_empty() {
+        return Ok(());
+    }
+    let dlq_producer = Arc::new(
+        crabka_client_producer::Producer::builder()
+            .bootstrap(config.bootstrap.clone())
+            .client_id(format!("{}-outbound-dlq", config.client_id))
+            .enable_idempotence(true)
+            .acks(crabka_client_producer::Acks::All)
+            .build()
+            .await
+            .map_err(|e| anyhow::anyhow!("build outbound dlq producer: {e}"))?,
+    );
+    for sub in &config.outbound {
+        spawn_outbound_delivery(sub, config, dlq_producer.clone(), shutdown);
+    }
+    Ok(())
+}
+
+fn spawn_outbound_delivery(
+    sub: &crabka_grpc_gateway::outbound_config::CompiledSubscription,
+    config: &GatewayConfig,
+    dlq_producer: Arc<crabka_client_producer::Producer>,
+    shutdown: &CancellationToken,
+) {
+    let sub = sub.clone();
+    let bootstrap = config.bootstrap.clone();
+    let client_id = format!("{}-outbound-{}", config.client_id, sub.name);
+    let shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(e) = crabka_grpc_gateway::outbound::run_subscription(
+            sub,
+            bootstrap,
+            client_id,
+            dlq_producer,
+            shutdown,
+        )
+        .await
+        {
+            tracing::error!(error = %e, "outbound delivery task exited with error");
         }
     });
 }

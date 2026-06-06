@@ -363,6 +363,7 @@ mod tests {
                 tls: None,
                 authz: None,
                 webhooks,
+                outbound: Vec::new(),
             }),
             authz: Arc::new(GatewayAuthz::new(Arc::new(
                 crabka_authz::AllowAllAuthorizer,

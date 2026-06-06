@@ -161,6 +161,7 @@ async fn webhook_state(
             tls: None,
             authz: None,
             webhooks,
+            outbound: Vec::new(),
         }),
         authz: Arc::new(GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
@@ -735,6 +736,7 @@ async fn webhook_state_with_authz(
             tls: None,
             authz: None,
             webhooks,
+            outbound: Vec::new(),
         }),
         authz,
     })
