@@ -19,11 +19,11 @@
 //!   * `tests/fixtures/election/members.json` — per member: `member_id`,
 //!     `client_id`, `client_host`, the UTF-8-lossy `member_metadata` +
 //!     `member_assignment` JSON, and `is_leader` (whether cp's group leader
-//!     member_id matches). This is the oracle that pins our
+//!     `member_id` matches). This is the oracle that pins our
 //!     `SchemaRegistryIdentity` / `SchemaRegistryGroupAssignment` encoders.
 //!   * `tests/fixtures/election/group.json` — the group-level shape:
 //!     `group_id`, `group_state`, `protocol_type` (expect `"sr"`),
-//!     `protocol_name` (the captured `SR_PROTOCOL_NAME`), the leader member_id,
+//!     `protocol_name` (the captured `SR_PROTOCOL_NAME`), the leader `member_id`,
 //!     and the elected master identity (decoded from the assignment) — the
 //!     oracle for `SR_PROTOCOL_NAME` and the `select_master` comparator.
 //!
