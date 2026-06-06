@@ -2215,3 +2215,91 @@ fn dsl_suppress_max_records_shuts_down_when_full() {
         );
     }
 }
+
+/// Suppress `until_time_limit`: a key is buffered and emitted once stream-time
+/// advances past `record_ts + wait`. Rate-limiter for a non-windowed table.
+#[test]
+fn dsl_suppress_until_time_limit_rate_limits() {
+    use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .suppress(Suppressed::until_time_limit(50, BufferConfig::unbounded()))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // "a"@10 → count 1, buffered (buffer_time 10, would emit at 10+50=60). No output.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("a".to_string()),
+        "x".to_string(),
+        10,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        None
+    );
+    // "b"@100 advances stream-time to 100 ≥ 60 → "a" emits its final count (1).
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("b".to_string()),
+        "x".to_string(),
+        100,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("a".into()), 1))
+    );
+}
+
+/// Suppress `emit_early_when_full`: an over-full eager buffer evicts + emits the
+/// oldest early (no panic). cap 1, two keys → the first emits when the second lands.
+#[test]
+fn dsl_suppress_emit_early_when_full_evicts_oldest() {
+    use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .suppress(Suppressed::until_time_limit(
+            100_000,
+            BufferConfig::max_records(1),
+        )) // eager cap 1
+        .to_stream()
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("a".to_string()),
+        "x".to_string(),
+        1,
+    );
+    // "b" overflows cap 1 → "a" is evicted + emitted early (no panic), even though
+    // its 100s time-limit hasn't elapsed.
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("b".to_string()),
+        "x".to_string(),
+        2,
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("a".into()), 1))
+    );
+}
+
+/// `until_window_closes` requires a strict buffer — an eager config panics at
+/// construction.
+#[test]
+#[should_panic(expected = "strict")]
+fn dsl_until_window_closes_rejects_eager_buffer() {
+    use crabka_client_streams::{BufferConfig, Suppressed, Windowed};
+    let _ = Suppressed::<Windowed<String>>::until_window_closes(BufferConfig::max_records(2));
+}

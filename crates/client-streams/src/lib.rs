@@ -196,8 +196,12 @@
 //! when stream-time passes `window.end + grace` (the grace comes from the upstream
 //! windowed/session aggregation). The buffer is in-memory and time-ordered.
 //! [`BufferConfig::unbounded`]`().with_max_records(n)` caps it; exceeding the cap
-//! shuts the task down (`shutDownWhenFull`). `maxBytes`, `untilTimeLimitElapsed`,
-//! and the buffer changelog are later slices.
+//! shuts the task down (`shutDownWhenFull`). [`Suppressed::until_time_limit`] is the
+//! rate-limiter variant for *any* table — it emits at most one update per key per
+//! wait (stream-time), a newer record resetting the timer; `BufferConfig::max_records(n)`
+//! (eager) / [`BufferConfig::emit_early_when_full`] evict + emit the oldest buffered
+//! record when full instead of shutting down. `maxBytes` and the buffer changelog
+//! are later slices.
 //!
 //! [`KStream::join`], [`KStream::left_join`], and [`KStream::outer_join`] are the
 //! windowed **stream-stream** joins: two streams join over a [`JoinWindows`] time
