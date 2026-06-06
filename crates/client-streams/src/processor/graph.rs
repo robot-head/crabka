@@ -169,9 +169,6 @@ impl Graph {
 
     /// Fire all due `STREAM_TIME` schedules at the current stream-time (each at
     /// most once). Bumps stream-time to `max(.., stream_time)` first.
-    // called by the task/driver punctuation tick (later task); exercised by the
-    // graph unit test now.
-    #[allow(dead_code)]
     pub async fn punctuate_stream_time(&mut self, stream_time: i64) -> Result<(), ProcessorError> {
         self.stream_time = self.stream_time.max(stream_time);
         let now = self.stream_time;

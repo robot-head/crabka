@@ -68,20 +68,12 @@ pub(crate) struct Dispatch<'a> {
     pub globals: &'a crate::runtime::global::GlobalStateManager,
     /// The graph node this dispatch is positioned at (so `schedule` tags the
     /// owning node, and a punctuator forwards to this node's children).
-    // read by ProcessorContext::schedule + Graph firing in T4
-    #[allow(dead_code)]
     pub node_idx: usize,
     /// Sink for `ProcessorContext::schedule`: newly-registered punctuation schedules.
-    // read by ProcessorContext::schedule + Graph firing in T4
-    #[allow(dead_code)]
     pub schedules: &'a mut Vec<crate::processor::punctuation::ScheduleEntry>,
     /// Current stream-time / wall-clock — the BASE `schedule` stamps a new entry's
     /// first-fire time from (`base + interval`).
-    // read by ProcessorContext::schedule + Graph firing in T4
-    #[allow(dead_code)]
     pub sched_stream_time: i64,
-    // read by ProcessorContext::schedule + Graph firing in T4
-    #[allow(dead_code)]
     pub sched_wall_clock: i64,
 }
 
