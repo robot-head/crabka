@@ -13,10 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Detect whether the PR touches operator-relevant code. Used to gate
-  # the kind-* jobs below — a docs-only or client-only PR skips the
-  # entire e2e suite. On push to main, every job runs unconditionally
-  # (their `if:` short-circuits on `github.event_name == 'push'`).
+  # Detect whether the change touches operator-relevant code. Used to gate
+  # the kind-* jobs below — a docs-only or client-only change skips the
+  # entire e2e suite.
   #
   # Single `operator` filter covers all kind-* jobs. Per-job filters
   # would be over-engineering: operator code is monolithic, a
@@ -52,14 +51,13 @@ jobs:
   # deduplicating the build across the four e2e jobs is the real win.
   build-images:
     needs: changes
-    # Run on every push to main, on PRs that touch operator-relevant
-    # code, and on PRs labeled for an OAuth e2e run (even if the PR
+    # Run when the change touches operator-relevant code, and on PRs
+    # labeled for an OAuth e2e run (even if the PR
     # itself doesn't touch operator code — e.g. a workflow-only tweak).
     if: |
-      github.event_name == 'push' ||
       needs.changes.outputs.operator == 'true' ||
-      contains(github.event.pull_request.labels.*.name, 'e2e-oauth') ||
-      contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection')
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-oauth')) ||
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -106,7 +104,7 @@ jobs:
 
   kind:
     needs: [build-images, changes]
-    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
+    if: ${{ needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -829,7 +827,7 @@ jobs:
 
   kind-network-policy:
     needs: [build-images, changes]
-    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
+    if: ${{ needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1074,7 +1072,7 @@ jobs:
 
   kind-kafkatopic:
     needs: [build-images, changes]
-    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
+    if: ${{ needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -1357,7 +1355,7 @@ jobs:
 
   kind-listener-auth:
     needs: [build-images, changes]
-    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
+    if: ${{ needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -2052,7 +2050,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────
   kind-kafkauser-delegation-token:
     needs: [build-images, changes]
-    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
+    if: ${{ needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -2322,7 +2320,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────────
   kind-opa-authorization:
     needs: [build-images, changes]
-    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
+    if: ${{ needs.changes.outputs.operator == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
@@ -2729,8 +2727,8 @@ jobs:
   # OAuth code don't pay the multi-minute Keycloak rollout cost.
   # ─────────────────────────────────────────────────────────────────────────
   kind-oauth:
-    needs: build-images
-    if: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'e2e-oauth') }}
+    needs: [build-images, changes]
+    if: ${{ needs.changes.outputs.operator == 'true' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-oauth')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -3446,8 +3444,8 @@ jobs:
           if-no-files-found: ignore
 
   kind-oauth-introspection:
-    needs: build-images
-    if: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection') }}
+    needs: [build-images, changes]
+    if: ${{ needs.changes.outputs.operator == 'true' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'e2e-oauth-introspection')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
