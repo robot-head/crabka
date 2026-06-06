@@ -154,4 +154,92 @@ mod tests {
             "{\"type\":\"int\"}"
         );
     }
+
+    #[test]
+    fn apply_record_handles_mode_delete_tombstone() {
+        use crate::kafkastore::record::{DeleteSubjectKey, DeleteSubjectValue, ModeKey, ModeValue};
+        let store = RwLock::new(StoreState::default());
+        let v = SchemaValue {
+            subject: "s".into(),
+            version: 1,
+            id: 1,
+            schema_type: None,
+            references: vec![],
+            schema: "{\"type\":\"int\"}".into(),
+            deleted: false,
+        };
+        apply_record(&store, SchemaRecord::Schema(SchemaKey::new("s", 1), v));
+        // global mode set then clear (Mode(None) -> clear_global_mode)
+        apply_record(
+            &store,
+            SchemaRecord::Mode(
+                ModeKey {
+                    keytype: "MODE".into(),
+                    subject: None,
+                    magic: 0,
+                },
+                Some(ModeValue {
+                    mode: "READONLY".into(),
+                }),
+            ),
+        );
+        assert_eq!(store.read().global_mode(), "READONLY");
+        apply_record(
+            &store,
+            SchemaRecord::Mode(
+                ModeKey {
+                    keytype: "MODE".into(),
+                    subject: None,
+                    magic: 0,
+                },
+                None,
+            ),
+        );
+        assert_eq!(store.read().global_mode(), "READWRITE");
+        // subject mode set then clear
+        apply_record(
+            &store,
+            SchemaRecord::Mode(
+                ModeKey {
+                    keytype: "MODE".into(),
+                    subject: Some("s".into()),
+                    magic: 0,
+                },
+                Some(ModeValue {
+                    mode: "IMPORT".into(),
+                }),
+            ),
+        );
+        assert_eq!(store.read().subject_mode("s"), Some("IMPORT"));
+        apply_record(
+            &store,
+            SchemaRecord::Mode(
+                ModeKey {
+                    keytype: "MODE".into(),
+                    subject: Some("s".into()),
+                    magic: 0,
+                },
+                None,
+            ),
+        );
+        assert_eq!(store.read().subject_mode("s"), None);
+        // soft-delete the subject, then permanently delete its version via a tombstone
+        apply_record(
+            &store,
+            SchemaRecord::DeleteSubject(
+                DeleteSubjectKey {
+                    keytype: "DELETE_SUBJECT".into(),
+                    subject: "s".into(),
+                    magic: 0,
+                },
+                DeleteSubjectValue {
+                    subject: "s".into(),
+                    version: 1,
+                },
+            ),
+        );
+        assert!(store.read().versions("s", false).is_none());
+        apply_record(&store, SchemaRecord::Tombstone(SchemaKey::new("s", 1)));
+        assert!(store.read().versions("s", true).is_none());
+    }
 }

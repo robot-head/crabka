@@ -1123,3 +1123,139 @@ async fn rest_cp_calibrated_admin_error_codes() {
     cancel.cancel();
     broker.shutdown().await;
 }
+
+// Error + edge branches across the facade/REST admin surface (mode gating,
+// soft-before-hard, missing subject/version, latest resolution, IMPORT guards).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
+async fn rest_admin_edge_and_error_branches() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    assert_eq!(store.topic(), "_schemas");
+    let app = rest::router(AppState { store });
+
+    // PUT /mode (global) -> 200, GET reflects it
+    assert_eq!(
+        app.clone()
+            .oneshot(req_put("/mode", r#"{"mode":"READONLY"}"#))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        get_json(&app, "/mode").await,
+        serde_json::json!({"mode": "READONLY"})
+    );
+    // global READONLY blocks PUT /config (set_compat gate) -> 422/42205
+    let cfg = app
+        .clone()
+        .oneshot(req_put("/config", r#"{"compatibility":"NONE"}"#))
+        .await
+        .unwrap();
+    assert_eq!(cfg.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(cfg).await["error_code"], 42205);
+    // back to READWRITE
+    assert_eq!(
+        app.clone()
+            .oneshot(req_put("/mode", r#"{"mode":"READWRITE"}"#))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    // invalid mode (global + subject) -> 422/42204
+    for uri in ["/mode", "/mode/x"] {
+        let bad = app
+            .clone()
+            .oneshot(req_put(uri, r#"{"mode":"BOGUS"}"#))
+            .await
+            .unwrap();
+        assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body_json(bad).await["error_code"], 42204);
+    }
+    // deletes on a missing subject
+    assert_eq!(
+        app.clone()
+            .oneshot(req_delete("/subjects/nope/versions/1"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(req_delete("/subjects/nope"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(req_delete("/subjects/nope/versions/1?permanent=true"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    // register a real subject
+    register(&app, "x", &format!(r#"{{"schema":{:?}}}"#, av("A"))).await;
+    // permanent-delete an absent version (subject exists) -> 404/40402
+    let pv = app
+        .clone()
+        .oneshot(req_delete("/subjects/x/versions/99?permanent=true"))
+        .await
+        .unwrap();
+    assert_eq!(pv.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(pv).await["error_code"], 40402);
+    // DELETE /versions/latest soft-deletes the latest live version
+    let dl = app
+        .clone()
+        .oneshot(req_delete("/subjects/x/versions/latest"))
+        .await
+        .unwrap();
+    assert_eq!(dl.status(), StatusCode::OK);
+    assert_eq!(body_json(dl).await, serde_json::json!(1));
+    // non-numeric version -> 422/42202
+    let dbad = app
+        .clone()
+        .oneshot(req_delete("/subjects/x/versions/abc"))
+        .await
+        .unwrap();
+    assert_eq!(dbad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(dbad).await["error_code"], 42202);
+    // IMPORT requires an empty subject / empty registry -> 422/42205
+    let import_subject = app
+        .clone()
+        .oneshot(req_put("/mode/x", r#"{"mode":"IMPORT"}"#))
+        .await
+        .unwrap();
+    assert_eq!(import_subject.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(import_subject).await["error_code"], 42205);
+    let import_global = app
+        .clone()
+        .oneshot(req_put("/mode", r#"{"mode":"IMPORT"}"#))
+        .await
+        .unwrap();
+    assert_eq!(import_global.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(import_global).await["error_code"], 42205);
+    // READONLY blocks a delete (ensure_writable) -> 422/42205
+    assert_eq!(
+        app.clone()
+            .oneshot(req_put("/mode/x", r#"{"mode":"READONLY"}"#))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let rod = app
+        .clone()
+        .oneshot(req_delete("/subjects/x/versions/1"))
+        .await
+        .unwrap();
+    assert_eq!(rod.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(rod).await["error_code"], 42205);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
