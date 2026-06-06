@@ -9,6 +9,8 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::sync::Mutex;
 
+use crate::error::StreamsClientError;
+use crate::runtime::io::RecordFetcher;
 use crate::store::backend::StoreBackend;
 use crate::store::registry::StoreRegistry;
 
@@ -80,12 +82,106 @@ impl GlobalStateManager {
     pub(crate) fn is_empty(&self) -> bool {
         self.topics.is_empty()
     }
+
+    /// Bootstrap every global store: for each (store, source topic), read all
+    /// partitions from offset 0 to end-of-log and apply each record. Returns the
+    /// per-`(topic, partition)` next-offset map so a live poll can resume. Blocks
+    /// until every partition is drained.
+    // Consumed by the app wiring in T8.
+    #[allow(dead_code)]
+    pub(crate) async fn bootstrap(
+        &self,
+        fetcher: &dyn RecordFetcher,
+    ) -> Result<HashMap<(String, i32), i64>, StreamsClientError> {
+        // Clone (store, topic) pairs so no borrow of `self.topics` is held across
+        // the awaits below.
+        let store_topics: Vec<(String, String)> = self
+            .topics
+            .iter()
+            .map(|(s, t)| (s.clone(), t.clone()))
+            .collect();
+
+        let mut offsets: HashMap<(String, i32), i64> = HashMap::new();
+        for (store, topic) in &store_topics {
+            for partition in fetcher.partitions(topic).await? {
+                let mut offset: i64 = 0;
+                loop {
+                    let batch = fetcher.fetch(topic, partition, offset).await?;
+                    if batch.records.is_empty() {
+                        break;
+                    }
+                    let mut advanced = false;
+                    for rec in &batch.records {
+                        self.apply(
+                            store,
+                            rec.key.clone().unwrap_or_default(),
+                            rec.value.clone(),
+                        )
+                        .await;
+                        let next = rec.offset + 1;
+                        if next > offset {
+                            offset = next;
+                            advanced = true;
+                        }
+                    }
+                    // Infinite-loop guard: stop if no record advanced the offset.
+                    if !advanced {
+                        break;
+                    }
+                }
+                offsets.insert((topic.clone(), partition), offset);
+            }
+        }
+        Ok(offsets)
+    }
+
+    /// One live-update pass from the given resume offsets: fetch new records on
+    /// each `(topic, partition)` and apply them, advancing the offsets in place.
+    /// Fetches one batch per partition (not to end-of-log); the caller repeats.
+    // Consumed by the app wiring in T8.
+    #[allow(dead_code)]
+    pub(crate) async fn poll_once(
+        &self,
+        fetcher: &dyn RecordFetcher,
+        offsets: &mut HashMap<(String, i32), i64>,
+    ) -> Result<(), StreamsClientError> {
+        // Map each topic back to its store so applies target the right store.
+        let topic_to_store: HashMap<&String, &String> =
+            self.topics.iter().map(|(s, t)| (t, s)).collect();
+
+        // Snapshot the keys so we don't borrow `offsets` while mutating it.
+        let keys: Vec<(String, i32)> = offsets.keys().cloned().collect();
+        for (topic, partition) in keys {
+            let Some(store) = topic_to_store.get(&topic).copied() else {
+                continue;
+            };
+            let offset = offsets[&(topic.clone(), partition)];
+            let batch = fetcher.fetch(&topic, partition, offset).await?;
+            let mut next = offset;
+            for rec in &batch.records {
+                self.apply(
+                    store,
+                    rec.key.clone().unwrap_or_default(),
+                    rec.value.clone(),
+                )
+                .await;
+                if rec.offset + 1 > next {
+                    next = rec.offset + 1;
+                }
+            }
+            offsets.insert((topic, partition), next);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex as StdMutex;
+
     use super::*;
     use crate::processor::serde::{Consumed, StringSerde};
+    use crate::runtime::io::{FetchBatch, FetchedRec};
     use crate::topology::Topology;
     use assert2::check;
 
@@ -148,5 +244,141 @@ mod tests {
         let topics = mgr.store_topics();
         check!(topics.get("g") == Some(&"gtopic".to_string()));
         check!(!mgr.is_empty());
+    }
+
+    // ─── global-consumer fakes ──────────────────────────────────────────────
+
+    /// A multi-partition fetcher: returns the scripted batch for a given
+    /// `(topic, partition, offset)` once, then an empty batch. `partitions`
+    /// is overridden so `bootstrap` reads every partition.
+    struct ScriptedFetcher {
+        scripts: StdMutex<HashMap<(String, i32, i64), FetchBatch>>,
+        partitions: HashMap<String, Vec<i32>>,
+    }
+
+    impl ScriptedFetcher {
+        fn new(
+            scripts: Vec<((String, i32, i64), FetchBatch)>,
+            partitions: Vec<(&str, Vec<i32>)>,
+        ) -> Self {
+            Self {
+                scripts: StdMutex::new(scripts.into_iter().collect()),
+                partitions: partitions
+                    .into_iter()
+                    .map(|(t, ps)| (t.to_string(), ps))
+                    .collect(),
+            }
+        }
+
+        /// Add (or replace) a scripted batch after construction (for `poll_once`).
+        fn script(&self, key: (String, i32, i64), batch: FetchBatch) {
+            self.scripts.lock().unwrap().insert(key, batch);
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RecordFetcher for ScriptedFetcher {
+        async fn fetch(&self, t: &str, p: i32, o: i64) -> Result<FetchBatch, StreamsClientError> {
+            Ok(self
+                .scripts
+                .lock()
+                .unwrap()
+                .remove(&(t.to_string(), p, o))
+                .unwrap_or_default())
+        }
+
+        async fn partitions(&self, topic: &str) -> Result<Vec<i32>, StreamsClientError> {
+            Ok(self
+                .partitions
+                .get(topic)
+                .cloned()
+                .unwrap_or_else(|| vec![0]))
+        }
+    }
+
+    /// One record `(key, value)` on `(topic, partition, offset)`.
+    fn one_rec(offset: i64, key: &str, value: &str) -> FetchBatch {
+        FetchBatch {
+            records: vec![FetchedRec {
+                offset,
+                key: Some(Bytes::from(key.to_string())),
+                value: Some(Bytes::from(value.to_string())),
+                timestamp: -1,
+            }],
+        }
+    }
+
+    /// Build a `GlobalStateManager` with one global store "g" fed by topic
+    /// "global" (used by the consumer tests, which script topic "global").
+    async fn global_topic_manager() -> GlobalStateManager {
+        let mut t = Topology::new();
+        t.add_global_store::<String, String, _, _>(
+            "g",
+            "gsrc",
+            "global",
+            "gproc",
+            Consumed::with(StringSerde, StringSerde),
+        );
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            [&src],
+            crate::processor::serde::Produced::with(StringSerde, StringSerde),
+        );
+        let built = t.build("app").unwrap();
+        GlobalStateManager::build(
+            built.global_store_factories_for_test(),
+            built.global_store_topics(),
+            &StoreBackend::InMemory,
+            "app",
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn bootstrap_reads_all_partitions() {
+        let mgr = global_topic_manager().await;
+        // Partition 0 carries "a"→"A"; partition 1 carries "b"→"B".
+        let fetcher = ScriptedFetcher::new(
+            vec![
+                (("global".into(), 0, 0), one_rec(0, "a", "A")),
+                (("global".into(), 1, 0), one_rec(0, "b", "B")),
+            ],
+            vec![("global", vec![0, 1])],
+        );
+
+        let offsets = mgr.bootstrap(&fetcher).await.unwrap();
+
+        // Both partitions materialized into the single fully-replicated store.
+        check!(mgr.get::<String, String>("g", &"a".to_string()).await == Some("A".to_string()));
+        check!(mgr.get::<String, String>("g", &"b".to_string()).await == Some("B".to_string()));
+
+        // Next-offset is one past the single record on each partition.
+        check!(offsets.get(&("global".to_string(), 0)) == Some(&1));
+        check!(offsets.get(&("global".to_string(), 1)) == Some(&1));
+    }
+
+    #[tokio::test]
+    async fn poll_once_applies_new_record() {
+        let mgr = global_topic_manager().await;
+        let fetcher = ScriptedFetcher::new(
+            vec![
+                (("global".into(), 0, 0), one_rec(0, "a", "A")),
+                (("global".into(), 1, 0), one_rec(0, "b", "B")),
+            ],
+            vec![("global", vec![0, 1])],
+        );
+        let mut offsets = mgr.bootstrap(&fetcher).await.unwrap();
+        check!(mgr.get::<String, String>("g", &"a".to_string()).await == Some("A".to_string()));
+
+        // A new record arrives on (global, 0, 1): "a"→"A2".
+        fetcher.script(("global".into(), 0, 1), one_rec(1, "a", "A2"));
+        mgr.poll_once(&fetcher, &mut offsets).await.unwrap();
+
+        check!(mgr.get::<String, String>("g", &"a".to_string()).await == Some("A2".to_string()));
+        // The offset for partition 0 advanced; partition 1 is unchanged.
+        check!(offsets.get(&("global".to_string(), 0)) == Some(&2));
+        check!(offsets.get(&("global".to_string(), 1)) == Some(&1));
     }
 }
