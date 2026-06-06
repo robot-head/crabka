@@ -37,6 +37,7 @@ use crabka_protocol::owned::offset_fetch_request::{
 };
 
 use crate::error::StreamsClientError;
+use crate::runtime::eos::{StreamsGroupMeta, TransactionalProducer};
 use crate::runtime::io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
 
 // ─── BrokerFetcher ────────────────────────────────────────────────────────────
@@ -211,6 +212,122 @@ impl RecordProducer for BrokerProducer {
             }
         }
         Ok(())
+    }
+}
+
+// ─── BrokerTransactionalProducer ────────────────────────────────────────────────
+
+/// A transactional (EOS-v2 / KIP-447) [`RecordProducer`] backed by a real Kafka
+/// `Producer` built with a `transactional_id`. In addition to `send`/`flush`
+/// (identical to [`BrokerProducer`]) it implements
+/// [`crate::runtime::eos::TransactionalProducer`] so the runtime can wrap each
+/// process-then-commit cycle in a transaction.
+// consumed by the EOS commit path in T3
+#[allow(dead_code)]
+pub(crate) struct BrokerTransactionalProducer {
+    inner: Producer,
+    /// Receivers from pending `Producer::send` calls. Drained by `flush`.
+    pending: Mutex<Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>>>,
+}
+
+#[async_trait::async_trait]
+impl RecordProducer for BrokerTransactionalProducer {
+    async fn send(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        key: Option<Bytes>,
+        value: Option<Bytes>,
+    ) -> Result<(), StreamsClientError> {
+        let rx = self
+            .inner
+            .send(ProducerRecord {
+                topic: topic.to_string(),
+                partition,
+                key,
+                value,
+                ..Default::default()
+            })
+            .await;
+        self.pending.lock().await.push(rx);
+        Ok(())
+    }
+
+    /// Flush: first ask the inner producer to drain its batch buffer, then
+    /// await every pending per-record ack. Any `Err` result from a record ack
+    /// is surfaced so the caller knows a commit would be unsafe.
+    async fn flush(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .flush()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+
+        let receivers: Vec<_> = std::mem::take(&mut *self.pending.lock().await);
+        for rx in receivers {
+            match rx.await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    return Err(StreamsClientError::Runtime(format!(
+                        "produce ack failed: {e}"
+                    )));
+                }
+                Err(_) => {
+                    return Err(StreamsClientError::Runtime(
+                        "produce ack receiver dropped".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl TransactionalProducer for BrokerTransactionalProducer {
+    async fn init_transactions(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .init_transactions()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+    }
+
+    async fn begin_transaction(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .begin_transaction()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+    }
+
+    async fn send_offsets_to_transaction(
+        &self,
+        offsets: &[(String, i32, i64)],
+        m: &StreamsGroupMeta,
+    ) -> Result<(), StreamsClientError> {
+        let meta = crabka_client_consumer::ConsumerGroupMetadata {
+            group_id: m.group_id.clone(),
+            generation_id: m.generation_id,
+            member_id: m.member_id.clone(),
+            group_instance_id: m.group_instance_id.clone(),
+        };
+        let off = offsets.iter().map(|(t, p, o)| ((t.clone(), *p), *o));
+        self.inner
+            .send_offsets_to_transaction(off, &meta)
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+    }
+
+    async fn commit_transaction(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .commit_transaction()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+    }
+
+    async fn abort_transaction(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .abort_transaction()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
     }
 }
 
@@ -568,6 +685,92 @@ pub(crate) async fn build(
     let offset_store = Arc::new(BrokerOffsetStore::new(offset_client, group_id));
 
     Ok((fetcher, broker_producer, offset_store))
+}
+
+// ─── build_eos ──────────────────────────────────────────────────────────────────
+
+/// Build broker I/O for EOS: a transactional producer (with `transactional_id`),
+/// plus the fetcher + offset store (for committed-offset reads / seek).
+///
+/// Mirrors [`build`] exactly, except the producer is constructed with a
+/// `transactional_id` (and `enable_idempotence` is implied by transactions) and
+/// wrapped in a [`BrokerTransactionalProducer`].
+// consumed by the EOS commit path in T3
+#[allow(dead_code)]
+pub(crate) async fn build_eos(
+    bootstrap: &str,
+    group_id: &str,
+    client_id: &str,
+    transactional_id: &str,
+) -> Result<
+    (
+        BrokerFetcher,
+        Arc<BrokerTransactionalProducer>,
+        Arc<BrokerOffsetStore>,
+    ),
+    StreamsClientError,
+> {
+    // 1. Client for metadata + offset RPCs.
+    let metadata_client = Client::builder()
+        .bootstrap(bootstrap)
+        .client_id(client_id)
+        .build()
+        .await?;
+
+    // 2. Dedicated fetch connection (single bootstrap broker).
+    // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
+    let addr = tokio::net::lookup_host(bootstrap)
+        .await
+        .map_err(|e| {
+            StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
+        })?
+        .next()
+        .ok_or_else(|| {
+            StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
+        })?;
+    let fetch_conn = Connection::connect_with_options(
+        addr,
+        ConnectionOptions {
+            client_id: client_id.to_string(),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    // 3. Transactional producer (idempotence is implied by transactions).
+    let producer = Producer::builder()
+        .bootstrap(bootstrap)
+        .client_id(format!("{client_id}-producer"))
+        .enable_idempotence(true)
+        .acks(Acks::All)
+        .transactional_id(transactional_id.to_string())
+        .build()
+        .await
+        .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+
+    // 4. Offset client — re-use a second Client for offset RPCs so the
+    //    metadata client's connection isn't head-of-line-blocked by slow
+    //    OffsetFetch or OffsetCommit calls.
+    let offset_client = Client::builder()
+        .bootstrap(bootstrap)
+        .client_id(format!("{client_id}-offsets"))
+        .build()
+        .await?;
+
+    let fetcher = BrokerFetcher {
+        conn: fetch_conn,
+        client: metadata_client,
+        topic_ids: Mutex::new(HashMap::new()),
+        max_wait_ms: 500,
+        partition_max_bytes: 1 << 20,
+    };
+    let txn_producer = Arc::new(BrokerTransactionalProducer {
+        inner: producer,
+        pending: Mutex::new(Vec::new()),
+    });
+    let offset_store = Arc::new(BrokerOffsetStore::new(offset_client, group_id));
+
+    Ok((fetcher, txn_producer, offset_store))
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────

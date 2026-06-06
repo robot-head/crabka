@@ -1487,6 +1487,7 @@ dependencies = [
  "bon",
  "bytes",
  "crabka-broker",
+ "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-protocol",
