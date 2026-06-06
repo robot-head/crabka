@@ -17,6 +17,7 @@ pub mod metrics;
 pub mod outbound;
 pub mod outbound_config;
 pub mod produce;
+pub mod schema;
 pub mod serve;
 pub mod state;
 pub mod streaming;

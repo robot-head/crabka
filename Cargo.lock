@@ -1542,6 +1542,7 @@ name = "crabka-grpc-gateway"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "apache-avro",
  "arc-swap",
  "assert2",
  "async-stream",
@@ -1572,6 +1573,8 @@ dependencies = [
  "pbjson",
  "prometheus-client",
  "prost",
+ "prost-reflect",
+ "protox-parse",
  "reqwest 0.13.4",
  "rustls",
  "serde",
@@ -1588,6 +1591,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

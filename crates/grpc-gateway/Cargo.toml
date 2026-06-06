@@ -57,6 +57,11 @@ jsonpath-rust = { workspace = true }
 toml = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
+# Schema Registry codec deps
+apache-avro = { workspace = true }
+prost-reflect = { workspace = true }
+protox-parse = "0.9"
+url = "2"
 
 [build-dependencies]
 connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
