@@ -205,6 +205,51 @@ where
     pub fn record_context(&self) -> &RecordContext {
         self.dispatch.record_ctx
     }
+
+    /// Schedule a periodic [`Punctuator`]. Callable from `init` or `process`.
+    /// `interval` must be positive. Returns a [`Cancellable`] to stop it.
+    ///
+    /// [`Punctuator`]: crate::processor::punctuation::Punctuator
+    /// [`Cancellable`]: crate::processor::punctuation::Cancellable
+    pub fn schedule<P>(
+        &mut self,
+        interval: std::time::Duration,
+        ty: crate::processor::punctuation::PunctuationType,
+        punctuator: P,
+    ) -> crate::processor::punctuation::Cancellable
+    where
+        P: crate::processor::punctuation::Punctuator<KOut, VOut>,
+    {
+        use crate::processor::punctuation::PunctuationType;
+        let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
+        assert!(
+            interval_ms >= 1,
+            "schedule interval must be positive (>= 1ms)"
+        );
+        let base = match ty {
+            PunctuationType::StreamTime => self.dispatch.sched_stream_time,
+            PunctuationType::WallClockTime => self.dispatch.sched_wall_clock,
+        };
+        let next_time = base.saturating_add(interval_ms);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let erased: Box<dyn crate::processor::punctuation::ErasedPunctuator> =
+            Box::new(crate::processor::punctuation::TypedPunctuator::<
+                KOut,
+                VOut,
+                P,
+            >::new(punctuator));
+        self.dispatch
+            .schedules
+            .push(crate::processor::punctuation::ScheduleEntry {
+                node_idx: self.dispatch.node_idx,
+                interval_ms,
+                ty,
+                next_time,
+                punctuator: erased,
+                cancel: cancel.clone(),
+            });
+        crate::processor::punctuation::Cancellable::new(cancel)
+    }
 }
 
 #[cfg(test)]

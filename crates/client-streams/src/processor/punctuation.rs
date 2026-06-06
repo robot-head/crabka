@@ -40,8 +40,6 @@ pub trait Punctuator<K: Send, V: Send>: Send + 'static {
 #[derive(Clone)]
 pub struct Cancellable(Arc<AtomicBool>);
 impl Cancellable {
-    // consumed by ProcessorContext::schedule + Graph firing in T3/T4
-    #[allow(dead_code)]
     pub(crate) fn new(flag: Arc<AtomicBool>) -> Self {
         Self(flag)
     }
@@ -53,8 +51,6 @@ impl Cancellable {
 
 /// Internal: a punctuator erased to the driver's untyped surface (mirrors
 /// `ErasedNode`).
-// consumed by ProcessorContext::schedule + Graph firing in T3/T4
-#[allow(dead_code)]
 #[async_trait]
 pub(crate) trait ErasedPunctuator: Send {
     async fn fire(&mut self, dispatch: &mut Dispatch<'_>, timestamp: i64);
@@ -62,15 +58,11 @@ pub(crate) trait ErasedPunctuator: Send {
 
 /// Wraps a typed [`Punctuator`] into an [`ErasedPunctuator`] by rebuilding the
 /// typed `ProcessorContext` from the `Dispatch`.
-// consumed by ProcessorContext::schedule + Graph firing in T3/T4
-#[allow(dead_code)]
 pub(crate) struct TypedPunctuator<K, V, P> {
     inner: P,
     _pd: PhantomData<fn(K, V)>,
 }
 impl<K, V, P> TypedPunctuator<K, V, P> {
-    // consumed by ProcessorContext::schedule + Graph firing in T3/T4
-    #[allow(dead_code)]
     pub(crate) fn new(inner: P) -> Self {
         Self {
             inner,
@@ -92,8 +84,6 @@ where
 }
 
 /// One live punctuation schedule, owned by the `Graph`.
-// consumed by ProcessorContext::schedule + Graph firing in T3/T4
-#[allow(dead_code)]
 pub(crate) struct ScheduleEntry {
     pub node_idx: usize,
     pub interval_ms: i64,
@@ -105,8 +95,6 @@ pub(crate) struct ScheduleEntry {
     pub cancel: Arc<AtomicBool>,
 }
 impl ScheduleEntry {
-    // consumed by ProcessorContext::schedule + Graph firing in T3/T4
-    #[allow(dead_code)]
     pub fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
     }
