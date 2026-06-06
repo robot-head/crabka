@@ -510,6 +510,7 @@ where
                     move || {
                         crate::dsl::processors::suppress::KTableSuppressProcessor::<KInner, V>::new(
                             grace_ms,
+                            None,
                         )
                     },
                     [parent],
