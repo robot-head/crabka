@@ -18,6 +18,7 @@ pub mod serve;
 pub mod state;
 pub mod streaming;
 pub mod types;
+pub mod webhook_config;
 
 /// Build the Connect-RPC [`axum::Router`] for the Gateway service.
 ///
