@@ -180,6 +180,16 @@
 //! changelog (`retention.ms = size + grace + 1 day`). Read the windowed output
 //! with [`TimeWindowedSerde`] (the key carries the window start).
 //!
+//! [`KGroupedStream::windowed_by_session`] groups records into data-driven
+//! **session windows**: records for a key form one session `[start, end]` while
+//! they stay within an inactivity [`SessionWindows`] gap. Terminal `count` /
+//! `reduce` / `aggregate` (the last taking a session merger) yield a
+//! [`KTable`]`<`[`Windowed`]`<K>, V>`. Each record merges every session within the
+//! gap into one `[minStart, maxEnd]` session — emitting a tombstone for each
+//! merged-away session and the new merged session (KIP session semantics,
+//! emit-on-update). The session store keys by `key‖end‖start` (a third typed store
+//! over the pluggable backend); read the output with [`SessionWindowedSerde`].
+//!
 //! [`KStream::join`], [`KStream::left_join`], and [`KStream::outer_join`] are the
 //! windowed **stream-stream** joins: two streams join over a [`JoinWindows`] time
 //! window, configured with [`StreamJoined`] serdes. Each side buffers its records
@@ -307,7 +317,8 @@ pub mod topology;
 
 pub use dsl::{
     BranchedStream, Grouped, JoinWindows, KGroupedStream, KTable, Materialized, Repartitioned,
-    StreamJoined, StreamsBuilder, TimeWindowedSerde, TimeWindows, Window, Windowed,
+    SessionWindowedSerde, SessionWindows, StreamJoined, StreamsBuilder, TimeWindowedSerde,
+    TimeWindows, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{

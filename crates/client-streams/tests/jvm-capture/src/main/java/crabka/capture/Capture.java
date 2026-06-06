@@ -76,8 +76,9 @@ public final class Capture {
         write(outDir, "windowed_count", windowedCount());
         write(outDir, "stream_stream_join", streamStreamJoin());
         write(outDir, "stream_stream_outer_join", streamStreamOuterJoin());
+        write(outDir, "session_count", sessionCount());
 
-        System.out.println("Capture complete. Wrote 11 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 12 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -241,6 +242,23 @@ public final class Capture {
         a.join(bt, (va, vb) -> va + vb)
             .toStream()
             .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 12. session_count: stream -> groupByKey -> windowedBy(SessionWindows gap 60s)
+     * -> count -> toStream -> to. Session store; changelog cleanup.policy=compact,delete
+     * + retention.ms = gap + grace + 1day. Pins the session store name + changelog config.
+     */
+    static Topology sessionCount() {
+        StreamsBuilder b = new StreamsBuilder();
+        b.<String, String>stream("in")
+            .groupByKey()
+            .windowedBy(org.apache.kafka.streams.kstream.SessionWindows.ofInactivityGapWithNoGrace(
+                java.time.Duration.ofSeconds(60)))
+            .count()
+            .toStream()
+            .to("out");
         return b.build(optimizedProps());
     }
 

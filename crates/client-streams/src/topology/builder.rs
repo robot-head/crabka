@@ -532,6 +532,58 @@ impl Topology {
         self
     }
 
+    /// Register a session state store connected to the given processors.
+    ///
+    /// Like [`add_window_store`] but for session stores. Reuses the windowed
+    /// (`compact,delete`) changelog config; the `retention.ms` is derived from
+    /// `gap_ms + grace_ms + 86_400_000` (JVM `windowstore.changelog.additional.
+    /// retention.ms` default of 1 day). The store holds the raw aggregate
+    /// (`SessionBytesStore`).
+    ///
+    /// [`add_window_store`]: Topology::add_window_store
+    pub fn add_session_store<K, V, KS, VS>(
+        &mut self,
+        name: impl Into<String>,
+        key_serde: KS,
+        value_serde: VS,
+        gap_ms: i64,
+        grace_ms: i64,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self
+    where
+        K: Send + 'static,
+        V: Send + 'static,
+        KS: Serde<K> + Clone,
+        VS: Serde<V> + Clone,
+    {
+        let name: String = name.into();
+        let retention_ms = gap_ms + grace_ms + 86_400_000;
+        let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
+        // Session changelog == windowed changelog (compact,delete + retention);
+        // reuse the AggWindow ChangelogKind via add_window_store.
+        self.reg.add_window_store(&name, procs, None, retention_ms);
+        self.store_factories.insert(
+            name.clone(),
+            (
+                None,
+                Box::new(
+                    move |store_name: &str,
+                          changelog: String,
+                          backend: Box<dyn crate::store::byte::ByteKeyValueStore>| {
+                        Box::new(crate::store::session::SessionBytesStore::<K, V>::new(
+                            store_name.to_string(),
+                            backend,
+                            Box::new(key_serde.clone()),
+                            Box::new(value_serde.clone()),
+                            changelog,
+                        )) as Box<dyn crate::store::api::StateStore>
+                    },
+                ),
+            ),
+        );
+        self
+    }
+
     /// Register a state store **without** a changelog topic.
     ///
     /// The store is available at runtime (for in-memory state), but NO entry is

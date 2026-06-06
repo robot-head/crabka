@@ -1808,3 +1808,237 @@ fn dsl_stream_stream_outer_join_executes() {
         None
     );
 }
+
+/// Session window count: two records within the inactivity gap merge into one
+/// session (with a tombstone for the intermediate session, which `to_stream`
+/// drops); a record beyond the gap starts a new session. Exercises the JVM
+/// session-merge in the DSL execution path.
+#[test]
+fn dsl_session_count_merges_within_gap() {
+    use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for ts in [0i64, 30, 200] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some("a".to_string()),
+            "x".to_string(),
+            ts,
+        );
+    }
+    let out = Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde);
+    // @0 → new session [0,0] count 1.
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 0 }
+            }),
+            1
+        ))
+    );
+    // @30 (within gap) → merged session [0,30] count 2 (the [0,0] tombstone is
+    // dropped by to_stream).
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 30 }
+            }),
+            2
+        ))
+    );
+    // @200 (beyond gap) → new session [200,200] count 1.
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window {
+                    start: 200,
+                    end: 200
+                }
+            }),
+            1
+        ))
+    );
+    assert_eq!(d.read_output("out", out), None);
+}
+
+/// Two records separated by more than the inactivity gap form two independent
+/// sessions (no merge, no tombstone).
+#[test]
+fn dsl_session_count_separate_beyond_gap() {
+    use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for ts in [0i64, 500] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some("a".to_string()),
+            "x".to_string(),
+            ts,
+        );
+    }
+    let out = Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde);
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 0 }
+            }),
+            1
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window {
+                    start: 500,
+                    end: 500
+                }
+            }),
+            1
+        ))
+    );
+    assert_eq!(d.read_output("out", out), None);
+}
+
+/// Session window `reduce`: values per session fold via the reducer; two records
+/// within the gap merge into one session whose value is the reduced concatenation.
+#[test]
+fn dsl_session_reduce_executes() {
+    use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+        .reduce(
+            |a: &String, c: &String| format!("{a}{c}"),
+            Materialized::with(StringSerde, StringSerde),
+        )
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(SessionWindowedSerde::new(StringSerde), StringSerde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for (v, ts) in [("x", 0i64), ("y", 30)] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some("a".to_string()),
+            v.to_string(),
+            ts,
+        );
+    }
+    let out = Produced::with(SessionWindowedSerde::new(StringSerde), StringSerde);
+    // @0 → [0,0]="x"; @30 (within gap) → merged [0,30]="xy" (the [0,0] tombstone is
+    // dropped by to_stream).
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 0 }
+            }),
+            "x".to_string()
+        ))
+    );
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 30 }
+            }),
+            "xy".to_string()
+        ))
+    );
+    assert_eq!(d.read_output("out", out), None);
+}
+
+/// Session window `aggregate` (with an explicit init/aggregator/merger): a
+/// count-equivalent over a session, exercising the generic session-aggregate
+/// lowering (distinct from the `count` convenience path).
+#[test]
+fn dsl_session_aggregate_executes() {
+    use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+        .aggregate(
+            || 0i64,
+            |_k: &String, _v: &String, acc: i64| acc + 1,
+            |_k: &String, a: i64, b: i64| a + b,
+            Materialized::with(StringSerde, I64Serde),
+        )
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for ts in [0i64, 30] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some("a".to_string()),
+            "x".to_string(),
+            ts,
+        );
+    }
+    let out = Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde);
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 0 }
+            }),
+            1
+        ))
+    );
+    // merged [0,30] aggregate = 2 (merger(0,1)=1 over the buffered session, + agg=2).
+    assert_eq!(
+        d.read_output("out", out),
+        Some((
+            Some(Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 30 }
+            }),
+            2
+        ))
+    );
+    assert_eq!(d.read_output("out", out), None);
+}

@@ -6,6 +6,7 @@ pub(crate) mod change;
 pub(crate) mod join;
 pub(crate) mod ktable_join;
 pub(crate) mod outer_join_store;
+pub(crate) mod session_aggregate;
 pub(crate) mod stateless;
 pub(crate) mod stream_join;
 pub(crate) mod table;
