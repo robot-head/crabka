@@ -43,15 +43,23 @@ async fn subscribe_receives_then_commits() {
     let core = ProduceCore::new(&bootstrap, "gw-c", Arc::new(RawCodec))
         .await
         .unwrap();
-    core.produce(GatewayRecord {
-        topic: "consume-itest".into(),
-        key: None,
-        value: Bytes::from_static(b"c1"),
-        headers: vec![],
-        partition: None,
-        timestamp_ms: None,
-        idempotency_key: None,
-    })
+    let anon = crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    };
+    core.produce(
+        GatewayRecord {
+            topic: "consume-itest".into(),
+            key: None,
+            value: Bytes::from_static(b"c1"),
+            headers: vec![],
+            partition: None,
+            timestamp_ms: None,
+            idempotency_key: None,
+        },
+        &anon,
+    )
     .await
     .unwrap();
 

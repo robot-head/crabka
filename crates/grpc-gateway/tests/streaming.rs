@@ -168,18 +168,22 @@ async fn subscribe_streams_records_then_commits() {
     let state = state_for(&bootstrap).await;
 
     // Produce one record up front.
+    let (prod_principal, _) = anon();
     crabka_grpc_gateway::produce::ProduceCore::new(&bootstrap, "sub-prod", Arc::new(RawCodec))
         .await
         .unwrap()
-        .produce(crabka_grpc_gateway::types::GatewayRecord {
-            topic: "sub-topic".into(),
-            key: None,
-            value: Bytes::from_static(b"hello"),
-            headers: vec![],
-            partition: None,
-            timestamp_ms: None,
-            idempotency_key: None,
-        })
+        .produce(
+            crabka_grpc_gateway::types::GatewayRecord {
+                topic: "sub-topic".into(),
+                key: None,
+                value: Bytes::from_static(b"hello"),
+                headers: vec![],
+                partition: None,
+                timestamp_ms: None,
+                idempotency_key: None,
+            },
+            &prod_principal,
+        )
         .await
         .unwrap();
 

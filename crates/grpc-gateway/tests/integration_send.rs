@@ -49,16 +49,24 @@ async fn produce_plain_then_read_back() {
         .await
         .expect("core");
 
+    let anon = crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    };
     let outcome = core
-        .produce(GatewayRecord {
-            topic: "send-itest".into(),
-            key: None,
-            value: Bytes::from_static(b"payload-1"),
-            headers: vec![],
-            partition: None,
-            timestamp_ms: None,
-            idempotency_key: None,
-        })
+        .produce(
+            GatewayRecord {
+                topic: "send-itest".into(),
+                key: None,
+                value: Bytes::from_static(b"payload-1"),
+                headers: vec![],
+                partition: None,
+                timestamp_ms: None,
+                idempotency_key: None,
+            },
+            &anon,
+        )
         .await
         .expect("produce");
     check!(outcome.partition == 0);

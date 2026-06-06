@@ -144,7 +144,7 @@ pub async fn send(
             )));
             continue;
         }
-        let result = match state.produce.produce(rec).await {
+        let result = match state.produce.produce(rec, &eff).await {
             Ok(o) => pb::RecordResult {
                 partition: o.partition,
                 offset: o.offset,

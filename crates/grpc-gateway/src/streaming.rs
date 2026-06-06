@@ -57,7 +57,7 @@ pub fn send_stream_inner(
                     ));
                     continue;
                 }
-                let result = match state.produce.produce(rec).await {
+                let result = match state.produce.produce(rec, &principal).await {
                     Ok(o) => pb::RecordResult {
                         partition: o.partition,
                         offset: o.offset,

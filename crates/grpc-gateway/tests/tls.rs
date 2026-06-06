@@ -462,15 +462,23 @@ async fn tls_forward_between_two_gateways() {
         idempotency_key: Some(key.clone()),
     };
 
+    // The resolved caller relayed on the mTLS forward; with AllowAll the
+    // owner's re-authz always allows it, so forwarding behavior is unchanged.
+    let anon = crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    };
+
     // Submit through A → forwarded to B over mTLS https → produced (not dedup'd).
-    let first = gw_a.state.produce.produce(mk()).await.unwrap();
+    let first = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
     assert!(
         !first.deduplicated,
         "first mTLS forward should produce, got {first:?}"
     );
 
     // Same key through A again → forwarded to B → B's map hit → deduplicated.
-    let second = gw_a.state.produce.produce(mk()).await.unwrap();
+    let second = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
     assert!(
         second.deduplicated,
         "second mTLS forward should dedup, got {second:?}"
