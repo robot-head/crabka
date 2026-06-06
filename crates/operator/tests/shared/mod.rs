@@ -386,6 +386,7 @@ pub fn op_config(namespace: &str) -> OperatorConfig {
         health_addr: "0.0.0.0:0".parse().unwrap(),
         log_filter: "info".into(),
         default_broker_image: None,
+        default_schema_registry_image: None,
     }
 }
 

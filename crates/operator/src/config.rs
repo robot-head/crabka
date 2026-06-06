@@ -40,6 +40,10 @@ pub struct OperatorConfig {
     /// Default broker image used when `Kafka.spec.image` is unset.
     #[arg(long, env = "DEFAULT_BROKER_IMAGE")]
     pub default_broker_image: Option<String>,
+
+    /// Default schema-registry image used when `SchemaRegistry.spec.image` is unset.
+    #[arg(long, env = "DEFAULT_SCHEMA_REGISTRY_IMAGE")]
+    pub default_schema_registry_image: Option<String>,
 }
 
 impl OperatorConfig {
