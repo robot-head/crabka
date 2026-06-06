@@ -28,6 +28,9 @@ pub struct GroupSnapshot {
     pub group_id: String,
     pub state: crate::coordinator::unified::classic_state::GroupState,
     pub protocol_type: Option<String>,
+    /// Selected protocol NAME, maps to `DescribeGroups` `protocol_data`;
+    /// `None` for an empty/dead group.
+    pub protocol_name: Option<String>,
     pub generation_id: i32,
     pub members: Vec<MemberSnapshot>,
 }
@@ -40,4 +43,7 @@ pub struct MemberSnapshot {
     pub client_host: String,
     /// Assignment bytes from the last `SyncGroup`, or empty if not yet assigned.
     pub assignment: Vec<u8>,
+    /// `JoinGroup` protocol metadata bytes → `DescribeGroups`
+    /// `member_metadata`; empty if not joined / next-gen.
+    pub protocol_metadata: Vec<u8>,
 }

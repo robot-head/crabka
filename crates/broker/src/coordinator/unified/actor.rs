@@ -163,6 +163,7 @@ pub struct ClassicView {
     pub group_id: String,
     pub state: ClassicGroupState,
     pub protocol_type: Option<String>,
+    pub protocol_name: Option<String>,
     pub generation_id: i32,
     pub members: Vec<ClassicMemberView>,
 }
@@ -185,6 +186,7 @@ impl ClassicView {
             group_id: self.group_id.clone(),
             state: self.state,
             protocol_type: self.protocol_type.clone(),
+            protocol_name: self.protocol_name.clone(),
             generation_id: self.generation_id,
             members: self
                 .members
@@ -198,6 +200,7 @@ impl ClassicView {
                         .as_ref()
                         .map(|b| b.to_vec())
                         .unwrap_or_default(),
+                    protocol_metadata: m.protocol_metadata.to_vec(),
                 })
                 .collect(),
         }
@@ -219,6 +222,9 @@ fn build_consumer_snapshot(state: &GroupState, image: &ReconcileInput) -> GroupS
         group_id: state.group_id.clone(),
         state: ClassicGroupState::Stable,
         protocol_type: Some("consumer".into()),
+        // Next-gen (KIP-848) members carry no classic JoinGroup protocol
+        // name; `DescribeGroups` is the classic API, so leave it empty.
+        protocol_name: None,
         generation_id: state.group_epoch,
         members: state
             .members
@@ -236,6 +242,8 @@ fn build_consumer_snapshot(state: &GroupState, image: &ReconcileInput) -> GroupS
                     client_id: m.client_id.clone(),
                     client_host: m.client_host.clone(),
                     assignment,
+                    // Next-gen members carry no classic JoinGroup metadata.
+                    protocol_metadata: Vec::new(),
                 }
             })
             .collect(),
@@ -729,6 +737,7 @@ fn build_classic_view(state: &ClassicState) -> ClassicView {
         group_id: state.group_id.clone(),
         state: state.state,
         protocol_type: state.protocol_type.clone(),
+        protocol_name: state.protocol_name.clone(),
         generation_id: state.generation_id,
         members: state
             .members
