@@ -120,6 +120,7 @@ async fn app_state(bootstrap: &str, client: &str, authz: Arc<GatewayAuthz>) -> A
             membership_topic: MEMBERSHIP.into(),
             tls: None,
             authz: None,
+            webhooks: std::collections::HashMap::new(),
         }),
         authz,
     })
@@ -747,6 +748,7 @@ async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
             membership_topic: MEMBERSHIP.into(),
             tls: None,
             authz: None,
+            webhooks: std::collections::HashMap::new(),
         }),
         authz,
     });

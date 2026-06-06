@@ -199,6 +199,7 @@ async fn main() -> anyhow::Result<()> {
         membership_topic: args.membership_topic.clone(),
         tls: tls.clone(),
         authz,
+        webhooks: std::collections::HashMap::new(),
     };
 
     let bearer = build_bearer(&args)?;

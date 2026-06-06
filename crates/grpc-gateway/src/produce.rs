@@ -50,6 +50,30 @@ impl ProduceCore {
         })
     }
 
+    /// Build a non-idempotent producer for unit tests that don't need a real
+    /// broker. The producer will fail at first send (no bootstrap available),
+    /// but route-layer tests that short-circuit before producing can use this.
+    #[cfg(test)]
+    pub async fn new_for_test(
+        bootstrap: &str,
+        client_id: &str,
+        codec: Arc<dyn RecordCodec>,
+    ) -> Result<Self, GatewayError> {
+        let producer = Producer::builder()
+            .bootstrap(bootstrap.to_string())
+            .client_id(client_id.to_string())
+            .enable_idempotence(false)
+            .acks(Acks::One)
+            .build()
+            .await?;
+        Ok(Self {
+            producer: Arc::new(producer),
+            codec,
+            dedup: None,
+            forwarding: None,
+        })
+    }
+
     /// Inject the dedup engine (Task 12).
     #[must_use]
     pub fn with_dedup(mut self, dedup: Arc<crate::dedup::DedupEngine>) -> Self {
