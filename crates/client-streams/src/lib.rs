@@ -249,6 +249,24 @@
 //! of the source topic to end-of-log — *before* any task begins processing, so the
 //! first joined record already sees the complete global table.
 //!
+//! [`KStream::process`] and [`KStream::process_values`] (KIP-820) drop a custom
+//! Processor-API node into a DSL pipeline: a user-written [`Processor`] (for
+//! `process`) or [`FixedKeyProcessor`] (for `process_values`) that reads and writes
+//! state stores connected by name. Register the store first with
+//! [`StreamsBuilder::add_state_store`] (a compact-changelog [`KeyValueStore`]), then
+//! pass its name to the `process`/`process_values` call that uses it — the named
+//! store is attached to that node and its `app-<store>-changelog` topic appears in
+//! the wire. `process` may rewrite the record key, so its result is
+//! **key-changing**: a downstream `group_by_key`/join inserts a repartition.
+//! `process_values` is **fixed-key** — it can change the value but not the key — so
+//! it carries the upstream key lineage and forces **no** repartition. That guarantee
+//! is structural: a [`FixedKeyProcessor`] only ever receives and forwards a
+//! [`FixedKeyRecord`], whose key is fixed from the input and preserved through
+//! [`FixedKeyRecord::with_value`]; the context's only `forward` re-attaches that key,
+//! so the processor cannot emit a different one. (An `add_state_store` store that no
+//! `process`/`process_values` connects is simply never instantiated — no changelog,
+//! no runtime store; an explicit unconnected-store build error is deferred.)
+//!
 //! ```
 //! use crabka_client_streams::{
 //!     Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder, StringSerde,
@@ -369,7 +387,8 @@ pub use membership::{
     TopicPartition,
 };
 pub use processor::{
-    BytesSerde, Consumed, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier,
+    BytesSerde, Consumed, FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyProcessorSupplier,
+    FixedKeyRecord, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier,
     Produced, Record, RecordContext, Serde, SerdeError, StringSerde,
 };
 pub use runtime::{KafkaStreams, KafkaStreamsState};

@@ -276,6 +276,65 @@ fn to_table_matches_jvm() {
 }
 
 #[test]
+fn process_matches_jvm() {
+    use crabka_client_streams::{Processor, ProcessorContext, Record};
+    // Mirrors a JVM `addStateStore("store") + process(supplier, "store") + to("out")`
+    // app: ONE subtopology "0", source "in", and the connected store's compact
+    // `app-store-changelog`. The Fwd processor just forwards each record unchanged;
+    // the store connection (not its use) is what surfaces the changelog topic.
+    struct Fwd;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, String> for Fwd {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
+            r: Record<String, String>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process(|| Fwd, ["store"])
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "process");
+}
+
+#[test]
+fn process_values_matches_jvm() {
+    use crabka_client_streams::{
+        Consumed, FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord, Produced,
+        StringSerde,
+    };
+    // Mirrors a JVM `addStateStore("store") + processValues(supplier, "store") +
+    // to("out")` app: ONE subtopology "0", source "in", and the connected store's
+    // compact `app-store-changelog`. processValues preserves the key, so the wire is
+    // byte-identical to the `process` fixture (per the T1 capture). The FixedFwd
+    // processor forwards each record unchanged; the store connection (not its use) is
+    // what surfaces the changelog topic.
+    struct FixedFwd;
+    #[async_trait::async_trait]
+    impl FixedKeyProcessor<String, String, String> for FixedFwd {
+        async fn process(
+            &mut self,
+            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
+            r: FixedKeyRecord<String, String>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process_values(|| FixedFwd, ["store"])
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "process_values");
+}
+
+#[test]
 fn stream_table_join_matches_jvm() {
     use crabka_client_streams::{Materialized, StringSerde};
     // Mirrors Capture.java `streamTableJoin()`:

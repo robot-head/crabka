@@ -3,6 +3,7 @@
 pub mod api;
 pub mod erased;
 pub(crate) mod factory;
+pub mod fixed_key;
 pub(crate) mod graph;
 pub(crate) mod node;
 pub mod record;
@@ -10,5 +11,8 @@ pub mod serde;
 
 pub use api::{Processor, ProcessorContext, ProcessorSupplier};
 pub use erased::ProcessorError;
+pub use fixed_key::{
+    FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyProcessorSupplier, FixedKeyRecord,
+};
 pub use record::{Record, RecordContext};
 pub use serde::{BytesSerde, Consumed, I64Serde, Produced, Serde, SerdeError, StringSerde};

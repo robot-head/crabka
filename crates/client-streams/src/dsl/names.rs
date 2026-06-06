@@ -94,3 +94,8 @@ pub(crate) const GLOBAL_SOURCE: &str = "KSTREAM-SOURCE-";
 /// wire-visible.
 #[allow(dead_code)]
 pub(crate) const GLOBAL_PROCESSOR: &str = "KTABLE-SOURCE-";
+/// JVM `KStream.process` node prefix. Not wire-visible (the wire lists topics, not
+/// processor names), but used for fidelity + diagnostics.
+pub(crate) const KSTREAM_PROCESSOR: &str = "KSTREAM-PROCESSOR-";
+/// JVM `KStream.processValues` node prefix. Not wire-visible.
+pub(crate) const KSTREAM_PROCESSVALUES: &str = "KSTREAM-PROCESSVALUES-";

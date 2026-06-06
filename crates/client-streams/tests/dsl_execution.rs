@@ -2595,3 +2595,309 @@ fn dsl_global_join_key_mapper_derives_compound_key() {
         Some((Some("k1".to_string()), "v1G".to_string()))
     );
 }
+
+// ---------------------------------------------------------------------------
+// KStream::process (custom Processor-API node + connected state stores)
+// ---------------------------------------------------------------------------
+
+/// `KStream::process` with a stateful custom processor: a `Counter` reads/writes
+/// a connected `counts` store per record and forwards `(value, running_count)`.
+///
+/// Topology: `stream("in")` → `process(Counter, ["counts"])` → `to("out")`.
+/// Pipe `("k","a")`,`("k","a")`,`("k","b")`; the per-VALUE running count yields
+/// `("a",1)`,`("a",2)`,`("b",1)`, and the store holds 2 for "a".
+#[test]
+fn dsl_process_stateful_counter_executes() {
+    use crabka_client_streams::{Processor, ProcessorContext, Record};
+    struct Counter;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, i64> for Counter {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, i64>,
+            r: Record<String, String>,
+        ) {
+            let n = {
+                let store = ctx.get_state_store::<String, i64>("counts").unwrap();
+                let n = store.get(&r.value).await.unwrap_or(0) + 1;
+                store.put(r.value.clone(), n).await;
+                n
+            };
+            ctx.forward(Record::new(Some(r.value), n, r.timestamp));
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, i64, _, _>("counts", StringSerde, I64Serde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process(|| Counter, ["counts"])
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for v in ["a", "a", "b"] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some("k".to_string()),
+            v.to_string(),
+            0,
+        );
+    }
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("a".into()), 1))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("a".into()), 2))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        Some((Some("b".into()), 1))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, I64Serde)),
+        None
+    );
+    assert_eq!(
+        d.store_get::<String, i64>("counts", &"a".to_string()),
+        Some(2)
+    );
+}
+
+/// `KStream::process` is **key-changing**: a downstream aggregation must insert a
+/// repartition. Build `stream("in").process(Fwd,["store"]).group_by_key().count()`
+/// and assert the wire carries a repartition topic (the process result re-keys, so
+/// the count repartitions before aggregating).
+#[test]
+fn dsl_process_is_key_changing_forces_repartition() {
+    use crabka_client_streams::{Processor, ProcessorContext, Record};
+    struct Fwd;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, String> for Fwd {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
+            r: Record<String, String>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process(|| Fwd, ["store"])
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let wire = b.build("app").unwrap().to_wire();
+    // The process result is key-changing → the count inserts a repartition. Assert
+    // SOME subtopology has a non-empty repartition sink + source.
+    let has_sink = wire
+        .subtopologies
+        .iter()
+        .any(|s| !s.repartition_sink_topics.is_empty());
+    let has_source = wire
+        .subtopologies
+        .iter()
+        .any(|s| !s.repartition_source_topics.is_empty());
+    assert!(
+        has_sink && has_source,
+        "expected a repartition topic from the key-changing process; wire = {wire:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// KStream::process_values (fixed-key custom Processor-API node)
+// ---------------------------------------------------------------------------
+
+/// `KStream::process_values` with a fixed-key processor that uppercases the value
+/// and forwards — the KEY is preserved (KIP-820 fixed-key semantics).
+///
+/// Topology: `stream("in")` → `process_values(Upper, ["store"])` → `to("out")`.
+/// Pipe `("k","hi")`; the output is `("k","HI")` — SAME key, uppercased value. The
+/// store is connected (so the changelog appears) but not read by the processor.
+#[test]
+fn dsl_process_values_preserves_key_executes() {
+    use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
+    struct Upper;
+    #[async_trait::async_trait]
+    impl FixedKeyProcessor<String, String, String> for Upper {
+        async fn process(
+            &mut self,
+            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
+            r: FixedKeyRecord<String, String>,
+        ) {
+            // Capture the value before `with_value` consumes the record.
+            let v = r.value.clone();
+            ctx.forward(r.with_value(v.to_uppercase()));
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process_values(|| Upper, ["store"])
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    d.pipe_input(
+        "in",
+        Consumed::with(StringSerde, StringSerde),
+        Some("k".to_string()),
+        "hi".to_string(),
+        0,
+    );
+    // SAME key "k", value uppercased to "HI".
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "HI".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        None
+    );
+}
+
+/// `KStream::process_values` is **non-key-changing** (KIP-820 preserves the key):
+/// a downstream aggregation must NOT insert a repartition. Build
+/// `stream("in").process_values(Upper,["store"]).group_by_key().count()` and assert
+/// the wire carries NO repartition topic anywhere. This is the CONTRAST with the
+/// `process` case (`dsl_process_is_key_changing_forces_repartition`), which DOES
+/// repartition.
+#[test]
+fn dsl_process_values_is_not_key_changing_no_repartition() {
+    use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
+    struct Upper;
+    #[async_trait::async_trait]
+    impl FixedKeyProcessor<String, String, String> for Upper {
+        async fn process(
+            &mut self,
+            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
+            r: FixedKeyRecord<String, String>,
+        ) {
+            let v = r.value.clone();
+            ctx.forward(r.with_value(v.to_uppercase()));
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process_values(|| Upper, ["store"])
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+        .to_stream()
+        .to("out", Produced::with(StringSerde, I64Serde));
+    let wire = b.build("app").unwrap().to_wire();
+    // process_values preserves the key → NO repartition. Every subtopology's
+    // repartition sink AND source lists must be empty.
+    let any_sink = wire
+        .subtopologies
+        .iter()
+        .any(|s| !s.repartition_sink_topics.is_empty());
+    let any_source = wire
+        .subtopologies
+        .iter()
+        .any(|s| !s.repartition_source_topics.is_empty());
+    assert!(
+        !any_sink && !any_source,
+        "expected NO repartition topic from non-key-changing process_values; wire = {wire:?}"
+    );
+}
+
+/// `process_values` reading a CONNECTED store via `get_state_store` and the source
+/// `record_context`: a `Tagger` counts per-key occurrences in the `seen` store and
+/// forwards `value#count`, keeping the key. Exercises the fixed-key context's
+/// store/record-context accessors over the real runtime path. Pipe `("k","a")`,
+/// `("k","b")` → `("k","a#1")`,`("k","b#2")`.
+#[test]
+fn dsl_process_values_reads_store_and_record_context() {
+    use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
+    struct Tagger;
+    #[async_trait::async_trait]
+    impl FixedKeyProcessor<String, String, String> for Tagger {
+        async fn process(
+            &mut self,
+            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
+            r: FixedKeyRecord<String, String>,
+        ) {
+            // Source metadata is available on every record.
+            assert!(!ctx.record_context().topic.is_empty());
+            let n = {
+                let store = ctx.get_state_store::<String, i64>("seen").unwrap();
+                let n = store.get(&r.key).await.unwrap_or(0) + 1;
+                store.put(r.key.clone(), n).await;
+                n
+            };
+            let v = r.value.clone();
+            ctx.forward(r.with_value(format!("{v}#{n}")));
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, i64, _, _>("seen", StringSerde, I64Serde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process_values(|| Tagger, ["seen"])
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for v in ["a", "b"] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some("k".to_string()),
+            v.to_string(),
+            0,
+        );
+    }
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "a#1".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "b#2".to_string()))
+    );
+}
+
+/// `process` referencing a store that was never `add_state_store`-ed panics at call
+/// time (the missing-store guard) — the store thunk is looked up when `process` is
+/// called, not deferred to lowering.
+#[test]
+#[should_panic(expected = "was not added via add_state_store")]
+fn dsl_process_unknown_store_panics() {
+    use crabka_client_streams::{Processor, ProcessorContext, Record};
+    struct Fwd;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, String> for Fwd {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
+            r: Record<String, String>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process(|| Fwd, ["missing"]);
+}
+
+/// `process_values` referencing an unadded store panics at call time, same guard.
+#[test]
+#[should_panic(expected = "was not added via add_state_store")]
+fn dsl_process_values_unknown_store_panics() {
+    use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
+    struct FixedFwd;
+    #[async_trait::async_trait]
+    impl FixedKeyProcessor<String, String, String> for FixedFwd {
+        async fn process(
+            &mut self,
+            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
+            r: FixedKeyRecord<String, String>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process_values(|| FixedFwd, ["missing"]);
+}
