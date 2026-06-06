@@ -191,7 +191,7 @@ pub(crate) async fn handle(
     let image = broker.controller.current_image();
     // Whole-request Cluster Alter authorize.
     let allow = broker.config.authorizer.authorize(
-        &image,
+        &*image,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

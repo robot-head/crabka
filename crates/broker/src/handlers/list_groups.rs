@@ -56,7 +56,7 @@ pub(crate) async fn handle(
             resource_name: group_id,
             operation: AclOperation::Describe,
         };
-        broker.config.authorizer.authorize(&image, &acl_req) != AuthorizationResult::Deny
+        broker.config.authorizer.authorize(&*image, &acl_req) != AuthorizationResult::Deny
     };
 
     let mut groups: Vec<ListedGroup> = Vec::with_capacity(snapshots.len());

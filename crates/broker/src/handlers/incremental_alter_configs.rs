@@ -96,7 +96,7 @@ pub(crate) async fn handle(
         // Other resource types are unsupported (INVALID_RESOURCE_TYPE) — checked after ACL.
         let acl_result = match resource.resource_type {
             RESOURCE_TYPE_TOPIC => broker.config.authorizer.authorize(
-                &image,
+                &*image,
                 &AuthorizationRequest {
                     principal: ctx.principal,
                     host: ctx.peer,
@@ -107,7 +107,7 @@ pub(crate) async fn handle(
             ),
             RESOURCE_TYPE_BROKER | RESOURCE_TYPE_CLIENT_METRICS => {
                 broker.config.authorizer.authorize(
-                    &image,
+                    &*image,
                     &AuthorizationRequest {
                         principal: ctx.principal,
                         host: ctx.peer,

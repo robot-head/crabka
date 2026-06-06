@@ -97,7 +97,7 @@ pub(crate) async fn handle(
                 resource_name: tid,
                 operation: AclOperation::Write,
             };
-            broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny
+            broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny
         }
         _ => false,
     };
@@ -119,7 +119,7 @@ pub(crate) async fn handle(
         .collect();
     let acl_results = authorize_topics(
         broker.config.authorizer.as_ref(),
-        &image,
+        &*image,
         ctx.principal,
         ctx.peer,
         AclOperation::Write,

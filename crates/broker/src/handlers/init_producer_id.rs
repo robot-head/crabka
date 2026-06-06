@@ -65,7 +65,7 @@ pub(crate) async fn handle(
                     resource_name: tid,
                     operation: AclOperation::Write,
                 };
-                if authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
+                if authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
                     return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
                 }
             }
@@ -77,7 +77,7 @@ pub(crate) async fn handle(
                     resource_name: "kafka-cluster",
                     operation: AclOperation::IdempotentWrite,
                 };
-                if authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
+                if authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
                     return encode_err(version, codes::CLUSTER_AUTHORIZATION_FAILED);
                 }
             }

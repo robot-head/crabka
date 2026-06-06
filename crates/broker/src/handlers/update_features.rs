@@ -50,7 +50,7 @@ pub(crate) async fn handle(
 
     // Whole-request Cluster:Alter gate.
     let authorized = broker.config.authorizer.authorize(
-        &image,
+        &*image,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

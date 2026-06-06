@@ -57,7 +57,7 @@ pub(crate) async fn handle(
             resource_name: req.group_id.as_str(),
             operation: AclOperation::Describe,
         };
-        if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
+        if broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
             let resp = OffsetFetchResponse {
                 topics: Vec::new(),
                 error_code: codes::GROUP_AUTHORIZATION_FAILED,
@@ -122,7 +122,7 @@ pub(crate) async fn handle(
             let image = broker.controller.current_image();
             authorize_topics(
                 broker.config.authorizer.as_ref(),
-                &image,
+                &*image,
                 ctx.principal,
                 ctx.peer,
                 AclOperation::Read,
@@ -174,7 +174,7 @@ pub(crate) async fn handle(
             let image = broker.controller.current_image();
             authorize_topics(
                 broker.config.authorizer.as_ref(),
-                &image,
+                &*image,
                 ctx.principal,
                 ctx.peer,
                 AclOperation::Read,
@@ -277,7 +277,7 @@ async fn handle_groups(
                 resource_name: grp.group_id.as_str(),
                 operation: AclOperation::Describe,
             };
-            if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
+            if broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
                 groups_out.push(OffsetFetchResponseGroup {
                     group_id: grp.group_id.clone(),
                     topics: Vec::new(),
@@ -342,7 +342,7 @@ async fn handle_groups(
                     resolved.iter().filter_map(|(_, n)| n.clone()).collect();
                 let decisions = authorize_topics(
                     broker.config.authorizer.as_ref(),
-                    &image,
+                    &*image,
                     ctx.principal,
                     ctx.peer,
                     AclOperation::Read,
@@ -446,7 +446,7 @@ async fn handle_groups(
                 let discovered: Vec<String> = by_topic.keys().cloned().collect();
                 let decisions = authorize_topics(
                     broker.config.authorizer.as_ref(),
-                    &image,
+                    &*image,
                     ctx.principal,
                     ctx.peer,
                     AclOperation::Read,

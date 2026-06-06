@@ -73,7 +73,7 @@ pub(crate) async fn handle(
         resource_name: tid,
         operation: AclOperation::Write,
     };
-    if authorizer.authorize(&image, &tid_req) == AuthorizationResult::Deny {
+    if authorizer.authorize(&*image, &tid_req) == AuthorizationResult::Deny {
         return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
     }
 

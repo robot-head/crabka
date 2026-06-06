@@ -41,7 +41,7 @@ pub(crate) async fn handle(
     // Whole-request Cluster Describe gate. On Deny, return
     // CLUSTER_AUTHORIZATION_FAILED on the whole response.
     let allow = broker.config.authorizer.authorize(
-        &image,
+        &*image,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

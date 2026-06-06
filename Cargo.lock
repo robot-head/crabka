@@ -1289,6 +1289,7 @@ dependencies = [
  "base64",
  "bytes",
  "clap",
+ "crabka-authz",
  "crabka-broker",
  "crabka-client-consumer",
  "crabka-client-core",
