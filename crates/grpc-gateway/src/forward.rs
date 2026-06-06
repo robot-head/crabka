@@ -193,7 +193,8 @@ impl Forwarder {
 
     /// POST the record to `owner_addr`'s internal forward endpoint. Transport
     /// failures and owner-`retriable` errors become `Unavailable` so the origin
-    /// retries / re-resolves to the (possibly new) owner.
+    /// retries / re-resolves to the (possibly new) owner; an owner authorization
+    /// denial (HTTP 403) becomes a non-retriable `Unauthorized`.
     pub async fn forward(
         &self,
         owner_addr: &str,
@@ -209,21 +210,33 @@ impl Forwarder {
             .send()
             .await
             .map_err(|_| GatewayError::Unavailable)?;
-        if !resp.status().is_success() {
-            return Err(GatewayError::Unavailable);
-        }
-        let result: ForwardResult = resp
-            .json()
-            .await
-            .map_err(|e| GatewayError::Forward(format!("decode forward result: {e}")))?;
-        match result.error {
-            None => Ok(RecordOutcome {
-                partition: result.partition,
-                offset: result.offset,
-                deduplicated: result.deduplicated,
-            }),
-            Some(e) if e.retriable => Err(GatewayError::Unavailable),
-            Some(e) => Err(GatewayError::Forward(e.message)),
+        // Parse the body regardless of status: the owner returns a JSON
+        // ForwardResult even on 403 (authz deny / unauthenticated peer). A
+        // denied forward must surface as a NON-retriable error, not a retriable
+        // Unavailable, so the caller doesn't retry-loop a permanent denial.
+        let status = resp.status();
+        match resp.json::<ForwardResult>().await {
+            Ok(result) => match result.error {
+                None if status.is_success() => Ok(RecordOutcome {
+                    partition: result.partition,
+                    offset: result.offset,
+                    deduplicated: result.deduplicated,
+                }),
+                None => Err(GatewayError::Unavailable),
+                Some(e) if e.retriable => Err(GatewayError::Unavailable),
+                // A non-retriable owner error on a 403 is an authorization
+                // denial: surface it as permanent PERMISSION_DENIED, never retry.
+                Some(e) if status == reqwest::StatusCode::FORBIDDEN => {
+                    Err(GatewayError::Unauthorized(e.message))
+                }
+                Some(e) => Err(GatewayError::Forward(e.message)),
+            },
+            // A 2xx with an undecodable body is a malformed owner response (fatal);
+            // a non-2xx with no JSON body is a transient transport-level failure.
+            Err(e) if status.is_success() => {
+                Err(GatewayError::Forward(format!("decode forward result: {e}")))
+            }
+            Err(_) => Err(GatewayError::Unavailable),
         }
     }
 }

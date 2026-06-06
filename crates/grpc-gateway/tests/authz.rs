@@ -368,12 +368,11 @@ async fn bearer_token_resolves_principal() {
 ///    - `mallory` (not granted) ⇒ B denies; the forward surfaces an error and
 ///      no extra record lands.
 ///
-///    NOTE on the deny surface: `forward_handler` returns HTTP 403 on a denied
-///    forward, and the forwarding client maps any non-2xx to
-///    `GatewayError::Unavailable` (it never parses the 403 body). So a denied
-///    forward presents to the origin as `Unavailable`, not `Unauthorized`. The
-///    load-bearing assertions are "allowed ⇒ produced once" and "denied ⇒
-///    errored + not produced".
+///    Deny surface: `forward_handler` returns HTTP 403 on a denied forward, and
+///    the forwarding client parses that body and maps it to a non-retriable
+///    `GatewayError::Unauthorized` (so the caller doesn't retry a permanent
+///    denial). The load-bearing assertions are "allowed ⇒ produced once" and
+///    "denied ⇒ Unauthorized + not produced".
 #[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn forwarding_owner_reauthorizes_caller() {
@@ -474,8 +473,8 @@ async fn forwarding_owner_reauthorizes_caller() {
     assert!(!first.deduplicated, "first granted forward should produce");
     assert_eq!(count_value(&bootstrap, "t", b"alice-val").await, 1);
 
-    // Denied: mallory forwarded A→B, B's cache denies ⇒ origin sees an error
-    // (mapped to Unavailable per the note above) and nothing extra lands.
+    // Denied: mallory forwarded A→B, B's cache denies ⇒ origin sees a
+    // non-retriable Unauthorized (403 body parsed) and nothing extra lands.
     let mallory = principal("mallory");
     let denied = gw_a
         .state
@@ -487,8 +486,8 @@ async fn forwarding_owner_reauthorizes_caller() {
         "ungranted forwarded caller must be rejected, got {denied:?}"
     );
     assert!(
-        matches!(denied, Err(GatewayError::Unavailable)),
-        "denied forward surfaces as Unavailable (403 → non-2xx), got {denied:?}"
+        matches!(denied, Err(GatewayError::Unauthorized(_))),
+        "denied forward surfaces as non-retriable Unauthorized, got {denied:?}"
     );
     assert_eq!(
         count_value(&bootstrap, "t", b"mallory-val").await,

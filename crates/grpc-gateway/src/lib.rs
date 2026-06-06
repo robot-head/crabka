@@ -1,6 +1,8 @@
 //! `crabka-grpc-gateway` — gRPC / Connect-RPC + HTTP gateway into Crabka topics.
 //!
-//! Built entirely on the native client crates; the broker is never modified.
+//! Built on the native client crates. The broker's Kafka wire stays byte-exact;
+//! P5 factored the shared `crabka-authz` ACL evaluator out of the broker (a
+//! behavior-preserving refactor), which the gateway reuses for authorization.
 
 pub mod authz;
 pub mod codec;

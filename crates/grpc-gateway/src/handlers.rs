@@ -16,9 +16,6 @@ use crate::state::AppState;
 /// The principal used when no authenticated identity is present on the request
 /// (plaintext listener, or no proxy-injected identity). Mirrors Kafka's
 /// `ANONYMOUS` principal so ACLs can target it explicitly.
-///
-/// NOTE: the parallel auth-layer task introduces `crate::authz::auth_layer::
-/// anonymous()`; until that lands this local constructor is the single source.
 pub(crate) fn anonymous_principal() -> Principal {
     Principal {
         name: "ANONYMOUS".into(),
