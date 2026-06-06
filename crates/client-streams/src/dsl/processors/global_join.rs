@@ -56,12 +56,10 @@ where
     async fn process(&mut self, ctx: &mut ProcessorContext<'_, '_, K, VR>, r: Record<K, V>) {
         let k = r.key.expect("global join requires a non-null stream key");
         let gk = (self.key_mapper)(&k, &r.value);
-        // Scoped borrow: look up + drop the global-store borrow before forwarding
-        // (the store `get` future can't be held across `ctx.forward`).
-        let looked = match ctx.get_global_kv_store::<GK, VG>(&self.store_name) {
-            Some(s) => s.get(&gk).await,
-            None => None,
-        };
+        // Read an owned value from the shared global manager: the lookup completes
+        // (and drops the manager's lock) before `ctx.forward`, so no borrow/future
+        // is held across the forward.
+        let looked = ctx.global_get::<GK, VG>(&self.store_name, &gk).await;
         if looked.is_some() || self.emit_on_miss {
             let out = (self.joiner)(&r.value, looked.as_ref());
             ctx.forward(Record::new(Some(k), out, r.timestamp));
@@ -80,25 +78,46 @@ mod tests {
     use crate::processor::api::ProcessorContext;
     use crate::processor::erased::{Dispatch, ErasedRecord};
     use crate::processor::record::RecordContext;
-    use crate::processor::serde::StringSerde;
-    use crate::store::api::KeyValueStore;
-    use crate::store::kv::KeyValueBytesStore;
+    use crate::processor::serde::{Consumed, StringSerde};
+    use crate::runtime::global::GlobalStateManager;
+    use crate::store::backend::StoreBackend;
     use crate::store::registry::StoreRegistry;
+    use crate::topology::Topology;
 
-    /// Build a store registry holding a global `KeyValueBytesStore<String,String>`
-    /// named `"g-store"` pre-seeded with `("v", "gv")` (so a `key_mapper` of
-    /// `|_k, v| v.clone()` finds it for a record whose value is `"v"`).
-    async fn make_stores() -> StoreRegistry {
-        let mut stores = StoreRegistry::default();
-        let mut kv = KeyValueBytesStore::<String, String>::in_memory(
-            "g-store".into(),
-            Box::new(StringSerde),
-            Box::new(StringSerde),
-            "app-g-store-changelog".into(),
+    /// Build a shared `GlobalStateManager` holding a global
+    /// `KeyValueBytesStore<String,String>` named `"g-store"` pre-seeded with
+    /// `("v", "gv")` (so a `key_mapper` of `|_k, v| v.clone()` finds it for a
+    /// record whose value is `"v"`). The store comes from the real
+    /// `add_global_store` → `build` path; the seed value is injected via `put`.
+    async fn make_globals() -> GlobalStateManager {
+        let mut t = Topology::new();
+        t.add_global_store::<String, String, _, _>(
+            "g-store",
+            "g-src",
+            "g-topic",
+            "g-proc",
+            Consumed::with(StringSerde, StringSerde),
         );
-        kv.put("v".to_string(), "gv".to_string()).await;
-        stores.insert(Box::new(kv));
-        stores
+        // A topology needs a non-global source/sink to build (global is invisible).
+        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        t.add_sink(
+            "snk",
+            "out",
+            [&src],
+            crate::processor::serde::Produced::with(StringSerde, StringSerde),
+        );
+        let built = t.build("app").unwrap();
+        let globals = GlobalStateManager::build(
+            built.global_store_factories_for_test(),
+            built.global_store_topics(),
+            &StoreBackend::InMemory,
+            "app",
+        )
+        .await;
+        globals
+            .put("g-store", "v".to_string(), "gv".to_string())
+            .await;
+        globals
     }
 
     /// Drive one `(key, value)` record through `proc` and return the forwarded
@@ -113,13 +132,14 @@ mod tests {
             impl Fn(&String, &String) -> String + Send + 'static,
             impl Fn(&String, Option<&String>) -> String + Send + 'static,
         >,
-        stores: &mut StoreRegistry,
+        globals: &GlobalStateManager,
         key: &str,
         value: &str,
     ) -> Option<String> {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
+        let mut stores = StoreRegistry::default();
         let rc = RecordContext {
             topic: "in".into(),
             partition: 0,
@@ -131,7 +151,8 @@ mod tests {
             children: &children,
             output: &mut output,
             record_ctx: &rc,
-            stores,
+            stores: &mut stores,
+            globals,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         proc.process(
@@ -149,7 +170,8 @@ mod tests {
     /// the record.
     #[tokio::test]
     async fn inner_join_hit_uses_derived_key_and_keeps_stream_key() {
-        let mut stores = make_stores().await;
+        let globals = make_globals().await;
+        let mut stores = StoreRegistry::default();
         let mut proc = KStreamGlobalTableJoinProcessor {
             store_name: "g-store".into(),
             // lookup key = the record value, not the stream key
@@ -177,6 +199,7 @@ mod tests {
             output: &mut output,
             record_ctx: &rc,
             stores: &mut stores,
+            globals: &globals,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         proc.process(
@@ -192,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn inner_join_miss_drops() {
-        let mut stores = make_stores().await;
+        let globals = make_globals().await;
         let mut proc = KStreamGlobalTableJoinProcessor {
             store_name: "g-store".into(),
             key_mapper: |_k: &String, v: &String| v.clone(),
@@ -204,13 +227,13 @@ mod tests {
         };
 
         // miss: ("k", "absent") → gk = "absent" → not in store → dropped
-        let out = run_one(&mut proc, &mut stores, "k", "absent").await;
+        let out = run_one(&mut proc, &globals, "k", "absent").await;
         check!(out == None);
     }
 
     #[tokio::test]
     async fn left_join_emits_on_miss_with_none() {
-        let mut stores = make_stores().await;
+        let globals = make_globals().await;
         let mut proc = KStreamGlobalTableJoinProcessor {
             store_name: "g-store".into(),
             key_mapper: |_k: &String, v: &String| v.clone(),
@@ -222,11 +245,11 @@ mod tests {
         };
 
         // hit still works
-        let hit = run_one(&mut proc, &mut stores, "k", "v").await;
+        let hit = run_one(&mut proc, &globals, "k", "v").await;
         check!(hit == Some("v+gv".to_string()));
 
         // miss: joiner receives None → "absent+<none>"
-        let miss = run_one(&mut proc, &mut stores, "k", "absent").await;
+        let miss = run_one(&mut proc, &globals, "k", "absent").await;
         check!(miss == Some("absent+<none>".to_string()));
     }
 }

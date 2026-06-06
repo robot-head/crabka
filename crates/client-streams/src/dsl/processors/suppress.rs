@@ -225,12 +225,14 @@ mod tests {
 
         // Two updates for window [0,10): count 1 then 2. ts in [0,10) < window end.
         for (cnt, ts) in [(1i64, 1i64), (2, 3)] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             let change = if cnt == 1 {
@@ -249,12 +251,14 @@ mod tests {
 
         // A record for window [20,30) advances stream_time to 25 ≥ 10 → [0,10) closes.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -288,12 +292,14 @@ mod tests {
         let mut proc = window_close_proc(5, None); // grace 5
 
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -304,12 +310,14 @@ mod tests {
         }
         // stream_time 12 → threshold 12-5=7 < window end 10 → NOT closed.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -321,12 +329,14 @@ mod tests {
         assert!(buffer.is_empty());
         // stream_time 16 → threshold 11 >= 10 → [0,10) closes.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -364,12 +374,14 @@ mod tests {
         let mut proc = window_close_proc(0, Some(2)); // cap 2
         // Three distinct keys in the SAME open window [0,10) (ts < 10 → none close).
         for (k, ts) in [("a", 1i64), ("b", 2), ("c", 3)] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             // the third put brings len() to 3 > cap 2 → panic
@@ -407,12 +419,14 @@ mod tests {
             false,
         );
         for (k, ts) in [("a", 1i64), ("b", 2)] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -439,12 +453,14 @@ mod tests {
         let mut proc = window_close_proc(0, Some(2)); // cap 2
         // Two keys in [0,10): len == cap, not over → no panic.
         for (k, ts) in [("a", 1i64), ("b", 2)] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -458,12 +474,14 @@ mod tests {
         // BEFORE the cap check, so len drops to 1 (the new window) → no panic, and
         // both [0,10) entries emit.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, Windowed<String>, Change<i64>>::new(&mut d);
             proc.process(
@@ -511,12 +529,14 @@ mod tests {
             ("a", Change::update(Some(1), 2), 40),
             ("b", Change::update(None, 1), 60),
         ] {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some(k.to_string()), change, ts))
@@ -529,12 +549,14 @@ mod tests {
 
         // stream-time 90 (threshold 40): a@40 is now due → emits the NEWER value (2).
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut d);
             proc.process(

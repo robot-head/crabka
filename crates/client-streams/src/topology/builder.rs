@@ -1185,6 +1185,10 @@ impl BuiltTopology {
             sources,
             output: Vec::new(),
             stores: store_registry,
+            // Default-empty here; the app wiring (T8b) / TopologyTestDriver builds
+            // and assigns the shared GlobalStateManager. `instantiate` produces a
+            // per-task graph and never owns the fully-replicated global stores.
+            globals: crate::runtime::global::GlobalStateManager::default(),
         })
     }
 }

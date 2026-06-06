@@ -286,12 +286,14 @@ mod tests {
         // Process A-record (k, "a") at ts=5 → fetch other [5-10, 5+10]=[-5,15]
         // → matches b1@3 (not b2@50).
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("k".into()), "a".into(), 5))
@@ -330,12 +332,14 @@ mod tests {
 
         // Process A-record (k, "a") at ts=5 → window [-5,15] → both duplicates at ts=4
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("k".into()), "a".into(), 5))
@@ -404,12 +408,14 @@ mod tests {
         // First A at t=5 with no B match. Its window (5+after=15) is open at
         // stream_time=5 → buffered, no forward yet.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("k".into()), "a".into(), 5))
@@ -422,12 +428,14 @@ mod tests {
         // the buffered left record (joiner(a, None) = "a") at its own ts=5. The
         // t=100 record itself buffers (window open) and does not emit.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut d);
             proc.process(&mut ctx, Record::new(Some("k".into()), "z".into(), 100))

@@ -30,6 +30,10 @@ pub(crate) struct Graph {
     pub sources: Vec<GraphSource>,
     pub output: Vec<OutputRecord>,
     pub stores: StoreRegistry,
+    /// The app-wide, fully-replicated global stores (shared across tasks),
+    /// lent into each dispatch. Default-empty until the app wiring (T8b) or the
+    /// `TopologyTestDriver` populates it; stream-globaltable joins read it.
+    pub globals: crate::runtime::global::GlobalStateManager,
 }
 
 impl Graph {
@@ -81,6 +85,7 @@ impl Graph {
                     output: out,
                     record_ctx: &rc,
                     stores,
+                    globals: &self.globals,
                 };
                 node.process(&mut d, rec).await
             };
@@ -109,12 +114,14 @@ impl Graph {
             };
             let node = &mut self.nodes[idx];
             let stores = &mut self.stores;
+            let globals = &self.globals;
             let mut d = Dispatch {
                 buffer: &mut buffer,
                 children: &[],
                 output: &mut output,
                 record_ctx: &rc,
                 stores,
+                globals,
             };
             node.init(&mut d).await?;
         }
@@ -210,6 +217,7 @@ mod tests {
             sources: vec![source],
             output: Vec::new(),
             stores: crate::store::registry::StoreRegistry::default(),
+            globals: crate::runtime::global::GlobalStateManager::default(),
         };
         graph.pipe("in", Some(b"k"), b"hi", 7).await.unwrap();
         let out = graph.take_output();
@@ -226,6 +234,7 @@ mod tests {
             sources: vec![],
             output: Vec::new(),
             stores: crate::store::registry::StoreRegistry::default(),
+            globals: crate::runtime::global::GlobalStateManager::default(),
         };
         graph.pipe("nope", None, b"x", 0).await.unwrap();
         check!(graph.take_output().is_empty());
@@ -292,6 +301,7 @@ mod tests {
             sources: vec![source],
             output: Vec::new(),
             stores,
+            globals: crate::runtime::global::GlobalStateManager::default(),
         };
 
         // pipe "in"/"a" twice — counter should accumulate to 2

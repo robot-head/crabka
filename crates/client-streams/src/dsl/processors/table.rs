@@ -309,12 +309,14 @@ mod tests {
         };
 
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(&mut ctx, Record::new(Some("k".into()), 42i64, 1))
@@ -348,12 +350,14 @@ mod tests {
 
         // Update record: the `new` value is extracted and forwarded as plain V.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
             proc.process(
@@ -367,12 +371,14 @@ mod tests {
 
         // Tombstone record: dropped — a KStream has no deletion record.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
             proc.process(
@@ -415,12 +421,14 @@ mod tests {
 
         // Update: both sides map; the mapped `new` materializes.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores2,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
             proc.process(
@@ -445,12 +453,14 @@ mod tests {
 
         // Tombstone: mapped `new` is None → the store entry is deleted.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores2,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
             proc.process(
@@ -488,12 +498,14 @@ mod tests {
         };
 
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
             proc.process(
@@ -534,12 +546,14 @@ mod tests {
 
         // Matching record (old None → new 42) — stored and forwarded as an update.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(
@@ -565,12 +579,14 @@ mod tests {
         // delete from the store AND forward a TOMBSTONE so downstream views drop
         // it. old_p survives the predicate (99 > 10); new_p is filtered out.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(
@@ -594,12 +610,14 @@ mod tests {
 
         // A row that never matched (old & new both filtered out) → no forward.
         {
+            let globals = crate::runtime::global::GlobalStateManager::default();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
                 output: &mut output,
                 record_ctx: &rc,
                 stores: &mut stores,
+                globals: &globals,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(

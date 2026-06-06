@@ -24,8 +24,6 @@ pub(crate) struct GlobalStateManager {
 impl GlobalStateManager {
     /// Build the global stores from the topology's global factories.
     /// `topic_for` maps each global store name to its source topic (the consumer reads it).
-    // Consumed by the global consumer / dispatch wiring in T7/T8.
-    #[allow(dead_code)]
     pub(crate) async fn build(
         factories: &HashMap<String, (Option<String>, crate::topology::builder::StoreFactory)>,
         topic_for: HashMap<String, String>,
@@ -46,7 +44,7 @@ impl GlobalStateManager {
 
     /// Apply one consumed record into the named global store (raw bytes — the
     /// consumer's path). `value = None` deletes (tombstone).
-    // Consumed by the global consumer in T7.
+    // Consumed by app wiring in T8b/T9.
     #[allow(dead_code)]
     pub(crate) async fn apply(&self, store: &str, key: Bytes, value: Option<Bytes>) {
         let mut g = self.stores.lock().await;
@@ -55,10 +53,23 @@ impl GlobalStateManager {
         }
     }
 
+    /// Typed write (test/driver path). Mirrors `apply` but takes typed K/V — the
+    /// `TopologyTestDriver`'s `pipe_global` injects values straight into the
+    /// shared store this way.
+    pub(crate) async fn put<K: Send + Sync + 'static, V: Send + 'static>(
+        &self,
+        store: &str,
+        key: K,
+        value: V,
+    ) {
+        let mut g = self.stores.lock().await;
+        if let Some(s) = g.get_kv::<K, V>(store) {
+            s.put(key, value).await;
+        }
+    }
+
     /// Typed read for a join lookup. Returns an owned value (clones out from under
     /// the lock) so no borrow escapes the guard.
-    // Consumed by the stream-globaltable join dispatch wiring in T8.
-    #[allow(dead_code)]
     pub(crate) async fn get<K: Send + Sync + 'static, V: Send + 'static>(
         &self,
         store: &str,

@@ -316,6 +316,7 @@ mod tests {
         output: &'a mut Vec<crate::processor::erased::OutputRecord>,
         rc: &'a RecordContext,
         stores: &'a mut crate::store::registry::StoreRegistry,
+        globals: &'a crate::runtime::global::GlobalStateManager,
     ) -> Dispatch<'a> {
         Dispatch {
             buffer,
@@ -323,6 +324,7 @@ mod tests {
             output,
             record_ctx: rc,
             stores,
+            globals,
         }
     }
 
@@ -343,7 +345,15 @@ mod tests {
         let rc = default_rc();
         let children = [9usize];
         let mut stores = crate::store::registry::StoreRegistry::default();
-        let mut d = make_dispatch(&mut buffer, &children, &mut output, &rc, &mut stores);
+        let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut d = make_dispatch(
+            &mut buffer,
+            &children,
+            &mut output,
+            &rc,
+            &mut stores,
+            &globals,
+        );
         let rec = ErasedRecord::new(
             Some(Box::new("k".to_string())),
             Box::new("hi".to_string()),
@@ -362,7 +372,15 @@ mod tests {
         let rc = default_rc();
         let children = [0usize];
         let mut stores = crate::store::registry::StoreRegistry::default();
-        let mut d = make_dispatch(&mut buffer, &children, &mut output, &rc, &mut stores);
+        let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut d = make_dispatch(
+            &mut buffer,
+            &children,
+            &mut output,
+            &rc,
+            &mut stores,
+            &globals,
+        );
         let rec = ErasedRecord::new(None, Box::new("hi".to_string()), 1);
         node.process(&mut d, rec).await.unwrap();
         let (_c, out) = buffer.pop_front().unwrap();
@@ -377,7 +395,8 @@ mod tests {
         let mut output = Vec::new();
         let rc = default_rc();
         let mut stores = crate::store::registry::StoreRegistry::default();
-        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
+        let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores, &globals);
         // value is i32, not String — must fail
         let bad = ErasedRecord::new(None, Box::new(7i32), 0);
         check!(node.process(&mut d, bad).await.is_err());
@@ -390,7 +409,8 @@ mod tests {
         let mut output = Vec::new();
         let rc = default_rc();
         let mut stores = crate::store::registry::StoreRegistry::default();
-        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
+        let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores, &globals);
         let rec = ErasedRecord::new(
             Some(Box::new("k".to_string())),
             Box::new("V".to_string()),
@@ -409,7 +429,8 @@ mod tests {
         let mut output = Vec::new();
         let rc = default_rc();
         let mut stores = crate::store::registry::StoreRegistry::default();
-        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
+        let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores, &globals);
         let rec = ErasedRecord::new(None, Box::new("v".to_string()), 0);
         node.process(&mut d, rec).await.unwrap();
         check!(output.len() == 1);
@@ -424,7 +445,8 @@ mod tests {
         let mut output = Vec::new();
         let rc = default_rc();
         let mut stores = crate::store::registry::StoreRegistry::default();
-        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores);
+        let globals = crate::runtime::global::GlobalStateManager::default();
+        let mut d = make_dispatch(&mut buffer, &[], &mut output, &rc, &mut stores, &globals);
         // value is i32, not String — must fail
         let bad = ErasedRecord::new(None, Box::new(7i32), 0);
         check!(node.process(&mut d, bad).await.is_err());
