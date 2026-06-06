@@ -3,6 +3,7 @@
 pub mod compatibility;
 pub mod config;
 pub mod delete;
+pub mod forward;
 pub mod mode;
 pub mod response;
 pub mod schemas;
@@ -79,4 +80,12 @@ pub fn router(state: AppState) -> Router {
             post(compatibility::check),
         )
         .with_state(state)
+}
+
+/// Wrap the router with the write-forwarding middleware (secondary → primary).
+pub fn router_with_forwarding(state: AppState, fwd: forward::ForwardState) -> Router {
+    router(state).layer(axum::middleware::from_fn_with_state(
+        fwd,
+        forward::forward_layer,
+    ))
 }

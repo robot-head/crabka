@@ -39,6 +39,20 @@ struct Args {
         default_value = "crabka-schema-registry"
     )]
     client_id: String,
+    #[arg(long, env = "SCHEMA_REGISTRY_ADVERTISED_URL")]
+    advertised_url: Option<String>,
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_GROUP_ID",
+        default_value = "schema-registry"
+    )]
+    group_id: String,
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_LEADER_ELIGIBILITY",
+        default_value_t = true
+    )]
+    leader_eligibility: bool,
 }
 
 #[tokio::main]
@@ -56,6 +70,12 @@ async fn main() -> anyhow::Result<()> {
         schemas_topic: args.schemas_topic,
         schemas_topic_rf: args.schemas_topic_rf,
         client_id: args.client_id,
+        advertised_url: args
+            .advertised_url
+            .clone()
+            .unwrap_or_else(|| format!("http://{}", args.listen_addr)),
+        group_id: args.group_id.clone(),
+        leader_eligibility: args.leader_eligibility,
     };
     info!(
         listen = %args.listen_addr,
@@ -66,7 +86,13 @@ async fn main() -> anyhow::Result<()> {
 
     let shutdown = CancellationToken::new();
     let store = KafkaStore::start(&cfg, shutdown.clone()).await?;
-    let app = rest::router(AppState { store });
+    let primary = crabka_schema_registry::election::Election::start(&cfg, shutdown.clone()).await?;
+    let fwd = rest::forward::ForwardState {
+        primary,
+        http: reqwest::Client::new(),
+        node_id: cfg.advertised_url.clone(),
+    };
+    let app = rest::router_with_forwarding(AppState { store }, fwd);
 
     let listener = tokio::net::TcpListener::bind(args.listen_addr).await?;
     info!(addr = %listener.local_addr()?, "listening");

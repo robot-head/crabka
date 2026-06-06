@@ -1,0 +1,166 @@
+//! Write-forwarding middleware: a secondary proxies mutating REST to the
+//! elected primary; reads + primary-side writes pass through. A forwarded
+//! request carries `X-Forwarded-For-Registry` so the primary never re-forwards.
+
+use axum::body::Body;
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use tokio::sync::watch;
+
+use crate::election::PrimaryState;
+
+pub const FORWARD_HEADER: &str = "x-forwarded-for-registry";
+
+#[derive(Clone)]
+pub struct ForwardState {
+    pub primary: watch::Receiver<PrimaryState>,
+    pub http: reqwest::Client,
+    pub node_id: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Decision {
+    PassThrough,
+    Forward(String),
+    Unavailable,
+    Retriable,
+}
+
+/// Decide what to do with a request, given the method, whether it already
+/// carries the forward header, and the current primary state.
+pub(crate) fn decide(method: &Method, already_forwarded: bool, state: &PrimaryState) -> Decision {
+    let mutating = matches!(
+        method,
+        &Method::POST | &Method::PUT | &Method::DELETE | &Method::PATCH
+    );
+    if !mutating {
+        return Decision::PassThrough;
+    }
+    if state.is_primary {
+        return Decision::PassThrough;
+    }
+    if already_forwarded {
+        // forwarded to a non-primary (stale primary / race) → ask caller to retry
+        return Decision::Retriable;
+    }
+    match &state.primary_url {
+        Some(url) => Decision::Forward(url.clone()),
+        None => Decision::Unavailable,
+    }
+}
+
+/// axum `from_fn_with_state` middleware.
+pub async fn forward_layer(State(fwd): State<ForwardState>, req: Request, next: Next) -> Response {
+    let already = req.headers().contains_key(FORWARD_HEADER);
+    let method = req.method().clone();
+    let state = fwd.primary.borrow().clone();
+    match decide(&method, already, &state) {
+        Decision::PassThrough => next.run(req).await,
+        Decision::Unavailable => {
+            (StatusCode::SERVICE_UNAVAILABLE, "no primary elected").into_response()
+        }
+        Decision::Retriable => {
+            (StatusCode::SERVICE_UNAVAILABLE, "not primary; retry").into_response()
+        }
+        Decision::Forward(primary_url) => proxy(&fwd, &primary_url, req).await,
+    }
+}
+
+async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response {
+    let (parts, body) = req.into_parts();
+    let path_q = parts.uri.path_and_query().map_or("", |p| p.as_str());
+    let url = format!("{primary_url}{path_q}");
+    let Ok(bytes) = axum::body::to_bytes(body, 16 * 1024 * 1024).await else {
+        return (StatusCode::BAD_REQUEST, "body read failed").into_response();
+    };
+    let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
+        .unwrap_or(reqwest::Method::POST);
+    let mut rb = fwd.http.request(method, &url).body(bytes.to_vec());
+    if let Some(ct) = parts.headers.get(header::CONTENT_TYPE) {
+        rb = rb.header(header::CONTENT_TYPE, ct);
+    }
+    rb = rb.header(FORWARD_HEADER, &fwd.node_id);
+    match rb.send().await {
+        Ok(resp) => {
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let ct = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| HeaderValue::from_bytes(v.as_bytes()).ok());
+            let body = resp.bytes().await.unwrap_or_default();
+            let mut out = Response::new(Body::from(body));
+            *out.status_mut() = status;
+            if let Some(ct) = ct {
+                out.headers_mut().insert(header::CONTENT_TYPE, ct);
+            }
+            out
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, format!("forward failed: {e}")).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::election::PrimaryState;
+
+    fn primary(url: &str) -> PrimaryState {
+        PrimaryState {
+            is_primary: true,
+            primary_url: Some(url.into()),
+        }
+    }
+    fn secondary(url: &str) -> PrimaryState {
+        PrimaryState {
+            is_primary: false,
+            primary_url: Some(url.into()),
+        }
+    }
+
+    #[test]
+    fn reads_always_pass_through() {
+        assert_eq!(
+            decide(&Method::GET, false, &secondary("http://p:8081")),
+            Decision::PassThrough
+        );
+    }
+    #[test]
+    fn primary_processes_writes_locally() {
+        assert_eq!(
+            decide(&Method::POST, false, &primary("http://me:8081")),
+            Decision::PassThrough
+        );
+    }
+    #[test]
+    fn secondary_forwards_writes_to_primary() {
+        assert_eq!(
+            decide(&Method::POST, false, &secondary("http://p:8081")),
+            Decision::Forward("http://p:8081".into())
+        );
+    }
+    #[test]
+    fn secondary_without_primary_is_unavailable() {
+        let st = PrimaryState {
+            is_primary: false,
+            primary_url: None,
+        };
+        assert_eq!(decide(&Method::DELETE, false, &st), Decision::Unavailable);
+    }
+    #[test]
+    fn already_forwarded_to_non_primary_is_retriable() {
+        assert_eq!(
+            decide(&Method::POST, true, &secondary("http://p:8081")),
+            Decision::Retriable
+        );
+    }
+    #[test]
+    fn already_forwarded_to_primary_passes_through() {
+        assert_eq!(
+            decide(&Method::POST, true, &primary("http://me:8081")),
+            Decision::PassThrough
+        );
+    }
+}

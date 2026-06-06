@@ -1,0 +1,18 @@
+[
+  {
+    "client_host": "",
+    "client_id": "",
+    "is_master": true,
+    "member_assignment": "{\"error\":0,\"master\":\"crabka-d7c9d4c3-a778-465d-a069-954b68d772f9\",\"master_identity\":{\"host\":\"sr-node-1\",\"port\":8081,\"master_eligibility\":true,\"scheme\":\"http\",\"version\":1},\"version\":1}",
+    "member_id": "crabka-d7c9d4c3-a778-465d-a069-954b68d772f9",
+    "member_metadata": ""
+  },
+  {
+    "client_host": "",
+    "client_id": "",
+    "is_master": false,
+    "member_assignment": "{\"error\":0,\"master\":\"crabka-d7c9d4c3-a778-465d-a069-954b68d772f9\",\"master_identity\":{\"host\":\"sr-node-1\",\"port\":8081,\"master_eligibility\":true,\"scheme\":\"http\",\"version\":1},\"version\":1}",
+    "member_id": "crabka-e0f909d7-bc38-4a07-8f00-84cf9fd71f17",
+    "member_metadata": ""
+  }
+]

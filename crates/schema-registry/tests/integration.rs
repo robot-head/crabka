@@ -38,6 +38,9 @@ async fn boot_registry(
         schemas_topic: "_schemas".into(),
         schemas_topic_rf: rf,
         client_id: "sr-it".into(),
+        advertised_url: "http://127.0.0.1:0".into(),
+        group_id: "schema-registry".into(),
+        leader_eligibility: true,
     };
     let cancel = CancellationToken::new();
     let store = KafkaStore::start(&cfg, cancel.clone()).await.unwrap();

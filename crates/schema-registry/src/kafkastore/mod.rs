@@ -21,9 +21,11 @@ use crate::store::{Registered, StoreState};
 const VALID_MODES: &[&str] = &["READWRITE", "READONLY", "IMPORT"];
 
 /// Facade over the `_schemas`-backed store: owns the writer, the reader's shared
-/// store + offset watch, and a write-serialisation gate. Single-node always-primary
-/// (slice 1): every mutating request takes the gate, decides on a clone of the
-/// store, produces the record, and waits for the reader to apply it
+/// store + offset watch, and a write-serialisation gate. Only the elected
+/// primary writes `_schemas`; secondaries forward mutating requests to it (see
+/// `rest::forward`), so this facade trusts that any write reaching it is
+/// primary-authorised. Every mutating request takes the gate, decides on a clone
+/// of the store, produces the record, and waits for the reader to apply it
 /// (read-your-writes).
 pub struct KafkaStore {
     pub store: Arc<RwLock<StoreState>>,
@@ -36,11 +38,13 @@ pub struct KafkaStore {
 impl KafkaStore {
     /// Create `_schemas`, start the reader, build the writer.
     ///
-    /// NOTE (slice 1): does not block for full initial replay before serving.
-    /// Tests start from a fresh (empty) `_schemas`, so there is nothing to
-    /// replay. Startup against a pre-existing log could briefly mis-assign ids
-    /// until the reader catches up; proper high-watermark catch-up is a later
-    /// (HA) slice.
+    /// NOTE: does not block for full initial replay before serving. A
+    /// freshly-promoted primary whose reader has not yet drained the prior
+    /// primary's last records could briefly mis-assign ids/versions until it
+    /// catches up — catch-up-before-write on promotion (and fencing the brief
+    /// rebalance multi-writer window) is a documented deferred limitation of the
+    /// HA slice. Tests start from a fresh (empty) `_schemas`, so there is nothing
+    /// to replay.
     pub async fn start(
         cfg: &RegistryConfig,
         cancel: CancellationToken,
