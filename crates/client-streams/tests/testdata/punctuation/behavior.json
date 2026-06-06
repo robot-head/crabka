@@ -1,0 +1,18 @@
+[
+  "stream:0",
+  "|pipe@0",
+  "|pipe@5",
+  "|pipe@9",
+  "stream:10",
+  "|pipe@10",
+  "|pipe@11",
+  "stream:100",
+  "|pipe@100",
+  "=== wall ===",
+  "|adv+3",
+  "|adv+3",
+  "wall:10",
+  "|adv+4",
+  "wall:110",
+  "|adv+100"
+]
