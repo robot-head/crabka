@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 # Cancel superseded PR runs; let pushes to main run to completion.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
