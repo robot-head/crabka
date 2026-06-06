@@ -47,7 +47,24 @@ async fn state_for(bootstrap: &str) -> Arc<AppState> {
             tls: None,
             authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     })
+}
+
+/// On-behalf-of identity for the `*_inner` helpers: ANONYMOUS over the unknown
+/// host. State carries an `AllowAllAuthorizer`, so the value is immaterial to
+/// the decision (every record is allowed) — it just satisfies the signature.
+fn anon() -> (crabka_security::Principal, SocketAddr) {
+    (
+        crabka_security::Principal {
+            name: "ANONYMOUS".into(),
+            auth_method: crabka_security::AuthMethod::Anonymous,
+            groups: vec![],
+        },
+        "0.0.0.0:0".parse().unwrap(),
+    )
 }
 
 fn rec(topic: &str, value: &'static [u8]) -> pb::Record {
@@ -94,7 +111,10 @@ async fn send_stream_produces_all_records() {
     ]);
     let inbound = Streaming::new(Box::pin(input));
 
-    let acks: Vec<_> = streaming::send_stream_inner(inbound, state).collect().await;
+    let (p, h) = anon();
+    let acks: Vec<_> = streaming::send_stream_inner(inbound, state, p, h)
+        .collect()
+        .await;
     check!(acks.len() == 2);
     for a in &acks {
         let ack = a.as_ref().expect("ack ok");
@@ -179,7 +199,8 @@ async fn subscribe_streams_records_then_commits() {
         tokio_stream::wrappers::UnboundedReceiverStream::new(rx),
     ));
 
-    let mut out = Box::pin(streaming::subscribe_inner(inbound, state));
+    let (p, h) = anon();
+    let mut out = Box::pin(streaming::subscribe_inner(inbound, state, p, h));
     let mut got = None;
     for _ in 0..20 {
         match tokio::time::timeout(std::time::Duration::from_millis(600), out.next()).await {
@@ -236,13 +257,14 @@ async fn streaming_wrappers_and_router_build() {
         acks: 0,
     })]);
     let send_req = ConnectRequest(Streaming::new(Box::pin(send_input)));
-    let send_resp = streaming::send_stream(axum::Extension(state.clone()), send_req).await;
+    let send_resp =
+        streaming::send_stream(axum::Extension(state.clone()), None, None, send_req).await;
     check!(send_resp.is_ok());
 
     // subscribe wrapper → Ok (inner stream is lazy; not driven here).
     let sub_input = futures_util::stream::iter(Vec::<Result<pb::SubscribeFrame, CErr>>::new());
     let sub_req = ConnectRequest(Streaming::new(Box::pin(sub_input)));
-    let sub_resp = streaming::subscribe(axum::Extension(state.clone()), sub_req).await;
+    let sub_resp = streaming::subscribe(axum::Extension(state.clone()), None, None, sub_req).await;
     check!(sub_resp.is_ok());
 
     broker.shutdown().await;

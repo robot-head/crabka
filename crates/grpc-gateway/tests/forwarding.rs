@@ -128,6 +128,9 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             tls: None,
             authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     });
 
     // Serve Connect + forward routes (health omitted — not needed here).

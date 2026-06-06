@@ -135,6 +135,9 @@ async fn send_handler_ok_and_error_arms() {
             tls: None,
             authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     });
 
     // Constructing the Connect router covers `lib::router`.
@@ -164,9 +167,10 @@ async fn send_handler_ok_and_error_arms() {
         acks: pb::Acks::All as i32,
     };
 
-    let resp: ConnectResponse<pb::SendResponse> = handlers::send(Extension(state), req(send))
-        .await
-        .expect("handler returned Err");
+    let resp: ConnectResponse<pb::SendResponse> =
+        handlers::send(Extension(state), None, None, req(send))
+            .await
+            .expect("handler returned Err");
     let body = resp.0;
     assert_eq!(body.results.len(), 2);
     // Unkeyed record produced successfully.

@@ -202,6 +202,9 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             tls: Some(settings.clone()),
             authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     });
 
     // Serve Connect + health + forward routes over TLS.

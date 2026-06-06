@@ -251,9 +251,17 @@ async fn run(config: GatewayConfig) -> anyhow::Result<()> {
             forwarder,
             config.advertised_addr.clone(),
         );
+    // Authorizer holder. Authz is config-gated and not yet wired from
+    // `config.authz` here (a follow-up builds the trusted-proxy authorizer +
+    // spawns the ACL-cache refresh); default to AllowAll so every decision is
+    // `Allow` and produce/consume behavior is unchanged.
+    let authz = Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+        crabka_authz::AllowAllAuthorizer,
+    )));
     let state = Arc::new(AppState {
         produce: Arc::new(produce),
         config: Arc::new(config.clone()),
+        authz,
     });
 
     let app = crabka_grpc_gateway::router(state.clone())

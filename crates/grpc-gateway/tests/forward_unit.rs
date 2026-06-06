@@ -175,6 +175,9 @@ async fn forward_handler_error_arm_returns_retriable() {
             tls: None,
             authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     });
 
     // Drive the REAL forward_router in-process via tower::ServiceExt::oneshot —
@@ -278,6 +281,9 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
             tls,
             authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     });
 
     let app = forward_router(state);
