@@ -960,7 +960,7 @@ async fn handle_alter_replica_log_dirs_frame(
 
     let image = broker.controller.current_image();
     let authorized = broker.config.authorizer.authorize(
-        &image,
+        &*image,
         &crate::authorizer::AuthorizationRequest {
             principal: &principal,
             host: peer,

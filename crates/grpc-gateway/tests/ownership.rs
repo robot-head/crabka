@@ -141,15 +141,21 @@ async fn ownership_split_non_owner_is_unavailable() {
         idempotency_key: Some(key.clone()),
     };
 
+    let anon = crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    };
+
     // Non-owner B refuses with a retriable Unavailable.
-    let err = core_b.produce(mk()).await.unwrap_err();
+    let err = core_b.produce(mk(), &anon).await.unwrap_err();
     assert!(
         matches!(err, GatewayError::Unavailable),
         "non-owner should be Unavailable, got {err:?}"
     );
 
     // Owner A produces it (deduplicated=false the first time).
-    let ok = core_a.produce(mk()).await.unwrap();
+    let ok = core_a.produce(mk(), &anon).await.unwrap();
     assert!(!ok.deduplicated);
 
     token.cancel();

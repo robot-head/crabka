@@ -71,7 +71,7 @@ pub(crate) async fn handle(
         let denied = match topic_name.as_deref() {
             Some(name) => {
                 broker.config.authorizer.authorize(
-                    &image,
+                    &*image,
                     &AuthorizationRequest {
                         principal: ctx.principal,
                         host: ctx.peer,

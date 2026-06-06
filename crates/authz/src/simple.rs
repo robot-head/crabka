@@ -2,22 +2,22 @@
 //! bypass + deny-wins-over-allow + LITERAL/PREFIXED matching +
 //! principal/host/operation wildcards.
 //!
-//! There is no "empty super-users AND no ACLs ⇒ Allow" compat shim —
-//! that case lives in [`super::AllowAllAuthorizer`].
-//! [`SimpleAclAuthorizer`] with an empty image + empty super-users
+//! There is no "empty source + no super-users ⇒ Allow" compat shim —
+//! that case lives in [`crate::AllowAllAuthorizer`].
+//! [`SimpleAclAuthorizer`] with an empty source + empty super-users
 //! denies everything (default-deny), which matches Kafka's
 //! `StandardAuthorizer` once an authorizer is explicitly configured.
 
 use std::collections::HashSet;
 
-use crabka_metadata::{AclEntry, AclOperation, MetadataImage, PermissionType};
+use crabka_metadata::{AclEntry, AclOperation, PermissionType};
 
-use super::{AuthorizationRequest, AuthorizationResult, Authorizer};
+use crate::{AclSource, AuthorizationRequest, AuthorizationResult, Authorizer};
 
 /// Authorizer that consults the cluster's persisted ACLs (the
-/// `MetadataImage` is held by the controller and passed in per call).
-/// Holds the configured super-user set; principals in this set bypass
-/// ACL evaluation and always get `Allow`.
+/// [`AclSource`] is supplied per call — a `MetadataImage` for the broker,
+/// an `AclCache` for the gateway). Holds the configured super-user set;
+/// principals in this set bypass ACL evaluation and always get `Allow`.
 #[derive(Debug)]
 pub struct SimpleAclAuthorizer {
     super_users: HashSet<String>,
@@ -33,7 +33,7 @@ impl SimpleAclAuthorizer {
 impl Authorizer for SimpleAclAuthorizer {
     fn authorize(
         &self,
-        image: &MetadataImage,
+        source: &dyn AclSource,
         req: &AuthorizationRequest<'_>,
     ) -> AuthorizationResult {
         // Super-user bypass.
@@ -44,7 +44,7 @@ impl Authorizer for SimpleAclAuthorizer {
         let user_pattern = format!("User:{}", req.principal.name);
         let host_str = req.host.ip().to_string();
         let mut saw_allow = false;
-        for entry in image.matching_acls(req.resource_type, req.resource_name) {
+        for entry in source.matching_acls(req.resource_type, req.resource_name) {
             if !matches_principal(entry, &user_pattern)
                 || !matches_host(entry, &host_str)
                 || !matches_operation(entry.operation, req.operation)
@@ -109,10 +109,10 @@ fn implies(stored: AclOperation, requested: AclOperation) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::super::authorize_topics;
     use super::*;
+    use crate::authorize_topics;
     use assert2::assert;
-    use crabka_metadata::{MetadataRecord, PatternType, ResourceType};
+    use crabka_metadata::{MetadataImage, MetadataRecord, PatternType, ResourceType};
     use crabka_security::Principal;
     use std::net::SocketAddr;
     use uuid::Uuid;

@@ -84,7 +84,7 @@ pub(crate) async fn handle(
     for tid in &req.transactional_ids {
         // ACL gate: per-tid `Describe` on `TransactionalId`.
         let allow = broker.config.authorizer.authorize(
-            &image,
+            &*image,
             &AuthorizationRequest {
                 principal: ctx.principal,
                 host: ctx.peer,

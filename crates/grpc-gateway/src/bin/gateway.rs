@@ -12,7 +12,7 @@ use tracing::info;
 use tokio_util::sync::CancellationToken;
 
 use crabka_grpc_gateway::codec::RawCodec;
-use crabka_grpc_gateway::config::{GatewayConfig, TlsSettings};
+use crabka_grpc_gateway::config::{AuthzSettings, BearerSettings, GatewayConfig, TlsSettings};
 use crabka_grpc_gateway::dedup::DedupEngine;
 use crabka_grpc_gateway::dedup::membership::{MembershipPublisher, MembershipStore};
 use crabka_grpc_gateway::dedup::store::DedupStore;
@@ -114,6 +114,27 @@ struct Args {
     /// Cert hot-reload poll interval (seconds).
     #[arg(long, env = "CRABKA_GATEWAY_TLS_RELOAD_SECS", default_value_t = 30)]
     tls_reload_secs: u64,
+
+    /// Authorizer mode: off | simple.
+    #[arg(long, env = "CRABKA_GATEWAY_AUTHZ", default_value = "off")]
+    authz: String,
+    /// Comma-separated super-user principal names that bypass ACL checks.
+    #[arg(long, env = "CRABKA_GATEWAY_AUTHZ_SUPER_USERS", default_value = "")]
+    authz_super_users: String,
+    /// ACL-cache refresh interval (seconds).
+    #[arg(long, env = "CRABKA_GATEWAY_ACL_REFRESH_SECS", default_value_t = 30)]
+    acl_refresh_secs: u64,
+
+    /// Bearer-token mode: off | unsecured.
+    #[arg(long, env = "CRABKA_GATEWAY_BEARER", default_value = "off")]
+    bearer: String,
+    /// JWT claim name to use as the principal name.
+    #[arg(
+        long,
+        env = "CRABKA_GATEWAY_BEARER_PRINCIPAL_CLAIM",
+        default_value = "sub"
+    )]
+    bearer_principal_claim: String,
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -164,6 +185,8 @@ async fn main() -> anyhow::Result<()> {
         _ => anyhow::bail!("--tls-cert and --tls-key must be set together"),
     };
 
+    let authz = build_authz_settings(&args)?;
+
     let config = GatewayConfig {
         bootstrap: args.bootstrap_servers.clone(),
         listen_addr: args.listen_addr,
@@ -175,12 +198,60 @@ async fn main() -> anyhow::Result<()> {
         advertised_addr: args.advertised_addr.clone(),
         membership_topic: args.membership_topic.clone(),
         tls: tls.clone(),
+        authz,
     };
 
-    run(config).await
+    let bearer = build_bearer(&args)?;
+
+    run(config, bearer).await
 }
 
-async fn run(config: GatewayConfig) -> anyhow::Result<()> {
+/// Build [`AuthzSettings`] from CLI args, or `None` when `--authz off`.
+fn build_authz_settings(args: &Args) -> anyhow::Result<Option<AuthzSettings>> {
+    match args.authz.as_str() {
+        "off" => Ok(None),
+        "simple" => {
+            let super_users: Vec<String> = args
+                .authz_super_users
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            Ok(Some(AuthzSettings {
+                super_users,
+                acl_refresh_secs: args.acl_refresh_secs,
+            }))
+        }
+        other => anyhow::bail!("invalid --authz: {other}"),
+    }
+}
+
+/// Build an optional [`BearerValidator`] extension from CLI args.
+fn build_bearer(
+    args: &Args,
+) -> anyhow::Result<Option<crabka_grpc_gateway::authz::auth_layer::BearerValidator>> {
+    match args.bearer.as_str() {
+        "off" => Ok(None),
+        "unsecured" => {
+            let v = BearerSettings {
+                principal_claim_name: args.bearer_principal_claim.clone(),
+                ..Default::default()
+            }
+            .build()
+            .map_err(|e| anyhow::anyhow!("bearer: {e}"))?;
+            Ok(Some(
+                crabka_grpc_gateway::authz::auth_layer::BearerValidator(Arc::new(v)),
+            ))
+        }
+        other => anyhow::bail!("invalid --bearer: {other}"),
+    }
+}
+
+async fn run(
+    config: GatewayConfig,
+    bearer: Option<crabka_grpc_gateway::authz::auth_layer::BearerValidator>,
+) -> anyhow::Result<()> {
     // Ensure internal topics exist before opening any producer/consumer.
     ensure_dedup_topic(
         &config.bootstrap,
@@ -250,14 +321,30 @@ async fn run(config: GatewayConfig) -> anyhow::Result<()> {
             forwarder,
             config.advertised_addr.clone(),
         );
+
+    let gateway_authz = build_gateway_authz(&config, &shutdown);
+
     let state = Arc::new(AppState {
         produce: Arc::new(produce),
         config: Arc::new(config.clone()),
+        authz: gateway_authz,
     });
 
+    // Layer ordering: axum applies .layer() calls outermost-last (rightmost runs
+    // first). We apply resolve_principal first (inner), then Extension(bv) outer.
+    // At request time: Extension layer runs first → inserts BearerValidator into
+    // extensions; then resolve_principal runs → reads BearerValidator and resolves
+    // the caller principal.
     let app = crabka_grpc_gateway::router(state.clone())
         .merge(health::router(readiness))
-        .merge(forward::forward_router(state.clone()));
+        .merge(forward::forward_router(state.clone()))
+        .layer(axum::middleware::from_fn(
+            crabka_grpc_gateway::authz::auth_layer::resolve_principal,
+        ));
+    let app = match bearer {
+        Some(bv) => app.layer(axum::Extension(bv)),
+        None => app,
+    };
 
     // Step 5: spawn ctrl-c → cancel, build optional dynamic TLS, then serve.
     {
@@ -284,6 +371,30 @@ async fn run(config: GatewayConfig) -> anyhow::Result<()> {
     info!(addr = %listener.local_addr()?, tls = tls_dynamic.is_some(), "gateway listening");
     crabka_grpc_gateway::serve::serve(listener, app, tls_dynamic, shutdown).await?;
     Ok(())
+}
+
+/// Build the [`GatewayAuthz`] and, when `config.authz` is present, spawn the
+/// ACL-cache refresh task.
+fn build_gateway_authz(
+    config: &GatewayConfig,
+    shutdown: &CancellationToken,
+) -> Arc<crabka_grpc_gateway::authz::GatewayAuthz> {
+    let authorizer: Arc<dyn crabka_authz::Authorizer> = match config.authz.as_ref() {
+        Some(a) => Arc::new(crabka_authz::SimpleAclAuthorizer::new(
+            a.super_users.iter().cloned().collect(),
+        )),
+        None => Arc::new(crabka_authz::AllowAllAuthorizer),
+    };
+    let gateway_authz = Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(authorizer));
+    if let Some(a) = config.authz.as_ref() {
+        let refresh = std::time::Duration::from_secs(a.acl_refresh_secs);
+        tokio::spawn(gateway_authz.clone().run_acl_refresh(
+            config.bootstrap.clone(),
+            refresh,
+            shutdown.clone(),
+        ));
+    }
+    gateway_authz
 }
 
 fn spawn_membership_reader(

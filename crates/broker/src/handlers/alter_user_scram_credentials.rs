@@ -65,7 +65,7 @@ pub(crate) async fn handle(
     // is configured.
     let image = broker.controller.current_image();
     let authorized = broker.config.authorizer.authorize(
-        &image,
+        &*image,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

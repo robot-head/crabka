@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
+use crabka_security::Principal;
 
 use crate::codec::RecordCodec;
 use crate::dedup::membership::MembershipStore;
@@ -80,8 +81,14 @@ impl ProduceCore {
 
     /// Public produce entry point. A keyed record whose dedup-partition this
     /// replica does not own is forwarded to the owner (per the membership
-    /// routing table); everything else is produced locally.
-    pub async fn produce(&self, rec: GatewayRecord) -> Result<RecordOutcome, GatewayError> {
+    /// routing table); everything else is produced locally. `principal` is the
+    /// resolved caller identity, relayed on a forward so the owning replica can
+    /// re-authorize the original caller (it is unused on the local path).
+    pub async fn produce(
+        &self,
+        rec: GatewayRecord,
+        principal: &Principal,
+    ) -> Result<RecordOutcome, GatewayError> {
         // Resolve the route without holding a borrow of `rec` across its move.
         let forward_addr: Option<String> =
             match (&self.dedup, &self.forwarding, &rec.idempotency_key) {
@@ -103,7 +110,7 @@ impl ProduceCore {
         match forward_addr {
             Some(addr) => {
                 let fwd = self.forwarding.as_ref().expect("route implies forwarding");
-                fwd.forwarder.forward(&addr, &rec).await
+                fwd.forwarder.forward(&addr, &rec, principal).await
             }
             None => self.produce_local(rec).await,
         }

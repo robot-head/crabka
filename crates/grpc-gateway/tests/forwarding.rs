@@ -126,7 +126,11 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             advertised_addr: addr.clone(),
             membership_topic: MEMBERSHIP.into(),
             tls: None,
+            authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     });
 
     // Serve Connect + forward routes (health omitted — not needed here).
@@ -245,12 +249,20 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
         idempotency_key: Some(key.clone()),
     };
 
+    // The resolved caller relayed on the forward; with AllowAll the owner's
+    // re-authz always allows it, so forwarding behavior is unchanged.
+    let anon = crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    };
+
     // Submit through A → forwarded to B → produced (not deduplicated).
-    let first = gw_a.state.produce.produce(mk()).await.unwrap();
+    let first = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
     assert!(!first.deduplicated, "first forward should produce");
 
     // Same key through A again → forwarded to B → B's map hit → deduplicated.
-    let second = gw_a.state.produce.produce(mk()).await.unwrap();
+    let second = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
     assert!(second.deduplicated, "second forward should dedup");
     assert_eq!(first.offset, second.offset);
 
@@ -294,6 +306,11 @@ async fn no_known_owner_is_unavailable() {
         timestamp_ms: None,
         idempotency_key: Some("k".into()),
     };
-    let err = produce.produce(rec).await.unwrap_err();
+    let anon = crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    };
+    let err = produce.produce(rec, &anon).await.unwrap_err();
     assert!(matches!(err, GatewayError::Unavailable));
 }

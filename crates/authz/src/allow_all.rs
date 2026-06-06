@@ -1,22 +1,20 @@
-//! Default authorizer when `Kafka.spec.authorization` is unset.
-//! Returns `Allow` for any request. Provides an explicit type so the
-//! "allow everything" behavior is spelled out at config time rather
-//! than emerging from the ACL impl's empty-input path.
+//! Default authorizer when authorization is unset. Returns `Allow` for
+//! any request. Provides an explicit type so the "allow everything"
+//! behavior is spelled out at config time rather than emerging from the
+//! ACL impl's empty-input path.
 
-use crabka_metadata::MetadataImage;
-
-use super::{AuthorizationRequest, AuthorizationResult, Authorizer};
+use crate::{AclSource, AuthorizationRequest, AuthorizationResult, Authorizer};
 
 /// Authorizer that always returns [`AuthorizationResult::Allow`].
-/// Default `BrokerConfig.authorizer` value; chosen by `[authorization]
-/// type = "allow_all"` (or omitted entirely) in `broker.toml`.
+/// Default authorizer value; chosen by `type = "allow_all"` (or omitted
+/// entirely) in the broker / gateway config.
 #[derive(Debug, Default)]
 pub struct AllowAllAuthorizer;
 
 impl Authorizer for AllowAllAuthorizer {
     fn authorize(
         &self,
-        _image: &MetadataImage,
+        _source: &dyn AclSource,
         _req: &AuthorizationRequest<'_>,
     ) -> AuthorizationResult {
         AuthorizationResult::Allow
@@ -27,7 +25,7 @@ impl Authorizer for AllowAllAuthorizer {
 mod tests {
     use super::*;
     use assert2::assert;
-    use crabka_metadata::{AclOperation, ResourceType};
+    use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use uuid::Uuid;

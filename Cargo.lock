@@ -1241,6 +1241,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "crabka-authz"
+version = "0.2.0"
+dependencies = [
+ "assert2",
+ "crabka-metadata",
+ "crabka-security",
+ "uuid",
+]
+
+[[package]]
 name = "crabka-bench-driver"
 version = "0.2.0"
 dependencies = [
@@ -1279,6 +1289,7 @@ dependencies = [
  "base64",
  "bytes",
  "clap",
+ "crabka-authz",
  "crabka-broker",
  "crabka-client-consumer",
  "crabka-client-core",
@@ -1511,6 +1522,7 @@ name = "crabka-grpc-gateway"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "assert2",
  "async-stream",
  "axum",
@@ -1518,10 +1530,12 @@ dependencies = [
  "clap",
  "connectrpc-axum",
  "connectrpc-axum-build",
+ "crabka-authz",
  "crabka-broker",
  "crabka-client-admin",
  "crabka-client-consumer",
  "crabka-client-producer",
+ "crabka-metadata",
  "crabka-security",
  "dashmap",
  "futures-util",

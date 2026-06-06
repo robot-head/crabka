@@ -63,7 +63,7 @@ pub(crate) async fn handle(
         resource_name: req.group_id.as_str(),
         operation: AclOperation::Delete,
     };
-    if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
+    if broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
         return encode(
             version,
             &whole_error(&req, codes::GROUP_AUTHORIZATION_FAILED),
@@ -80,7 +80,7 @@ pub(crate) async fn handle(
         let topic_names: Vec<&str> = req.topics.iter().map(|t| t.name.as_str()).collect();
         authorize_topics(
             broker.config.authorizer.as_ref(),
-            &image,
+            &*image,
             ctx.principal,
             ctx.peer,
             AclOperation::Read,

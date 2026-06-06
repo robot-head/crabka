@@ -200,7 +200,11 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             membership_topic: MEMBERSHIP.into(),
             // TLS configured ⇒ /internal/v1/forward enforces the mTLS principal gate.
             tls: Some(settings.clone()),
+            authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     });
 
     // Serve Connect + health + forward routes over TLS.
@@ -458,15 +462,23 @@ async fn tls_forward_between_two_gateways() {
         idempotency_key: Some(key.clone()),
     };
 
+    // The resolved caller relayed on the mTLS forward; with AllowAll the
+    // owner's re-authz always allows it, so forwarding behavior is unchanged.
+    let anon = crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    };
+
     // Submit through A → forwarded to B over mTLS https → produced (not dedup'd).
-    let first = gw_a.state.produce.produce(mk()).await.unwrap();
+    let first = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
     assert!(
         !first.deduplicated,
         "first mTLS forward should produce, got {first:?}"
     );
 
     // Same key through A again → forwarded to B → B's map hit → deduplicated.
-    let second = gw_a.state.produce.produce(mk()).await.unwrap();
+    let second = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
     assert!(
         second.deduplicated,
         "second mTLS forward should dedup, got {second:?}"

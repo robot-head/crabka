@@ -50,15 +50,23 @@ async fn jvm_consumer_reads_gateway_output() {
     let core = ProduceCore::new(BOOTSTRAP, "gw-jvm", Arc::new(RawCodec))
         .await
         .expect("core");
-    core.produce(GatewayRecord {
-        topic: "gw-jvm".into(),
-        key: None,
-        value: Bytes::from_static(b"jvm-sees-this"),
-        headers: vec![],
-        partition: None,
-        timestamp_ms: None,
-        idempotency_key: None,
-    })
+    let anon = crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    };
+    core.produce(
+        GatewayRecord {
+            topic: "gw-jvm".into(),
+            key: None,
+            value: Bytes::from_static(b"jvm-sees-this"),
+            headers: vec![],
+            partition: None,
+            timestamp_ms: None,
+            idempotency_key: None,
+        },
+        &anon,
+    )
     .await
     .expect("produce");
     tokio::time::sleep(Duration::from_millis(500)).await;

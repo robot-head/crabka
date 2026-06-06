@@ -66,7 +66,7 @@ pub(crate) async fn handle(
     // Whole-request Cluster Describe gate. DescribeQuorum is
     // cluster-wide raft introspection — same gate as DescribeCluster.
     let allow = broker.config.authorizer.authorize(
-        &image,
+        &*image,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

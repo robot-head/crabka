@@ -37,6 +37,68 @@ impl TlsSettings {
     }
 }
 
+/// Bearer-token validation settings for per-request caller authentication.
+///
+/// Present ⇒ a [`BearerValidator`](crate::authz::BearerValidator) extension is
+/// mounted on the router; absent ⇒ only the mTLS principal (if any) is used.
+///
+/// Currently supports only the **unsecured** (`alg:none`) JWS validator — the
+/// Kafka `OAuthBearerUnsecuredValidatorCallbackHandler` equivalent, intended for
+/// development / testing environments.
+///
+/// TODO: add a `Signed` variant that constructs a `SignedJwsValidator` backed by
+/// a `JwksHandle` when a JWKS endpoint URL is provided; requires spawning the
+/// background JWKS refresher in `bin/gateway.rs`.
+#[derive(Debug, Clone)]
+pub struct BearerSettings {
+    /// The JWT claim whose string value becomes the principal name.
+    /// Defaults to `"sub"`.
+    pub principal_claim_name: String,
+    /// Allowable clock-skew tolerance (milliseconds) for `exp`/`iat` checks.
+    /// Defaults to `30_000` (30 seconds), mirroring the JVM default.
+    pub allowable_clock_skew_ms: i64,
+}
+
+impl Default for BearerSettings {
+    fn default() -> Self {
+        Self {
+            principal_claim_name: "sub".to_string(),
+            allowable_clock_skew_ms: 30_000,
+        }
+    }
+}
+
+impl BearerSettings {
+    /// Build an [`OAuthBearerValidator`] from these settings.
+    ///
+    /// Currently produces an `Unsecured(UnsecuredJwsValidator)` — the
+    /// development validator; always succeeds construction.
+    ///
+    /// # Errors
+    ///
+    /// Currently infallible (returns `Ok`); the signature is `Result` to
+    /// accommodate future `Signed` / `Introspection` variants that may fail
+    /// at build time (e.g. bad JWKS URL, missing cert).
+    pub fn build(&self) -> Result<crabka_security::OAuthBearerValidator, String> {
+        Ok(crabka_security::OAuthBearerValidator::Unsecured(
+            crabka_security::UnsecuredJwsValidator {
+                principal_claim_name: self.principal_claim_name.clone(),
+                allowable_clock_skew_ms: self.allowable_clock_skew_ms,
+                ..Default::default()
+            },
+        ))
+    }
+}
+
+/// Authorization settings. `None` ⇒ `AllowAll` (no enforcement; default).
+#[derive(Debug, Clone)]
+pub struct AuthzSettings {
+    /// Principals (bare names) that bypass ACL checks.
+    pub super_users: Vec<String>,
+    /// ACL-cache refresh interval (seconds).
+    pub acl_refresh_secs: u64,
+}
+
 /// Runtime configuration for the gateway process.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -61,6 +123,8 @@ pub struct GatewayConfig {
     pub membership_topic: String,
     /// TLS/mTLS settings; `None` ⇒ plaintext (all current tests).
     pub tls: Option<TlsSettings>,
+    /// Authorization settings; `None` ⇒ `AllowAll` (no enforcement; default).
+    pub authz: Option<AuthzSettings>,
 }
 
 impl GatewayConfig {

@@ -45,7 +45,7 @@ pub(crate) async fn handle(
     // Cluster:Alter gate — KIP-853 reconfiguration is a cluster-wide
     // mutation, same gate as UnregisterBroker.
     let allow = broker.config.authorizer.authorize(
-        &image,
+        &*image,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

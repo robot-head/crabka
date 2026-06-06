@@ -73,7 +73,7 @@ pub(crate) async fn handle(
             resource_name: gid.as_str(),
             operation: AclOperation::Describe,
         };
-        if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
+        if broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
             groups.push(DescribeShareGroupOffsetsResponseGroup {
                 group_id: gid,
                 error_code: codes::GROUP_AUTHORIZATION_FAILED,

@@ -22,7 +22,7 @@ pub(crate) async fn handle(
 ) -> Result<Bytes, crate::error::BrokerError> {
     let image = broker.controller.current_image();
     let allow = broker.config.authorizer.authorize(
-        &image,
+        &*image,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

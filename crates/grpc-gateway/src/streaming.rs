@@ -3,6 +3,7 @@
 //! returning a plain `Stream` (unit-testable); the public handler is a thin
 //! wrapper into `ConnectResponse::new(StreamBody::new(inner))`.
 
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -10,18 +11,25 @@ use axum::Extension;
 use connectrpc_axum::message::{
     ConnectError, ConnectRequest, ConnectResponse, StreamBody, Streaming,
 };
+use crabka_authz::AuthorizationResult;
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_security::Principal;
 use futures_util::{Stream, StreamExt};
 
 use crate::consume::ConsumeSession;
-use crate::handlers::to_gateway_record;
+use crate::handlers::{anonymous_principal, authorize_resource, to_gateway_record, unknown_host};
 use crate::pb;
 use crate::state::AppState;
 
 /// Produce every record in each inbound `SendRequest`, emitting one `SendAck`
-/// (with a per-record `RecordResult` vector) per request.
+/// (with a per-record `RecordResult` vector) per request. Each record is gated
+/// by a Write ACL on its target topic for the on-behalf-of `principal`/`host`;
+/// a denied record is skipped and reported as a non-retriable `PERMISSION_DENIED`.
 pub fn send_stream_inner(
     mut inbound: Streaming<pb::SendRequest>,
     state: Arc<AppState>,
+    principal: Principal,
+    host: SocketAddr,
 ) -> impl Stream<Item = Result<pb::SendAck, ConnectError>> {
     async_stream::stream! {
         while let Some(item) = inbound.next().await {
@@ -32,7 +40,24 @@ pub fn send_stream_inner(
             let mut results = Vec::with_capacity(send_req.records.len());
             for r in send_req.records {
                 let rec = to_gateway_record(r);
-                let result = match state.produce.produce(rec).await {
+                if authorize_resource(
+                    &state,
+                    &principal,
+                    &host,
+                    ResourceType::Topic,
+                    &rec.topic,
+                    AclOperation::Write,
+                ) == AuthorizationResult::Deny
+                {
+                    results.push(crate::handlers::error_result(
+                        &crate::error::GatewayError::Unauthorized(format!(
+                            "Write Topic:{}",
+                            rec.topic
+                        )),
+                    ));
+                    continue;
+                }
+                let result = match state.produce.produce(rec, &principal).await {
                     Ok(o) => pb::RecordResult {
                         partition: o.partition,
                         offset: o.offset,
@@ -51,6 +76,8 @@ pub fn send_stream_inner(
 /// Bidi `SendStream` Connect handler.
 pub async fn send_stream(
     Extension(state): Extension<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    peer: Option<Extension<SocketAddr>>,
     req: ConnectRequest<Streaming<pb::SendRequest>>,
 ) -> Result<
     ConnectResponse<
@@ -58,8 +85,10 @@ pub async fn send_stream(
     >,
     ConnectError,
 > {
+    let eff = principal.map_or_else(anonymous_principal, |Extension(p)| p);
+    let host = peer.map_or_else(unknown_host, |Extension(a)| a);
     Ok(ConnectResponse::new(StreamBody::new(Box::pin(
-        send_stream_inner(req.0, state),
+        send_stream_inner(req.0, state, eff, host),
     ))))
 }
 
@@ -78,6 +107,8 @@ pub async fn send_stream(
 pub fn subscribe_inner(
     mut frames: Streaming<pb::SubscribeFrame>,
     state: Arc<AppState>,
+    principal: Principal,
+    host: SocketAddr,
 ) -> impl Stream<Item = Result<pb::Inbound, ConnectError>> {
     async_stream::stream! {
         // First frame must be Start.
@@ -87,6 +118,25 @@ pub fn subscribe_inner(
             Some(Err(e)) => { yield Err(e); return; }
             None => return,
         };
+
+        // Authorize the subscription up-front: the consumer group (Read) and
+        // every topic (Read). Subscribing requires read access to all of them —
+        // any Deny ends the stream with a PERMISSION_DENIED (there is no
+        // per-topic partial subscribe on the Connect surface).
+        if authorize_resource(&state, &principal, &host, ResourceType::Group, &start.group_id, AclOperation::Read)
+            == AuthorizationResult::Deny
+        {
+            yield Err(ConnectError::new_permission_denied(format!("Read Group:{}", start.group_id)));
+            return;
+        }
+        for topic in &start.topics {
+            if authorize_resource(&state, &principal, &host, ResourceType::Topic, topic, AclOperation::Read)
+                == AuthorizationResult::Deny
+            {
+                yield Err(ConnectError::new_permission_denied(format!("Read Topic:{topic}")));
+                return;
+            }
+        }
 
         let client_id = format!("{}-sub", state.config.client_id);
         let mut session = match ConsumeSession::new(&state.config.bootstrap, &start.group_id, &client_id, start.topics).await {
@@ -148,6 +198,8 @@ pub fn subscribe_inner(
 /// Bidi `Subscribe` Connect handler.
 pub async fn subscribe(
     Extension(state): Extension<Arc<AppState>>,
+    principal: Option<Extension<Principal>>,
+    peer: Option<Extension<SocketAddr>>,
     req: ConnectRequest<Streaming<pb::SubscribeFrame>>,
 ) -> Result<
     ConnectResponse<
@@ -155,7 +207,9 @@ pub async fn subscribe(
     >,
     ConnectError,
 > {
+    let eff = principal.map_or_else(anonymous_principal, |Extension(p)| p);
+    let host = peer.map_or_else(unknown_host, |Extension(a)| a);
     Ok(ConnectResponse::new(StreamBody::new(Box::pin(
-        subscribe_inner(req.0, state),
+        subscribe_inner(req.0, state, eff, host),
     ))))
 }

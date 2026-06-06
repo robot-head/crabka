@@ -14,6 +14,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Extension, Json, Router};
+use crabka_authz::{AuthorizationRequest, AuthorizationResult};
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_security::{AuthMethod, Principal};
 use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
@@ -30,10 +33,77 @@ pub struct ForwardRecord {
     pub partition: Option<i32>,
     pub timestamp_ms: Option<i64>,
     pub idempotency_key: Option<String>,
+    /// The ORIGINAL caller's resolved identity, relayed by the forwarding
+    /// gateway so the owning replica re-authorizes the caller (not the
+    /// forwarding gateway's own mTLS identity). `None` ⇒ the owner treats the
+    /// caller as ANONYMOUS. The owner trusts the mTLS-authenticated peer
+    /// gateway to relay this truthfully (trusted-proxy chain).
+    pub principal: Option<ForwardPrincipal>,
+}
+
+/// Wire form of a resolved caller [`Principal`] carried on a forward.
+/// `auth_method` is a string because [`AuthMethod`] is not `Serialize`; it
+/// round-trips through [`ForwardPrincipal::from_principal`] /
+/// [`ForwardPrincipal::to_principal`] (unknown strings map to
+/// [`AuthMethod::Anonymous`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForwardPrincipal {
+    pub name: String,
+    pub auth_method: String,
+    pub groups: Vec<String>,
+}
+
+impl ForwardPrincipal {
+    /// Project a resolved session [`Principal`] onto its wire form.
+    #[must_use]
+    pub fn from_principal(p: &Principal) -> Self {
+        Self {
+            name: p.name.clone(),
+            auth_method: auth_method_to_str(p.auth_method).to_string(),
+            groups: p.groups.clone(),
+        }
+    }
+
+    /// Reconstruct a session [`Principal`] from the wire form. An unrecognized
+    /// `auth_method` string defaults to [`AuthMethod::Anonymous`].
+    #[must_use]
+    pub fn to_principal(&self) -> Principal {
+        Principal {
+            name: self.name.clone(),
+            auth_method: auth_method_from_str(&self.auth_method),
+            groups: self.groups.clone(),
+        }
+    }
+}
+
+/// Stable string tag for an [`AuthMethod`] on the forward wire.
+fn auth_method_to_str(m: AuthMethod) -> &'static str {
+    match m {
+        AuthMethod::Anonymous => "Anonymous",
+        AuthMethod::SaslPlain => "SaslPlain",
+        AuthMethod::SaslScramSha256 => "SaslScramSha256",
+        AuthMethod::SaslScramSha512 => "SaslScramSha512",
+        AuthMethod::SaslOAuthBearer => "SaslOAuthBearer",
+        AuthMethod::SaslGssapi => "SaslGssapi",
+        AuthMethod::MTls => "MTls",
+    }
+}
+
+/// Inverse of [`auth_method_to_str`]; unknown tags ⇒ [`AuthMethod::Anonymous`].
+fn auth_method_from_str(s: &str) -> AuthMethod {
+    match s {
+        "SaslPlain" => AuthMethod::SaslPlain,
+        "SaslScramSha256" => AuthMethod::SaslScramSha256,
+        "SaslScramSha512" => AuthMethod::SaslScramSha512,
+        "SaslOAuthBearer" => AuthMethod::SaslOAuthBearer,
+        "SaslGssapi" => AuthMethod::SaslGssapi,
+        "MTls" => AuthMethod::MTls,
+        _ => AuthMethod::Anonymous,
+    }
 }
 
 impl ForwardRecord {
-    fn from_record(r: &GatewayRecord) -> Self {
+    fn from_record(r: &GatewayRecord, principal: &Principal) -> Self {
         Self {
             topic: r.topic.clone(),
             key: r.key.as_ref().map(|b| b.to_vec()),
@@ -46,6 +116,7 @@ impl ForwardRecord {
             partition: r.partition,
             timestamp_ms: r.timestamp_ms,
             idempotency_key: r.idempotency_key.clone(),
+            principal: Some(ForwardPrincipal::from_principal(principal)),
         }
     }
 
@@ -122,14 +193,16 @@ impl Forwarder {
 
     /// POST the record to `owner_addr`'s internal forward endpoint. Transport
     /// failures and owner-`retriable` errors become `Unavailable` so the origin
-    /// retries / re-resolves to the (possibly new) owner.
+    /// retries / re-resolves to the (possibly new) owner; an owner authorization
+    /// denial (HTTP 403) becomes a non-retriable `Unauthorized`.
     pub async fn forward(
         &self,
         owner_addr: &str,
         rec: &GatewayRecord,
+        principal: &Principal,
     ) -> Result<RecordOutcome, GatewayError> {
         let url = format!("{}://{}/internal/v1/forward", self.scheme, owner_addr);
-        let body = ForwardRecord::from_record(rec);
+        let body = ForwardRecord::from_record(rec, principal);
         let resp = self
             .http
             .post(&url)
@@ -137,21 +210,33 @@ impl Forwarder {
             .send()
             .await
             .map_err(|_| GatewayError::Unavailable)?;
-        if !resp.status().is_success() {
-            return Err(GatewayError::Unavailable);
-        }
-        let result: ForwardResult = resp
-            .json()
-            .await
-            .map_err(|e| GatewayError::Forward(format!("decode forward result: {e}")))?;
-        match result.error {
-            None => Ok(RecordOutcome {
-                partition: result.partition,
-                offset: result.offset,
-                deduplicated: result.deduplicated,
-            }),
-            Some(e) if e.retriable => Err(GatewayError::Unavailable),
-            Some(e) => Err(GatewayError::Forward(e.message)),
+        // Parse the body regardless of status: the owner returns a JSON
+        // ForwardResult even on 403 (authz deny / unauthenticated peer). A
+        // denied forward must surface as a NON-retriable error, not a retriable
+        // Unavailable, so the caller doesn't retry-loop a permanent denial.
+        let status = resp.status();
+        match resp.json::<ForwardResult>().await {
+            Ok(result) => match result.error {
+                None if status.is_success() => Ok(RecordOutcome {
+                    partition: result.partition,
+                    offset: result.offset,
+                    deduplicated: result.deduplicated,
+                }),
+                None => Err(GatewayError::Unavailable),
+                Some(e) if e.retriable => Err(GatewayError::Unavailable),
+                // A non-retriable owner error on a 403 is an authorization
+                // denial: surface it as permanent PERMISSION_DENIED, never retry.
+                Some(e) if status == reqwest::StatusCode::FORBIDDEN => {
+                    Err(GatewayError::Unauthorized(e.message))
+                }
+                Some(e) => Err(GatewayError::Forward(e.message)),
+            },
+            // A 2xx with an undecodable body is a malformed owner response (fatal);
+            // a non-2xx with no JSON body is a transient transport-level failure.
+            Err(e) if status.is_success() => {
+                Err(GatewayError::Forward(format!("decode forward result: {e}")))
+            }
+            Err(_) => Err(GatewayError::Unavailable),
         }
     }
 }
@@ -197,6 +282,50 @@ async fn forward_handler(
         )
             .into_response();
     }
+
+    // Re-authorize the ORIGINAL caller (relayed in `req.principal`), NOT the
+    // forwarding gateway's mTLS peer identity gated above. The owner trusts the
+    // authenticated peer to truthfully relay who the caller is, then applies its
+    // own ACL cache against that caller. A missing identity ⇒ ANONYMOUS.
+    let caller = req.principal.as_ref().map_or_else(
+        crate::handlers::anonymous_principal,
+        ForwardPrincipal::to_principal,
+    );
+    let host = crate::handlers::unknown_host();
+    let authz_req = AuthorizationRequest {
+        principal: &caller,
+        host: &host,
+        resource_type: ResourceType::Topic,
+        resource_name: &req.topic,
+        operation: AclOperation::Write,
+    };
+    let cache = state.authz.cache();
+    let decision = state.authz.authorizer().authorize(&**cache, &authz_req);
+    tracing::info!(
+        target: "gateway::audit",
+        principal = %caller.name,
+        op = "Write",
+        topic = %req.topic,
+        forwarded = true,
+        allowed = matches!(decision, AuthorizationResult::Allow),
+        "forward authz",
+    );
+    if decision == AuthorizationResult::Deny {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ForwardResult {
+                partition: -1,
+                offset: -1,
+                deduplicated: false,
+                error: Some(ForwardError {
+                    message: format!("Write Topic:{}", req.topic),
+                    retriable: false,
+                }),
+            }),
+        )
+            .into_response();
+    }
+
     let rec = req.into_record();
     match state.produce.produce_local(rec).await {
         Ok(o) => Json(ForwardResult {

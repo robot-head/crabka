@@ -15,6 +15,16 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
+/// The resolved caller relayed on a forward. With `AllowAll` the value is
+/// immaterial — it only satisfies `produce`'s signature for these local tests.
+fn anon() -> crabka_security::Principal {
+    crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn duplicate_idempotency_key_produces_once() {
     use bytes::Bytes;
@@ -91,8 +101,9 @@ async fn duplicate_idempotency_key_produces_once() {
         idempotency_key: Some("idem-1".into()),
     };
 
-    let first = core.produce(mk()).await.unwrap();
-    let second = core.produce(mk()).await.unwrap();
+    let anon = anon();
+    let first = core.produce(mk(), &anon).await.unwrap();
+    let second = core.produce(mk(), &anon).await.unwrap();
     assert!(!first.deduplicated);
     assert!(second.deduplicated);
     assert_eq!(first.partition, second.partition);
@@ -255,15 +266,18 @@ async fn concurrent_duplicates_produce_once() {
     for _ in 0..8 {
         let core = core.clone();
         handles.push(tokio::spawn(async move {
-            core.produce(GatewayRecord {
-                topic: "dedup-conc".into(),
-                key: None,
-                value: Bytes::from_static(b"x"),
-                headers: vec![],
-                partition: None,
-                timestamp_ms: None,
-                idempotency_key: Some("same".into()),
-            })
+            core.produce(
+                GatewayRecord {
+                    topic: "dedup-conc".into(),
+                    key: None,
+                    value: Bytes::from_static(b"x"),
+                    headers: vec![],
+                    partition: None,
+                    timestamp_ms: None,
+                    idempotency_key: Some("same".into()),
+                },
+                &anon(),
+            )
             .await
             .unwrap()
         }));

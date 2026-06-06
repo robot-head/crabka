@@ -53,7 +53,7 @@ pub(crate) async fn handle(
         resource_name: gid.as_str(),
         operation: AclOperation::Alter,
     };
-    if broker.config.authorizer.authorize(&image, &acl_req) == AuthorizationResult::Deny {
+    if broker.config.authorizer.authorize(&*image, &acl_req) == AuthorizationResult::Deny {
         return encode_top_level(version, codes::GROUP_AUTHORIZATION_FAILED);
     }
 

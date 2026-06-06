@@ -51,7 +51,7 @@ pub(crate) async fn handle(
     // Batch-authorize Read on every requested topic in one pass.
     let topic_decisions = authorize_topics(
         broker.config.authorizer.as_ref(),
-        &image,
+        &*image,
         ctx.principal,
         ctx.peer,
         AclOperation::Read,

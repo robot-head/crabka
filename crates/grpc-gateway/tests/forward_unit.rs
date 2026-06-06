@@ -38,6 +38,16 @@ fn rec(topic: &str) -> GatewayRecord {
     }
 }
 
+/// The relayed caller for forward tests. With the mock owner / `AllowAll` the
+/// value is immaterial to the response — it only satisfies `forward`'s signature.
+fn anon() -> crabka_security::Principal {
+    crabka_security::Principal {
+        name: "ANONYMOUS".into(),
+        auth_method: crabka_security::AuthMethod::Anonymous,
+        groups: vec![],
+    }
+}
+
 // Mock owner endpoint: the response is chosen by the forwarded record's `topic`.
 async fn mock_forward(Json(req): Json<ForwardRecord>) -> Response {
     match req.topic.as_str() {
@@ -90,7 +100,7 @@ async fn spawn_mock() -> String {
 async fn forward_transport_error_is_unavailable() {
     // Nothing listening on :1 => connection refused => Unavailable.
     let err = Forwarder::new()
-        .forward("127.0.0.1:1", &rec("ok"))
+        .forward("127.0.0.1:1", &rec("ok"), &anon())
         .await
         .unwrap_err();
     assert!(matches!(err, GatewayError::Unavailable));
@@ -102,30 +112,36 @@ async fn forward_maps_owner_responses() {
     let fwd = Forwarder::new();
 
     // Happy path: error: None => Ok with the forwarded outcome.
-    let ok = fwd.forward(&addr, &rec("ok")).await.unwrap();
+    let ok = fwd.forward(&addr, &rec("ok"), &anon()).await.unwrap();
     assert_eq!((ok.partition, ok.offset, ok.deduplicated), (7, 11, true));
 
     // error: Some{retriable:true} => Unavailable (origin retries / re-resolves).
     assert!(matches!(
-        fwd.forward(&addr, &rec("retriable")).await.unwrap_err(),
+        fwd.forward(&addr, &rec("retriable"), &anon())
+            .await
+            .unwrap_err(),
         GatewayError::Unavailable
     ));
 
     // error: Some{retriable:false} => Forward(message).
     assert!(matches!(
-        fwd.forward(&addr, &rec("fatal")).await.unwrap_err(),
+        fwd.forward(&addr, &rec("fatal"), &anon()).await.unwrap_err(),
         GatewayError::Forward(m) if m == "boom"
     ));
 
     // non-2xx HTTP status => Unavailable.
     assert!(matches!(
-        fwd.forward(&addr, &rec("http500")).await.unwrap_err(),
+        fwd.forward(&addr, &rec("http500"), &anon())
+            .await
+            .unwrap_err(),
         GatewayError::Unavailable
     ));
 
     // 200 OK but non-JSON body => Forward (decode error).
     assert!(matches!(
-        fwd.forward(&addr, &rec("badjson")).await.unwrap_err(),
+        fwd.forward(&addr, &rec("badjson"), &anon())
+            .await
+            .unwrap_err(),
         GatewayError::Forward(_)
     ));
 }
@@ -173,7 +189,11 @@ async fn forward_handler_error_arm_returns_retriable() {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh".into(),
             tls: None,
+            authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     });
 
     // Drive the REAL forward_router in-process via tower::ServiceExt::oneshot —
@@ -188,6 +208,7 @@ async fn forward_handler_error_arm_returns_retriable() {
         partition: None,
         timestamp_ms: None,
         idempotency_key: Some("k".into()),
+        principal: None,
     };
 
     let resp = app
@@ -275,7 +296,11 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh_tls".into(),
             tls,
+            authz: None,
         }),
+        authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
+            crabka_authz::AllowAllAuthorizer,
+        ))),
     });
 
     let app = forward_router(state);
@@ -288,6 +313,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
         partition: None,
         timestamp_ms: None,
         idempotency_key: Some("k".into()),
+        principal: None,
     };
 
     // No principal extension on the request — anonymous caller.

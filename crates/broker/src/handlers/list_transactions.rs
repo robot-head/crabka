@@ -102,7 +102,7 @@ pub(crate) async fn handle(
         // ACL: per-tid `Describe` on `TransactionalId`. Silent filter on
         // Deny.
         let allow = broker.config.authorizer.authorize(
-            &image,
+            &*image,
             &AuthorizationRequest {
                 principal: ctx.principal,
                 host: ctx.peer,

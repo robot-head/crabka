@@ -125,7 +125,7 @@ pub(crate) async fn handle(
             .filter(|t| {
                 let resource = t.owner.to_string();
                 authorizer.authorize(
-                    &image,
+                    &*image,
                     &AuthorizationRequest {
                         principal,
                         host: peer,

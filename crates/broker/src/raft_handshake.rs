@@ -101,7 +101,7 @@ impl BrokerRaftHandshake {
         })?;
         let image = controller.current_image();
         let decision = self.authorizer.authorize(
-            &image,
+            &*image,
             &AuthorizationRequest {
                 principal,
                 host: peer,

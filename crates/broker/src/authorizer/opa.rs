@@ -20,11 +20,11 @@ use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+use crabka_authz::{AclSource, AuthorizationRequest, AuthorizationResult, Authorizer};
+use crabka_metadata::{AclOperation, ResourceType};
 use lru::LruCache;
 use serde::{Deserialize, Serialize};
 
-use super::{AuthorizationRequest, AuthorizationResult, Authorizer};
 use crate::time_util::now_ms;
 
 /// HTTP request timeout for a single OPA decision call. Conservative —
@@ -224,7 +224,7 @@ impl OpaAuthorizer {
 impl Authorizer for OpaAuthorizer {
     fn authorize(
         &self,
-        _image: &MetadataImage,
+        _source: &dyn AclSource,
         req: &AuthorizationRequest<'_>,
     ) -> AuthorizationResult {
         // 1. Super-user bypass — no HTTP, no cache touch.
@@ -321,6 +321,7 @@ fn resource_type_str(t: ResourceType) -> &'static str {
 mod tests {
     use super::*;
     use assert2::assert;
+    use crabka_metadata::MetadataImage;
     use crabka_security::{AuthMethod, Principal};
     use std::net::SocketAddr;
     use uuid::Uuid;

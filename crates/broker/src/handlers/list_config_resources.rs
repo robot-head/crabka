@@ -61,7 +61,7 @@ pub(crate) async fn handle(
     // DescribeConfigs: ListConfigResources is a cluster-wide enumeration,
     // so the same ACL gates it.
     let allow = broker.config.authorizer.authorize(
-        &image,
+        &*image,
         &AuthorizationRequest {
             principal: ctx.principal,
             host: ctx.peer,

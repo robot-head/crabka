@@ -87,7 +87,7 @@ pub(crate) async fn handle(
         .collect();
     let acl_results = authorize_topics(
         broker.config.authorizer.as_ref(),
-        &image,
+        &*image,
         ctx.principal,
         ctx.peer,
         AclOperation::Delete,
