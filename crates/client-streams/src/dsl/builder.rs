@@ -194,6 +194,79 @@ impl StreamsBuilder {
         .with_suppress_factory(Some(suppress_factory))
     }
 
+    /// Source a [`GlobalKTable`] from a topic: a fully-replicated lookup table,
+    /// usable only as a join target.
+    ///
+    /// Records a single `GlobalSource` logical node whose thunk lowers (via
+    /// [`Topology::add_global_store`]) a source + update-processor + a global KV
+    /// store. The store/source/processor are **invisible in the wire** (no
+    /// subtopology, no changelog), but the global source node still consumes a
+    /// node-group index during grouping — so declaring `global_table` before
+    /// `stream` shifts the stream subtopology id (e.g. to `"1"`). The store name
+    /// is taken from `materialized` (else a fresh `KTABLE-SOURCE-STATE-STORE`
+    /// counter), minted at the JVM position (before the source/processor names).
+    ///
+    /// [`GlobalKTable`]: crate::dsl::global_table::GlobalKTable
+    /// [`Topology::add_global_store`]: crate::topology::Topology::add_global_store
+    pub fn global_table<K, V, KS, VS>(
+        &self,
+        topic: impl Into<String>,
+        consumed: Consumed<KS, VS>,
+        materialized: crate::dsl::config::Materialized<KS, VS>,
+    ) -> crate::dsl::global_table::GlobalKTable<K, V>
+    where
+        K: std::any::Any + Send + Sync + Clone,
+        V: std::any::Any + Send + Clone,
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+    {
+        let topic: String = topic.into();
+        let topic_for_handle = topic.clone();
+        let mut g = self.internal.borrow_mut();
+        // Store name at the JVM position (minted before the source/processor name).
+        let store_name = match &materialized.store_name {
+            Some(name) => name.clone(),
+            None => g.new_processor_name(crate::dsl::names::TABLE_SOURCE),
+        };
+        let source_name = g.new_processor_name(crate::dsl::names::GLOBAL_SOURCE);
+        let proc_name = g.new_processor_name(crate::dsl::names::GLOBAL_PROCESSOR);
+        let id = g.graph.add(
+            source_name.clone(),
+            GraphNodeKind::GlobalSource {
+                topic: topic.clone(),
+                store_name: store_name.clone(),
+                source_name: source_name.clone(),
+                processor_name: proc_name.clone(),
+            },
+            vec![],
+        );
+        // `materialized` carries the store serdes; for a global table the store and
+        // source serdes coincide, so `add_global_store` (which uses one `Consumed`
+        // for both the source deser and the store factory) takes the source serdes.
+        // Drop `materialized` to keep its API surface symmetric with `table()` even
+        // though its serdes aren't separately threaded here.
+        drop(materialized);
+        let store_for_handle = store_name.clone();
+        g.graph.nodes[id].lower = Some(Box::new(
+            move |state: &mut crate::dsl::graph::LowerState| {
+                state.topology.add_global_store::<K, V, KS, VS>(
+                    store_name,
+                    source_name,
+                    topic,
+                    proc_name,
+                    consumed,
+                );
+            },
+        ));
+        drop(g);
+        crate::dsl::global_table::GlobalKTable::new(
+            Rc::clone(&self.internal),
+            id,
+            store_for_handle,
+            topic_for_handle,
+        )
+    }
+
     /// Build the topology with no optimizer (the JVM `NO_OPTIMIZATION` default):
     /// lower the logical graph straight to the Processor-API [`Topology`], then
     /// finalize it into a [`BuiltTopology`].
@@ -364,6 +437,53 @@ mod tests {
             .map(|t| t.name.as_str())
             .collect();
         check!(cl == vec!["in"]);
+    }
+
+    #[test]
+    fn global_table_returns_handle_with_store_name() {
+        let builder = StreamsBuilder::new();
+        let gt = builder.global_table::<String, String, _, _>(
+            "global",
+            crate::processor::serde::Consumed::with(StringSerde, StringSerde),
+            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("g-store"),
+        );
+        check!(gt.store_name() == "g-store");
+        check!(gt.source_topic == "global");
+        // The global source is the FIRST logical node (so it takes index 0 at
+        // grouping time, bumping a later stream's subtopology id).
+        let g = builder.internal.borrow();
+        check!(matches!(
+            g.graph.nodes[0].kind,
+            GraphNodeKind::GlobalSource { .. }
+        ));
+    }
+
+    #[test]
+    fn global_table_before_stream_bumps_stream_subtopology_to_one() {
+        use crate::processor::serde::{Consumed, Produced};
+        let b = StreamsBuilder::new();
+        // Declared FIRST: the global source is registered before the stream source,
+        // so it consumes node-group index 0 and the stream emits as "1".
+        let gt = b.global_table::<String, String, _, _>(
+            "global",
+            Consumed::with(StringSerde, StringSerde),
+            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("g-store"),
+        );
+        // The GlobalKTable handle holds an `Rc` clone of the internal builder; drop
+        // it before `build()` (which requires `Rc::try_unwrap` to succeed).
+        drop(gt);
+        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+            .to("out", Produced::with(StringSerde, StringSerde));
+        let wire = b.build("app").unwrap().to_wire();
+        check!(wire.subtopologies.len() == 1);
+        check!(wire.subtopologies[0].subtopology_id == "1");
+        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
+        // No changelog topic for the global store.
+        check!(
+            wire.subtopologies
+                .iter()
+                .all(|s| s.state_changelog_topics.is_empty())
+        );
     }
 
     #[test]
