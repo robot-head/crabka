@@ -1,0 +1,219 @@
+//! Coverage for the Forwarder's response/error mapping and the internal
+//! forward endpoint's error arm — without the full multi-replica path.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Json;
+use axum::Router;
+use axum::body::Body;
+use axum::http::{Request, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::post;
+use bytes::Bytes;
+use crabka_broker::{Broker, BrokerConfig};
+use crabka_grpc_gateway::codec::RawCodec;
+use crabka_grpc_gateway::config::GatewayConfig;
+use crabka_grpc_gateway::dedup::DedupEngine;
+use crabka_grpc_gateway::dedup::store::DedupStore;
+use crabka_grpc_gateway::error::GatewayError;
+use crabka_grpc_gateway::forward::{
+    ForwardError, ForwardRecord, ForwardResult, Forwarder, forward_router,
+};
+use crabka_grpc_gateway::produce::ProduceCore;
+use crabka_grpc_gateway::state::AppState;
+use crabka_grpc_gateway::types::GatewayRecord;
+use tempfile::TempDir;
+use tower::ServiceExt;
+
+fn rec(topic: &str) -> GatewayRecord {
+    GatewayRecord {
+        topic: topic.into(),
+        key: None,
+        value: Bytes::from_static(b"v"),
+        headers: vec![],
+        partition: None,
+        timestamp_ms: None,
+        idempotency_key: Some("k".into()),
+    }
+}
+
+// Mock owner endpoint: the response is chosen by the forwarded record's `topic`.
+async fn mock_forward(Json(req): Json<ForwardRecord>) -> Response {
+    match req.topic.as_str() {
+        "ok" => Json(ForwardResult {
+            partition: 7,
+            offset: 11,
+            deduplicated: true,
+            error: None,
+        })
+        .into_response(),
+        "retriable" => Json(ForwardResult {
+            partition: -1,
+            offset: -1,
+            deduplicated: false,
+            error: Some(ForwardError {
+                message: "warming".into(),
+                retriable: true,
+            }),
+        })
+        .into_response(),
+        "fatal" => Json(ForwardResult {
+            partition: -1,
+            offset: -1,
+            deduplicated: false,
+            error: Some(ForwardError {
+                message: "boom".into(),
+                retriable: false,
+            }),
+        })
+        .into_response(),
+        "http500" => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        // "badjson" and everything else: 200 OK but non-JSON body
+        _ => (StatusCode::OK, "not json").into_response(),
+    }
+}
+
+async fn spawn_mock() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let app = Router::new().route("/internal/v1/forward", post(mock_forward));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    // small readiness pause so the first request doesn't race serve startup
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    addr
+}
+
+#[tokio::test]
+async fn forward_transport_error_is_unavailable() {
+    // Nothing listening on :1 => connection refused => Unavailable.
+    let err = Forwarder::new()
+        .forward("127.0.0.1:1", &rec("ok"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GatewayError::Unavailable));
+}
+
+#[tokio::test]
+async fn forward_maps_owner_responses() {
+    let addr = spawn_mock().await;
+    let fwd = Forwarder::new();
+
+    // Happy path: error: None => Ok with the forwarded outcome.
+    let ok = fwd.forward(&addr, &rec("ok")).await.unwrap();
+    assert_eq!((ok.partition, ok.offset, ok.deduplicated), (7, 11, true));
+
+    // error: Some{retriable:true} => Unavailable (origin retries / re-resolves).
+    assert!(matches!(
+        fwd.forward(&addr, &rec("retriable")).await.unwrap_err(),
+        GatewayError::Unavailable
+    ));
+
+    // error: Some{retriable:false} => Forward(message).
+    assert!(matches!(
+        fwd.forward(&addr, &rec("fatal")).await.unwrap_err(),
+        GatewayError::Forward(m) if m == "boom"
+    ));
+
+    // non-2xx HTTP status => Unavailable.
+    assert!(matches!(
+        fwd.forward(&addr, &rec("http500")).await.unwrap_err(),
+        GatewayError::Unavailable
+    ));
+
+    // 200 OK but non-JSON body => Forward (decode error).
+    assert!(matches!(
+        fwd.forward(&addr, &rec("badjson")).await.unwrap_err(),
+        GatewayError::Forward(_)
+    ));
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_handler_error_arm_returns_retriable() {
+    // Consts before any statements (clippy::items_after_statements).
+    const N: u32 = 4;
+    const DEDUP: &str = "__crabka_grpc_dedup_fh";
+
+    // Boot a real broker so ProduceCore::new can connect, even though
+    // produce_local will short-circuit before any data is written (the
+    // DedupStore owns nothing => dedup_produce returns Unavailable).
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+
+    let store = Arc::new(DedupStore::new(N));
+    let engine = Arc::new(DedupEngine::new(
+        &bootstrap,
+        "fh",
+        "fh-dedup",
+        DEDUP.into(),
+        N,
+        store,
+    ));
+    let produce = ProduceCore::new(&bootstrap, "fh", Arc::new(RawCodec))
+        .await
+        .unwrap()
+        .with_dedup(engine);
+
+    let state = Arc::new(AppState {
+        produce: Arc::new(produce),
+        config: Arc::new(GatewayConfig {
+            bootstrap: bootstrap.clone(),
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            client_id: "fh".into(),
+            dedup_topic: DEDUP.into(),
+            dedup_partitions: N,
+            dedup_window_ms: 3_600_000,
+            dedup_txn_id_prefix: "fh-dedup".into(),
+            advertised_addr: "127.0.0.1:0".into(),
+            membership_topic: "__crabka_grpc_gateway_membership_fh".into(),
+        }),
+    });
+
+    // Drive the REAL forward_router in-process via tower::ServiceExt::oneshot —
+    // no listen socket needed, so no race between bind and serve.
+    let app = forward_router(state);
+
+    let fr = ForwardRecord {
+        topic: "t".into(),
+        key: None,
+        value: vec![1],
+        headers: vec![],
+        partition: None,
+        timestamp_ms: None,
+        idempotency_key: Some("k".into()),
+    };
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/v1/forward")
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&fr).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let result: ForwardResult = serde_json::from_slice(&bytes).unwrap();
+
+    // produce_local => dedup_produce => DedupStore owns nothing => Unavailable
+    // => forward_handler wraps it with retriable: true.
+    assert!(result.error.is_some(), "expected an error in ForwardResult");
+    assert!(
+        result.error.unwrap().retriable,
+        "Unavailable from produce_local must be retriable"
+    );
+
+    broker.shutdown().await;
+}

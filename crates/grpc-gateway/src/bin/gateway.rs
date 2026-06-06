@@ -14,8 +14,10 @@ use tokio_util::sync::CancellationToken;
 use crabka_grpc_gateway::codec::RawCodec;
 use crabka_grpc_gateway::config::GatewayConfig;
 use crabka_grpc_gateway::dedup::DedupEngine;
+use crabka_grpc_gateway::dedup::membership::{MembershipPublisher, MembershipStore};
 use crabka_grpc_gateway::dedup::store::DedupStore;
-use crabka_grpc_gateway::dedup::topic::ensure_dedup_topic;
+use crabka_grpc_gateway::dedup::topic::{ensure_dedup_topic, ensure_membership_topic};
+use crabka_grpc_gateway::forward::{self, Forwarder};
 use crabka_grpc_gateway::health::{self, Readiness};
 use crabka_grpc_gateway::produce::ProduceCore;
 use crabka_grpc_gateway::state::AppState;
@@ -76,6 +78,19 @@ struct Args {
         default_value = "crabka-gw-dedup"
     )]
     dedup_txn_id_prefix: String,
+
+    /// Address peers reach this gateway at (e.g. `gw-0.gw:9500`). Required for
+    /// active-active forwarding; must be routable from other replicas.
+    #[arg(long, env = "CRABKA_GATEWAY_ADVERTISED_ADDR")]
+    advertised_addr: String,
+
+    /// Internal membership / owner-routing topic.
+    #[arg(
+        long,
+        env = "CRABKA_GATEWAY_MEMBERSHIP_TOPIC",
+        default_value = "__crabka_grpc_gateway_membership"
+    )]
+    membership_topic: String,
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -104,10 +119,15 @@ async fn main() -> anyhow::Result<()> {
         dedup_partitions: args.dedup_partitions,
         dedup_window_ms: args.dedup_window_ms,
         dedup_txn_id_prefix: args.dedup_txn_id_prefix.clone(),
+        advertised_addr: args.advertised_addr.clone(),
+        membership_topic: args.membership_topic.clone(),
     };
 
-    // Ensure the internal compacted dedup-claim topic exists before opening
-    // any producer/consumer against it.
+    run(config).await
+}
+
+async fn run(config: GatewayConfig) -> anyhow::Result<()> {
+    // Ensure internal topics exist before opening any producer/consumer.
     ensure_dedup_topic(
         &config.bootstrap,
         &config.dedup_topic,
@@ -116,46 +136,36 @@ async fn main() -> anyhow::Result<()> {
         GatewayConfig::DEDUP_TOPIC_REPLICATION,
     )
     .await?;
+    ensure_membership_topic(
+        &config.bootstrap,
+        &config.membership_topic,
+        GatewayConfig::MEMBERSHIP_TOPIC_REPLICATION,
+    )
+    .await?;
 
-    // Build the dedup store and run the ownership consumer in the background;
-    // the gateway reports `/readyz` 503 until the store has warmed at least once.
+    let node_id = uuid::Uuid::new_v4().to_string();
     let store = Arc::new(DedupStore::new(config.dedup_partitions));
     let readiness = Readiness::new();
     let shutdown = CancellationToken::new();
-    {
-        let store = store.clone();
-        let bootstrap = config.bootstrap.clone();
-        let client_id = format!("{}-dedup-owner", config.client_id);
-        let dedup_topic = config.dedup_topic.clone();
-        let shutdown = shutdown.clone();
-        tokio::spawn(async move {
-            if let Err(e) = store
-                .run_ownership(
-                    bootstrap,
-                    client_id,
-                    dedup_topic,
-                    "__crabka_grpc_gateway_dedup_owners".to_string(),
-                    shutdown,
-                )
-                .await
-            {
-                tracing::error!(error = %e, "dedup ownership task exited with error");
-            }
-        });
-    }
-    {
-        let store = store.clone();
-        let readiness = readiness.clone();
-        tokio::spawn(async move {
-            loop {
-                if store.has_warmed_once() {
-                    readiness.set_ready();
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            }
-        });
-    }
+
+    // Membership: tail the routing table, and install the publisher BEFORE the
+    // ownership consumer starts so its first assignment is published.
+    let membership = Arc::new(MembershipStore::new());
+    spawn_membership_reader(&config, &membership, &node_id, &shutdown);
+    let publisher = Arc::new(
+        MembershipPublisher::new(
+            &config.bootstrap,
+            &format!("{}-membership-pub", config.client_id),
+            node_id.clone(),
+            config.advertised_addr.clone(),
+            config.membership_topic.clone(),
+        )
+        .await?,
+    );
+    store.set_membership(publisher);
+
+    spawn_ownership_consumer(&config, &store, &shutdown);
+    spawn_readiness_watcher(store.clone(), readiness.clone());
 
     let engine = Arc::new(DedupEngine::new(
         &config.bootstrap,
@@ -167,13 +177,20 @@ async fn main() -> anyhow::Result<()> {
     ));
     let produce = ProduceCore::new(&config.bootstrap, &config.client_id, Arc::new(RawCodec))
         .await?
-        .with_dedup(engine);
+        .with_dedup(engine)
+        .with_forwarding(
+            membership,
+            Arc::new(Forwarder::new()),
+            config.advertised_addr.clone(),
+        );
     let state = Arc::new(AppState {
         produce: Arc::new(produce),
         config: Arc::new(config.clone()),
     });
 
-    let app = crabka_grpc_gateway::router(state).merge(health::router(readiness));
+    let app = crabka_grpc_gateway::router(state.clone())
+        .merge(health::router(readiness))
+        .merge(forward::forward_router(state.clone()));
 
     let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
     info!(addr = %listener.local_addr()?, "gateway listening");
@@ -184,4 +201,64 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     Ok(())
+}
+
+fn spawn_membership_reader(
+    config: &GatewayConfig,
+    membership: &Arc<MembershipStore>,
+    node_id: &str,
+    shutdown: &CancellationToken,
+) {
+    let membership = membership.clone();
+    let bootstrap = config.bootstrap.clone();
+    let client_id = format!("{}-membership", config.client_id);
+    let topic = config.membership_topic.clone();
+    let group = format!("__crabka_grpc_gateway_membership_reader-{node_id}");
+    let shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(e) = membership
+            .run_membership(bootstrap, client_id, topic, group, shutdown)
+            .await
+        {
+            tracing::error!(error = %e, "membership reader exited with error");
+        }
+    });
+}
+
+fn spawn_ownership_consumer(
+    config: &GatewayConfig,
+    store: &Arc<DedupStore>,
+    shutdown: &CancellationToken,
+) {
+    let store = store.clone();
+    let bootstrap = config.bootstrap.clone();
+    let client_id = format!("{}-dedup-owner", config.client_id);
+    let dedup_topic = config.dedup_topic.clone();
+    let shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        if let Err(e) = store
+            .run_ownership(
+                bootstrap,
+                client_id,
+                dedup_topic,
+                "__crabka_grpc_gateway_dedup_owners".to_string(),
+                shutdown,
+            )
+            .await
+        {
+            tracing::error!(error = %e, "dedup ownership task exited with error");
+        }
+    });
+}
+
+fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness) {
+    tokio::spawn(async move {
+        loop {
+            if store.has_warmed_once() {
+                readiness.set_ready();
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
 }

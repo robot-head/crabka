@@ -1,0 +1,298 @@
+//! Active-active forwarding: two gateway replicas split the dedup partitions and
+//! each tails membership. A keyed record whose partition is owned by B, when
+//! submitted to A, is forwarded to B over HTTP and produced exactly once;
+//! re-submitting the same key dedups. A record with no known owner is Unavailable.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
+
+use bytes::Bytes;
+use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_client_admin::{AdminClient, CreateTopicSpec};
+use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
+use crabka_grpc_gateway::codec::RawCodec;
+use crabka_grpc_gateway::config::GatewayConfig;
+use crabka_grpc_gateway::dedup::membership::{MembershipPublisher, MembershipStore};
+use crabka_grpc_gateway::dedup::store::DedupStore;
+use crabka_grpc_gateway::dedup::topic::{ensure_dedup_topic, ensure_membership_topic};
+use crabka_grpc_gateway::dedup::{DedupEngine, partition_for};
+use crabka_grpc_gateway::error::GatewayError;
+use crabka_grpc_gateway::forward::{self, Forwarder};
+use crabka_grpc_gateway::produce::ProduceCore;
+use crabka_grpc_gateway::state::AppState;
+use crabka_grpc_gateway::types::GatewayRecord;
+use tempfile::TempDir;
+use tokio_util::sync::CancellationToken;
+
+const N: u32 = 4;
+const DEDUP: &str = "__crabka_grpc_dedup";
+const MEMBERSHIP: &str = "__crabka_grpc_gateway_membership";
+const OWNERS_GROUP: &str = "__crabka_grpc_gateway_dedup_owners";
+const USER_TOPIC: &str = "fwd-user";
+
+struct Gw {
+    addr: String,
+    state: Arc<AppState>,
+    store: Arc<DedupStore>,
+    membership: Arc<MembershipStore>,
+    token: CancellationToken,
+}
+
+async fn boot() -> (BrokerHandle, String, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    (broker, bootstrap, dir)
+}
+
+/// Bind a listener first (to learn the advertised addr), install the membership
+/// publisher, start ownership + membership, then serve Connect + forward routes.
+async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let token = CancellationToken::new();
+
+    let store = Arc::new(DedupStore::new(N));
+    let node_id = format!("{client}-{addr}");
+    let publisher = Arc::new(
+        MembershipPublisher::new(
+            bootstrap,
+            &format!("{client}-pub"),
+            node_id.clone(),
+            addr.clone(),
+            MEMBERSHIP.into(),
+        )
+        .await
+        .unwrap(),
+    );
+    store.set_membership(publisher);
+
+    // Ownership consumer (shared owners group).
+    {
+        let store = store.clone();
+        let bootstrap = bootstrap.to_string();
+        let token = token.clone();
+        tokio::spawn(store.run_ownership(
+            bootstrap,
+            format!("{client}-owner"),
+            DEDUP.into(),
+            OWNERS_GROUP.into(),
+            token,
+        ));
+    }
+
+    // Membership reader (unique group per replica).
+    let membership = Arc::new(MembershipStore::new());
+    {
+        let membership = membership.clone();
+        let bootstrap = bootstrap.to_string();
+        let token = token.clone();
+        tokio::spawn(membership.clone().run_membership(
+            bootstrap,
+            format!("{client}-memb"),
+            MEMBERSHIP.into(),
+            format!("__crabka_grpc_gateway_membership_reader-{node_id}"),
+            token,
+        ));
+    }
+
+    let engine = Arc::new(DedupEngine::new(
+        bootstrap,
+        client,
+        &format!("crabka-grpc-dedup-{client}"),
+        DEDUP.into(),
+        N,
+        store.clone(),
+    ));
+    let forwarder = Arc::new(Forwarder::new());
+    let produce = ProduceCore::new(bootstrap, client, Arc::new(RawCodec))
+        .await
+        .unwrap()
+        .with_dedup(engine)
+        .with_forwarding(membership.clone(), forwarder, addr.clone());
+    let state = Arc::new(AppState {
+        produce: Arc::new(produce),
+        config: Arc::new(GatewayConfig {
+            bootstrap: bootstrap.to_string(),
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            client_id: client.into(),
+            dedup_topic: DEDUP.into(),
+            dedup_partitions: N,
+            dedup_window_ms: 3_600_000,
+            dedup_txn_id_prefix: format!("crabka-grpc-dedup-{client}"),
+            advertised_addr: addr.clone(),
+            membership_topic: MEMBERSHIP.into(),
+        }),
+    });
+
+    // Serve Connect + forward routes (health omitted — not needed here).
+    {
+        let app = crabka_grpc_gateway::router(state.clone())
+            .merge(forward::forward_router(state.clone()));
+        let token = token.clone();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async move { token.cancelled().await })
+                .await;
+        });
+    }
+
+    Gw {
+        addr,
+        state,
+        store,
+        membership,
+        token,
+    }
+}
+
+async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
+    let mut consumer = Consumer::builder()
+        .bootstrap(bootstrap.to_string())
+        .client_id("fwd-verify")
+        .group_id("fwd-verify-grp")
+        .subscribe(vec![USER_TOPIC.to_string()])
+        .isolation_level(IsolationLevel::ReadCommitted)
+        .auto_offset_reset(AutoOffsetReset::Earliest)
+        .build()
+        .await
+        .unwrap();
+    let mut n = 0;
+    for _ in 0..10 {
+        let batch = consumer.poll(Duration::from_millis(500)).await.unwrap();
+        for r in batch {
+            if r.value.as_deref() == Some(key_filter.as_bytes()) {
+                n += 1;
+            }
+        }
+    }
+    let _ = consumer.close().await;
+    n
+}
+
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+async fn keyed_record_forwards_to_owner_and_dedups() {
+    let (broker, bootstrap, _dir) = boot().await;
+    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1)
+        .await
+        .unwrap();
+    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1)
+        .await
+        .unwrap();
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: USER_TOPIC.into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            10_000,
+        )
+        .await
+        .unwrap();
+
+    let gw_a = spawn_gateway(&bootstrap, "gwa").await;
+    let gw_b = spawn_gateway(&bootstrap, "gwb").await;
+
+    // Wait for a disjoint, covering split where both replicas are warm AND both
+    // membership tables route every partition (forwarding can resolve any key).
+    let mut ready = false;
+    for _ in 0..160 {
+        let split_ok = (0..N).all(|p| gw_a.store.owns(p) ^ gw_b.store.owns(p))
+            && gw_a.store.has_warmed_once()
+            && gw_b.store.has_warmed_once();
+        let routes_ok = (0..N).all(|p| gw_a.membership.owner_of(p).is_some())
+            && (0..N).all(|p| gw_b.membership.owner_of(p).is_some());
+        if split_ok && routes_ok {
+            ready = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(
+        ready,
+        "replicas did not reach a stable split + converged routing"
+    );
+
+    // Pick a key owned by B (so submitting through A must forward to B).
+    let key = (0..1000)
+        .map(|i| format!("k{i}"))
+        .find(|k| gw_b.store.owns(partition_for(k, N)))
+        .expect("a key owned by B");
+    let p = partition_for(&key, N);
+    assert!(gw_b.store.owns(p) && !gw_a.store.owns(p));
+    assert_eq!(
+        gw_a.membership.owner_of(p).as_deref(),
+        Some(gw_b.addr.as_str())
+    );
+
+    let mk = || GatewayRecord {
+        topic: USER_TOPIC.into(),
+        key: None,
+        value: Bytes::from(key.clone().into_bytes()),
+        headers: vec![],
+        partition: None,
+        timestamp_ms: None,
+        idempotency_key: Some(key.clone()),
+    };
+
+    // Submit through A → forwarded to B → produced (not deduplicated).
+    let first = gw_a.state.produce.produce(mk()).await.unwrap();
+    assert!(!first.deduplicated, "first forward should produce");
+
+    // Same key through A again → forwarded to B → B's map hit → deduplicated.
+    let second = gw_a.state.produce.produce(mk()).await.unwrap();
+    assert!(second.deduplicated, "second forward should dedup");
+    assert_eq!(first.offset, second.offset);
+
+    // Exactly one record with that value landed in the user topic.
+    assert_eq!(count_in_user_topic(&bootstrap, &key).await, 1);
+
+    gw_a.token.cancel();
+    gw_b.token.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test]
+async fn no_known_owner_is_unavailable() {
+    // A produce core with dedup but an EMPTY membership table: a keyed record
+    // for an unowned partition has no route ⇒ Unavailable (origin retries).
+    // ProduceCore::new connects to the broker during build, so we need a real
+    // broker even though this test never actually produces a record.
+    let (_broker, bootstrap, _dir) = boot().await;
+    let store = Arc::new(DedupStore::new(N));
+    let engine = Arc::new(DedupEngine::new(
+        &bootstrap,
+        "gw",
+        "crabka-grpc-dedup",
+        DEDUP.into(),
+        N,
+        store,
+    ));
+    let membership = Arc::new(MembershipStore::new());
+    let forwarder = Arc::new(Forwarder::new());
+    let produce = ProduceCore::new(&bootstrap, "gw", Arc::new(RawCodec))
+        .await
+        .unwrap()
+        .with_dedup(engine)
+        .with_forwarding(membership, forwarder, "127.0.0.1:9999".into());
+    let rec = GatewayRecord {
+        topic: USER_TOPIC.into(),
+        key: None,
+        value: Bytes::from_static(b"v"),
+        headers: vec![],
+        partition: None,
+        timestamp_ms: None,
+        idempotency_key: Some("k".into()),
+    };
+    let err = produce.produce(rec).await.unwrap_err();
+    assert!(matches!(err, GatewayError::Unavailable));
+}
