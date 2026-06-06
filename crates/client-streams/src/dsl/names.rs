@@ -48,6 +48,10 @@ pub(crate) const TABLE_MAPVALUES: &str = "KTABLE-MAPVALUES-";
 pub(crate) const TABLE_FILTER: &str = "KTABLE-FILTER-";
 #[allow(dead_code)]
 pub(crate) const JOIN: &str = "KSTREAM-JOIN-";
+/// Stream-globaltable join processor prefix. Not wire-visible (the wire topology
+/// carries topics only, and the global table has no subtopology), so this name
+/// affects no golden — it just keeps the join node clearly labelled in the graph.
+pub(crate) const GLOBALTABLE_JOIN: &str = "KSTREAM-GLOBALTABLE-JOIN-";
 #[allow(dead_code)]
 pub(crate) const KTABLE_JOIN_THIS: &str = "KTABLE-JOINTHIS-";
 #[allow(dead_code)]

@@ -17,10 +17,11 @@ use crate::dsl::graph::NodeId;
 
 /// A handle to a fully-replicated `GlobalKTable`. Only usable as a join target.
 ///
-/// `builder`, `node`, and `source_topic` are read by `KStream::join_global` /
-/// `left_join_global` in a later task to wire the join; `store_name` is the
-/// materialized store the join processor reads. They're marked `dead_code` until
-/// that task lands.
+/// `store_name` is the materialized store `KStream::join_global` /
+/// `left_join_global` wire the join processor's lookup against. `builder`, `node`,
+/// and `source_topic` remain `dead_code` until the real shared global registry +
+/// global consumer are wired (a later task); the join itself reaches the store via
+/// the per-task registry for now.
 pub struct GlobalKTable<K, V> {
     // Used by join_global in a later task.
     #[allow(dead_code)]
@@ -51,9 +52,9 @@ impl<K, V> GlobalKTable<K, V> {
         }
     }
 
-    /// The name of the materialized state store backing this global table.
-    // Used by join_global in a later task.
-    #[allow(dead_code)]
+    /// The name of the materialized state store backing this global table. Read by
+    /// [`KStream::join_global`](crate::dsl::kstream::KStream::join_global) /
+    /// `left_join_global` to wire the join processor's global-store lookup.
     pub(crate) fn store_name(&self) -> &str {
         &self.store_name
     }

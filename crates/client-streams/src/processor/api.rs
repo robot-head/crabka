@@ -148,6 +148,18 @@ where
         self.dispatch.stores.get_kv::<K2, V2>(name)
     }
 
+    /// Access a connected GLOBAL key-value store, typed (read-only lookups). In
+    /// this slice the global store is registered in the per-task registry, so this
+    /// aliases [`get_state_store`](Self::get_state_store); a later task repoints it
+    /// at the shared `GlobalStateManager`. `None` if absent / type mismatch. Fetch
+    /// it per-record (do not hold across `process` calls).
+    pub fn get_global_kv_store<K2: Send + Sync + 'static, V2: Send + 'static>(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut dyn crate::store::api::KeyValueStore<K2, V2>> {
+        self.dispatch.stores.get_kv::<K2, V2>(name)
+    }
+
     /// Access a connected window store, typed. `None` if absent or the K/V types
     /// don't match. Fetch it per-record (do not hold across `process` calls).
     pub fn get_window_store<K2: Send + Sync + 'static, V2: Send + 'static>(

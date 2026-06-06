@@ -22,6 +22,7 @@ use crate::dsl::kgrouped::KGroupedStream;
 use crate::dsl::ktable::KTable;
 use crate::dsl::names;
 use crate::dsl::processors::change::Change;
+use crate::dsl::processors::global_join::KStreamGlobalTableJoinProcessor;
 use crate::dsl::processors::join::KStreamKTableJoinProcessor;
 use crate::dsl::processors::ktable_join::JoinKind;
 use crate::dsl::processors::outer_join_store::TimeTracker;
@@ -593,6 +594,124 @@ where
         drop(g);
         // The joined stream keeps the key but no longer maps to a single source
         // topic (it is the join output), so its source-topic lineage is `None`.
+        KStream::new_with_key_changing(Rc::clone(&self.builder), join_id, false)
+    }
+
+    /// `join` (inner stream-globaltable join): for each record on this stream,
+    /// compute the lookup key `gk = key_mapper(&streamKey, &streamValue)`, look it
+    /// up in `global`'s fully-replicated store, and — **only on a hit** — forward
+    /// `joiner(&stream_value, &global_value)` keyed by the **stream key** with the
+    /// stream timestamp. Records whose derived key is absent are dropped.
+    ///
+    /// Unlike [`join_table`](Self::join_table), the lookup key is *derived* from
+    /// the record (so it may differ from the stream key), and because a
+    /// `GlobalKTable` is fully replicated there is **no copartitioning, no
+    /// repartition, and no key-changing assertion** — any record can look up any
+    /// key on every instance.
+    ///
+    /// [`GlobalKTable`]: crate::dsl::global_table::GlobalKTable
+    #[must_use]
+    pub fn join_global<GK, VG, VR, KM, J>(
+        &self,
+        global: &crate::dsl::global_table::GlobalKTable<GK, VG>,
+        key_mapper: KM,
+        joiner: J,
+    ) -> KStream<K, VR>
+    where
+        GK: Any + Send + Sync + 'static,
+        VG: Any + Send + Clone,
+        VR: Any + Send + Clone,
+        KM: Fn(&K, &V) -> GK + Clone + Send + Sync + 'static,
+        J: Fn(&V, &VG) -> VR + Clone + Send + Sync + 'static,
+    {
+        // Wrap the inner joiner to the left form `Fn(&V, Option<&VG>) -> VR`; with
+        // `emit_on_miss = false` the closure is only ever called with `Some`.
+        let jf = move |v: &V, opt: Option<&VG>| joiner(v, opt.expect("inner global join hit"));
+        self.join_global_impl::<GK, VG, VR, KM, _>(global, key_mapper, jf, false)
+    }
+
+    /// `leftJoin` (left stream-globaltable join): like
+    /// [`join_global`](Self::join_global) but always forwards a record for every
+    /// stream record. On a global-store miss the `joiner` receives `None` for the
+    /// global-side value.
+    #[must_use]
+    pub fn left_join_global<GK, VG, VR, KM, J>(
+        &self,
+        global: &crate::dsl::global_table::GlobalKTable<GK, VG>,
+        key_mapper: KM,
+        joiner: J,
+    ) -> KStream<K, VR>
+    where
+        GK: Any + Send + Sync + 'static,
+        VG: Any + Send + Clone,
+        VR: Any + Send + Clone,
+        KM: Fn(&K, &V) -> GK + Clone + Send + Sync + 'static,
+        J: Fn(&V, Option<&VG>) -> VR + Clone + Send + Sync + 'static,
+    {
+        self.join_global_impl::<GK, VG, VR, KM, _>(global, key_mapper, joiner, true)
+    }
+
+    /// Shared lowering for inner/left stream-globaltable join. `left_form` is the
+    /// `Fn(&V, Option<&VG>) -> VR` joiner; `emit_on_miss` is `false` for inner,
+    /// `true` for left.
+    ///
+    /// Records a `KSTREAM-GLOBALTABLE-JOIN-` processor node wired to this stream's
+    /// node; its thunk builds a [`KStreamGlobalTableJoinProcessor`] that reads the
+    /// global table's store by name via the global registry accessor. Unlike the
+    /// stream-table join there is **no** copartition group and **no**
+    /// `connect_processor_store` (the global store is fully replicated and reached
+    /// through the global registry, not a copartitioned subtopology), and **no**
+    /// `key_changing` assertion (the lookup key is derived, not the stream key).
+    fn join_global_impl<GK, VG, VR, KM, LF>(
+        &self,
+        global: &crate::dsl::global_table::GlobalKTable<GK, VG>,
+        key_mapper: KM,
+        left_form: LF,
+        emit_on_miss: bool,
+    ) -> KStream<K, VR>
+    where
+        GK: Any + Send + Sync + 'static,
+        VG: Any + Send + Clone,
+        VR: Any + Send + Clone,
+        KM: Fn(&K, &V) -> GK + Clone + Send + Sync + 'static,
+        LF: Fn(&V, Option<&VG>) -> VR + Clone + Send + Sync + 'static,
+    {
+        let store_name = global.store_name().to_string();
+
+        let parent_id = self.node;
+        let mut g = self.builder.borrow_mut();
+        let join_name = g.new_processor_name(names::GLOBALTABLE_JOIN);
+        let join_id = g.graph.add(
+            join_name.clone(),
+            // Reuse the stateless kind: the global join lowers to a plain processor
+            // node with no repartition and no store-connection/copartition wiring,
+            // so the optimizer passes (Repartition / TableSource) correctly skip it.
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![parent_id],
+        );
+        g.graph.nodes[join_id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
+            let store_for_proc = store_name.clone();
+            let km = key_mapper.clone();
+            let jf = left_form.clone();
+            let h = state.topology.add_processor::<K, V, K, VR, _, _, _>(
+                join_name.clone(),
+                move || KStreamGlobalTableJoinProcessor {
+                    store_name: store_for_proc.clone(),
+                    key_mapper: km.clone(),
+                    joiner: jf.clone(),
+                    emit_on_miss,
+                    _pd: PhantomData,
+                },
+                [parent],
+            );
+            state.handle_name.insert(join_id, h.name().to_string());
+        }));
+        drop(g);
+        // The joined stream keeps the stream key but is a join output, so it no
+        // longer maps to a single source topic.
         KStream::new_with_key_changing(Rc::clone(&self.builder), join_id, false)
     }
 
