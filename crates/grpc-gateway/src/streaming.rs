@@ -139,7 +139,7 @@ pub fn subscribe_inner(
         }
 
         let client_id = format!("{}-sub", state.config.client_id);
-        let mut session = match ConsumeSession::new(&state.config.bootstrap, &start.group_id, &client_id, start.topics).await {
+        let mut session = match ConsumeSession::new(&state.config.bootstrap, &start.group_id, &client_id, start.topics, state.config.broker_security.clone()).await {
             Ok(s) => s,
             Err(e) => { yield Err(ConnectError::new_internal(e.to_string())); return; }
         };

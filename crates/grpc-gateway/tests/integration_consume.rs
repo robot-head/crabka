@@ -68,6 +68,7 @@ async fn subscribe_receives_then_commits() {
         "gw-consume-group",
         "gw-c",
         vec!["consume-itest".to_string()],
+        None,
     )
     .await
     .unwrap();
