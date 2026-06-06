@@ -225,8 +225,15 @@ impl KafkaStore {
         self.ensure_writable(subject)?;
         let versions = {
             let s = self.store.read();
-            s.versions(subject, false)
-                .ok_or_else(|| SrError::SubjectNotFound(subject.to_string()))?
+            match s.versions(subject, false) {
+                Some(v) => v,
+                // exists but no live versions => already soft-deleted (cp: 40404);
+                // truly absent => not found (40401).
+                None if s.versions(subject, true).is_some() => {
+                    return Err(SrError::SubjectSoftDeleted(subject.to_string()));
+                }
+                None => return Err(SrError::SubjectNotFound(subject.to_string())),
+            }
         };
         let max = versions.iter().copied().max().unwrap_or(0);
         let (key, value) = record::encode_delete_subject(subject, max);

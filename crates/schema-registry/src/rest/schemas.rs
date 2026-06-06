@@ -33,23 +33,27 @@ pub async fn types(State(_st): State<AppState>) -> Response {
     ok_json(&serde_json::json!(["AVRO", "JSON", "PROTOBUF"]))
 }
 
-/// GET /schemas/ids/{id}/versions -> [{"subject":..,"version":..}]
+/// GET /schemas/ids/{id}/versions -> [{"subject":..,"version":..}] | 404 when the
+/// id has no qualifying versions (cp returns 40403 Schema Not Found).
 #[allow(clippy::unused_async)]
 pub async fn get_by_id_versions(
     State(st): State<AppState>,
     Path(id): Path<i32>,
     Query(q): Query<DeletedQ>,
-) -> Response {
+) -> Result<Response, SrError> {
     let pairs = st
         .store
         .store
         .read()
         .schema_id_subject_versions(id, q.deleted);
+    if pairs.is_empty() {
+        return Err(SrError::SchemaNotFound);
+    }
     let arr: Vec<serde_json::Value> = pairs
         .into_iter()
         .map(|(subject, version)| serde_json::json!({ "subject": subject, "version": version }))
         .collect();
-    ok_json(&serde_json::Value::Array(arr))
+    Ok(ok_json(&serde_json::Value::Array(arr)))
 }
 
 /// GET /schemas -> [{subject,version,id,schemaType,schema}]

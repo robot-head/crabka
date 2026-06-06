@@ -41,6 +41,12 @@ pub enum SrError {
     /// Unknown mode string on PUT /mode.
     #[error("Invalid mode: {0}")]
     InvalidMode(String),
+    /// A soft-deleted subject was soft-deleted again (cp: use `permanent=true`).
+    #[error("Subject '{0}' was soft deleted. Set permanent=true to delete permanently.")]
+    SubjectSoftDeleted(String),
+    /// GET/DELETE `/mode/{subject}` when the subject has no mode override.
+    #[error("Subject '{0}' does not have subject-level mode configured")]
+    SubjectModeNotConfigured(String),
 }
 
 impl SrError {
@@ -59,6 +65,8 @@ impl SrError {
             Self::SubjectNotSoftDeleted(_) => 40405,
             Self::VersionNotSoftDeleted(..) => 40407,
             Self::InvalidMode(_) => 42204,
+            Self::SubjectSoftDeleted(_) => 40404,
+            Self::SubjectModeNotConfigured(_) => 40409,
         }
     }
 
@@ -69,7 +77,9 @@ impl SrError {
             | Self::VersionNotFound
             | Self::SchemaNotFound
             | Self::SubjectNotSoftDeleted(_)
-            | Self::VersionNotSoftDeleted(..) => StatusCode::NOT_FOUND,
+            | Self::VersionNotSoftDeleted(..)
+            | Self::SubjectSoftDeleted(_)
+            | Self::SubjectModeNotConfigured(_) => StatusCode::NOT_FOUND,
             Self::InvalidSchema(_)
             | Self::InvalidVersion(_)
             | Self::InvalidCompatibilityLevel(_)
@@ -148,6 +158,16 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(SrError::InvalidMode("X".into()).error_code(), 42204);
+        // cp-captured (cp-schema-registry 7.4.0 admin lifecycle):
+        assert_eq!(SrError::SubjectSoftDeleted("s".into()).error_code(), 40404);
+        assert_eq!(
+            SrError::SubjectSoftDeleted("s".into()).http_status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            SrError::SubjectModeNotConfigured("s".into()).error_code(),
+            40409
+        );
     }
 
     #[tokio::test]

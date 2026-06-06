@@ -222,7 +222,7 @@ impl StoreState {
     }
 
     /// Every `(subject, version, id, schemaType, schema)` (GET /schemas), sorted
-    /// by id then subject then version.
+    /// by subject then version (matches cp's `/schemas` ordering).
     #[must_use]
     pub fn all_schemas(
         &self,
@@ -238,7 +238,7 @@ impl StoreState {
                 }
             }
         }
-        out.sort_by(|a, b| a.2.cmp(&b.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
         out
     }
 

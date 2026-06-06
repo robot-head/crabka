@@ -174,7 +174,7 @@ impl SchemaRecord {
                 // own SCHEMA tombstones, so this marker is a no-op on replay.
                 _ => Self::Noop,
             },
-            Some("NOOP" | "CLEAR_SUBJECTS") => Self::Noop,
+            Some("NOOP" | "CLEAR_SUBJECTS" | "CLEAR_SUBJECT") => Self::Noop,
             _ => Self::Unknown,
         }
     }
@@ -389,10 +389,44 @@ mod tests {
     fn clear_subjects_and_delete_subject_tombstone_are_noop() {
         let cs = br#"{"keytype":"CLEAR_SUBJECTS","subject":"s","magic":0}"#;
         assert!(matches!(SchemaRecord::decode(cs, None), SchemaRecord::Noop));
+        // cp 7.4.0 emits the SINGULAR `CLEAR_SUBJECT` (with a `{"subject":..}` value).
+        let cs1 = br#"{"keytype":"CLEAR_SUBJECT","subject":"i","magic":0}"#;
+        assert!(matches!(
+            SchemaRecord::decode(cs1, Some(br#"{"subject":"i"}"#)),
+            SchemaRecord::Noop
+        ));
         let (dk, _dv) = encode_delete_subject("s", 1);
         assert!(matches!(
             SchemaRecord::decode(&dk, None),
             SchemaRecord::Noop
         ));
+    }
+
+    /// The `_schemas` keys we emit must match cp-schema-registry 7.4.0 byte-for-byte
+    /// (the compaction keys); confirmed against `tests/fixtures/admin/records.json`.
+    #[test]
+    fn encoders_match_cp_captured_keys() {
+        assert_eq!(
+            &encode_schema("t", 1, 1, SchemaType::Avro, "{}").0,
+            br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#
+        );
+        assert_eq!(
+            &encode_delete_subject("d", 1).0,
+            br#"{"keytype":"DELETE_SUBJECT","subject":"d","magic":0}"#
+        );
+        assert_eq!(
+            &encode_mode(Some("r"), "READONLY").0,
+            br#"{"keytype":"MODE","subject":"r","magic":0}"#
+        );
+        assert_eq!(
+            &encode_tombstone("t", 1),
+            br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#
+        );
+        // soft-delete value: cp's SCHEMA value field order with `deleted:true`.
+        let (_k, v) = encode_schema_deleted("t", 1, 1, SchemaType::Avro, "{}");
+        assert_eq!(
+            &v,
+            br#"{"subject":"t","version":1,"id":1,"schema":"{}","deleted":true}"#
+        );
     }
 }

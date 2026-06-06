@@ -1070,3 +1070,56 @@ async fn rest_import_mode_registers_explicit_id() {
     cancel.cancel();
     broker.shutdown().await;
 }
+
+// cp-schema-registry 7.4.0 admin error codes, captured in
+// tests/capture_admin_fixtures.rs and pinned here (cp is authority).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_cp_calibrated_admin_error_codes() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    register(&app, "d", &format!(r#"{{"schema":{:?}}}"#, av("A"))).await;
+    // soft-delete, then soft-delete AGAIN -> cp 404 / 40404
+    assert_eq!(
+        app.clone()
+            .oneshot(req_delete("/subjects/d"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let again = app
+        .clone()
+        .oneshot(req_delete("/subjects/d"))
+        .await
+        .unwrap();
+    assert_eq!(again.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(again).await["error_code"], 40404);
+    // GET /mode/{subject} with no override -> cp 404 / 40409
+    let nomode = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/mode/nope")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(nomode.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(nomode).await["error_code"], 40409);
+    // GET /schemas/ids/{unknown}/versions -> cp 404 / 40403
+    let noid = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/schemas/ids/999/versions")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(noid.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(noid).await["error_code"], 40403);
+    cancel.cancel();
+    broker.shutdown().await;
+}

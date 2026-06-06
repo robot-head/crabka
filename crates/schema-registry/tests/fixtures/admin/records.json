@@ -1,0 +1,77 @@
+[
+  {
+    "key": "{\"keytype\":\"NOOP\",\"magic\":0}",
+    "offset": 0,
+    "value": null
+  },
+  {
+    "key": "{\"keytype\":\"NOOP\",\"magic\":0}",
+    "offset": 1,
+    "value": null
+  },
+  {
+    "key": "{\"keytype\":\"CONFIG\",\"subject\":\"t\",\"magic\":0}",
+    "offset": 2,
+    "value": "{\"subject\":\"t\",\"compatibilityLevel\":\"NONE\"}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"t\",\"version\":1,\"magic\":1}",
+    "offset": 3,
+    "value": "{\"subject\":\"t\",\"version\":1,\"id\":1,\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"A\\\",\\\"fields\\\":[]}\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"t\",\"version\":2,\"magic\":1}",
+    "offset": 4,
+    "value": "{\"subject\":\"t\",\"version\":2,\"id\":2,\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"B\\\",\\\"fields\\\":[]}\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"t\",\"version\":1,\"magic\":1}",
+    "offset": 5,
+    "value": "{\"subject\":\"t\",\"version\":1,\"id\":1,\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"A\\\",\\\"fields\\\":[]}\",\"deleted\":true}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"t\",\"version\":1,\"magic\":1}",
+    "offset": 6,
+    "value": null
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"d\",\"version\":1,\"magic\":1}",
+    "offset": 7,
+    "value": "{\"subject\":\"d\",\"version\":1,\"id\":3,\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"A\\\",\\\"fields\\\":[]}\",\"deleted\":false}"
+  },
+  {
+    "key": "{\"keytype\":\"DELETE_SUBJECT\",\"subject\":\"d\",\"magic\":0}",
+    "offset": 8,
+    "value": "{\"subject\":\"d\",\"version\":1}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"d\",\"version\":1,\"magic\":1}",
+    "offset": 9,
+    "value": null
+  },
+  {
+    "key": "{\"keytype\":\"MODE\",\"subject\":\"r\",\"magic\":0}",
+    "offset": 10,
+    "value": "{\"subject\":\"r\",\"mode\":\"READONLY\"}"
+  },
+  {
+    "key": "{\"keytype\":\"MODE\",\"subject\":\"r\",\"magic\":0}",
+    "offset": 11,
+    "value": null
+  },
+  {
+    "key": "{\"keytype\":\"CLEAR_SUBJECT\",\"subject\":\"i\",\"magic\":0}",
+    "offset": 12,
+    "value": "{\"subject\":\"i\"}"
+  },
+  {
+    "key": "{\"keytype\":\"MODE\",\"subject\":\"i\",\"magic\":0}",
+    "offset": 13,
+    "value": "{\"subject\":\"i\",\"mode\":\"IMPORT\"}"
+  },
+  {
+    "key": "{\"keytype\":\"SCHEMA\",\"subject\":\"i\",\"version\":5,\"magic\":1}",
+    "offset": 14,
+    "value": "{\"subject\":\"i\",\"version\":5,\"id\":42,\"schema\":\"{\\\"type\\\":\\\"record\\\",\\\"name\\\":\\\"C\\\",\\\"fields\\\":[]}\",\"deleted\":false}"
+  }
+]

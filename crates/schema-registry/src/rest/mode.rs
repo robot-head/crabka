@@ -39,7 +39,7 @@ pub async fn get_subject(
         .read()
         .subject_mode(&subject)
         .map(str::to_string)
-        .ok_or_else(|| SrError::SubjectNotFound(subject.clone()))?;
+        .ok_or_else(|| SrError::SubjectModeNotConfigured(subject.clone()))?;
     Ok(ok_json(&serde_json::json!({ "mode": m })))
 }
 
@@ -68,7 +68,7 @@ pub async fn delete_subject(
         .read()
         .subject_mode(&subject)
         .map(str::to_string)
-        .ok_or_else(|| SrError::SubjectNotFound(subject.clone()))?;
+        .ok_or_else(|| SrError::SubjectModeNotConfigured(subject.clone()))?;
     st.store.clear_subject_mode(&subject).await?;
     Ok(ok_json(&serde_json::json!({ "mode": prior })))
 }
