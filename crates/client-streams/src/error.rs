@@ -30,4 +30,7 @@ pub enum StreamsClientError {
     /// A runtime processing/produce/commit failure.
     #[error("runtime error: {0}")]
     Runtime(String),
+    /// An interactive query failed.
+    #[error(transparent)]
+    InteractiveQuery(#[from] crate::runtime::iq::IqError),
 }
