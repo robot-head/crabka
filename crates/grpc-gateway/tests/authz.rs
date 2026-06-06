@@ -505,12 +505,14 @@ async fn forwarding_owner_reauthorizes_caller() {
 ///    with the principal + `allowed` field is emitted.
 ///
 ///    The audit `tracing::info!` is synchronous, fired inside the per-record
-///    authz check at the head of `handlers::send` (before any `.await` that
-///    could hop threads). To capture it deterministically we drive the handler
-///    on a fresh current-thread runtime *inside* `with_default`, so the emitting
-///    poll runs on the thread that owns the thread-local subscriber. The broker
-///    + producer client live on the outer runtime; the cross-runtime channel the
-///    producer uses is unaffected.
+///    authz check at the head of `handlers::send` — before the first `.await`
+///    (the produce). We capture it deterministically by installing the capturing
+///    subscriber as this thread's default via a `set_default` GUARD held across
+///    the `.await`, then awaiting the handler directly on the test's own runtime.
+///    The test future is the runtime's top-level (`block_on`) future, so it never
+///    hops worker threads; the handler's first poll — where the synchronous audit
+///    event is emitted — runs inline on this thread, which owns the thread-local
+///    subscriber. No nested runtime, no `block_in_place`, no race.
 #[allow(clippy::items_after_statements, clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audit_log_emitted() {
@@ -562,33 +564,27 @@ async fn audit_log_emitted() {
     let captured = Arc::new(Mutex::new(Captured::default()));
     let subscriber = tracing_subscriber::registry().with(Cap(captured.clone()));
 
-    // Drive `send` on a fresh current-thread runtime under the capturing
-    // subscriber. `block_in_place` lets us block this worker thread (the outer
-    // test is multi-thread); the inner runtime drives the handler so the
-    // synchronous audit `info!` — fired before any `.await` — runs on the thread
-    // that owns the thread-local subscriber.
+    // Install the capturing subscriber as this thread's default and hold the
+    // guard across the `.await`. The test future is the runtime's top-level
+    // (`block_on`) future, so it stays on this thread; awaiting `handlers::send`
+    // polls it inline here, and the synchronous audit `info!` — fired before the
+    // handler's first `.await` — is emitted on the thread that owns the
+    // thread-local subscriber. So the capture is deterministic.
     let alice = principal("alice");
-    tokio::task::block_in_place(|| {
-        let inner = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        tracing::subscriber::with_default(subscriber, || {
-            let result: pb::RecordResult = inner.block_on(async {
-                let resp: ConnectResponse<pb::SendResponse> = handlers::send(
-                    Extension(state.clone()),
-                    Some(Extension(alice.clone())),
-                    None,
-                    ConnectRequest(send_one("audit-topic", b"audit-me")),
-                )
-                .await
-                .expect("handler returned Err");
-                resp.0.results.into_iter().next().unwrap()
-            });
-            // AllowAll ⇒ produced, no error.
-            assert!(result.error.is_none());
-        });
-    });
+    let result: pb::RecordResult = {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let resp: ConnectResponse<pb::SendResponse> = handlers::send(
+            Extension(state.clone()),
+            Some(Extension(alice.clone())),
+            None,
+            ConnectRequest(send_one("audit-topic", b"audit-me")),
+        )
+        .await
+        .expect("handler returned Err");
+        resp.0.results.into_iter().next().unwrap()
+    };
+    // AllowAll ⇒ produced, no error.
+    assert!(result.error.is_none());
 
     {
         let g = captured.lock().unwrap();
