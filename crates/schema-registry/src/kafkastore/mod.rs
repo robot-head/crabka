@@ -91,14 +91,14 @@ impl KafkaStore {
         }
         // Normalise before dedup check: `syntax = "proto3"; message ...`
         // needs to deduplicate against the same proto in normalised form.
-        let schema = &format::normalized_storage_form(ty, schema)?;
+        let schema = &format::normalized_storage_form(ty, schema, &[])?;
         if mode == "IMPORT" {
             let (Some(id), Some(version)) = (import_id, import_version) else {
                 return Err(SrError::InvalidSchema(
                     "IMPORT mode requires explicit id and version".into(),
                 ));
             };
-            format::parse(ty, schema)?; // 42201 if unparseable
+            format::parse(ty, schema, &[])?; // 42201 if unparseable
             let (key, value) = record::encode_schema(subject, version, id, ty, schema);
             let offset = self
                 .writer

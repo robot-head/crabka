@@ -82,16 +82,18 @@ fn effective_level(snap: &StoreState, subject: &str) -> CompatibilityLevel {
 fn check_pair(
     ty: SchemaType,
     candidate: &str,
+    candidate_refs: &[crate::format::ResolvedReference],
     existing: &str,
+    existing_refs: &[crate::format::ResolvedReference],
     dirs: &[Direction],
     out: &mut Vec<String>,
 ) {
     for dir in dirs {
-        let (reader, writer) = match dir {
-            Direction::NewReadsOld => (candidate, existing),
-            Direction::OldReadsNew => (existing, candidate),
+        let (reader, writer, reader_refs, writer_refs) = match dir {
+            Direction::NewReadsOld => (candidate, existing, candidate_refs, existing_refs),
+            Direction::OldReadsNew => (existing, candidate, existing_refs, candidate_refs),
         };
-        if let Err(msgs) = format::check(ty, reader, writer) {
+        if let Err(msgs) = format::check(ty, reader, writer, reader_refs, writer_refs) {
             out.extend(msgs);
         }
     }
@@ -121,7 +123,7 @@ pub fn check_registration(
     };
     let mut msgs = Vec::new();
     for (_vty, vschema) in targets {
-        check_pair(ty, candidate, vschema, dirs, &mut msgs);
+        check_pair(ty, candidate, &[], vschema, &[], dirs, &mut msgs);
     }
     if msgs.is_empty() {
         Ok(())
@@ -155,7 +157,7 @@ pub fn check_against_version(
         });
     }
     let mut msgs = Vec::new();
-    check_pair(ty, candidate, &vschema, dirs, &mut msgs);
+    check_pair(ty, candidate, &[], &vschema, &[], dirs, &mut msgs);
     Ok(Verdict {
         is_compatible: msgs.is_empty(),
         messages: msgs,

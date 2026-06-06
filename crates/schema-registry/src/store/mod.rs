@@ -50,7 +50,7 @@ impl StoreState {
         ty: SchemaType,
         schema: &str,
     ) -> Result<Registered, SrError> {
-        let canonical = format::parse(ty, schema)?.canonical_form();
+        let canonical = format::parse(ty, schema, &[])?.canonical_form();
         // Idempotent within subject?
         if let Some(existing) = self.find_under_subject_canonical(subject, &canonical, true) {
             return Ok(existing);
@@ -93,7 +93,7 @@ impl StoreState {
         self.by_id
             .entry(value.id)
             .or_insert_with(|| (ty, value.schema.clone()));
-        if let Ok(p) = format::parse(ty, &value.schema) {
+        if let Ok(p) = format::parse(ty, &value.schema, &[]) {
             self.by_canonical
                 .entry(p.canonical_form())
                 .or_insert(value.id);
@@ -322,7 +322,7 @@ impl StoreState {
         schema: &str,
         include_deleted: bool,
     ) -> Option<Registered> {
-        let canonical = format::parse(ty, schema).ok()?.canonical_form();
+        let canonical = format::parse(ty, schema, &[]).ok()?.canonical_form();
         self.find_under_subject_canonical(subject, &canonical, include_deleted)
     }
 }

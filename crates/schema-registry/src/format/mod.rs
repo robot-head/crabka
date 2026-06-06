@@ -41,13 +41,28 @@ pub trait ParsedSchema {
     fn canonical_form(&self) -> String;
 }
 
-/// Parse `schema` as `ty`, returning a boxed parsed form or `SrError::InvalidSchema`.
-pub fn parse(ty: SchemaType, schema: &str) -> Result<Box<dyn ParsedSchema>, SrError> {
+/// A referenced schema resolved from the store, ready to feed a format parser.
+/// `name` is the format-specific reference label (Protobuf import path, Avro
+/// type name, JSON `$ref` target); `ty`/`schema` are the referenced version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedReference {
+    pub name: String,
+    pub ty: SchemaType,
+    pub schema: String,
+}
+
+/// Parse `schema` as `ty` with its resolved references available, returning a
+/// boxed parsed form or `SrError::InvalidSchema`.
+pub fn parse(
+    ty: SchemaType,
+    schema: &str,
+    refs: &[ResolvedReference],
+) -> Result<Box<dyn ParsedSchema>, SrError> {
     match ty {
-        SchemaType::Avro => avro::parse(schema).map(|p| Box::new(p) as Box<dyn ParsedSchema>),
-        SchemaType::Json => json::parse(schema).map(|p| Box::new(p) as Box<dyn ParsedSchema>),
+        SchemaType::Avro => avro::parse(schema, refs).map(|p| Box::new(p) as Box<dyn ParsedSchema>),
+        SchemaType::Json => json::parse(schema, refs).map(|p| Box::new(p) as Box<dyn ParsedSchema>),
         SchemaType::Protobuf => {
-            protobuf::parse(schema).map(|p| Box::new(p) as Box<dyn ParsedSchema>)
+            protobuf::parse(schema, refs).map(|p| Box::new(p) as Box<dyn ParsedSchema>)
         }
     }
 }
@@ -56,15 +71,19 @@ pub fn parse(ty: SchemaType, schema: &str) -> Result<Box<dyn ParsedSchema>, SrEr
 /// For AVRO and JSON, the raw input is returned (cp-schema-registry echoes
 /// them verbatim). For Protobuf, a pretty-printed canonical text is returned
 /// matching the format cp-schema-registry produces.
-pub fn normalized_storage_form(ty: SchemaType, schema: &str) -> Result<String, SrError> {
+pub fn normalized_storage_form(
+    ty: SchemaType,
+    schema: &str,
+    refs: &[ResolvedReference],
+) -> Result<String, SrError> {
     match ty {
         SchemaType::Avro | SchemaType::Json => {
             // Validate (returns Err on bad input) but keep the raw string.
-            parse(ty, schema)?;
+            parse(ty, schema, refs)?;
             Ok(schema.to_string())
         }
         SchemaType::Protobuf => {
-            let p = protobuf::parse(schema)?;
+            let p = protobuf::parse(schema, refs)?;
             Ok(p.normalized_form().to_string())
         }
     }
@@ -73,11 +92,17 @@ pub fn normalized_storage_form(ty: SchemaType, schema: &str) -> Result<String, S
 /// Directional compatibility check: can a reader using `reader` read data
 /// written with `writer`, per format `ty`? `Err(messages)` on incompatibility.
 /// Avro is real (apache-avro); Protobuf/JSON are permissive until 2b/2c.
-pub fn check(ty: SchemaType, reader: &str, writer: &str) -> Result<(), Vec<String>> {
+pub fn check(
+    ty: SchemaType,
+    reader: &str,
+    writer: &str,
+    reader_refs: &[ResolvedReference],
+    writer_refs: &[ResolvedReference],
+) -> Result<(), Vec<String>> {
     match ty {
-        SchemaType::Avro => avro::check(reader, writer),
-        SchemaType::Protobuf => protobuf::check(reader, writer),
-        SchemaType::Json => json::check(reader, writer),
+        SchemaType::Avro => avro::check(reader, writer, reader_refs, writer_refs),
+        SchemaType::Protobuf => protobuf::check(reader, writer, reader_refs, writer_refs),
+        SchemaType::Json => json::check(reader, writer, reader_refs, writer_refs),
     }
 }
 
@@ -102,17 +127,20 @@ mod tests {
         let a = parse(
             SchemaType::Avro,
             r#"{"type":"record","name":"U","fields":[{"name":"id","type":"int"}]}"#,
+            &[],
         )
         .unwrap();
         let b = parse(
             SchemaType::Avro,
             "{ \"type\":\"record\", \"name\":\"U\", \"fields\":[ {\"name\":\"id\",\"type\":\"int\"} ] }",
+            &[],
         )
         .unwrap();
         assert_eq!(a.canonical_form(), b.canonical_form());
         let c = parse(
             SchemaType::Avro,
             r#"{"type":"record","name":"V","fields":[]}"#,
+            &[],
         )
         .unwrap();
         assert_ne!(a.canonical_form(), c.canonical_form());
@@ -120,6 +148,6 @@ mod tests {
 
     #[test]
     fn avro_rejects_invalid() {
-        assert!(parse(SchemaType::Avro, "{not avro}").is_err());
+        assert!(parse(SchemaType::Avro, "{not avro}", &[]).is_err());
     }
 }

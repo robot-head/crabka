@@ -34,7 +34,7 @@ pub async fn check(
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
     // 42201 if the candidate itself is unparseable (matches Confluent).
-    crate::format::parse(ty, &req.schema)?;
+    crate::format::parse(ty, &req.schema, &[])?;
     let want = parse_version(&version)?;
     let verdict = {
         let snap = st.store.store.read();

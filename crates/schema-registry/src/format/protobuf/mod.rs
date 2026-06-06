@@ -110,7 +110,7 @@ fn proto_type_name(field: &FieldDescriptorProto) -> String {
     .to_string()
 }
 
-pub fn parse(schema: &str) -> Result<ProtobufSchema, SrError> {
+pub fn parse(schema: &str, _refs: &[super::ResolvedReference]) -> Result<ProtobufSchema, SrError> {
     let descriptor = protox_parse::parse("schema.proto", schema)
         .map_err(|e| SrError::InvalidSchema(format!("Protobuf: {e}")))?;
     let normalised = normalize(&descriptor);
@@ -135,9 +135,14 @@ impl ProtobufSchema {
 /// Confluent Protobuf compatibility: can a reader using `reader` read data
 /// written with `writer`? Computes the structural diff (original = writer,
 /// update = reader) and rejects if any difference is backward-incompatible.
-pub fn check(reader: &str, writer: &str) -> Result<(), Vec<String>> {
-    let reader_d = parse(reader).map_err(|e| vec![format!("reader: {e}")])?;
-    let writer_d = parse(writer).map_err(|e| vec![format!("writer: {e}")])?;
+pub fn check(
+    reader: &str,
+    writer: &str,
+    _reader_refs: &[super::ResolvedReference],
+    _writer_refs: &[super::ResolvedReference],
+) -> Result<(), Vec<String>> {
+    let reader_d = parse(reader, &[]).map_err(|e| vec![format!("reader: {e}")])?;
+    let writer_d = parse(writer, &[]).map_err(|e| vec![format!("writer: {e}")])?;
     let diffs = diff::compare(writer_d.descriptor(), reader_d.descriptor());
     let incompatible: Vec<&diff::Difference> = diffs
         .iter()
@@ -177,14 +182,18 @@ mod tests {
 
     #[test]
     fn parses_and_is_stable() {
-        let a = parse(P).unwrap();
-        let b = parse("syntax = \"proto3\";\nmessage User {\n  int32 id = 1;\n}\n").unwrap();
+        let a = parse(P, &[]).unwrap();
+        let b = parse(
+            "syntax = \"proto3\";\nmessage User {\n  int32 id = 1;\n}\n",
+            &[],
+        )
+        .unwrap();
         assert_eq!(a.canonical_form(), b.canonical_form());
     }
 
     #[test]
     fn rejects_invalid_proto() {
-        assert!(parse("this is not protobuf").is_err());
+        assert!(parse("this is not protobuf", &[]).is_err());
     }
 
     fn p(body: &str) -> String {
@@ -193,18 +202,34 @@ mod tests {
 
     #[test]
     fn field_added_is_backward_compatible() {
-        assert!(check(&p("int32 id = 1; int32 x = 2;"), &p("int32 id = 1;")).is_ok());
+        assert!(
+            check(
+                &p("int32 id = 1; int32 x = 2;"),
+                &p("int32 id = 1;"),
+                &[],
+                &[]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn field_removed_is_backward_compatible() {
-        assert!(check(&p("int32 id = 1;"), &p("int32 id = 1; int32 x = 2;")).is_ok());
+        assert!(
+            check(
+                &p("int32 id = 1;"),
+                &p("int32 id = 1; int32 x = 2;"),
+                &[],
+                &[]
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn scalar_change_within_group_ok_across_group_bad() {
-        assert!(check(&p("int64 id = 1;"), &p("int32 id = 1;")).is_ok());
-        assert!(check(&p("string id = 1;"), &p("int32 id = 1;")).is_err());
+        assert!(check(&p("int64 id = 1;"), &p("int32 id = 1;"), &[], &[]).is_ok());
+        assert!(check(&p("string id = 1;"), &p("int32 id = 1;"), &[], &[]).is_err());
     }
 
     #[test]
@@ -212,14 +237,14 @@ mod tests {
         // cp is authority: singular ↔ repeated of the same type is compatible
         // (calibrated in Task 6 against the golden matrix — previously seeded
         // as incompatible, which cp contradicts).
-        assert!(check(&p("repeated int32 id = 1;"), &p("int32 id = 1;")).is_ok());
+        assert!(check(&p("repeated int32 id = 1;"), &p("int32 id = 1;"), &[], &[]).is_ok());
     }
 
     #[test]
     fn kind_change_scalar_to_message_is_incompatible() {
         let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
         let r = "syntax = \"proto3\"; message M {} message U { M id = 1; }";
-        assert!(check(r, w).is_err());
+        assert!(check(r, w, &[], &[]).is_err());
     }
 
     // ── Task 2: oneof rules ───────────────────────────────────────────────────
@@ -232,11 +257,11 @@ mod tests {
         let plain = "syntax = \"proto3\"; message U { int32 a = 1; int32 b = 2; }";
         let oneof = "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }";
         assert!(
-            check(oneof, plain).is_err(),
+            check(oneof, plain, &[], &[]).is_err(),
             "reader moved fields into oneof"
         );
         assert!(
-            check(plain, oneof).is_ok(),
+            check(plain, oneof, &[], &[]).is_ok(),
             "reader moved fields out of oneof"
         );
     }
@@ -246,7 +271,7 @@ mod tests {
         let w = "syntax = \"proto3\"; message U { int32 a = 1; }";
         let r = "syntax = \"proto3\"; message U { optional int32 a = 1; }";
         assert!(
-            check(r, w).is_ok(),
+            check(r, w, &[], &[]).is_ok(),
             "proto3 optional is not a oneof migration"
         );
     }
@@ -257,20 +282,20 @@ mod tests {
     fn reserving_a_number_is_compatible() {
         let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
         let r = "syntax = \"proto3\"; message U { reserved 2; int32 id = 1; }";
-        assert!(check(r, w).is_ok());
+        assert!(check(r, w, &[], &[]).is_ok());
     }
 
     #[test]
     fn map_value_type_change_across_group_is_incompatible() {
         let w = "syntax = \"proto3\"; message U { map<string, int32> m = 1; }";
         let r = "syntax = \"proto3\"; message U { map<string, string> m = 1; }";
-        assert!(check(r, w).is_err());
+        assert!(check(r, w, &[], &[]).is_err());
     }
 
     #[test]
     fn identical_map_is_compatible() {
         let s = "syntax = \"proto3\"; message U { map<string, int32> m = 1; }";
-        assert!(check(s, s).is_ok());
+        assert!(check(s, s, &[], &[]).is_ok());
     }
 
     // ── Task 4: enum + nested + package ──────────────────────────────────────
@@ -279,14 +304,17 @@ mod tests {
     fn enum_const_added_compatible() {
         let w = "syntax = \"proto3\"; enum E { A = 0; } message U { E e = 1; }";
         let r = "syntax = \"proto3\"; enum E { A = 0; B = 1; } message U { E e = 1; }";
-        assert!(check(r, w).is_ok());
+        assert!(check(r, w, &[], &[]).is_ok());
     }
 
     #[test]
     fn nested_message_field_change_detected() {
         let w = "syntax = \"proto3\"; message U { message N { int32 a = 1; } N n = 1; }";
         let r = "syntax = \"proto3\"; message U { message N { string a = 1; } N n = 1; }";
-        assert!(check(r, w).is_err(), "nested int32->string is across-group");
+        assert!(
+            check(r, w, &[], &[]).is_err(),
+            "nested int32->string is across-group"
+        );
     }
 
     #[test]
@@ -294,7 +322,7 @@ mod tests {
         // cp is authority: a package rename is compatible (calibrated in Task 6).
         let w = "syntax = \"proto3\"; package a; message U { int32 id = 1; }";
         let r = "syntax = \"proto3\"; package b; message U { int32 id = 1; }";
-        assert!(check(r, w).is_ok());
+        assert!(check(r, w, &[], &[]).is_ok());
     }
 
     #[test]
@@ -303,7 +331,7 @@ mod tests {
         // are varints on the wire). scalar → message stays incompatible.
         let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
         let r = "syntax = \"proto3\"; enum E { A = 0; } message U { E id = 1; }";
-        assert!(check(r, w).is_ok());
+        assert!(check(r, w, &[], &[]).is_ok());
     }
 
     #[test]
@@ -313,10 +341,13 @@ mod tests {
         let small = "syntax = \"proto3\"; message U { int32 id = 1; }";
         let big = "syntax = \"proto3\"; message U { int32 id = 1; } message V { int32 a = 1; }";
         // reader=big, writer=small → reader has an extra message → compatible.
-        assert!(check(big, small).is_ok(), "reader-only message is fine");
+        assert!(
+            check(big, small, &[], &[]).is_ok(),
+            "reader-only message is fine"
+        );
         // reader=small, writer=big → reader is missing a writer message → incompatible.
         assert!(
-            check(small, big).is_err(),
+            check(small, big, &[], &[]).is_err(),
             "reader missing a writer message"
         );
     }
