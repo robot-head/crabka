@@ -75,8 +75,6 @@ impl StoreRegistry {
 
     /// Typed mutable access: downcast the erased store to the suppress store
     /// of the requested types. `None` if absent or the types don't match.
-    // The suppress processor wires this in via `ctx.get_suppress_store` in T3.
-    #[allow(dead_code)]
     pub(crate) fn get_suppress<K: Send + Sync + 'static, V: Send + 'static>(
         &mut self,
         name: &str,

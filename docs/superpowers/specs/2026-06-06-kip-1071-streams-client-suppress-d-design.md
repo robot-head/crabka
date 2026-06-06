@@ -130,13 +130,14 @@ The heaviest new piece. Matches the JVM `InMemoryTimeOrderedKeyValueChangeBuffer
 changelog. **Changelog key** = the record key bytes. **Changelog value** =
 `BufferValue.serialize() ‖ bufferTime:8 (BE)`.
 
-`ProcessorRecordContext.serialize()`:
+`ProcessorRecordContext.serialize()` (field order pinned by the byte-vector
+capture — topic precedes partition):
 ```
 timestamp : i64 BE
 offset    : i64 BE
-partition : i32 BE
 topicLen  : i32 BE   (-1 if null topic)
 topic     : UTF-8 bytes
+partition : i32 BE
 headerCount : i32 BE   (Crabka streams records are header-less → 0)
 [ per header: keyLen:i32, key, valueLen:i32 (-1 if null), value ]
 ```

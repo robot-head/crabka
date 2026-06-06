@@ -181,8 +181,6 @@ where
     ///
     /// `pub(crate)`: the returned trait surfaces `Change<V>` (crate-internal) and
     /// the suppress store is a built-in DSL mechanism, not a user-facing store.
-    // The suppress processor calls this in T3; unused until then.
-    #[allow(dead_code)]
     pub(crate) fn get_suppress_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,

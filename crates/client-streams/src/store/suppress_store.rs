@@ -31,8 +31,6 @@ use crate::store::suppress_bufval::{
 // `pub(crate)`: the trait surfaces `Change<V>` (a crate-internal type) and the
 // suppress store is a built-in DSL mechanism the suppress processor reaches via
 // `ctx.get_suppress_store` — never a user-facing custom-processor store.
-// The methods are called by the suppress processor in T3; lib-dead until then.
-#[allow(dead_code)]
 #[async_trait]
 pub(crate) trait SuppressStore<K: Send + Sync, V: Send>: StateStore {
     /// Buffer (or replace) `key`'s pending change at `buffer_time`. `ctx` is the
@@ -45,6 +43,10 @@ pub(crate) trait SuppressStore<K: Send + Sync, V: Send>: StateStore {
     /// `None` if empty. Logs a tombstone for the popped entry.
     async fn evict_oldest(&mut self) -> Option<(K, Change<V>, i64)>;
     fn len(&self) -> usize;
+    /// Paired with [`len`](Self::len) for `clippy::len_without_is_empty`; the
+    /// processor reads `len`/`byte_size` for the caps, never emptiness, so this is
+    /// exercised only by the store's own tests.
+    #[allow(dead_code)]
     fn is_empty(&self) -> bool;
     /// Total buffered bytes (`key_bytes.len() + new_bytes.len()` per entry), the
     /// JVM `maxBytes`-cap accounting unit.
@@ -52,19 +54,14 @@ pub(crate) trait SuppressStore<K: Send + Sync, V: Send>: StateStore {
 }
 
 /// One buffered entry. `new_bytes`/`old_bytes` are the (de)serializable sides of
-/// the buffered `Change`; `prior_bytes` feeds the changelog `-2` alias rule and
-/// `ctx` the changelog record context.
-// Several fields (`old_bytes`/`record_ts` here; `prior_bytes`/`ctx` for re-logging)
-// are only read once the suppress processor drains/re-logs through the store in T3,
-// so they read as dead at the lib level today. Narrow per-struct allow.
-#[allow(dead_code)]
+/// the buffered `Change`, recovered on eviction; `record_ts` is the forwarded
+/// timestamp. (The changelog VALUE is built once at `put`/drained on evict — the
+/// `prior`/`ctx` it needs are not retained per entry.)
 struct Entry {
     key_bytes: Bytes,
     new_bytes: Option<Bytes>,
     old_bytes: Option<Bytes>,
-    prior_bytes: Option<Bytes>,
     record_ts: i64,
-    ctx: SuppressRecordCtx,
 }
 
 /// Per-entry `maxBytes` accounting unit: serialized key + serialized new value.
@@ -74,9 +71,6 @@ fn entry_size(key_bytes: &Bytes, new_bytes: Option<&Bytes>) -> usize {
 
 /// Typed suppress store (holds the key/value serdes). Registered erased and
 /// downcast back via [`StoreRegistry::get_suppress`](crate::store::registry).
-// `key_serde`/`value_serde` are read only inside the trait methods, which are
-// themselves lib-dead until the T3 processor calls them. Narrow per-struct allow.
-#[allow(dead_code)]
 pub struct SuppressBytesStore<K, V> {
     name: String,
     changelog_topic: String,
@@ -147,8 +141,6 @@ impl<K: 'static, V: 'static> SuppressBytesStore<K, V> {
 
     /// Pop one slot: drop it from `entries`/`index`, subtract its size, log a
     /// tombstone (if logging), and rebuild the typed `(K, Change<V>, record_ts)`.
-    // Called by `evict_while`/`evict_oldest`, which are lib-dead until T3.
-    #[allow(dead_code)]
     fn pop_slot(&mut self, slot: (i64, u64)) -> (K, Change<V>, i64) {
         let entry = self.entries.remove(&slot).expect("slot present");
         self.index.remove(&entry.key_bytes);
@@ -204,9 +196,7 @@ impl<K: 'static, V: 'static> StateStore for SuppressBytesStore<K, V> {
                     key_bytes: key,
                     new_bytes: d.new.map(Bytes::from),
                     old_bytes: d.old.map(Bytes::from),
-                    prior_bytes: d.prior.map(Bytes::from),
                     record_ts: d.ctx.timestamp,
-                    ctx: d.ctx,
                 };
                 self.insert_slot(d.buffer_time, entry);
             }
@@ -237,9 +227,7 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SuppressStore<K, V> for Suppre
             key_bytes: kb.clone(),
             new_bytes: new_bytes.clone(),
             old_bytes: old_bytes.clone(),
-            prior_bytes: prior_bytes.clone(),
             record_ts: ctx.timestamp,
-            ctx: ctx.clone(),
         };
         self.insert_slot(buffer_time, entry);
 
