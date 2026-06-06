@@ -65,6 +65,12 @@ pub(crate) struct NodeRegistry {
     pub stores: Vec<StoreEntry>,
     /// Topic names registered as internal repartition topics.
     pub repartition_topics: HashSet<String>,
+    /// Topics consumed for a `GlobalKTable`: invisible in the wire (no
+    /// subtopology of their own, no changelog). The global source node still
+    /// occupies a node-group index during grouping, so other subtopology ids
+    /// shift — but its topic is skipped in the source-bucketing pass, leaving the
+    /// group source-less so the final filter drops it.
+    pub global_source_topics: HashSet<String>,
     /// Declared copartition groups: each a list of member topic names that must
     /// share a partitioning (required for joins). The grouping pass assigns each
     /// group to the subtopology containing its members.
@@ -190,6 +196,14 @@ impl NodeRegistry {
         self.copartition_groups.push(topics);
     }
 
+    /// Mark `topic` as a `GlobalKTable` source: it is consumed for a global store
+    /// and must NOT appear in the wire (no subtopology, no changelog). The global
+    /// node group still consumes a subtopology index (so other subtopology ids
+    /// shift).
+    pub fn add_global_source(&mut self, topic: &str) {
+        self.global_source_topics.insert(topic.to_string());
+    }
+
     /// Connect an additional processor to an existing store.
     ///
     /// Mirrors `InternalTopologyBuilder.connectProcessorAndStateStores`: lets a
@@ -247,5 +261,13 @@ mod tests {
         let mut reg = NodeRegistry::default();
         reg.add_source("a", vec!["t".into()]).unwrap();
         check!(reg.add_processor("a", vec![]).is_err());
+    }
+
+    #[test]
+    fn add_global_source_records_topic() {
+        let mut reg = NodeRegistry::default();
+        reg.add_global_source("global");
+        check!(reg.global_source_topics.contains("global"));
+        check!(reg.global_source_topics.len() == 1);
     }
 }

@@ -83,3 +83,10 @@ pub(crate) const KTABLE_SUPPRESS: &str = "KTABLE-SUPPRESS-";
 pub(crate) const KTABLE_SUPPRESS_STORE: &str = "KTABLE-SUPPRESS-STATE-STORE-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";
+/// Global table source node prefix (JVM `KSTREAM-SOURCE-`). Not wire-visible.
+#[allow(dead_code)]
+pub(crate) const GLOBAL_SOURCE: &str = "KSTREAM-SOURCE-";
+/// Global table store-update processor prefix (JVM `KTABLE-SOURCE-`). Not
+/// wire-visible.
+#[allow(dead_code)]
+pub(crate) const GLOBAL_PROCESSOR: &str = "KTABLE-SOURCE-";
