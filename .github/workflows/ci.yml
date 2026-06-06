@@ -12,13 +12,6 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-# Minimal default GITHUB_TOKEN scope for every job (CodeQL hardening). All jobs
-# only read the repo + download release assets (protoc via setup-protoc); none
-# write to the repo or use the token for write APIs, so contents: read suffices.
-# Coverage uploads authenticate with CODECOV_TOKEN, not GITHUB_TOKEN.
-permissions:
-  contents: read
-
 jobs:
   changes:
     runs-on: ubuntu-latest
@@ -606,6 +599,9 @@ jobs:
   # Each tests/<name>.rs file must be listed with `--test <name>` so that
   # the codecov/patch check sees coverage for newly added test files.
   operator-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.helm_lint == 'true' }}
+    timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -652,3 +648,27 @@ jobs:
           disable_search: true
           flags: operator-integration
           fail_ci_if_error: false
+
+  gatekeeper:
+    needs:
+      - changes
+      - rust
+      - jvm-differential
+      - cargo-deny
+      - helm-lint
+      - client-core-integration
+      - log-integration
+      - client-consumer-integration
+      - client-streams-integration
+      - grpc-gateway-integration
+      - schema-registry-integration
+      - broker-jvm-acceptance
+      - broker-integration
+      - operator-integration
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Check dynamic CI job results
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: exit 1
