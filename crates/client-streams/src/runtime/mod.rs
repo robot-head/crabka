@@ -2,6 +2,7 @@
 
 mod app;
 pub(crate) mod clock;
+pub(crate) mod eos;
 pub(crate) mod global;
 pub mod io;
 mod io_broker;

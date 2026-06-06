@@ -489,6 +489,7 @@ pub use processor::{
     ProcessorError, ProcessorSupplier, Produced, PunctuationType, Punctuator, Record,
     RecordContext, Serde, SerdeError, StringSerde,
 };
+pub use runtime::eos::ProcessingGuarantee;
 pub use runtime::iq::IqError;
 pub use runtime::{
     KafkaStreams, KafkaStreamsState, ReadOnlyKeyValueStore, ReadOnlySessionStore,

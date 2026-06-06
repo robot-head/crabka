@@ -53,7 +53,9 @@ impl KafkaStreams {
         #[builder(default = Duration::from_millis(200))] poll_interval: Duration,
         #[builder(default = Duration::from_secs(5))] commit_interval: Duration,
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
+        #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
     ) -> Result<Self, StreamsClientError> {
+        let _ = processing_guarantee; // consumed by the EOS commit path in T3
         let built = Arc::new(topology);
 
         // Broker I/O (one shared producer).
