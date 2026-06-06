@@ -5,6 +5,7 @@
 //! `docs/superpowers/specs/2026-06-04-crabka-schema-registry-design.md`.
 
 pub mod auth;
+pub mod authz;
 pub mod compat;
 pub mod config;
 pub mod election;
