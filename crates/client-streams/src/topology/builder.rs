@@ -984,10 +984,10 @@ pub struct BuiltTopology {
     /// `<app_id>-<store_name>-changelog` derivation.
     store_factories: HashMap<String, (Option<String>, StoreFactory)>,
     /// `GlobalKTable` store factories (separate from `store_factories`): NOT built
-    /// by per-task `instantiate`. The fully-replicated global-store runtime (a
-    /// later task) reads these to build + restore each global store once; the
-    /// [`TopologyTestDriver`] reads them via
-    /// [`global_store_factories_for_test`](Self::global_store_factories_for_test)
+    /// by per-task `instantiate`. The fully-replicated global-store runtime
+    /// (`StreamThread`) reads these to build + restore each global store once;
+    /// the [`TopologyTestDriver`] reads them via
+    /// [`global_store_factories`](Self::global_store_factories)
     /// to materialize global stores directly for join tests.
     global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
     /// `global store name -> source topic` for each `GlobalKTable`. Read by the
@@ -1020,13 +1020,13 @@ impl BuiltTopology {
         self.wire.clone()
     }
 
-    /// The `GlobalKTable` store factories, keyed by store name (test-only). The
+    /// The `GlobalKTable` store factories, keyed by store name. The
     /// [`TopologyTestDriver`] materializes these directly into its per-task store
     /// registry so a stream-globaltable join can find them; the real runtime
-    /// builds them once in a shared global manager (a later task), NOT per task.
+    /// (`StreamThread`) builds them once in a shared global manager, NOT per task.
     ///
     /// [`TopologyTestDriver`]: crate::TopologyTestDriver
-    pub(crate) fn global_store_factories_for_test(
+    pub(crate) fn global_store_factories(
         &self,
     ) -> &HashMap<String, (Option<String>, StoreFactory)> {
         &self.global_store_factories

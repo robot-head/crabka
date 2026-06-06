@@ -219,7 +219,7 @@ mod tests {
         );
         let built = t.build("app").unwrap();
         GlobalStateManager::build(
-            built.global_store_factories_for_test(),
+            built.global_store_factories(),
             built.global_store_topics(),
             &StoreBackend::InMemory,
             "app",
@@ -339,7 +339,7 @@ mod tests {
         );
         let built = t.build("app").unwrap();
         GlobalStateManager::build(
-            built.global_store_factories_for_test(),
+            built.global_store_factories(),
             built.global_store_topics(),
             &StoreBackend::InMemory,
             "app",

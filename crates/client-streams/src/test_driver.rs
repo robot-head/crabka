@@ -37,7 +37,7 @@ impl TopologyTestDriver {
         // global store is fully replicated, not task-partitioned). Tests populate
         // it directly via `pipe_global`, and stream-globaltable joins read it.
         graph.globals = pollster::block_on(crate::runtime::global::GlobalStateManager::build(
-            built.global_store_factories_for_test(),
+            built.global_store_factories(),
             built.global_store_topics(),
             &backend,
             "app",
