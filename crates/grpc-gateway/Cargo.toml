@@ -15,9 +15,12 @@ name = "crabka-grpc-gateway"
 path = "src/bin/gateway.rs"
 
 [dependencies]
+crabka-authz = { version = "0.2", path = "../authz" }
 crabka-client-producer = { version = "0.2", path = "../client-producer" }
 crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
 crabka-client-admin = { version = "0.2", path = "../client-admin" }
+crabka-metadata = { version = "0.2", path = "../metadata" }
+arc-swap = { workspace = true }
 connectrpc-axum.workspace = true
 prost.workspace = true
 pbjson.workspace = true

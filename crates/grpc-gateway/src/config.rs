@@ -37,6 +37,15 @@ impl TlsSettings {
     }
 }
 
+/// Authorization settings. `None` ⇒ `AllowAll` (no enforcement; default).
+#[derive(Debug, Clone)]
+pub struct AuthzSettings {
+    /// Principals (bare names) that bypass ACL checks.
+    pub super_users: Vec<String>,
+    /// ACL-cache refresh interval (seconds).
+    pub acl_refresh_secs: u64,
+}
+
 /// Runtime configuration for the gateway process.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -61,6 +70,8 @@ pub struct GatewayConfig {
     pub membership_topic: String,
     /// TLS/mTLS settings; `None` ⇒ plaintext (all current tests).
     pub tls: Option<TlsSettings>,
+    /// Authorization settings; `None` ⇒ `AllowAll` (no enforcement; default).
+    pub authz: Option<AuthzSettings>,
 }
 
 impl GatewayConfig {

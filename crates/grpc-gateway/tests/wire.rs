@@ -133,6 +133,7 @@ async fn send_handler_ok_and_error_arms() {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership".into(),
             tls: None,
+            authz: None,
         }),
     });
 

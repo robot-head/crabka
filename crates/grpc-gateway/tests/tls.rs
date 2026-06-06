@@ -200,6 +200,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             membership_topic: MEMBERSHIP.into(),
             // TLS configured ⇒ /internal/v1/forward enforces the mTLS principal gate.
             tls: Some(settings.clone()),
+            authz: None,
         }),
     });
 

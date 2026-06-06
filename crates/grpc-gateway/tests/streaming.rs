@@ -45,6 +45,7 @@ async fn state_for(bootstrap: &str) -> Arc<AppState> {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership".into(),
             tls: None,
+            authz: None,
         }),
     })
 }

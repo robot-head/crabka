@@ -1522,6 +1522,7 @@ name = "crabka-grpc-gateway"
 version = "0.2.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "assert2",
  "async-stream",
  "axum",
@@ -1529,10 +1530,12 @@ dependencies = [
  "clap",
  "connectrpc-axum",
  "connectrpc-axum-build",
+ "crabka-authz",
  "crabka-broker",
  "crabka-client-admin",
  "crabka-client-consumer",
  "crabka-client-producer",
+ "crabka-metadata",
  "crabka-security",
  "dashmap",
  "futures-util",

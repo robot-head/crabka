@@ -173,6 +173,7 @@ async fn forward_handler_error_arm_returns_retriable() {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh".into(),
             tls: None,
+            authz: None,
         }),
     });
 
@@ -275,6 +276,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh_tls".into(),
             tls,
+            authz: None,
         }),
     });
 

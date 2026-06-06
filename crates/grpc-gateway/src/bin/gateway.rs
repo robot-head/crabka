@@ -175,6 +175,7 @@ async fn main() -> anyhow::Result<()> {
         advertised_addr: args.advertised_addr.clone(),
         membership_topic: args.membership_topic.clone(),
         tls: tls.clone(),
+        authz: None,
     };
 
     run(config).await
