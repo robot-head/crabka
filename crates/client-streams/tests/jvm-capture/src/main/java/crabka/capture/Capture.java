@@ -13,7 +13,12 @@ import org.apache.kafka.streams.kstream.GlobalKTable;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.kstream.Produced;
+import org.apache.kafka.streams.processor.api.ContextualProcessor;
+import org.apache.kafka.streams.processor.api.ContextualFixedKeyProcessor;
 import org.apache.kafka.streams.processor.internals.InternalTopologyBuilder;
+import org.apache.kafka.streams.state.KeyValueStore;
+import org.apache.kafka.streams.state.StoreBuilder;
+import org.apache.kafka.streams.state.Stores;
 
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -81,8 +86,10 @@ public final class Capture {
         write(outDir, "suppress_until_window_closes", suppressUntilWindowCloses());
         write(outDir, "suppress_until_window_closes_logged", suppressUntilWindowClosesLogged());
         write(outDir, "global_table_join", globalTableJoin());
+        write(outDir, "process", processTopology());
+        write(outDir, "process_values", processValuesTopology());
 
-        System.out.println("Capture complete. Wrote 15 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 17 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -320,6 +327,46 @@ public final class Capture {
                 org.apache.kafka.streams.kstream.Suppressed.BufferConfig.unbounded()))
             .toStream()
             .to("out");
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 15. process: addStateStore + process(supplier, "store") -> to("out"). A custom
+     * Processor-API node with a connected KV store. The store's changelog topic appears
+     * in the wire (compact); the processor node kind/name is not wire-visible.
+     */
+    static Topology processTopology() {
+        StreamsBuilder b = new StreamsBuilder();
+        StoreBuilder<KeyValueStore<String, String>> sb = Stores.keyValueStoreBuilder(
+            Stores.persistentKeyValueStore("store"), Serdes.String(), Serdes.String());
+        b.addStateStore(sb);
+        b.<String, String>stream("in", Consumed.with(Serdes.String(), Serdes.String()))
+            .process(() -> new ContextualProcessor<String, String, String, String>() {
+                public void process(org.apache.kafka.streams.processor.api.Record<String, String> r) {
+                    context().forward(r);
+                }
+            }, "store")
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 16. process_values: addStateStore + processValues(supplier, "store") -> to("out").
+     * The fixed-key variant. Expected byte-identical to process here (same source/sink/store;
+     * the node kind is not wire-visible).
+     */
+    static Topology processValuesTopology() {
+        StreamsBuilder b = new StreamsBuilder();
+        StoreBuilder<KeyValueStore<String, String>> sb = Stores.keyValueStoreBuilder(
+            Stores.persistentKeyValueStore("store"), Serdes.String(), Serdes.String());
+        b.addStateStore(sb);
+        b.<String, String>stream("in", Consumed.with(Serdes.String(), Serdes.String()))
+            .processValues(() -> new ContextualFixedKeyProcessor<String, String, String>() {
+                public void process(org.apache.kafka.streams.processor.api.FixedKeyRecord<String, String> r) {
+                    context().forward(r);
+                }
+            }, "store")
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
         return b.build(optimizedProps());
     }
 
