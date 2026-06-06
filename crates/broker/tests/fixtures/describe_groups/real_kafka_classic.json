@@ -1,0 +1,35 @@
+{
+  "classic_consumer_group": {
+    "error_code": 0,
+    "group_id": "g",
+    "group_state": "Stable",
+    "members": [
+      {
+        "client_host": "/127.0.0.1",
+        "client_id": "console-consumer",
+        "member_assignment_hex": "000300000001000174000000020000000000000001ffffffff",
+        "member_assignment_len": 25,
+        "member_assignment_lossy": "\u0000\u0003\u0000\u0000\u0000\u0001\u0000\u0001t\u0000\u0000\u0000\u0002\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0001����",
+        "member_id": "console-consumer-de9a872d-022f-4c64-a9b7-a24a691a1b88",
+        "member_metadata_hex": "000300000001000174ffffffff00000000ffffffffffff",
+        "member_metadata_len": 23,
+        "member_metadata_lossy": "\u0000\u0003\u0000\u0000\u0000\u0001\u0000\u0001t����\u0000\u0000\u0000\u0000������"
+      }
+    ],
+    "protocol_data": "range",
+    "protocol_type": "consumer"
+  },
+  "provenance": {
+    "api_key": 15,
+    "image": "confluentinc/cp-kafka:7.4.0",
+    "note": "Real cp-kafka DescribeGroups. cp/JVM is the authority for protocol_type / protocol_data / member_metadata."
+  },
+  "typeless_group": {
+    "error_code": 0,
+    "group_id": "simple-typeless",
+    "group_state": "Empty",
+    "members": [],
+    "protocol_data": "",
+    "protocol_type": ""
+  }
+}

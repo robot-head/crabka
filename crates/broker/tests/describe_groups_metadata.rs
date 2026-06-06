@@ -39,6 +39,26 @@ const KNOWN_METADATA: &[u8] = b"\x00\x01rangemeta\xde\xad";
 /// `member_assignment`.
 const ASSIGN: &[u8] = b"assign-bytes";
 
+/// The EXACT `ConsumerProtocolSubscription` bytes a real `RangeAssignor`
+/// console-consumer sent to `confluentinc/cp-kafka:7.4.0` (captured by the
+/// `describe_groups_jvm` Docker harness into
+/// `tests/fixtures/describe_groups/real_kafka_classic.json`, member
+/// `member_metadata_hex`). Wire shape: version `i16=3`, then one subscribed
+/// topic `"t"`, `userData=null`, empty `ownedPartitions`. This pins Crabka's
+/// `DescribeGroups` echo to a *realistic* subscription, not just an arbitrary
+/// blob — cp/JVM is the authority.
+const REAL_KAFKA_SUBSCRIPTION: &[u8] = &[
+    0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x74, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00,
+    0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+];
+/// The EXACT `ConsumerProtocolAssignment` bytes cp-kafka 7.4.0 returned for
+/// that member (fixture `member_assignment_hex`): version `i16=3`, topic `"t"`,
+/// partitions `[0, 1]`, `userData=null`.
+const REAL_KAFKA_ASSIGNMENT: &[u8] = &[
+    0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x74, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0xff, 0xff, 0xff, 0xff,
+];
+
 async fn start_broker() -> (crabka_broker::BrokerHandle, String, tempfile::TempDir) {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let config = BrokerConfig::for_tests(tempdir.path().to_path_buf());
@@ -47,7 +67,7 @@ async fn start_broker() -> (crabka_broker::BrokerHandle, String, tempfile::TempD
     (handle, bootstrap, tempdir)
 }
 
-fn join_request(group_id: &str, member_id: &str) -> JoinGroupRequest {
+fn join_request(group_id: &str, member_id: &str, metadata: &'static [u8]) -> JoinGroupRequest {
     JoinGroupRequest {
         group_id: group_id.to_string(),
         session_timeout_ms: 10_000,
@@ -57,7 +77,7 @@ fn join_request(group_id: &str, member_id: &str) -> JoinGroupRequest {
         protocol_type: "consumer".to_string(),
         protocols: vec![JoinGroupRequestProtocol {
             name: "range".to_string(),
-            metadata: Bytes::from_static(KNOWN_METADATA),
+            metadata: Bytes::from_static(metadata),
             ..Default::default()
         }],
         ..Default::default()
@@ -80,7 +100,7 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
 
     // ── JoinGroup round 1: empty member_id → MEMBER_ID_REQUIRED (79). ──
     let r1 = client
-        .send(join_request(group_id, ""))
+        .send(join_request(group_id, "", KNOWN_METADATA))
         .await
         .expect("first JoinGroup must round-trip");
     assert!(
@@ -98,7 +118,7 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
     // rebalance and returns NONE. This lone member is the leader. ──
     let r2 = tokio::time::timeout(
         Duration::from_secs(10),
-        client.send(join_request(group_id, &member_id)),
+        client.send(join_request(group_id, &member_id, KNOWN_METADATA)),
     )
     .await
     .expect("second JoinGroup timed out")
@@ -180,5 +200,109 @@ async fn describe_groups_reports_member_metadata_and_protocol_name() {
         m.member_assignment.as_ref() == ASSIGN,
         "member_assignment must be the SyncGroup assignment bytes, got {:?}",
         m.member_assignment
+    );
+}
+
+/// cp/JVM cross-validation: drive the SAME classic flow but with the EXACT
+/// `ConsumerProtocolSubscription` / `ConsumerProtocolAssignment` bytes a real
+/// `RangeAssignor` console-consumer exchanged with `confluentinc/cp-kafka:7.4.0`
+/// (captured by `describe_groups_jvm.rs` → `real_kafka_classic.json`). Crabka's
+/// `DescribeGroups` must reproduce real Kafka's authority semantics:
+/// `protocol_type == "consumer"`, `protocol_data == "range"`, and a byte-exact
+/// `member_metadata` echo of the realistic subscription (not just the arbitrary
+/// blob the test above pins).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn describe_groups_matches_real_kafka_range_subscription() {
+    let (handle, bootstrap, _tempdir) = start_broker().await;
+    let group_id = "cg-describe-real-kafka";
+    let client = Client::builder()
+        .bootstrap(bootstrap)
+        .client_id("describe-real-kafka-member")
+        .build()
+        .await
+        .expect("client build");
+
+    // JoinGroup two-step, supplying the REAL captured subscription bytes.
+    let r1 = client
+        .send(join_request(group_id, "", REAL_KAFKA_SUBSCRIPTION))
+        .await
+        .expect("first JoinGroup must round-trip");
+    assert!(
+        r1.error_code == ERR_MEMBER_ID_REQUIRED,
+        "first JoinGroup must return MEMBER_ID_REQUIRED (79), got {r1:?}"
+    );
+    let member_id = r1.member_id;
+
+    let r2 = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.send(join_request(group_id, &member_id, REAL_KAFKA_SUBSCRIPTION)),
+    )
+    .await
+    .expect("second JoinGroup timed out")
+    .expect("second JoinGroup must round-trip");
+    assert!(
+        r2.error_code == ERR_NONE,
+        "second JoinGroup must succeed, got {r2:?}"
+    );
+    assert!(
+        r2.protocol_name.as_deref() == Some("range"),
+        "single member must land on 'range', got {r2:?}"
+    );
+    let generation_id = r2.generation_id;
+
+    // SyncGroup: leader supplies the REAL captured assignment bytes.
+    let r3 = client
+        .send(SyncGroupRequest {
+            group_id: group_id.to_string(),
+            generation_id,
+            member_id: member_id.clone(),
+            protocol_type: Some("consumer".into()),
+            protocol_name: Some("range".into()),
+            assignments: vec![SyncGroupRequestAssignment {
+                member_id: member_id.clone(),
+                assignment: Bytes::from_static(REAL_KAFKA_ASSIGNMENT),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("SyncGroup must round-trip");
+    assert!(
+        r3.error_code == ERR_NONE,
+        "SyncGroup must succeed, got {r3:?}"
+    );
+
+    let resp = client
+        .send(DescribeGroupsRequest {
+            groups: vec![group_id.to_string()],
+            ..Default::default()
+        })
+        .await
+        .expect("DescribeGroups must round-trip");
+    handle.shutdown().await;
+
+    let g = &resp.groups[0];
+    assert!(g.error_code == ERR_NONE, "DescribeGroups error: {g:?}");
+    // Real-Kafka authority (from real_kafka_classic.json).
+    assert!(
+        g.protocol_type == "consumer",
+        "protocol_type must match real Kafka 'consumer', got {:?}",
+        g.protocol_type
+    );
+    assert!(
+        g.protocol_data == "range",
+        "protocol_data must match real Kafka's selected assignor 'range', got {:?}",
+        g.protocol_data
+    );
+    let m = &g.members[0];
+    assert!(
+        m.member_metadata.as_ref() == REAL_KAFKA_SUBSCRIPTION,
+        "member_metadata must be the byte-exact real-Kafka ConsumerProtocolSubscription, got {:02x?}",
+        m.member_metadata.as_ref()
+    );
+    assert!(
+        m.member_assignment.as_ref() == REAL_KAFKA_ASSIGNMENT,
+        "member_assignment must be the byte-exact real-Kafka ConsumerProtocolAssignment, got {:02x?}",
+        m.member_assignment.as_ref()
     );
 }
