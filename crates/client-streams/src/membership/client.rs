@@ -29,6 +29,9 @@ const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 pub struct StreamsMembership {
     member_id: String,
     group_id: String,
+    /// Shared with the coordinator loop; reads the live member epoch for
+    /// [`group_metadata`](Self::group_metadata) (EOS `send_offsets_to_transaction`).
+    member_epoch: Arc<Mutex<i32>>,
     events: mpsc::UnboundedReceiver<StreamsEvent>,
     shutdown: CancellationToken,
     hb_handle: Option<JoinHandle<()>>,
@@ -119,6 +122,9 @@ impl StreamsMembership {
             .build()
             .await?;
         let shutdown = CancellationToken::new();
+        // Shared epoch handle: the coordinator advances it each heartbeat; the
+        // membership reads it for EOS `group_metadata()`.
+        let member_epoch = Arc::new(Mutex::new(member_epoch_val));
         let state = CoordinatorState {
             client: coordinator_client,
             group_id: group_id.clone(),
@@ -127,7 +133,7 @@ impl StreamsMembership {
             instance_id,
             rebalance_timeout_ms,
             topology: Arc::clone(&topology),
-            member_epoch: Arc::new(Mutex::new(member_epoch_val)),
+            member_epoch: Arc::clone(&member_epoch),
             owned_active,
             owned_standby,
             owned_warmup,
@@ -141,6 +147,7 @@ impl StreamsMembership {
         Ok(Self {
             member_id,
             group_id,
+            member_epoch,
             events: events_rx,
             shutdown,
             hb_handle: Some(hb_handle),
@@ -166,6 +173,22 @@ impl StreamsMembership {
     #[must_use]
     pub fn group_id(&self) -> &str {
         &self.group_id
+    }
+
+    /// Streams group metadata for the EOS `send_offsets_to_transaction` call.
+    ///
+    /// The `generation_id` maps to the live member epoch (next-gen
+    /// "generation"). The epoch lives behind the coordinator's async `Mutex`, so
+    /// this reader is `async` (a sync accessor would have to `blocking_lock`,
+    /// which panics inside the runtime's async supervisor).
+    pub async fn group_metadata(&self) -> crate::runtime::eos::StreamsGroupMeta {
+        let epoch = *self.member_epoch.lock().await;
+        crate::runtime::eos::StreamsGroupMeta {
+            group_id: self.group_id.clone(),
+            generation_id: epoch,
+            member_id: self.member_id.clone(),
+            group_instance_id: None,
+        }
     }
 
     /// Await the next membership event (assignment / not-ready / fenced).

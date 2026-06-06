@@ -4,6 +4,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::error::StreamsClientError;
 use crate::membership::StreamsAssignment;
+use crate::runtime::eos::{ProcessingGuarantee, StreamsGroupMeta, TransactionalProducer};
 use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
 use crate::runtime::iq::{IqRequest, answer_iq};
 use crate::runtime::task::{StreamTask, TaskRole};
@@ -34,6 +35,17 @@ pub(crate) struct StreamThread {
     /// Wall-clock source driving wall-clock punctuation between polls. Defaults to
     /// `SystemClock`; tests inject a `ManualClock` via `with_clock` for determinism.
     clock: Arc<dyn crate::runtime::clock::Clock>,
+    /// Delivery guarantee for this thread. Set by `apply_assignment`; defaults to
+    /// at-least-once until the first assignment arrives.
+    guarantee: ProcessingGuarantee,
+    /// The EOS-v2 transactional producer (the same object the tasks `send`
+    /// through, viewed as a `TransactionalProducer`). `None` under at-least-once.
+    txn: Option<Arc<dyn TransactionalProducer>>,
+    /// Whether `init_transactions` has run (one-time, on the first EOS assignment).
+    initialized: bool,
+    /// Whether a transaction is currently open (`begin_transaction` called, not yet
+    /// committed/aborted). Drives the begin-on-first-poll / commit barrier.
+    in_txn: bool,
 }
 
 impl StreamThread {
@@ -51,6 +63,10 @@ impl StreamThread {
             globals_ready: false,
             global_offsets: std::collections::HashMap::new(),
             clock: Arc::new(crate::runtime::clock::SystemClock),
+            guarantee: ProcessingGuarantee::AtLeastOnce,
+            txn: None,
+            initialized: false,
+            in_txn: false,
         }
     }
 
@@ -70,13 +86,33 @@ impl StreamThread {
     }
 
     /// Reconcile tasks to `assignment`. Reconciles active, standby, and warmup tasks.
+    ///
+    /// `guarantee` + `txn` configure the EOS commit path: under
+    /// [`ProcessingGuarantee::ExactlyOnceV2`] the same producer object is also
+    /// passed as `txn` (a [`TransactionalProducer`] view), and the first EOS
+    /// assignment runs `init_transactions` once (fencing any zombie).
     pub async fn apply_assignment(
         &mut self,
         assignment: &StreamsAssignment,
         topology: &BuiltTopology,
         producer: &Arc<dyn RecordProducer>,
         store: &Arc<dyn OffsetStore>,
+        guarantee: ProcessingGuarantee,
+        txn: Option<Arc<dyn TransactionalProducer>>,
     ) -> Result<(), StreamsClientError> {
+        self.guarantee = guarantee;
+        self.txn = txn;
+        // One-time `init_transactions` on the first EOS assignment (bumps the
+        // producer epoch, fencing a zombie of the same transactional id).
+        if self.guarantee == ProcessingGuarantee::ExactlyOnceV2 && !self.initialized {
+            let txn = self
+                .txn
+                .as_ref()
+                .expect("EOS requires a transactional producer");
+            txn.init_transactions().await?;
+            self.initialized = true;
+        }
+
         // Lazily build + bootstrap the shared global store(s) exactly once, before
         // any task processes. Kafka blocks task start until the global store is
         // ready, so we drain every partition of each global source topic here.
@@ -201,6 +237,17 @@ impl StreamThread {
                 .poll_once(fetcher, &mut self.global_offsets)
                 .await?;
         }
+        // EOS: open a transaction before producing any sink/changelog records, so
+        // the whole process-then-commit cycle is one atomic txn. Idempotent across
+        // polls within a commit interval — `in_txn` stays set until `commit_all`.
+        if self.guarantee == ProcessingGuarantee::ExactlyOnceV2 && !self.in_txn {
+            self.txn
+                .as_ref()
+                .expect("EOS txn producer")
+                .begin_transaction()
+                .await?;
+            self.in_txn = true;
+        }
         for task in self.tasks.values_mut() {
             if task.role == TaskRole::Active {
                 task.process_once(fetcher).await?;
@@ -235,9 +282,41 @@ impl StreamThread {
         Ok(())
     }
 
-    pub async fn commit_all(&mut self) -> Result<(), StreamsClientError> {
-        for task in self.tasks.values_mut() {
-            task.commit().await?;
+    /// Commit advanced offsets.
+    ///
+    /// At-least-once: per-task `flush` + offset commit (`meta` ignored).
+    /// Exactly-once-v2: fold every task's pending source offsets into a single
+    /// `send_offsets_to_transaction`, then `commit_transaction` atomically, and
+    /// clear the tasks' pending offsets. Requires `meta` (the streams group
+    /// metadata). A no-op when no transaction is open (nothing produced since the
+    /// last commit).
+    pub async fn commit_all(
+        &mut self,
+        meta: Option<&StreamsGroupMeta>,
+    ) -> Result<(), StreamsClientError> {
+        match self.guarantee {
+            ProcessingGuarantee::AtLeastOnce => {
+                for task in self.tasks.values_mut() {
+                    task.commit().await?;
+                }
+            }
+            ProcessingGuarantee::ExactlyOnceV2 => {
+                if !self.in_txn {
+                    return Ok(()); // nothing produced since last commit
+                }
+                let txn = self.txn.as_ref().expect("EOS txn producer");
+                let mut offsets = Vec::new();
+                for task in self.tasks.values() {
+                    offsets.extend(task.pending_offsets());
+                }
+                let meta = meta.expect("EOS commit requires group metadata");
+                txn.send_offsets_to_transaction(&offsets, meta).await?;
+                txn.commit_transaction().await?;
+                for task in self.tasks.values_mut() {
+                    task.clear_pending();
+                }
+                self.in_txn = false;
+            }
         }
         Ok(())
     }
@@ -269,8 +348,28 @@ impl StreamThread {
     }
 
     /// Commit + drop all tasks (on Fenced / shutdown).
-    pub async fn close_all(&mut self) -> Result<(), StreamsClientError> {
-        self.commit_all().await?;
+    ///
+    /// Under EOS, an open transaction is aborted (best-effort) rather than
+    /// committed — a fence/shutdown mid-cycle must not leak a half-written txn.
+    pub async fn close_all(
+        &mut self,
+        meta: Option<&StreamsGroupMeta>,
+    ) -> Result<(), StreamsClientError> {
+        match self.guarantee {
+            ProcessingGuarantee::AtLeastOnce => {
+                self.commit_all(meta).await?;
+            }
+            ProcessingGuarantee::ExactlyOnceV2 => {
+                // Abort any in-flight txn (best-effort) — a fence/shutdown mid-cycle
+                // must not leak a half-written transaction. (Clean rollback = T4.)
+                if self.in_txn {
+                    if let Some(t) = &self.txn {
+                        let _ = t.abort_transaction().await;
+                    }
+                    self.in_txn = false;
+                }
+            }
+        }
         self.tasks.clear();
         Ok(())
     }
@@ -604,7 +703,14 @@ mod tests {
             "app".into(),
         );
         thread
-            .apply_assignment(&assignment(), &built, &producer, &store)
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -621,7 +727,7 @@ mod tests {
             })),
         };
         thread.poll_all(&fetcher, &tracker).await.unwrap();
-        thread.commit_all().await.unwrap();
+        thread.commit_all(None).await.unwrap();
         check!(
             producer_c
                 .sent
@@ -641,7 +747,14 @@ mod tests {
 
         // empty assignment → task removed (close_processors + committed on the way out)
         thread
-            .apply_assignment(&StreamsAssignment::default(), &built, &producer, &store)
+            .apply_assignment(
+                &StreamsAssignment::default(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 0);
@@ -679,7 +792,14 @@ mod tests {
             "app".into(),
         );
         thread
-            .apply_assignment(&assignment(), &built, &producer, &store)
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -698,7 +818,7 @@ mod tests {
             },
         )]);
         thread.poll_all(&process_fetcher, &tracker).await.unwrap();
-        thread.commit_all().await.unwrap();
+        thread.commit_all(None).await.unwrap();
 
         let sent = producer_c.sent.lock().unwrap();
         check!(
@@ -867,7 +987,14 @@ mod tests {
             warmup: vec![],
         };
         thread
-            .apply_assignment(&assignment, &built, &producer, &store)
+            .apply_assignment(
+                &assignment,
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -888,7 +1015,7 @@ mod tests {
             },
         )]);
         thread.poll_all(&process_fetcher, &tracker).await.unwrap();
-        thread.commit_all().await.unwrap();
+        thread.commit_all(None).await.unwrap();
 
         let sent = producer_c.sent.lock().unwrap();
         check!(
@@ -945,7 +1072,14 @@ mod tests {
         };
 
         thread
-            .apply_assignment(&assignment1, &built, &producer, &store)
+            .apply_assignment(
+                &assignment1,
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 3);
@@ -987,7 +1121,14 @@ mod tests {
         };
 
         thread
-            .apply_assignment(&assignment2, &built, &producer, &store)
+            .apply_assignment(
+                &assignment2,
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 3);
@@ -996,5 +1137,87 @@ mod tests {
         check!(!thread.tasks.contains_key(&("0".to_string(), 1)));
         check!(thread.tasks.get(&("0".to_string(), 2)).map(|t| t.role) == Some(TaskRole::Active));
         check!(thread.tasks.get(&("0".to_string(), 3)).map(|t| t.role) == Some(TaskRole::Warmup));
+    }
+
+    /// EOS-v2 happy path: the thread runs the full transactional commit lifecycle
+    /// over a stateless `source → up → sink` topology. The single
+    /// `MockTransactionalProducer` is shared as BOTH the task `RecordProducer`
+    /// (for the sink `send`) AND the thread's `TransactionalProducer`, so the
+    /// recorded call sequence is the cross-product of both views.
+    ///
+    /// Expected sequence: `Init` (`apply_assignment`), `Begin` (first `poll_all`),
+    /// `Send` (the sink emit during process), then `SendOffsets` + `Commit`
+    /// (`commit_all`). The sink record must also be logged in `.sent`.
+    #[tokio::test]
+    async fn eos_happy_path_runs_begin_send_offsets_commit() {
+        use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
+
+        // One mock object, two trait-object views (same Arc).
+        let mock = Arc::new(MockTransactionalProducer::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&mock) as _;
+        let txn: Arc<dyn TransactionalProducer> = Arc::clone(&mock) as _;
+        let store: Arc<dyn OffsetStore> = Arc::new(MemStore::default());
+
+        let built = built();
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+        // EOS assignment: passes the txn producer and ExactlyOnceV2.
+        thread
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::ExactlyOnceV2,
+                Some(Arc::clone(&txn)),
+            )
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        // One input batch → the sink emits one uppercased record.
+        let fetcher = OneShot {
+            batch: StdMutex::new(Some(FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: Some("k".into()),
+                    value: Some("hi".into()),
+                    timestamp: -1,
+                }],
+            })),
+        };
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
+        thread.poll_all(&fetcher, &tracker).await.unwrap();
+
+        let meta = crate::runtime::eos::StreamsGroupMeta {
+            group_id: "app".into(),
+            generation_id: 3,
+            member_id: "m".into(),
+            group_instance_id: None,
+        };
+        thread.commit_all(Some(&meta)).await.unwrap();
+
+        // The full transactional lifecycle, in order.
+        check!(
+            *mock.calls.lock().unwrap()
+                == vec![
+                    Step::Init,
+                    Step::Begin,
+                    Step::Send,
+                    Step::SendOffsets,
+                    Step::Commit,
+                ]
+        );
+        // The sink record was produced through the transactional producer.
+        check!(
+            mock.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(t, _p, _k, v)| t == "out" && v.as_deref() == Some(b"HI".as_ref()))
+        );
     }
 }

@@ -290,6 +290,21 @@ impl StreamTask {
         Ok(())
     }
 
+    /// The source offsets advanced since the last commit (for the thread's txn).
+    /// The thread (not the task) drives the EOS commit, so it reads pending
+    /// offsets here, folds them into `send_offsets_to_transaction`, and clears
+    /// them via [`clear_pending`](Self::clear_pending) once the txn commits.
+    pub fn pending_offsets(&self) -> Vec<(String, i32, i64)> {
+        self.pending
+            .iter()
+            .map(|((t, p), o)| (t.clone(), *p, *o))
+            .collect()
+    }
+
+    /// Clear pending after the thread's EOS txn commit succeeds.
+    pub fn clear_pending(&mut self) {
+        self.pending.clear();
+
     /// At-least-once commit: flush producer THEN commit advanced source offsets.
     pub async fn commit(&mut self) -> Result<(), StreamsClientError> {
         self.producer.flush().await?;

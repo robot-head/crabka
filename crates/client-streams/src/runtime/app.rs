@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::StreamsClientError;
 use crate::membership::{StreamsEvent, StreamsMembership};
 use crate::processor::serde::Serde;
+use crate::runtime::eos::{ProcessingGuarantee, TransactionalProducer};
 use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
 use crate::runtime::io_broker;
 use crate::runtime::iq::IqRequest;
@@ -55,15 +56,37 @@ impl KafkaStreams {
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
         #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
     ) -> Result<Self, StreamsClientError> {
-        let _ = processing_guarantee; // consumed by the EOS commit path in T3
         let built = Arc::new(topology);
 
-        // Broker I/O (one shared producer).
-        let (fetcher, producer, store) =
-            io_broker::build(&bootstrap, &application_id, &application_id).await?;
-        let fetcher: Arc<dyn RecordFetcher> = Arc::new(fetcher);
-        let producer: Arc<dyn RecordProducer> = producer;
-        let store: Arc<dyn OffsetStore> = store;
+        // Broker I/O. Under EOS-v2 the producer is transactional: the SAME object
+        // is both the task `RecordProducer` (for `send`) and the thread's
+        // `TransactionalProducer` (for begin/send_offsets/commit). Under ALO `txn`
+        // is `None`.
+        let fetcher: Arc<dyn RecordFetcher>;
+        let producer: Arc<dyn RecordProducer>;
+        let store: Arc<dyn OffsetStore>;
+        let txn: Option<Arc<dyn TransactionalProducer>>;
+        match processing_guarantee {
+            ProcessingGuarantee::AtLeastOnce => {
+                let (f, p, s) =
+                    io_broker::build(&bootstrap, &application_id, &application_id).await?;
+                fetcher = Arc::new(f);
+                producer = p;
+                store = s;
+                txn = None;
+            }
+            ProcessingGuarantee::ExactlyOnceV2 => {
+                let txn_id = crate::runtime::eos::transactional_id(&application_id, 0);
+                let (f, txn_producer, s) =
+                    io_broker::build_eos(&bootstrap, &application_id, &application_id, &txn_id)
+                        .await?;
+                fetcher = Arc::new(f);
+                // Two trait-object views of the one transactional producer.
+                producer = Arc::clone(&txn_producer) as Arc<dyn RecordProducer>;
+                txn = Some(txn_producer as Arc<dyn TransactionalProducer>);
+                store = s;
+            }
+        }
 
         // Join the streams group (membership owns the heartbeat loop).
         let mut membership = StreamsMembership::builder()
@@ -80,6 +103,7 @@ impl KafkaStreams {
         let topo_for_thread = Arc::clone(&built);
         let fetcher_for_thread = Arc::clone(&fetcher);
         let (iq_tx, mut iq_rx) = mpsc::channel::<IqRequest>(64);
+        let is_eos = processing_guarantee == ProcessingGuarantee::ExactlyOnceV2;
         let handle = tokio::spawn(async move {
             let mut thread = StreamThread::new(fetcher_for_thread, store_backend, application_id);
             let mut poll = tokio::time::interval(poll_interval);
@@ -88,17 +112,28 @@ impl KafkaStreams {
             loop {
                 tokio::select! {
                     () = sd.cancelled() => {
-                        let _ = thread.close_all().await;
+                        // EOS close aborts any in-flight txn (meta unused); ALO commits.
+                        let _ = thread.close_all(None).await;
                         let _ = membership.close().await;
                         break;
                     }
                     ev = membership.next_event() => match ev {
                         Ok(StreamsEvent::Assigned(a)) => {
-                            if let Err(e) = thread.apply_assignment(&a, &topo_for_thread, &producer, &store).await {
+                            if let Err(e) = thread
+                                .apply_assignment(
+                                    &a,
+                                    &topo_for_thread,
+                                    &producer,
+                                    &store,
+                                    processing_guarantee,
+                                    txn.clone(),
+                                )
+                                .await
+                            {
                                 tracing::warn!(error = %e, "apply_assignment failed");
                             }
                         }
-                        Ok(StreamsEvent::Fenced) => { let _ = thread.close_all().await; }
+                        Ok(StreamsEvent::Fenced) => { let _ = thread.close_all(None).await; }
                         Ok(StreamsEvent::NotReady(_)) => {}
                         Err(e) => { tracing::warn!(error = %e, "membership event stream ended"); break; }
                     },
@@ -108,7 +143,14 @@ impl KafkaStreams {
                         }
                     }
                     _ = commit.tick() => {
-                        if let Err(e) = thread.commit_all().await {
+                        // EOS commit folds offsets into the txn — needs the live
+                        // streams group metadata; ALO ignores it.
+                        let meta = if is_eos {
+                            Some(membership.group_metadata().await)
+                        } else {
+                            None
+                        };
+                        if let Err(e) = thread.commit_all(meta.as_ref()).await {
                             tracing::warn!(error = %e, "commit_all failed");
                         }
                     }
