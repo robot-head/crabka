@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::crd::{Kafka, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser};
+use crate::crd::{Kafka, KafkaGrpcGateway, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser};
 
 /// Write every CRD this operator owns into `out_dir` as
 /// `<group>_<plural>.yaml`. Existing files are overwritten.
@@ -12,6 +12,7 @@ pub fn write_all(out_dir: &Path) -> anyhow::Result<()> {
     write_one::<KafkaTopic>(out_dir)?;
     write_one::<KafkaUser>(out_dir)?;
     write_one::<KafkaRebalance>(out_dir)?;
+    write_one::<KafkaGrpcGateway>(out_dir)?;
     Ok(())
 }
 
@@ -44,11 +45,13 @@ mod tests {
         let tf = dir.path().join("crabka.io_kafkatopics.yaml");
         let uf = dir.path().join("crabka.io_kafkausers.yaml");
         let rf = dir.path().join("crabka.io_kafkarebalances.yaml");
+        let gf = dir.path().join("crabka.io_kafkagrpcgateways.yaml");
         assert!(kf.exists());
         assert!(pf.exists());
         assert!(tf.exists());
         assert!(uf.exists());
         assert!(rf.exists());
+        assert!(gf.exists());
         let kafka = std::fs::read_to_string(&kf).unwrap();
         assert!(kafka.contains("plural: kafkas"));
         let pool = std::fs::read_to_string(&pf).unwrap();
@@ -63,5 +66,8 @@ mod tests {
         let rebalance = std::fs::read_to_string(&rf).unwrap();
         assert!(rebalance.contains("plural: kafkarebalances"));
         assert!(rebalance.contains("- kr"));
+        let gateway = std::fs::read_to_string(&gf).unwrap();
+        assert!(gateway.contains("plural: kafkagrpcgateways"));
+        assert!(gateway.contains("- kgg"));
     }
 }

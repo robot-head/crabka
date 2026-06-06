@@ -1,0 +1,440 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kafkagrpcgateways.crabka.io
+spec:
+  group: crabka.io
+  names:
+    categories: []
+    kind: KafkaGrpcGateway
+    plural: kafkagrpcgateways
+    shortNames:
+    - kgg
+    singular: kafkagrpcgateway
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KafkaGrpcGatewaySpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              allowedTargets:
+                description: |-
+                  Explicit SSRF allowlist for outbound HTTP targets. The controller
+                  derives entries automatically from each subscription's
+                  `targetUrl`; use this field to add extra allowed hosts.
+                items:
+                  description: |-
+                    One entry in the gateway's SSRF allowlist. An outbound HTTP request
+                    is allowed only when `scheme` and `host` match.
+                  properties:
+                    host:
+                      description: Hostname (and optional port) of the allowed target.
+                      type: string
+                    scheme:
+                      description: URL scheme. One of `http` or `https`.
+                      type: string
+                  required:
+                  - host
+                  - scheme
+                  type: object
+                type: array
+              authz:
+                description: |-
+                  Authorization configuration. When absent, simple ACL-based authz
+                  is used (mode = `simple`).
+                nullable: true
+                properties:
+                  aclRefreshSecs:
+                    description: |-
+                      How often the gateway refreshes its ACL cache from the broker,
+                      in seconds. Default 60.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  bearer:
+                    description: |-
+                      Bearer-token authentication configuration. When absent,
+                      bearer auth is disabled.
+                    nullable: true
+                    properties:
+                      mode:
+                        description: Bearer auth mode. One of `off` or `unsecured`. Default `off`.
+                        nullable: true
+                        type: string
+                      principalClaim:
+                        description: JWT claim used as the Kafka principal. Default `sub`.
+                        nullable: true
+                        type: string
+                    type: object
+                  mode:
+                    description: |-
+                      Authorization mode. One of `off` or `simple`. Default `simple`
+                      (ACL-based, reading `KafkaUser` ACLs from the broker).
+                    nullable: true
+                    type: string
+                  superUsers:
+                    description: Principal strings (e.g. `User:admin`) that bypass all ACL checks.
+                    items:
+                      type: string
+                    type: array
+                type: object
+              dedup:
+                description: |-
+                  Configuration for the deduplication topic that backs idempotent
+                  produce (exactly-once delivery). When absent, dedup is disabled.
+                nullable: true
+                properties:
+                  partitions:
+                    description: Number of partitions for the dedup topic. Default 8.
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  topic:
+                    description: |-
+                      Kafka topic used to store dedup state. Defaults to
+                      `<gateway-name>-dedup` when absent.
+                    nullable: true
+                    type: string
+                  txnIdPrefix:
+                    description: |-
+                      Prefix for transactional producer IDs. Defaults to the gateway
+                      name. The full `transactional.id` is `<prefix>-<partition>`.
+                    nullable: true
+                    type: string
+                  windowMs:
+                    description: |-
+                      Dedup window in milliseconds. Records with the same idempotency
+                      key within this window are dropped. Default `86_400_000` (24 h).
+                    format: int64
+                    nullable: true
+                    type: integer
+                type: object
+              image:
+                description: |-
+                  Container image override. When absent the operator uses its
+                  `--default-gateway-image` flag.
+                nullable: true
+                type: string
+              outboundSubscriptions:
+                description: |-
+                  Outbound webhook subscriptions. Each entry reads from
+                  `sourceTopics` and HTTP-POSTs records to `targetUrl`.
+                items:
+                  description: |-
+                    One outbound webhook subscription. Reads from `sourceTopics` and
+                    HTTP-POSTs each record to `targetUrl`.
+                  properties:
+                    baseBackoffMs:
+                      description: Initial backoff in milliseconds for exponential retry. Default 1000.
+                      format: uint64
+                      minimum: 0.0
+                      nullable: true
+                      type: integer
+                    deadLetterTopic:
+                      description: |-
+                        Kafka topic for records that exhausted all delivery attempts.
+                        When absent, failed records are logged and discarded.
+                      nullable: true
+                      type: string
+                    filter:
+                      description: |-
+                        CEL expression evaluated against the record to decide whether to
+                        deliver it. An absent or empty filter delivers all records.
+                      nullable: true
+                      type: string
+                    headers:
+                      additionalProperties:
+                        type: string
+                      description: Static HTTP headers appended to every delivery request.
+                      type: object
+                    maxAttempts:
+                      description: |-
+                        Maximum number of delivery attempts before moving the record to
+                        the dead-letter topic. Default 3.
+                      format: uint32
+                      minimum: 0.0
+                      nullable: true
+                      type: integer
+                    maxBackoffMs:
+                      description: Maximum backoff cap in milliseconds. Default 30000.
+                      format: uint64
+                      minimum: 0.0
+                      nullable: true
+                      type: integer
+                    name:
+                      description: |-
+                        Unique name for this subscription. Used as the consumer group id
+                        suffix.
+                      type: string
+                    requestTimeoutMs:
+                      description: HTTP request timeout in milliseconds. Default 10000.
+                      format: uint64
+                      minimum: 0.0
+                      nullable: true
+                      type: integer
+                    signingSecretRef:
+                      description: |-
+                        Secret key reference for the outbound request HMAC signing secret.
+                        Resolved by the controller at render time.
+                      nullable: true
+                      properties:
+                        key:
+                          description: Key within the Secret's `data` map.
+                          type: string
+                        name:
+                          description: Name of the Kubernetes Secret.
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                    sourceTopics:
+                      description: Kafka topics to consume records from.
+                      items:
+                        type: string
+                      type: array
+                    targetUrl:
+                      description: HTTP endpoint to POST records to.
+                      type: string
+                  required:
+                  - name
+                  - targetUrl
+                  type: object
+                type: array
+              replicas:
+                description: Number of gateway replicas. Defaults to 1 when absent.
+                format: int32
+                nullable: true
+                type: integer
+              resources:
+                description: CPU / memory resource requests and limits for the gateway container.
+                nullable: true
+                properties:
+                  claims:
+                    description: |-
+                      Claims lists the names of resources, defined in spec.resourceClaims, that are used by this container.
+
+                      This is an alpha field and requires enabling the DynamicResourceAllocation feature gate.
+
+                      This field is immutable. It can only be set for containers.
+                    items:
+                      description: ResourceClaim references one entry in PodSpec.ResourceClaims.
+                      properties:
+                        name:
+                          description: Name must match the name of one entry in pod.spec.resourceClaims of the Pod where this field is used. It makes that resource available inside a container.
+                          type: string
+                        request:
+                          description: Request is the name chosen for a request in the referenced claim. If empty, everything from the claim is made available, otherwise only the result of this request.
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    type: array
+                  limits:
+                    additionalProperties:
+                      description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
+                      x-kubernetes-int-or-string: true
+                    description: 'Limits describes the maximum amount of compute resources allowed. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                    type: object
+                  requests:
+                    additionalProperties:
+                      description: "Quantity is a fixed-point representation of a number. It provides convenient marshaling/unmarshaling in JSON and YAML, in addition to String() and AsInt64() accessors.\n\nThe serialization format is:\n\n``` <quantity>        ::= <signedNumber><suffix>\n\n\t(Note that <suffix> may be empty, from the \"\" case in <decimalSI>.)\n\n<digit>           ::= 0 | 1 | ... | 9 <digits>          ::= <digit> | <digit><digits> <number>          ::= <digits> | <digits>.<digits> | <digits>. | .<digits> <sign>            ::= \"+\" | \"-\" <signedNumber>    ::= <number> | <sign><number> <suffix>          ::= <binarySI> | <decimalExponent> | <decimalSI> <binarySI>        ::= Ki | Mi | Gi | Ti | Pi | Ei\n\n\t(International System of units; See: http://physics.nist.gov/cuu/Units/binary.html)\n\n<decimalSI>       ::= m | \"\" | k | M | G | T | P | E\n\n\t(Note that 1024 = 1Ki but 1000 = 1k; I didn't choose the capitalization.)\n\n<decimalExponent> ::= \"e\" <signedNumber> | \"E\" <signedNumber> ```\n\nNo matter which of the three exponent forms is used, no quantity may represent a number greater than 2^63-1 in magnitude, nor may it have more than 3 decimal places. Numbers larger or more precise will be capped or rounded up. (E.g.: 0.1m will rounded up to 1m.) This may be extended in the future if we require larger or smaller quantities.\n\nWhen a Quantity is parsed from a string, it will remember the type of suffix it had, and will use the same type again when it is serialized.\n\nBefore serializing, Quantity will be put in \"canonical form\". This means that Exponent/suffix will be adjusted up or down (with a corresponding increase or decrease in Mantissa) such that:\n\n- No precision is lost - No fractional digits will be emitted - The exponent (or suffix) is as large as possible.\n\nThe sign will be omitted unless the number is negative.\n\nExamples:\n\n- 1.5 will be serialized as \"1500m\" - 1.5Gi will be serialized as \"1536Mi\"\n\nNote that the quantity will NEVER be internally represented by a floating point number. That is the whole point of this exercise.\n\nNon-canonical values will still parse as long as they are well formed, but will be re-emitted in their canonical form. (So always use canonical form, or don't diff.)\n\nThis format is intended to make it difficult to use these numbers without writing some sort of special handling code in the hopes that that will cause implementors to also use a fixed point implementation."
+                      x-kubernetes-int-or-string: true
+                    description: 'Requests describes the minimum amount of compute resources required. If Requests is omitted for a container, it defaults to Limits if that is explicitly specified, otherwise to an implementation-defined value. Requests cannot exceed Limits. More info: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/'
+                    type: object
+                type: object
+              telemetry:
+                description: |-
+                  OpenTelemetry / observability configuration. When absent,
+                  the gateway exports no telemetry.
+                nullable: true
+                properties:
+                  otlpEndpoint:
+                    description: |-
+                      OTLP exporter endpoint URL. E.g.
+                      `http://otel-collector.observability.svc:4317`.
+                    nullable: true
+                    type: string
+                  otlpProtocol:
+                    description: OTLP exporter protocol. One of `grpc` or `http`. Default `grpc`.
+                    nullable: true
+                    type: string
+                  sampleRatio:
+                    description: |-
+                      Fraction of traces to sample in the range `[0.0, 1.0]`.
+                      Default 1.0 (sample everything).
+                    format: double
+                    nullable: true
+                    type: number
+                type: object
+              tls:
+                description: |-
+                  TLS serving configuration. When absent, TLS defaults apply
+                  (`clientAuth: required`, `validityDays: 365`).
+                nullable: true
+                properties:
+                  clientAuth:
+                    description: |-
+                      How the gateway authenticates inbound clients.
+                      One of `disabled`, `optional`, `required`. Default `required`.
+                    nullable: true
+                    type: string
+                  validityDays:
+                    description: Serving-cert lifetime in days. Default 365.
+                    format: uint32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                type: object
+              webhooks:
+                description: |-
+                  Inbound HTTP-webhook endpoints. Each entry creates one
+                  authenticated ingress route that produces records to
+                  `targetTopic`.
+                items:
+                  description: |-
+                    One inbound HTTP-webhook endpoint. Records a produce call against
+                    `targetTopic` for every verified POST to `/<name>`.
+                  properties:
+                    idempotencySource:
+                      description: |-
+                        How to derive the idempotency key for deduplication. E.g.
+                        `header:X-Idempotency-Key` or `body_hash`.
+                      nullable: true
+                      type: string
+                    keySource:
+                      description: |-
+                        How to derive the Kafka record key from the request. E.g.
+                        `header:X-Record-Key` or `body_path:.id`.
+                      nullable: true
+                      type: string
+                    maxBodyBytes:
+                      description: Maximum accepted request body size in bytes. Default 1 MiB.
+                      format: uint64
+                      minimum: 0.0
+                      nullable: true
+                      type: integer
+                    name:
+                      description: Unique name for this webhook route. Used as the URL path segment.
+                      type: string
+                    principal:
+                      description: |-
+                        Kafka principal for ACL checks on produce to `targetTopic`.
+                        Defaults to the gateway service account principal when absent.
+                      nullable: true
+                      type: string
+                    secretRef:
+                      description: |-
+                        Kubernetes Secret key reference for the HMAC signing secret.
+                        The controller resolves this at render time and injects the
+                        raw secret value into the config Secret — it is never stored
+                        in the CRD.
+                      nullable: true
+                      properties:
+                        key:
+                          description: Key within the Secret's `data` map.
+                          type: string
+                        name:
+                          description: Name of the Kubernetes Secret.
+                          type: string
+                      required:
+                      - key
+                      - name
+                      type: object
+                    signatureEncoding:
+                      description: Signature encoding. One of `hex` or `base64`. Default `hex`.
+                      nullable: true
+                      type: string
+                    signatureHeader:
+                      description: |-
+                        HTTP header carrying the HMAC signature. E.g.
+                        `X-Hub-Signature-256`.
+                      nullable: true
+                      type: string
+                    signaturePrefix:
+                      description: |-
+                        Prefix to strip from the signature header value before
+                        verifying. E.g. `sha256=`.
+                      nullable: true
+                      type: string
+                    targetTopic:
+                      description: Kafka topic that records are produced to.
+                      type: string
+                    timestampHeader:
+                      description: |-
+                        HTTP header carrying the request timestamp. Used with
+                        `timestampToleranceSecs` to reject replayed requests.
+                      nullable: true
+                      type: string
+                    timestampToleranceSecs:
+                      description: |-
+                        Maximum age of a request timestamp in seconds before it is
+                        rejected as a replay. Default 300 (5 minutes).
+                      format: int64
+                      nullable: true
+                      type: integer
+                  required:
+                  - name
+                  - targetTopic
+                  type: object
+                type: array
+            type: object
+          status:
+            description: Status reported back by the controller onto each `KafkaGrpcGateway`.
+            nullable: true
+            properties:
+              conditions:
+                default: []
+                description: |-
+                  Standard Kubernetes-style condition list. Surfaces
+                  `Ready`, `KafkaVersionValid`, `CertReady`, `Degraded`.
+                items:
+                  properties:
+                    lastTransitionTime:
+                      description: RFC3339 timestamp.
+                      type: string
+                    message:
+                      description: Human-readable message.
+                      type: string
+                    reason:
+                      description: CamelCase machine reason.
+                      type: string
+                    status:
+                      description: '`True`, `False`, or `Unknown`.'
+                      type: string
+                    type:
+                      description: e.g. `Ready`.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              observedGeneration:
+                description: '`metadata.generation` of the last successfully-reconciled spec.'
+                format: int64
+                nullable: true
+                type: integer
+              readyReplicas:
+                description: Number of gateway replicas currently reporting Ready.
+                format: int32
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: KafkaGrpcGateway
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
