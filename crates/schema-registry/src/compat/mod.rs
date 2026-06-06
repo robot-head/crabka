@@ -116,13 +116,17 @@ pub fn check_registration(
     if versions.is_empty() {
         return Ok(());
     }
-    let targets: &[(SchemaType, String)] = if level.is_transitive() {
+    let targets: &[(
+        SchemaType,
+        String,
+        Vec<crate::kafkastore::record::SchemaReference>,
+    )] = if level.is_transitive() {
         &versions
     } else {
         &versions[versions.len() - 1..]
     };
     let mut msgs = Vec::new();
-    for (_vty, vschema) in targets {
+    for (_vty, vschema, _refs) in targets {
         check_pair(ty, candidate, &[], vschema, &[], dirs, &mut msgs);
     }
     if msgs.is_empty() {
@@ -145,7 +149,7 @@ pub fn check_against_version(
     if snap.versions(subject, false).is_none() {
         return Err(SrError::SubjectNotFound(subject.to_string()));
     }
-    let (_, _, _vty, vschema) = snap
+    let (_, _, _vty, vschema, _refs) = snap
         .version(subject, version, false)
         .ok_or(SrError::VersionNotFound)?;
     let level = effective_level(snap, subject);
@@ -200,7 +204,7 @@ mod tests {
     fn backward_rejects_added_required_field() {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", "BACKWARD".into());
-        snap.register("s", SchemaType::Avro, &av(ID)).unwrap();
+        snap.register("s", SchemaType::Avro, &av(ID), &[]).unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
         assert!(matches!(
             check_registration(&snap, "s", SchemaType::Avro, &bad),
@@ -216,7 +220,7 @@ mod tests {
     fn none_level_bypasses() {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", "NONE".into());
-        snap.register("s", SchemaType::Avro, &av(ID)).unwrap();
+        snap.register("s", SchemaType::Avro, &av(ID), &[]).unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
         assert!(check_registration(&snap, "s", SchemaType::Avro, &bad).is_ok());
     }
@@ -225,7 +229,7 @@ mod tests {
     fn check_against_version_verdict() {
         let mut snap = StoreState::default();
         snap.set_subject_compat("s", "BACKWARD".into());
-        snap.register("s", SchemaType::Avro, &av(ID)).unwrap();
+        snap.register("s", SchemaType::Avro, &av(ID), &[]).unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
         let v = check_against_version(&snap, "s", SchemaType::Avro, &bad, None).unwrap();
         assert!(!v.is_compatible);

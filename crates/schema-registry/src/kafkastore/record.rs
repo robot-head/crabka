@@ -213,6 +213,7 @@ fn schema_kv(
     id: i32,
     ty: SchemaType,
     schema: &str,
+    references: &[SchemaReference],
     deleted: bool,
 ) -> (Vec<u8>, Vec<u8>) {
     let key = SchemaKey::new(subject, version);
@@ -221,7 +222,7 @@ fn schema_kv(
         version,
         id,
         schema_type: ty.wire_name().map(str::to_string),
-        references: Vec::new(),
+        references: references.to_vec(),
         schema: schema.to_string(),
         deleted,
     };
@@ -239,8 +240,9 @@ pub fn encode_schema(
     id: i32,
     ty: SchemaType,
     schema: &str,
+    references: &[SchemaReference],
 ) -> (Vec<u8>, Vec<u8>) {
-    schema_kv(subject, version, id, ty, schema, false)
+    schema_kv(subject, version, id, ty, schema, references, false)
 }
 
 /// Build a soft-delete `SCHEMA` record: identical key/value to the original but
@@ -252,8 +254,9 @@ pub fn encode_schema_deleted(
     id: i32,
     ty: SchemaType,
     schema: &str,
+    references: &[SchemaReference],
 ) -> (Vec<u8>, Vec<u8>) {
-    schema_kv(subject, version, id, ty, schema, true)
+    schema_kv(subject, version, id, ty, schema, references, true)
 }
 
 /// Build the `SCHEMA` key bytes for a permanent-delete tombstone (value is null,
@@ -379,10 +382,24 @@ mod tests {
 
     #[test]
     fn encode_schema_deleted_sets_flag() {
-        let (_k, v) = encode_schema_deleted("s", 1, 7, SchemaType::Avro, "{\"type\":\"int\"}");
+        let (_k, v) = encode_schema_deleted("s", 1, 7, SchemaType::Avro, "{\"type\":\"int\"}", &[]);
         let val: SchemaValue = serde_json::from_slice(&v).unwrap();
         assert!(val.deleted);
         assert_eq!(val.id, 7);
+    }
+
+    #[test]
+    fn encode_schema_round_trips_references() {
+        let refs = vec![SchemaReference {
+            name: "n".into(),
+            subject: "b".into(),
+            version: 1,
+        }];
+        let (k, v) = encode_schema("s", 1, 1, SchemaType::Avro, "{}", &refs);
+        match SchemaRecord::decode(&k, Some(&v)) {
+            SchemaRecord::Schema(_, val) => assert_eq!(val.references, refs),
+            other => panic!("expected Schema, got {other:?}"),
+        }
     }
 
     #[test]
@@ -407,7 +424,7 @@ mod tests {
     #[test]
     fn encoders_match_cp_captured_keys() {
         assert_eq!(
-            &encode_schema("t", 1, 1, SchemaType::Avro, "{}").0,
+            &encode_schema("t", 1, 1, SchemaType::Avro, "{}", &[]).0,
             br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#
         );
         assert_eq!(
@@ -423,7 +440,7 @@ mod tests {
             br#"{"keytype":"SCHEMA","subject":"t","version":1,"magic":1}"#
         );
         // soft-delete value: cp's SCHEMA value field order with `deleted:true`.
-        let (_k, v) = encode_schema_deleted("t", 1, 1, SchemaType::Avro, "{}");
+        let (_k, v) = encode_schema_deleted("t", 1, 1, SchemaType::Avro, "{}", &[]);
         assert_eq!(
             &v,
             br#"{"subject":"t","version":1,"id":1,"schema":"{}","deleted":true}"#

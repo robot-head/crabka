@@ -12,7 +12,7 @@ pub async fn get_by_id(
     Path(id): Path<i32>,
     Query(q): Query<DeletedQ>,
 ) -> Result<Response, SrError> {
-    let (ty, schema) = st
+    let (ty, schema, _references) = st
         .store
         .store
         .read()
@@ -62,7 +62,7 @@ pub async fn list_schemas(State(st): State<AppState>, Query(q): Query<DeletedQ>)
     let rows = st.store.store.read().all_schemas(q.deleted);
     let arr: Vec<serde_json::Value> = rows
         .into_iter()
-        .map(|(subject, version, id, ty, schema)| {
+        .map(|(subject, version, id, ty, schema, _references)| {
             let mut m = serde_json::Map::new();
             m.insert("subject".into(), subject.into());
             m.insert("version".into(), version.into());

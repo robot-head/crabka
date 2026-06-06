@@ -50,6 +50,7 @@ fn avro_value_omits_schema_type_and_references() {
         i32::try_from(v["id"].as_i64().unwrap()).unwrap(),
         SchemaType::Avro,
         v["schema"].as_str().unwrap(),
+        &[],
     );
     let ours: serde_json::Value = serde_json::from_slice(&our_val).unwrap();
     assert_eq!(ours, v, "structural value match");
@@ -66,6 +67,7 @@ fn protobuf_value_has_schema_type() {
         i32::try_from(v["id"].as_i64().unwrap()).unwrap(),
         SchemaType::Protobuf,
         v["schema"].as_str().unwrap(),
+        &[],
     );
     let ours: serde_json::Value = serde_json::from_slice(&our_val).unwrap();
     assert_eq!(

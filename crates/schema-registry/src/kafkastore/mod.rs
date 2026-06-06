@@ -99,7 +99,7 @@ impl KafkaStore {
                 ));
             };
             format::parse(ty, schema, &[])?; // 42201 if unparseable
-            let (key, value) = record::encode_schema(subject, version, id, ty, schema);
+            let (key, value) = record::encode_schema(subject, version, id, ty, schema, &[]);
             let offset = self
                 .writer
                 .produce(key, value)
@@ -108,10 +108,10 @@ impl KafkaStore {
             self.await_applied(offset).await;
             return Ok(Registered { id, version });
         }
-        if let Some(existing) = self
-            .store
-            .read()
-            .find_under_subject(subject, ty, schema, false)
+        if let Some(existing) =
+            self.store
+                .read()
+                .find_under_subject(subject, ty, schema, &[], false)
         {
             return Ok(existing);
         }
@@ -123,9 +123,9 @@ impl KafkaStore {
         // clone (the reader is the sole mutator of the live store).
         let reg = {
             let mut probe = self.store.read().clone();
-            probe.register(subject, ty, schema)?
+            probe.register(subject, ty, schema, &[])?
         };
-        let (key, value) = record::encode_schema(subject, reg.version, reg.id, ty, schema);
+        let (key, value) = record::encode_schema(subject, reg.version, reg.id, ty, schema, &[]);
         let offset = self
             .writer
             .produce(key, value)
@@ -171,7 +171,7 @@ impl KafkaStore {
     pub async fn soft_delete_version(&self, subject: &str, version: i32) -> Result<i32, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
-        let (id, ver, ty, schema) = {
+        let (id, ver, ty, schema, references) = {
             let s = self.store.read();
             if s.versions(subject, true).is_none() {
                 return Err(SrError::SubjectNotFound(subject.to_string()));
@@ -179,7 +179,8 @@ impl KafkaStore {
             s.version(subject, Some(version), true)
                 .ok_or(SrError::VersionNotFound)?
         };
-        let (key, value) = record::encode_schema_deleted(subject, ver, id, ty, &schema);
+        let (key, value) =
+            record::encode_schema_deleted(subject, ver, id, ty, &schema, &references);
         let offset = self
             .writer
             .produce(key, value)

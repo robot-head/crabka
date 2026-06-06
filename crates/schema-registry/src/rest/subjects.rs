@@ -55,10 +55,10 @@ pub async fn lookup(
     if s.versions(&subject, q.deleted).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    let Some(found) = s.find_under_subject(&subject, ty, &req.schema, q.deleted) else {
+    let Some(found) = s.find_under_subject(&subject, ty, &req.schema, &[], q.deleted) else {
         return Err(SrError::SchemaNotFound);
     };
-    let (sty, schema) = s
+    let (sty, schema, _references) = s
         .schema_by_id(found.id, q.deleted)
         .ok_or(SrError::SchemaNotFound)?;
     let mut m = serde_json::Map::new();
@@ -115,7 +115,7 @@ pub async fn get_version(
     if s.versions(&subject, q.deleted).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    let (id, ver, ty, schema) = s
+    let (id, ver, ty, schema, _references) = s
         .version(&subject, want, q.deleted)
         .ok_or(SrError::VersionNotFound)?;
     let mut m = serde_json::Map::new();
@@ -140,7 +140,7 @@ pub async fn get_version_schema(
     if s.versions(&subject, q.deleted).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    let (_, _, _, schema) = s
+    let (_, _, _, schema, _) = s
         .version(&subject, want, q.deleted)
         .ok_or(SrError::VersionNotFound)?;
     Ok(ok_raw(schema))
