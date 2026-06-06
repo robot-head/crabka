@@ -952,3 +952,121 @@ async fn rest_mode_and_lookup_endpoints() {
     cancel.cancel();
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_subject_soft_then_permanent_and_soft_before_hard() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    // NONE so two distinct schemas register as v1+v2 (isolates the delete lifecycle from compat)
+    assert_eq!(
+        app.clone()
+            .oneshot(req_put("/config/s", r#"{"compatibility":"NONE"}"#))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    register(&app, "s", &format!(r#"{{"schema":{:?}}}"#, av("A"))).await;
+    register(&app, "s", &format!(r#"{{"schema":{:?}}}"#, av("B"))).await;
+    // permanent subject delete BEFORE a soft delete → soft-before-hard: 404 / 40405
+    let early = app
+        .clone()
+        .oneshot(req_delete("/subjects/s?permanent=true"))
+        .await
+        .unwrap();
+    assert_eq!(early.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(early).await["error_code"], 40405);
+    // soft delete → returns the version array, subject disappears from the live list
+    let soft = app
+        .clone()
+        .oneshot(req_delete("/subjects/s"))
+        .await
+        .unwrap();
+    assert_eq!(soft.status(), StatusCode::OK);
+    assert_eq!(body_json(soft).await, serde_json::json!([1, 2]));
+    assert!(
+        get_json(&app, "/subjects")
+            .await
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        get_json(&app, "/subjects?deleted=true").await,
+        serde_json::json!(["s"])
+    );
+    // permanent delete → gone even with ?deleted
+    let perm = app
+        .clone()
+        .oneshot(req_delete("/subjects/s?permanent=true"))
+        .await
+        .unwrap();
+    assert_eq!(perm.status(), StatusCode::OK);
+    assert_eq!(
+        get_json(&app, "/subjects?deleted=true").await,
+        serde_json::json!([])
+    );
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_version_permanent_before_soft_is_rejected() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    register(&app, "v", &format!(r#"{{"schema":{:?}}}"#, av("A"))).await;
+    // permanent version delete before a soft delete → 404 / 40407
+    let r = app
+        .clone()
+        .oneshot(req_delete("/subjects/v/versions/1?permanent=true"))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(r).await["error_code"], 40407);
+    // soft then permanent succeeds
+    assert_eq!(
+        app.clone()
+            .oneshot(req_delete("/subjects/v/versions/1"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.clone()
+            .oneshot(req_delete("/subjects/v/versions/1?permanent=true"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_import_mode_registers_explicit_id() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    assert_eq!(
+        app.clone()
+            .oneshot(req_put("/mode/imp", r#"{"mode":"IMPORT"}"#))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    let body = format!(r#"{{"schema":{:?},"id":42,"version":5}}"#, av("C"));
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/imp/versions", &body))
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    assert_eq!(body_json(r).await["id"], 42);
+    let got = get_json(&app, "/subjects/imp/versions/5").await;
+    assert_eq!(got["id"], 42);
+    assert_eq!(got["version"], 5);
+    cancel.cancel();
+    broker.shutdown().await;
+}
