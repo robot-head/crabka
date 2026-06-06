@@ -75,6 +75,10 @@ async fn serve_tls(
                     }
                 },
             );
+            // HTTP/1.1 only — matches the gateway's Connect-over-h1 design (axum
+            // is built with the `http1` feature; the plaintext `axum::serve`
+            // path is h1 too). Connect unary + streaming work over h1; a future
+            // h2/gRPC-over-TLS client would need `auto::Builder` + ALPN here.
             if let Err(e) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, svc)
                 .await
