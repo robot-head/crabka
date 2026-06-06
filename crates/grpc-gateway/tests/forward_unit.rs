@@ -172,6 +172,7 @@ async fn forward_handler_error_arm_returns_retriable() {
             dedup_txn_id_prefix: "fh-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh".into(),
+            tls: None,
         }),
     });
 
