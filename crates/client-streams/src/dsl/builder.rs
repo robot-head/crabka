@@ -110,6 +110,12 @@ impl StreamsBuilder {
         let topic: String = topic.into();
         // Preserve a copy of the source topic to surface via `KTable::source_topic()`.
         let topic_for_ktable = topic.clone();
+        // Factory letting a downstream `suppress` register a SuppressBytesStore<K,V>
+        // with this table's serdes (non-windowed). Built before the thunk moves them.
+        let suppress_factory = crate::dsl::ktable::kv_suppress_factory::<K, V, KS, VS>(
+            materialized.key_serde.clone(),
+            materialized.value_serde.clone(),
+        );
         let mut g = self.internal.borrow_mut();
         // Store name at the JVM position (minted before the source/processor name).
         let store_name = match &materialized.store_name {
@@ -185,6 +191,7 @@ impl StreamsBuilder {
             Some(store_name),
             Some(topic_for_ktable),
         )
+        .with_suppress_factory(Some(suppress_factory))
     }
 
     /// Build the topology with no optimizer (the JVM `NO_OPTIMIZATION` default):

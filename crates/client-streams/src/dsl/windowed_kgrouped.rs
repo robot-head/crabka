@@ -26,11 +26,12 @@ use crate::dsl::config::Materialized;
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name};
 use crate::dsl::ktable::KTable;
+use crate::dsl::ktable::SuppressStoreFactory;
 use crate::dsl::names;
 use crate::dsl::processors::window_aggregate::{
     KStreamWindowAggregateProcessor, KStreamWindowReduceProcessor,
 };
-use crate::dsl::windows::{TimeWindows, Windowed};
+use crate::dsl::windows::{TimeWindowedSerde, TimeWindows, Windowed};
 use crate::processor::serde::Serde;
 use crate::topology::NodeHandle;
 
@@ -188,6 +189,14 @@ where
             value_serde,
             ..
         } = materialized;
+        // Factory that lets a downstream `suppress` register a SuppressBytesStore
+        // with the windowed key serde (`TimeWindowedSerde`) + the aggregate value
+        // serde. Built before the agg thunk moves the serdes.
+        let suppress_factory = windowed_suppress_factory::<K, VA, KS, VS>(
+            key_serde.clone(),
+            value_serde.clone(),
+            self.windows,
+        );
         let parent = self.parent;
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
@@ -243,6 +252,7 @@ where
         drop(g);
         KTable::new(Rc::clone(&self.builder), agg_id, Some(store_name), None)
             .with_window_grace(Some(windows.grace_ms))
+            .with_suppress_factory(Some(suppress_factory))
     }
 
     /// Record the (optional) repartition node + a windowed
@@ -265,6 +275,11 @@ where
             value_serde,
             ..
         } = materialized;
+        let suppress_factory = windowed_suppress_factory::<K, V, KS, VS>(
+            key_serde.clone(),
+            value_serde.clone(),
+            self.windows,
+        );
         let parent = self.parent;
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
@@ -319,5 +334,40 @@ where
         drop(g);
         KTable::new(Rc::clone(&self.builder), red_id, Some(store_name), None)
             .with_window_grace(Some(windows.grace_ms))
+            .with_suppress_factory(Some(suppress_factory))
     }
+}
+
+/// Build the suppress-store factory for a windowed-aggregation result table.
+/// Captures the windowed key serde ([`TimeWindowedSerde`]) + the aggregate value
+/// serde so a downstream `suppress` can register a
+/// `SuppressBytesStore<Windowed<K>, VA>` with the right serdes + changelog config.
+fn windowed_suppress_factory<K, VA, KS, VS>(
+    key_serde: KS,
+    value_serde: VS,
+    windows: TimeWindows,
+) -> SuppressStoreFactory
+where
+    K: Any + Send + Sync + Clone,
+    VA: Any + Send + Clone,
+    KS: Serde<K> + Clone + 'static,
+    VS: Serde<VA> + Clone + 'static,
+{
+    std::sync::Arc::new(
+        move |state: &mut LowerState, store_name: &str, proc_name: &str, logging: bool| {
+            // Suppress changelog retention mirrors the windowed store (size+grace+1day);
+            // tuned to the JVM golden #14 in T5.
+            let retention_ms = windows.size_ms + windows.grace_ms + 86_400_000;
+            state
+                .topology
+                .add_suppress_store::<Windowed<K>, VA, TimeWindowedSerde<KS>, VS>(
+                    store_name.to_string(),
+                    TimeWindowedSerde::new(key_serde.clone(), windows.size_ms),
+                    value_serde.clone(),
+                    retention_ms,
+                    logging,
+                    [proc_name.to_string()],
+                );
+        },
+    )
 }

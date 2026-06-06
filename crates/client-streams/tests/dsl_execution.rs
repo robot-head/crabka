@@ -2047,7 +2047,6 @@ fn dsl_session_aggregate_executes() {
 /// once, when stream-time passes the window's end. Records in window [0,60000)
 /// produce no output until a later-window record advances stream-time past 60000.
 #[test]
-#[ignore = "suppress-D-T4 registers the SuppressBytesStore in the lowering; until then the refactored T3 processor panics 'suppress store not found'"]
 fn dsl_suppress_until_window_closes_emits_final_only() {
     use crabka_client_streams::{
         BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows, Window, Windowed,
@@ -2107,7 +2106,6 @@ fn dsl_suppress_until_window_closes_emits_final_only() {
 /// [0,60000) are both emitted (in buffer order) when a later-window record advances
 /// stream-time past 60000. Exercises the end-to-end multi-entry eviction path.
 #[test]
-#[ignore = "suppress-D-T4 registers the SuppressBytesStore in the lowering; until then the refactored T3 processor panics 'suppress store not found'"]
 fn dsl_suppress_closes_multiple_windows_in_order() {
     use crabka_client_streams::{
         BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows, Window, Windowed,
@@ -2186,7 +2184,6 @@ fn dsl_suppress_closes_multiple_windows_in_order() {
 /// [0,60000) with a cap of 2 → the third overflows → panic.
 #[test]
 #[should_panic(expected = "max capacity")]
-#[ignore = "suppress-D-T4 registers the SuppressBytesStore in the lowering; until then the refactored T3 processor panics 'suppress store not found' (wrong panic message)"]
 fn dsl_suppress_max_records_shuts_down_when_full() {
     use crabka_client_streams::{
         BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows,
@@ -2222,7 +2219,6 @@ fn dsl_suppress_max_records_shuts_down_when_full() {
 /// Suppress `until_time_limit`: a key is buffered and emitted once stream-time
 /// advances past `record_ts + wait`. Rate-limiter for a non-windowed table.
 #[test]
-#[ignore = "suppress-D-T4 registers the SuppressBytesStore in the lowering; until then the refactored T3 processor panics 'suppress store not found'"]
 fn dsl_suppress_until_time_limit_rate_limits() {
     use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
     let b = StreamsBuilder::new();
@@ -2263,7 +2259,6 @@ fn dsl_suppress_until_time_limit_rate_limits() {
 /// Suppress `emit_early_when_full`: an over-full eager buffer evicts + emits the
 /// oldest early (no panic). cap 1, two keys → the first emits when the second lands.
 #[test]
-#[ignore = "suppress-D-T4 registers the SuppressBytesStore in the lowering; until then the refactored T3 processor panics 'suppress store not found'"]
 fn dsl_suppress_emit_early_when_full_evicts_oldest() {
     use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
     let b = StreamsBuilder::new();

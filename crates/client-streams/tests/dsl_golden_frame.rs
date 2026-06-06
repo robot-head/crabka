@@ -146,17 +146,19 @@ fn suppress_until_window_closes_matches_jvm() {
     use crabka_client_streams::{
         BufferConfig, Grouped, I64Serde, Materialized, Suppressed, TimeWindowedSerde, TimeWindows,
     };
-    // Mirrors Capture.java `suppressUntilWindowCloses()`. With logging disabled the
-    // suppress buffer adds no changelog → the wire is byte-identical to
+    // Mirrors Capture.java `suppressUntilWindowCloses()` (logging DISABLED). With the
+    // suppress buffer's changelog off it adds no topic → the wire is byte-identical to
     // windowed_count (the suppress processor is not wire-visible, and the aggregate
-    // store naming/counter is unperturbed). Pins that the suppress DSL introduces no
-    // spurious topic.
+    // store naming/counter is unperturbed). Pins that a logging-off suppress introduces
+    // no spurious topic. (Default logging is ON as of slice D — see fixture #14.)
     let b = StreamsBuilder::new();
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .group_by_key(Grouped::with(StringSerde, StringSerde))
         .windowed_by(TimeWindows::of_size(60_000))
         .count(Materialized::with(StringSerde, I64Serde))
-        .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
+        .suppress(
+            Suppressed::until_window_closes(BufferConfig::unbounded()).with_logging_disabled(),
+        )
         .to_stream()
         .to(
             "out",

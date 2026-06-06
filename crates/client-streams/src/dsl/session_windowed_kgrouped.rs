@@ -15,11 +15,12 @@ use crate::dsl::config::Materialized;
 use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::kgrouped::{KGroupedStream, RepartitionLowerFn, mint_store_name};
 use crate::dsl::ktable::KTable;
+use crate::dsl::ktable::SuppressStoreFactory;
 use crate::dsl::names;
 use crate::dsl::processors::session_aggregate::{
     KStreamSessionAggregateProcessor, KStreamSessionReduceProcessor,
 };
-use crate::dsl::windows::{SessionWindows, Windowed};
+use crate::dsl::windows::{SessionWindowedSerde, SessionWindows, Windowed};
 use crate::processor::serde::Serde;
 use crate::topology::NodeHandle;
 
@@ -142,6 +143,11 @@ where
             value_serde,
             ..
         } = materialized;
+        let suppress_factory = session_suppress_factory::<K, VA, KS, VS>(
+            key_serde.clone(),
+            value_serde.clone(),
+            self.windows,
+        );
         let parent = self.parent;
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
@@ -199,6 +205,7 @@ where
         drop(g);
         KTable::new(Rc::clone(&self.builder), agg_id, Some(store_name), None)
             .with_window_grace(Some(windows.grace_ms))
+            .with_suppress_factory(Some(suppress_factory))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -218,6 +225,11 @@ where
             value_serde,
             ..
         } = materialized;
+        let suppress_factory = session_suppress_factory::<K, V, KS, VS>(
+            key_serde.clone(),
+            value_serde.clone(),
+            self.windows,
+        );
         let parent = self.parent;
         let key_changing = self.key_changing_upstream;
         let rp_lower = self.repartition_lower.take();
@@ -271,5 +283,40 @@ where
         drop(g);
         KTable::new(Rc::clone(&self.builder), red_id, Some(store_name), None)
             .with_window_grace(Some(windows.grace_ms))
+            .with_suppress_factory(Some(suppress_factory))
     }
+}
+
+/// Build the suppress-store factory for a session-aggregation result table.
+/// Captures the session key serde ([`SessionWindowedSerde`]) + the aggregate value
+/// serde so a downstream `suppress` registers a `SuppressBytesStore<Windowed<K>, VA>`
+/// with the session-windowed key serde + the matching changelog config.
+fn session_suppress_factory<K, VA, KS, VS>(
+    key_serde: KS,
+    value_serde: VS,
+    windows: SessionWindows,
+) -> SuppressStoreFactory
+where
+    K: Any + Send + Sync + Clone,
+    VA: Any + Send + Clone,
+    KS: Serde<K> + Clone + 'static,
+    VS: Serde<VA> + Clone + 'static,
+{
+    std::sync::Arc::new(
+        move |state: &mut LowerState, store_name: &str, proc_name: &str, logging: bool| {
+            // Suppress changelog retention mirrors the session store (gap+grace+1day);
+            // tuned to the JVM golden in T5 if a session-suppress golden is added.
+            let retention_ms = windows.gap_ms + windows.grace_ms + 86_400_000;
+            state
+                .topology
+                .add_suppress_store::<Windowed<K>, VA, SessionWindowedSerde<KS>, VS>(
+                    store_name.to_string(),
+                    SessionWindowedSerde::new(key_serde.clone()),
+                    value_serde.clone(),
+                    retention_ms,
+                    logging,
+                    [proc_name.to_string()],
+                );
+        },
+    )
 }
