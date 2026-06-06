@@ -4,9 +4,9 @@
 //! `Processor<KIn, VIn, KIn, VOut>` (the output key type equals the input key
 //! type, so the runtime keeps the partition assignment unchanged).
 //!
-//! The DSL surface (`KStream::process_values`) that wraps a
-//! [`FixedKeyProcessorSupplier`] in a [`FixedKeyAdapter`] arrives in a later task;
-//! this module is only the typed facade + adapter.
+//! The DSL surface `KStream::process_values` wraps a
+//! [`FixedKeyProcessorSupplier`] in a [`FixedKeyAdapter`]; this module is the
+//! typed facade + adapter it builds on.
 
 use std::any::Any;
 
@@ -235,12 +235,14 @@ mod tests {
         };
         let children = [1usize];
         let mut stores = crate::store::registry::StoreRegistry::default();
+        let globals = crate::runtime::global::GlobalStateManager::default();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
             output: &mut output,
             record_ctx: &rc,
             stores: &mut stores,
+            globals: &globals,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         adapter
@@ -275,12 +277,14 @@ mod tests {
         };
         let children = [2usize];
         let mut stores = crate::store::registry::StoreRegistry::default();
+        let globals = crate::runtime::global::GlobalStateManager::default();
         let mut dispatch = Dispatch {
             buffer: &mut buffer,
             children: &children,
             output: &mut output,
             record_ctx: &rc,
             stores: &mut stores,
+            globals: &globals,
         };
         let mut ctx = ProcessorContext::<'_, '_, String, String>::new(&mut dispatch);
         let mut fk_ctx = FixedKeyProcessorContext::new(&mut ctx);

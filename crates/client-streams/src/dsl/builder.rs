@@ -550,6 +550,7 @@ mod tests {
         b.add_state_store::<String, i64, _, _>("counts", StringSerde, I64Serde);
         check!(b.internal.borrow().store_thunk("counts").is_some());
         check!(b.internal.borrow().store_thunk("missing").is_none());
+    }
 
     #[test]
     #[should_panic(expected = "outstanding KStream/KTable handles")]
