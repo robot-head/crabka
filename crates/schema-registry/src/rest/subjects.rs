@@ -30,7 +30,10 @@ pub async fn register(
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let _ = &req.references; // slice 1 ignores references
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
-    let reg = st.store.register(&subject, ty, &req.schema).await?;
+    let reg = st
+        .store
+        .register(&subject, ty, &req.schema, None, None)
+        .await?;
     Ok(ok_json(&serde_json::json!({ "id": reg.id })))
 }
 

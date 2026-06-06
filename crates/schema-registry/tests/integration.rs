@@ -16,6 +16,7 @@ use tower::ServiceExt;
 
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_schema_registry::config::RegistryConfig;
+use crabka_schema_registry::format::SchemaType;
 use crabka_schema_registry::kafkastore::KafkaStore;
 use crabka_schema_registry::rest::{self, AppState};
 use tokio_util::sync::CancellationToken;
@@ -746,4 +747,76 @@ async fn compatibility_endpoint_real_verdict() {
 
     cancel.cancel();
     broker.shutdown().await;
+}
+
+// ── facade: delete lifecycle + modes + IMPORT/READONLY (broker-backed) ────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn facade_soft_then_permanent_delete_version() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    // Distinct record names across versions trip Avro BACKWARD (names must
+    // match); NONE bypasses so we can register two versions to delete.
+    store.set_subject_compat("av", "NONE".into()).await.unwrap();
+    store
+        .register("av", SchemaType::Avro, &av("A"), None, None)
+        .await
+        .unwrap();
+    store
+        .register("av", SchemaType::Avro, &av("B"), None, None)
+        .await
+        .unwrap();
+    assert_eq!(store.soft_delete_version("av", 1).await.unwrap(), 1);
+    assert_eq!(store.store.read().versions("av", false).unwrap(), vec![2]);
+    assert_eq!(store.store.read().versions("av", true).unwrap(), vec![1, 2]);
+    let err = store.permanent_delete_version("av", 2).await.unwrap_err();
+    assert_eq!(err.error_code(), 40407);
+    assert_eq!(store.permanent_delete_version("av", 1).await.unwrap(), 1);
+    assert!(store.store.read().version("av", Some(1), true).is_none());
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn facade_readonly_blocks_writes_import_allows_explicit_id() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    store
+        .register("ro", SchemaType::Avro, &av("A"), None, None)
+        .await
+        .unwrap();
+    store
+        .set_subject_mode("ro", "READONLY".into())
+        .await
+        .unwrap();
+    let err = store
+        .register("ro", SchemaType::Avro, &av("B"), None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.error_code(), 42205);
+    store
+        .set_subject_mode("imp", "IMPORT".into())
+        .await
+        .unwrap();
+    let reg = store
+        .register("imp", SchemaType::Avro, &av("C"), Some(42), Some(5))
+        .await
+        .unwrap();
+    assert_eq!((reg.id, reg.version), (42, 5));
+    assert_eq!(
+        store.store.read().version("imp", Some(5), false).unwrap().0,
+        42
+    );
+    // IMPORT requires BOTH id and version: providing only one is rejected.
+    assert!(
+        store
+            .register("imp", SchemaType::Avro, &av("D"), Some(7), None)
+            .await
+            .is_err(),
+        "IMPORT with id but no version must error"
+    );
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+fn av(n: &str) -> String {
+    format!("{{\"type\":\"record\",\"name\":\"{n}\",\"fields\":[]}}")
 }

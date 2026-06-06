@@ -27,6 +27,20 @@ pub enum SrError {
     /// are best-effort reasons (Avro's wording, not Confluent's).
     #[error("Schema being registered is incompatible with an earlier schema; details: {0:?}")]
     Incompatible(Vec<String>),
+    /// A write was attempted on a subject/registry in `READONLY` mode.
+    #[error("Subject '{0}' is in read-only mode.")]
+    OperationNotPermitted(String),
+    /// Permanent subject delete attempted before a soft delete.
+    #[error("Subject '{0}' was not deleted first before being permanently deleted.")]
+    SubjectNotSoftDeleted(String),
+    /// Permanent version delete attempted before a soft delete.
+    #[error(
+        "Version {1} of subject '{0}' was not soft-deleted first before being permanently deleted."
+    )]
+    VersionNotSoftDeleted(String, i32),
+    /// Unknown mode string on PUT /mode.
+    #[error("Invalid mode: {0}")]
+    InvalidMode(String),
 }
 
 impl SrError {
@@ -41,18 +55,26 @@ impl SrError {
             Self::InvalidCompatibilityLevel(_) => 42203,
             Self::Backend(_) => 50001,
             Self::Incompatible(_) => 409,
+            Self::OperationNotPermitted(_) => 42205,
+            Self::SubjectNotSoftDeleted(_) => 40405,
+            Self::VersionNotSoftDeleted(..) => 40407,
+            Self::InvalidMode(_) => 42204,
         }
     }
 
     #[must_use]
     pub fn http_status(&self) -> StatusCode {
         match self {
-            Self::SubjectNotFound(_) | Self::VersionNotFound | Self::SchemaNotFound => {
-                StatusCode::NOT_FOUND
-            }
+            Self::SubjectNotFound(_)
+            | Self::VersionNotFound
+            | Self::SchemaNotFound
+            | Self::SubjectNotSoftDeleted(_)
+            | Self::VersionNotSoftDeleted(..) => StatusCode::NOT_FOUND,
             Self::InvalidSchema(_)
             | Self::InvalidVersion(_)
-            | Self::InvalidCompatibilityLevel(_) => StatusCode::UNPROCESSABLE_ENTITY,
+            | Self::InvalidCompatibilityLevel(_)
+            | Self::OperationNotPermitted(_)
+            | Self::InvalidMode(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Backend(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Incompatible(_) => StatusCode::CONFLICT,
         }
@@ -101,6 +123,31 @@ mod tests {
             StatusCode::UNPROCESSABLE_ENTITY
         );
         assert_eq!(SrError::Backend("x".into()).error_code(), 50001);
+    }
+
+    #[test]
+    fn slice3_codes() {
+        assert_eq!(
+            SrError::OperationNotPermitted("s".into()).error_code(),
+            42205
+        );
+        assert_eq!(
+            SrError::OperationNotPermitted("s".into()).http_status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            SrError::SubjectNotSoftDeleted("s".into()).error_code(),
+            40405
+        );
+        assert_eq!(
+            SrError::VersionNotSoftDeleted("s".into(), 2).error_code(),
+            40407
+        );
+        assert_eq!(
+            SrError::SubjectNotSoftDeleted("s".into()).http_status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(SrError::InvalidMode("X".into()).error_code(), 42204);
     }
 
     #[tokio::test]
