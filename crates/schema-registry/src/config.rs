@@ -95,4 +95,24 @@ mod tests {
         assert!(s.authz.is_none());
         assert!(s.client.is_none());
     }
+
+    #[test]
+    fn authz_config_default_is_disabled_with_30s_refresh() {
+        let a = super::AuthzConfig::default();
+        assert!(!a.enabled);
+        assert!(a.super_users.is_empty());
+        assert_eq!(a.acl_refresh, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn bearer_auth_config_debug_does_not_leak_validator() {
+        // The manual Debug impl exists so a validator (which may wrap JWKS
+        // handles / secrets) never lands in logs — it must render as the opaque
+        // tag regardless of its contents.
+        let validator = std::sync::Arc::new(crabka_security::OAuthBearerValidator::Unsecured(
+            crabka_security::UnsecuredJwsValidator::default(),
+        ));
+        let cfg = super::BearerAuthConfig { validator };
+        assert_eq!(format!("{cfg:?}"), "BearerAuthConfig");
+    }
 }

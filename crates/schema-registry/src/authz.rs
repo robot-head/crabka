@@ -334,6 +334,26 @@ mod tests {
     }
 
     #[test]
+    fn unmapped_methods_on_known_routes_have_no_authz_target() {
+        // A method that isn't a valid Schema-Registry operation on an otherwise
+        // known route maps to None (no authz requirement) — the handler rejects
+        // it with 405 on its own. This pins every per-route `_ => None` arm so a
+        // future route edit can't silently turn a real mutation into a no-authz
+        // pass-through.
+        for (m, p) in [
+            ("PUT", "/subjects/s"),
+            ("DELETE", "/subjects/s/versions"),
+            ("PUT", "/subjects/s/versions/1"),
+            ("DELETE", "/config"),
+            ("DELETE", "/config/s"),
+            ("DELETE", "/mode"),
+            ("POST", "/mode/s"),
+        ] {
+            assert_eq!(t(m, p), None, "{m} {p} should have no authz target");
+        }
+    }
+
+    #[test]
     fn register_is_write_on_topic_subject() {
         assert_eq!(
             t("POST", "/subjects/orders-value/versions"),
