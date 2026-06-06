@@ -338,6 +338,7 @@ async fn delivers_2xx() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
+        None,
     ));
 
     assert!(
@@ -430,6 +431,7 @@ async fn retries_then_succeeds() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
+        None,
     ));
 
     // Wait until the event has been received ≥ 3 times (2 failures + 1 success).
@@ -496,6 +498,7 @@ async fn dead_letters_on_exhaustion() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
+        None,
     ));
 
     let client = Client::builder()
@@ -568,6 +571,7 @@ async fn ordering_within_partition() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
+        None,
     ));
 
     assert!(
@@ -621,6 +625,7 @@ async fn filter_skips_nonmatching() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
+        None,
     ));
 
     // Exactly one record (the truthy one) is delivered.

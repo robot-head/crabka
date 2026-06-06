@@ -28,7 +28,7 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
 }
 
 async fn state_for(bootstrap: &str) -> Arc<AppState> {
-    let produce = ProduceCore::new(bootstrap, "stream", Arc::new(RawCodec))
+    let produce = ProduceCore::new(bootstrap, "stream", Arc::new(RawCodec), None)
         .await
         .unwrap();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -45,6 +45,7 @@ async fn state_for(bootstrap: &str) -> Arc<AppState> {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership".into(),
             tls: None,
+            broker_security: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
@@ -171,23 +172,28 @@ async fn subscribe_streams_records_then_commits() {
 
     // Produce one record up front.
     let (prod_principal, _) = anon();
-    crabka_grpc_gateway::produce::ProduceCore::new(&bootstrap, "sub-prod", Arc::new(RawCodec))
-        .await
-        .unwrap()
-        .produce(
-            crabka_grpc_gateway::types::GatewayRecord {
-                topic: "sub-topic".into(),
-                key: None,
-                value: Bytes::from_static(b"hello"),
-                headers: vec![],
-                partition: None,
-                timestamp_ms: None,
-                idempotency_key: None,
-            },
-            &prod_principal,
-        )
-        .await
-        .unwrap();
+    crabka_grpc_gateway::produce::ProduceCore::new(
+        &bootstrap,
+        "sub-prod",
+        Arc::new(RawCodec),
+        None,
+    )
+    .await
+    .unwrap()
+    .produce(
+        crabka_grpc_gateway::types::GatewayRecord {
+            topic: "sub-topic".into(),
+            key: None,
+            value: Bytes::from_static(b"hello"),
+            headers: vec![],
+            partition: None,
+            timestamp_ms: None,
+            idempotency_key: None,
+        },
+        &prod_principal,
+    )
+    .await
+    .unwrap();
 
     // Control stream: a Start frame (auto_commit), then stays open until dropped.
     let start = pb::SubscribeFrame {

@@ -34,12 +34,14 @@ impl ProduceCore {
         bootstrap: &str,
         client_id: &str,
         codec: Arc<dyn RecordCodec>,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, GatewayError> {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id(client_id.to_string())
             .enable_idempotence(true)
             .acks(Acks::All)
+            .maybe_security(security)
             .build()
             .await?;
         Ok(Self {

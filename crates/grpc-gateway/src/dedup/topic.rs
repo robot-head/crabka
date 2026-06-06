@@ -4,7 +4,8 @@
 
 use std::collections::BTreeMap;
 
-use crabka_client_admin::{AdminClient, CreateTopicSpec};
+use crabka_client_admin::AdminClient;
+use crabka_client_admin::CreateTopicSpec;
 
 use crate::error::GatewayError;
 
@@ -17,9 +18,10 @@ pub async fn ensure_dedup_topic(
     partitions: u32,
     window_ms: i64,
     replication: i16,
+    security: Option<crabka_client_core::security::ClientSecurity>,
 ) -> Result<(), GatewayError> {
     let addrs: Vec<String> = bootstrap.split(',').map(|s| s.trim().to_string()).collect();
-    let mut admin = AdminClient::connect(&addrs)
+    let mut admin = AdminClient::connect_secured(&addrs, security)
         .await
         .map_err(|e| GatewayError::Other(format!("admin connect: {e}")))?;
 
@@ -40,9 +42,10 @@ pub async fn ensure_membership_topic(
     bootstrap: &str,
     name: &str,
     replication: i16,
+    security: Option<crabka_client_core::security::ClientSecurity>,
 ) -> Result<(), GatewayError> {
     let addrs: Vec<String> = bootstrap.split(',').map(|s| s.trim().to_string()).collect();
-    let mut admin = AdminClient::connect(&addrs)
+    let mut admin = AdminClient::connect_secured(&addrs, security)
         .await
         .map_err(|e| GatewayError::Other(format!("admin connect: {e}")))?;
 

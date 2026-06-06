@@ -97,7 +97,7 @@ async fn webhook_state(
     let token = CancellationToken::new();
 
     let (produce, store) = if with_dedup {
-        ensure_dedup_topic(bootstrap, DEDUP_TOPIC, N, 3_600_000, 1)
+        ensure_dedup_topic(bootstrap, DEDUP_TOPIC, N, 3_600_000, 1, None)
             .await
             .unwrap();
 
@@ -113,6 +113,7 @@ async fn webhook_state(
                 DEDUP_TOPIC.into(),
                 OWNERS_GROUP.into(),
                 token,
+                None,
             ));
         }
 
@@ -123,12 +124,14 @@ async fn webhook_state(
             DEDUP_TOPIC.into(),
             N,
             store.clone(),
+            None,
         ));
 
         let core = ProduceCore::new(
             bootstrap,
             &format!("{client_prefix}-prod"),
             Arc::new(RawCodec),
+            None,
         )
         .await
         .unwrap()
@@ -140,6 +143,7 @@ async fn webhook_state(
             bootstrap,
             &format!("{client_prefix}-prod"),
             Arc::new(RawCodec),
+            None,
         )
         .await
         .unwrap();
@@ -159,6 +163,7 @@ async fn webhook_state(
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_wh_membership".into(),
             tls: None,
+            broker_security: None,
             authz: None,
             webhooks,
             outbound: Vec::new(),
@@ -717,6 +722,7 @@ async fn webhook_state_with_authz(
         bootstrap,
         &format!("{client_prefix}-prod"),
         Arc::new(RawCodec),
+        None,
     )
     .await
     .unwrap();
@@ -734,6 +740,7 @@ async fn webhook_state_with_authz(
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_wh_membership".into(),
             tls: None,
+            broker_security: None,
             authz: None,
             webhooks,
             outbound: Vec::new(),
@@ -881,7 +888,7 @@ signature_encoding = "hex"
         let authz = authz.clone();
         let bootstrap = bootstrap.clone();
         let shutdown = shutdown.clone();
-        tokio::spawn(authz.run_acl_refresh(bootstrap, Duration::from_millis(200), shutdown));
+        tokio::spawn(authz.run_acl_refresh(bootstrap, Duration::from_millis(200), shutdown, None));
     }
 
     // Build a Principal matching what the authorizer sees for this endpoint.

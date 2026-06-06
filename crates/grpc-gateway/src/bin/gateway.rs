@@ -4,8 +4,10 @@
 //! router, then serves both on the configured listen address.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context as _;
 use clap::Parser;
 use tracing::info;
 
@@ -136,6 +138,22 @@ struct Args {
     )]
     bearer_principal_claim: String,
 
+    /// CA cert (PEM) the gateway trusts when connecting to the broker over TLS.
+    #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_CA")]
+    broker_tls_ca: Option<std::path::PathBuf>,
+    /// Client cert chain (PEM) presented to the broker for mTLS.
+    /// Must be set together with `--broker-tls-key`.
+    #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_CERT")]
+    broker_tls_cert: Option<std::path::PathBuf>,
+    /// Client private key (PEM) for mTLS to the broker.
+    /// Must be set together with `--broker-tls-cert`.
+    #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_KEY")]
+    broker_tls_key: Option<std::path::PathBuf>,
+    /// SNI / server-name used for the TLS handshake with the broker.
+    /// Required when `--broker-tls-cert` + `--broker-tls-key` are set.
+    #[arg(long, env = "CRABKA_GATEWAY_BROKER_TLS_SERVER_NAME")]
+    broker_tls_server_name: Option<String>,
+
     /// Optional TOML file defining `[[webhooks.endpoints]]` for HTTP webhook inbound.
     #[arg(long, env = "CRABKA_GATEWAY_WEBHOOKS_CONFIG")]
     webhooks_config: Option<std::path::PathBuf>,
@@ -200,6 +218,12 @@ async fn main() -> anyhow::Result<()> {
         _ => anyhow::bail!("--tls-cert and --tls-key must be set together"),
     };
 
+    let broker_security = build_broker_security(
+        args.broker_tls_cert.as_ref(),
+        args.broker_tls_key.as_ref(),
+        args.broker_tls_ca.as_ref(),
+        args.broker_tls_server_name.as_ref(),
+    )?;
     let authz = build_authz_settings(&args)?;
     let webhooks = load_webhooks(&args)?;
     let outbound = load_outbound(&args)?;
@@ -215,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
         advertised_addr: args.advertised_addr.clone(),
         membership_topic: args.membership_topic.clone(),
         tls: tls.clone(),
+        broker_security,
         authz,
         webhooks,
         outbound,
@@ -245,6 +270,43 @@ fn build_authz_settings(args: &Args) -> anyhow::Result<Option<AuthzSettings>> {
             }))
         }
         other => anyhow::bail!("invalid --authz: {other}"),
+    }
+}
+
+/// Build [`ClientSecurity`] for outbound broker connections from the four
+/// `--broker-tls-*` flags.
+///
+/// - Both cert+key present ⇒ mTLS; SNI is required in that case.
+/// - Both absent ⇒ plaintext (`None`).
+/// - Exactly one present ⇒ configuration error.
+/// - CA only (no cert/key) ⇒ one-way TLS with the given CA.
+fn build_broker_security(
+    cert: Option<&PathBuf>,
+    key: Option<&PathBuf>,
+    ca: Option<&PathBuf>,
+    sni: Option<&String>,
+) -> anyhow::Result<Option<crabka_client_core::security::ClientSecurity>> {
+    use crabka_client_core::security::{ClientSecurity, TlsConnectorConfig};
+    use crabka_security::ListenerProtocol;
+
+    match (cert, key) {
+        (Some(cert_path), Some(key_path)) => {
+            let server_name = sni
+                .cloned()
+                .context("--broker-tls-server-name required with broker TLS")?;
+            Ok(Some(ClientSecurity {
+                protocol: ListenerProtocol::Ssl,
+                tls: Some(TlsConnectorConfig {
+                    trust_roots_pem: ca.cloned(),
+                    server_name,
+                    client_identity: Some((cert_path.clone(), key_path.clone())),
+                }),
+                sasl: None,
+                sasl_host: None,
+            }))
+        }
+        (None, None) => Ok(None),
+        _ => anyhow::bail!("--broker-tls-cert and --broker-tls-key must be set together"),
     }
 }
 
@@ -306,6 +368,7 @@ fn build_bearer(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run(
     config: GatewayConfig,
     bearer: Option<crabka_grpc_gateway::authz::auth_layer::BearerValidator>,
@@ -317,12 +380,14 @@ async fn run(
         config.dedup_partitions,
         config.dedup_window_ms,
         GatewayConfig::DEDUP_TOPIC_REPLICATION,
+        config.broker_security.clone(),
     )
     .await?;
     ensure_membership_topic(
         &config.bootstrap,
         &config.membership_topic,
         GatewayConfig::MEMBERSHIP_TOPIC_REPLICATION,
+        config.broker_security.clone(),
     )
     .await?;
 
@@ -342,6 +407,7 @@ async fn run(
             node_id.clone(),
             config.advertised_addr.clone(),
             config.membership_topic.clone(),
+            config.broker_security.clone(),
         )
         .await?,
     );
@@ -359,6 +425,7 @@ async fn run(
         config.dedup_topic.clone(),
         config.dedup_partitions,
         store,
+        config.broker_security.clone(),
     ));
 
     // Step 4: build the forwarder — mTLS https when TLS is configured, plaintext http otherwise.
@@ -373,16 +440,21 @@ async fn run(
         None => Arc::new(Forwarder::new()),
     };
 
-    let produce = ProduceCore::new(&config.bootstrap, &config.client_id, Arc::new(RawCodec))
-        .await?
-        .with_dedup(engine)
-        .with_forwarding(
-            membership.clone(),
-            forwarder,
-            config.advertised_addr.clone(),
-        );
+    let produce = ProduceCore::new(
+        &config.bootstrap,
+        &config.client_id,
+        Arc::new(RawCodec),
+        config.broker_security.clone(),
+    )
+    .await?
+    .with_dedup(engine)
+    .with_forwarding(
+        membership.clone(),
+        forwarder,
+        config.advertised_addr.clone(),
+    );
 
-    let gateway_authz = build_gateway_authz(&config, &shutdown);
+    let gateway_authz = build_gateway_authz(&config, &shutdown, config.broker_security.clone());
 
     let state = Arc::new(AppState {
         produce: Arc::new(produce),
@@ -432,6 +504,7 @@ async fn run(
 fn build_gateway_authz(
     config: &GatewayConfig,
     shutdown: &CancellationToken,
+    broker_security: Option<crabka_client_core::security::ClientSecurity>,
 ) -> Arc<crabka_grpc_gateway::authz::GatewayAuthz> {
     let authorizer: Arc<dyn crabka_authz::Authorizer> = match config.authz.as_ref() {
         Some(a) => Arc::new(crabka_authz::SimpleAclAuthorizer::new(
@@ -446,6 +519,7 @@ fn build_gateway_authz(
             config.bootstrap.clone(),
             refresh,
             shutdown.clone(),
+            broker_security,
         ));
     }
     gateway_authz
@@ -463,9 +537,10 @@ fn spawn_membership_reader(
     let topic = config.membership_topic.clone();
     let group = format!("__crabka_grpc_gateway_membership_reader-{node_id}");
     let shutdown = shutdown.clone();
+    let security = config.broker_security.clone();
     tokio::spawn(async move {
         if let Err(e) = membership
-            .run_membership(bootstrap, client_id, topic, group, shutdown)
+            .run_membership(bootstrap, client_id, topic, group, shutdown, security)
             .await
         {
             tracing::error!(error = %e, "membership reader exited with error");
@@ -483,6 +558,7 @@ fn spawn_ownership_consumer(
     let client_id = format!("{}-dedup-owner", config.client_id);
     let dedup_topic = config.dedup_topic.clone();
     let shutdown = shutdown.clone();
+    let security = config.broker_security.clone();
     tokio::spawn(async move {
         if let Err(e) = store
             .run_ownership(
@@ -491,6 +567,7 @@ fn spawn_ownership_consumer(
                 dedup_topic,
                 "__crabka_grpc_gateway_dedup_owners".to_string(),
                 shutdown,
+                security,
             )
             .await
         {
@@ -526,6 +603,7 @@ async fn spawn_outbound_subscriptions(
             .client_id(format!("{}-outbound-dlq", config.client_id))
             .enable_idempotence(true)
             .acks(crabka_client_producer::Acks::All)
+            .maybe_security(config.broker_security.clone())
             .build()
             .await
             .map_err(|e| anyhow::anyhow!("build outbound dlq producer: {e}"))?,
@@ -546,6 +624,7 @@ fn spawn_outbound_delivery(
     let bootstrap = config.bootstrap.clone();
     let client_id = format!("{}-outbound-{}", config.client_id, sub.name);
     let shutdown = shutdown.clone();
+    let security = config.broker_security.clone();
     tokio::spawn(async move {
         if let Err(e) = crabka_grpc_gateway::outbound::run_subscription(
             sub,
@@ -553,10 +632,66 @@ fn spawn_outbound_delivery(
             client_id,
             dlq_producer,
             shutdown,
+            security,
         )
         .await
         {
             tracing::error!(error = %e, "outbound delivery task exited with error");
         }
     });
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crabka_security::ListenerProtocol;
+
+    #[test]
+    fn build_broker_security_some_with_cert_and_key_and_sni() {
+        let cert = PathBuf::from("/tmp/cert.pem");
+        let key = PathBuf::from("/tmp/key.pem");
+        let ca = PathBuf::from("/tmp/ca.pem");
+        let sni = "broker.example.com".to_string();
+        let sec = build_broker_security(Some(&cert), Some(&key), Some(&ca), Some(&sni))
+            .expect("should succeed")
+            .expect("should be Some");
+        assert_eq!(sec.protocol, ListenerProtocol::Ssl);
+        let tls = sec.tls.expect("tls should be set");
+        assert_eq!(tls.server_name, "broker.example.com");
+        assert!(
+            tls.client_identity.is_some(),
+            "client_identity should be set"
+        );
+        assert!(tls.trust_roots_pem.is_some(), "ca should be set");
+    }
+
+    #[test]
+    fn build_broker_security_none_when_all_absent() {
+        let sec = build_broker_security(None, None, None, None).expect("should succeed");
+        assert!(sec.is_none(), "all absent should return None");
+    }
+
+    #[test]
+    fn build_broker_security_err_when_cert_without_key() {
+        let cert = PathBuf::from("/tmp/cert.pem");
+        let result = build_broker_security(Some(&cert), None, None, None);
+        assert!(result.is_err(), "cert without key should error");
+    }
+
+    #[test]
+    fn build_broker_security_err_when_key_without_cert() {
+        let key = PathBuf::from("/tmp/key.pem");
+        let result = build_broker_security(None, Some(&key), None, None);
+        assert!(result.is_err(), "key without cert should error");
+    }
+
+    #[test]
+    fn build_broker_security_err_when_cert_and_key_but_no_sni() {
+        let cert = PathBuf::from("/tmp/cert.pem");
+        let key = PathBuf::from("/tmp/key.pem");
+        let result = build_broker_security(Some(&cert), Some(&key), None, None);
+        assert!(result.is_err(), "cert+key without sni should error");
+    }
 }

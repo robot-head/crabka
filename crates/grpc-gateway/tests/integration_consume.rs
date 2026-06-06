@@ -40,7 +40,7 @@ async fn subscribe_receives_then_commits() {
         .await
         .unwrap();
 
-    let core = ProduceCore::new(&bootstrap, "gw-c", Arc::new(RawCodec))
+    let core = ProduceCore::new(&bootstrap, "gw-c", Arc::new(RawCodec), None)
         .await
         .unwrap();
     let anon = crabka_security::Principal {

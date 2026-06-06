@@ -101,6 +101,7 @@ impl MembershipStore {
         membership_topic: String,
         group: String,
         shutdown: tokio_util::sync::CancellationToken,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<(), GatewayError> {
         let mut consumer = Consumer::builder()
             .bootstrap(bootstrap)
@@ -110,6 +111,7 @@ impl MembershipStore {
             .isolation_level(IsolationLevel::ReadCommitted)
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .assignor(crabka_client_consumer::Assignor::CooperativeSticky)
+            .maybe_security(security)
             .build()
             .await?;
 
@@ -168,12 +170,14 @@ impl MembershipPublisher {
         node_id: String,
         advertised_addr: String,
         membership_topic: String,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, GatewayError> {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id(client_id.to_string())
             .enable_idempotence(true)
             .acks(Acks::All)
+            .maybe_security(security)
             .build()
             .await?;
         Ok(Self {

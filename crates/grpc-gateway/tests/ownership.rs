@@ -37,7 +37,7 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ownership_split_non_owner_is_unavailable() {
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1)
+    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
         .await
         .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
@@ -65,6 +65,7 @@ async fn ownership_split_non_owner_is_unavailable() {
         DEDUP.into(),
         GROUP.into(),
         token.clone(),
+        None,
     ));
     let hb = tokio::spawn(store_b.clone().run_ownership(
         bootstrap.clone(),
@@ -72,6 +73,7 @@ async fn ownership_split_non_owner_is_unavailable() {
         DEDUP.into(),
         GROUP.into(),
         token.clone(),
+        None,
     ));
 
     // Wait for a stable, disjoint split covering all N partitions, both warm.
@@ -113,6 +115,7 @@ async fn ownership_split_non_owner_is_unavailable() {
         DEDUP.into(),
         N,
         store_a.clone(),
+        None,
     ));
     let engine_b = Arc::new(DedupEngine::new(
         &bootstrap,
@@ -121,12 +124,13 @@ async fn ownership_split_non_owner_is_unavailable() {
         DEDUP.into(),
         N,
         store_b.clone(),
+        None,
     ));
-    let core_a = ProduceCore::new(&bootstrap, "gw-a", Arc::new(RawCodec))
+    let core_a = ProduceCore::new(&bootstrap, "gw-a", Arc::new(RawCodec), None)
         .await
         .unwrap()
         .with_dedup(engine_a);
-    let core_b = ProduceCore::new(&bootstrap, "gw-b", Arc::new(RawCodec))
+    let core_b = ProduceCore::new(&bootstrap, "gw-b", Arc::new(RawCodec), None)
         .await
         .unwrap()
         .with_dedup(engine_b);

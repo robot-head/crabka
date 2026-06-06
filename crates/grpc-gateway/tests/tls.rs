@@ -126,6 +126,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             node_id.clone(),
             addr.clone(),
             MEMBERSHIP.into(),
+            None,
         )
         .await
         .unwrap(),
@@ -143,6 +144,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             DEDUP.into(),
             OWNERS_GROUP.into(),
             token,
+            None,
         ));
     }
 
@@ -158,6 +160,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             MEMBERSHIP.into(),
             format!("__crabka_grpc_gateway_membership_reader-{node_id}"),
             token,
+            None,
         ));
     }
 
@@ -168,6 +171,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
         DEDUP.into(),
         N,
         store.clone(),
+        None,
     ));
 
     // mTLS forwarder: presents the gateway's own client identity + trusts the CA.
@@ -181,7 +185,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
         .unwrap(),
     );
 
-    let produce = ProduceCore::new(bootstrap, client, Arc::new(RawCodec))
+    let produce = ProduceCore::new(bootstrap, client, Arc::new(RawCodec), None)
         .await
         .unwrap()
         .with_dedup(engine)
@@ -200,6 +204,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             membership_topic: MEMBERSHIP.into(),
             // TLS configured ⇒ /internal/v1/forward enforces the mTLS principal gate.
             tls: Some(settings.clone()),
+            broker_security: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
@@ -287,10 +292,10 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
 async fn server_tls_handshake_and_health() {
     install_provider();
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1)
+    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
         .await
         .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1)
+    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
         .await
         .unwrap();
 
@@ -336,10 +341,10 @@ async fn server_tls_handshake_and_health() {
 async fn mtls_required_rejects_no_client_cert() {
     install_provider();
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1)
+    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
         .await
         .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1)
+    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
         .await
         .unwrap();
 
@@ -384,10 +389,10 @@ async fn mtls_required_rejects_no_client_cert() {
 async fn tls_forward_between_two_gateways() {
     install_provider();
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1)
+    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
         .await
         .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1)
+    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
         .await
         .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))

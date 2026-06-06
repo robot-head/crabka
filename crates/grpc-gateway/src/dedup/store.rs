@@ -97,6 +97,7 @@ impl DedupStore {
         dedup_topic: String,
         group: String,
         shutdown: tokio_util::sync::CancellationToken,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<(), GatewayError> {
         let mut consumer = Consumer::builder()
             .bootstrap(bootstrap)
@@ -106,6 +107,7 @@ impl DedupStore {
             .isolation_level(IsolationLevel::ReadCommitted)
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .assignor(crabka_client_consumer::Assignor::CooperativeSticky)
+            .maybe_security(security)
             .build()
             .await?;
 
@@ -198,12 +200,14 @@ impl DedupStore {
         dedup_topic: &str,
         key: &str,
         value: &ClaimValue,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<(), GatewayError> {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id(client_id.to_string())
             .enable_idempotence(true)
             .acks(Acks::All)
+            .maybe_security(security)
             .build()
             .await?;
         let partition =

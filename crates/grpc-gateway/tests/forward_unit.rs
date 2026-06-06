@@ -170,8 +170,9 @@ async fn forward_handler_error_arm_returns_retriable() {
         DEDUP.into(),
         N,
         store,
+        None,
     ));
-    let produce = ProduceCore::new(&bootstrap, "fh", Arc::new(RawCodec))
+    let produce = ProduceCore::new(&bootstrap, "fh", Arc::new(RawCodec), None)
         .await
         .unwrap()
         .with_dedup(engine);
@@ -189,6 +190,7 @@ async fn forward_handler_error_arm_returns_retriable() {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh".into(),
             tls: None,
+            broker_security: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
@@ -268,8 +270,9 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
         DEDUP.into(),
         N,
         store,
+        None,
     ));
-    let produce = ProduceCore::new(&bootstrap, "fh-tls", Arc::new(RawCodec))
+    let produce = ProduceCore::new(&bootstrap, "fh-tls", Arc::new(RawCodec), None)
         .await
         .unwrap()
         .with_dedup(engine);
@@ -298,6 +301,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership_fh_tls".into(),
             tls,
+            broker_security: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),

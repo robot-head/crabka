@@ -50,6 +50,7 @@ async fn boot() -> (BrokerHandle, String, TempDir) {
 
 /// Bind a listener first (to learn the advertised addr), install the membership
 /// publisher, start ownership + membership, then serve Connect + forward routes.
+#[allow(clippy::too_many_lines)]
 async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
@@ -64,6 +65,7 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             node_id.clone(),
             addr.clone(),
             MEMBERSHIP.into(),
+            None,
         )
         .await
         .unwrap(),
@@ -81,6 +83,7 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             DEDUP.into(),
             OWNERS_GROUP.into(),
             token,
+            None,
         ));
     }
 
@@ -96,6 +99,7 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             MEMBERSHIP.into(),
             format!("__crabka_grpc_gateway_membership_reader-{node_id}"),
             token,
+            None,
         ));
     }
 
@@ -106,9 +110,10 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
         DEDUP.into(),
         N,
         store.clone(),
+        None,
     ));
     let forwarder = Arc::new(Forwarder::new());
-    let produce = ProduceCore::new(bootstrap, client, Arc::new(RawCodec))
+    let produce = ProduceCore::new(bootstrap, client, Arc::new(RawCodec), None)
         .await
         .unwrap()
         .with_dedup(engine)
@@ -126,6 +131,7 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             advertised_addr: addr.clone(),
             membership_topic: MEMBERSHIP.into(),
             tls: None,
+            broker_security: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
@@ -184,10 +190,10 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn keyed_record_forwards_to_owner_and_dedups() {
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1)
+    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
         .await
         .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1)
+    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
         .await
         .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
@@ -291,10 +297,11 @@ async fn no_known_owner_is_unavailable() {
         DEDUP.into(),
         N,
         store,
+        None,
     ));
     let membership = Arc::new(MembershipStore::new());
     let forwarder = Arc::new(Forwarder::new());
-    let produce = ProduceCore::new(&bootstrap, "gw", Arc::new(RawCodec))
+    let produce = ProduceCore::new(&bootstrap, "gw", Arc::new(RawCodec), None)
         .await
         .unwrap()
         .with_dedup(engine)

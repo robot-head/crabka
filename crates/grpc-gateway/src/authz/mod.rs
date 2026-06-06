@@ -43,10 +43,11 @@ impl GatewayAuthz {
         bootstrap: String,
         refresh: Duration,
         shutdown: CancellationToken,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) {
         let addrs: Vec<String> = bootstrap.split(',').map(|s| s.trim().to_string()).collect();
         loop {
-            match Self::fetch(&addrs).await {
+            match Self::fetch(&addrs, security.clone()).await {
                 Ok(entries) => self.cache.store(Arc::new(AclCache::new(entries))),
                 Err(e) => {
                     tracing::warn!(error = %e, "ACL refresh failed; keeping prior snapshot");
@@ -61,8 +62,9 @@ impl GatewayAuthz {
 
     async fn fetch(
         addrs: &[String],
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Vec<crabka_metadata::AclEntry>, crate::error::GatewayError> {
-        let mut admin = AdminClient::connect(addrs)
+        let mut admin = AdminClient::connect_secured(addrs, security)
             .await
             .map_err(|e| crate::error::GatewayError::Other(format!("acl admin connect: {e}")))?;
         let entries = admin

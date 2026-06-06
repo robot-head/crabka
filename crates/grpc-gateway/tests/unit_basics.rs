@@ -55,6 +55,7 @@ async fn dedup_produce_before_ownership_is_unavailable() {
         "__crabka_grpc_dedup".to_string(),
         4,
         store,
+        None,
     );
     let rec = GatewayRecord {
         topic: "t".into(),

@@ -59,6 +59,7 @@ pub async fn run_subscription(
     client_id: String,
     producer: Arc<Producer>,
     shutdown: CancellationToken,
+    security: Option<crabka_client_core::security::ClientSecurity>,
 ) -> Result<(), GatewayError> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(sub.request_timeout_ms))
@@ -74,6 +75,7 @@ pub async fn run_subscription(
         .isolation_level(IsolationLevel::ReadCommitted)
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .assignor(Assignor::CooperativeSticky)
+        .maybe_security(security)
         .build()
         .await?;
 
