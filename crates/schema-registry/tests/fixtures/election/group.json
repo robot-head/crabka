@@ -1,0 +1,15 @@
+{
+  "elected_master_identity": {
+    "host": "sr-node-1",
+    "master_eligibility": true,
+    "port": 8081,
+    "scheme": "http",
+    "version": 1
+  },
+  "elected_master_member_id": "crabka-d7c9d4c3-a778-465d-a069-954b68d772f9",
+  "group_id": "schema-registry",
+  "group_state": "Stable",
+  "member_count": 2,
+  "protocol_name_via_describe_groups": "",
+  "protocol_type": "sr"
+}

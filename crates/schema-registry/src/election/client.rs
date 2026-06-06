@@ -17,8 +17,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::PrimaryState;
 use super::protocol::{
-    SR_PROTOCOL_NAME, SR_PROTOCOL_TYPE, SchemaRegistryGroupAssignment, SchemaRegistryIdentity,
-    select_master,
+    SR_PROTOCOL_NAME, SR_PROTOCOL_TYPE, SR_VERSION, SchemaRegistryGroupAssignment,
+    SchemaRegistryIdentity, select_master,
 };
 
 // Kafka group error codes (defined locally to avoid a crabka-broker dependency).
@@ -198,10 +198,16 @@ impl ElectionClient {
                         .map(|id| (m.member_id.clone(), id))
                 })
                 .collect();
-            let master = select_master(&ids);
+            // cp's leader broadcasts the elected master's member-id + identity.
+            let (master_member_id, master_identity) = match select_master(&ids) {
+                Some((mid, idn)) => (Some(mid), Some(idn)),
+                None => (None, None),
+            };
             let assign = Bytes::from(serde_json::to_vec(&SchemaRegistryGroupAssignment {
                 error: 0,
-                master,
+                master: master_member_id,
+                master_identity,
+                version: SR_VERSION,
             })?);
             jg.members
                 .iter()
@@ -234,8 +240,15 @@ impl ElectionClient {
     fn publish(&self, assignment: &Bytes) {
         let parsed: SchemaRegistryGroupAssignment =
             serde_json::from_slice(assignment).unwrap_or_default();
-        let is_primary = parsed.master.as_ref() == Some(&self.identity);
-        let primary_url = parsed.master.as_ref().map(SchemaRegistryIdentity::url);
+        // cp's assignment carries the master's identity; we're primary iff it
+        // equals ours (the `master` member-id string isn't comparable here
+        // because our own member_id lives in the coordinator loop, not the
+        // identity — the identity match is the cp-faithful primary signal).
+        let is_primary = parsed.master_identity.as_ref() == Some(&self.identity);
+        let primary_url = parsed
+            .master_identity
+            .as_ref()
+            .map(SchemaRegistryIdentity::url);
         let _ = self.tx.send(PrimaryState {
             is_primary,
             primary_url,
