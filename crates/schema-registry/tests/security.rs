@@ -424,6 +424,16 @@ async fn https_round_trip_enforces_auth_over_tls() {
     broker.shutdown().await;
 }
 
+// TODO(slice-6): mTLS multi-node forward integration test. This Basic two-node
+// case plus the `auth::tests::forwarded_request_bypasses_require_auth` unit test
+// already cover model A end-to-end (ingress authn+authz → proxy with no creds,
+// only FORWARD_HEADER → primary auth_layer + authz_layer trust the forward). An
+// mTLS variant (two `serve_https` nodes with `ClientAuthMode::Required`, an mTLS
+// alice client writing to the secondary, the write landing on the primary) would
+// additionally prove model A works where model B could not — but it needs a
+// bespoke HTTPS harness (the secondary's forward `reqwest::Client` must carry its
+// own client identity + CA trust to complete the mTLS handshake to the primary)
+// plus a full-subject-DN ACL (`User:CN=alice,…`), so it is deferred as too heavy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn two_nodes_authorize_then_forward_to_primary() {
     let dir = tempfile::tempdir().unwrap();

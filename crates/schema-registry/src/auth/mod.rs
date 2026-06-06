@@ -119,6 +119,23 @@ pub async fn auth_layer(
     mut req: Request,
     next: Next,
 ) -> Response {
+    // SECURITY: a request carrying the inter-node forward header is TRUSTED — its
+    // ingress node already authenticated AND authorized it. Mirror authz_layer's
+    // FORWARD_HEADER skip so auth and authz agree on the same trust boundary
+    // (operators MUST isolate the inter-node forwarding link; a client that forges
+    // `X-Forwarded-For-Registry` bypasses both — see the slice-6 security spec).
+    // This is required for ALL auth methods: an mTLS client's credential (its TLS
+    // client cert) cannot be carried over the secondary→primary proxy hop, so the
+    // primary must trust the forward rather than re-authenticate.
+    if req
+        .headers()
+        .contains_key(crate::rest::forward::FORWARD_HEADER)
+    {
+        if req.extensions().get::<Principal>().is_none() {
+            req.extensions_mut().insert(anonymous());
+        }
+        return next.run(req).await;
+    }
     let mtls = req.extensions().get::<MtlsPrincipal>().map(|m| m.0.clone());
     let now = now_ms();
     match resolve(req.headers(), mtls, &st, now).await {
@@ -250,5 +267,51 @@ mod tests {
         )
         .await;
         assert_eq!(decision, AuthDecision::Authn(mtls));
+    }
+
+    /// Model A: `auth_layer` TRUSTS a request carrying `FORWARD_HEADER` and runs
+    /// the handler even under `require_auth` with no credentials (the ingress node
+    /// already authenticated it). A non-forwarded credential-less request still
+    /// `401`s. This is the mechanism that lets ALL auth methods (incl. mTLS, whose
+    /// credential can't cross the secondary→primary hop) work — see `proxy()`,
+    /// which forwards no credential, only `FORWARD_HEADER`.
+    #[tokio::test]
+    async fn forwarded_request_bypasses_require_auth() {
+        use axum::Router;
+        use axum::body::Body;
+        use axum::routing::get;
+        use tower::ServiceExt as _; // for `oneshot`
+
+        let st = AuthState {
+            basic: None,
+            bearer: None,
+            require_auth: true,
+            realm: "schema-registry".to_string(),
+        };
+        let app: Router = Router::new().route("/", get(|| async { "ok" })).layer(
+            axum::middleware::from_fn_with_state(Arc::new(st), auth_layer),
+        );
+
+        // WITH the forward header, no Authorization → handler runs (200), NOT 401.
+        let req = Request::builder()
+            .uri("/")
+            .header(crate::rest::forward::FORWARD_HEADER, "ingress-node")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "forwarded request must bypass require_auth"
+        );
+
+        // WITHOUT the forward header and no credentials → 401.
+        let req = Request::builder().uri("/").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "non-forwarded credential-less request must 401"
+        );
     }
 }
