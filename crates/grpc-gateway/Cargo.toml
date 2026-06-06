@@ -21,6 +21,7 @@ crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
 crabka-client-admin = { version = "0.2", path = "../client-admin" }
 crabka-metadata = { version = "0.2", path = "../metadata" }
 arc-swap = { workspace = true }
+prometheus-client = { workspace = true }
 connectrpc-axum.workspace = true
 prost.workspace = true
 pbjson.workspace = true
