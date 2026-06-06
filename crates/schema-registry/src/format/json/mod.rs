@@ -7,23 +7,44 @@ mod diff;
 use super::ParsedSchema;
 use crate::error::SrError;
 
-pub struct JsonSchema(serde_json::Value);
+pub struct JsonSchema {
+    value: serde_json::Value,
+    /// Resolved registry references as `(name, parsed-document)` pairs, where
+    /// `name` is the `$ref` target string a referring schema uses. JSON refs do
+    /// NOT affect the canonical form (cp does not inline them) — they only feed
+    /// the compatibility diff so a cross-subject `$ref` resolves to its target.
+    refs: Vec<(String, serde_json::Value)>,
+}
 
 impl JsonSchema {
     pub(crate) fn value(&self) -> &serde_json::Value {
-        &self.0
+        &self.value
+    }
+    pub(crate) fn refs(&self) -> &[(String, serde_json::Value)] {
+        &self.refs
     }
 }
 
-pub fn parse(schema: &str, _refs: &[super::ResolvedReference]) -> Result<JsonSchema, SrError> {
-    let v: serde_json::Value = serde_json::from_str(schema)
+pub fn parse(schema: &str, refs: &[super::ResolvedReference]) -> Result<JsonSchema, SrError> {
+    let value: serde_json::Value = serde_json::from_str(schema)
         .map_err(|e| SrError::InvalidSchema(format!("JSON Schema: {e}")))?;
-    if !v.is_object() && !v.is_boolean() {
+    if !value.is_object() && !value.is_boolean() {
         return Err(SrError::InvalidSchema(
             "JSON Schema must be an object or boolean".into(),
         ));
     }
-    Ok(JsonSchema(v))
+    // Stash the resolved reference documents for compat resolution, skipping any
+    // that don't parse as JSON (the referrer is still valid; that ref just won't
+    // resolve — matching the permissive treatment of an unresolved `$ref`).
+    let refs = refs
+        .iter()
+        .filter_map(|r| {
+            serde_json::from_str::<serde_json::Value>(&r.schema)
+                .ok()
+                .map(|v| (r.name.clone(), v))
+        })
+        .collect();
+    Ok(JsonSchema { value, refs })
 }
 
 /// Confluent JSON Schema compatibility: can a reader using `reader` read data
@@ -32,12 +53,17 @@ pub fn parse(schema: &str, _refs: &[super::ResolvedReference]) -> Result<JsonSch
 pub fn check(
     reader: &str,
     writer: &str,
-    _reader_refs: &[super::ResolvedReference],
-    _writer_refs: &[super::ResolvedReference],
+    reader_refs: &[super::ResolvedReference],
+    writer_refs: &[super::ResolvedReference],
 ) -> Result<(), Vec<String>> {
-    let reader_s = parse(reader, &[]).map_err(|e| vec![format!("reader: {e}")])?;
-    let writer_s = parse(writer, &[]).map_err(|e| vec![format!("writer: {e}")])?;
-    let diffs = diff::compare(writer_s.value(), reader_s.value());
+    let reader_s = parse(reader, reader_refs).map_err(|e| vec![format!("reader: {e}")])?;
+    let writer_s = parse(writer, writer_refs).map_err(|e| vec![format!("writer: {e}")])?;
+    let diffs = diff::compare_with_refs(
+        writer_s.value(),
+        reader_s.value(),
+        writer_s.refs(),
+        reader_s.refs(),
+    );
     let incompatible: Vec<&diff::Difference> = diffs
         .iter()
         .filter(|d| !compat::is_backward_compatible(&d.kind))
@@ -51,7 +77,9 @@ pub fn check(
 
 impl ParsedSchema for JsonSchema {
     fn canonical_form(&self) -> String {
-        canonicalize(&self.0)
+        // Refs are intentionally NOT inlined — cp leaves a JSON `$ref` as-written
+        // in the canonical (dedup) form. Only `self.value` participates.
+        canonicalize(&self.value)
     }
 }
 
@@ -86,6 +114,25 @@ pub(crate) fn canonicalize(v: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use crate::format::ParsedSchema;
+
+    #[test]
+    fn json_resolves_registry_ref_in_compat() {
+        use crate::format::{ResolvedReference, SchemaType};
+        let dep = r#"{"type":"integer","maximum":10}"#;
+        let refs = vec![ResolvedReference {
+            name: "Amount".into(),
+            ty: SchemaType::Json,
+            schema: dep.into(),
+        }];
+        let with_ref = r#"{"type":"object","properties":{"a":{"$ref":"Amount"}}}"#;
+        // canonical form is the schema as-written (refs NOT inlined)
+        assert_eq!(
+            parse(with_ref, &refs).unwrap().canonical_form(),
+            parse(with_ref, &[]).unwrap().canonical_form()
+        );
+        // check resolves the ref: reader == writer (with the ref present) is compatible
+        assert!(check(with_ref, with_ref, &refs, &refs).is_ok());
+    }
 
     #[test]
     fn parses_object_and_dedups_key_order() {

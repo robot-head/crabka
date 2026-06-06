@@ -108,28 +108,51 @@ fn d(kind: Kind, path: &str) -> Difference {
     }
 }
 
-/// Context for $ref resolution — carries the document roots and a cycle-guard
-/// set of `(orig_ptr, upd_ptr)` pairs already visited.
+/// A side's registry references as `(name, document)` pairs. `name` is the
+/// `$ref` target string a referring schema uses to point at that document.
+type RefMap = [(String, Value)];
+
+/// Context for $ref resolution — carries each side's document root and registry
+/// ref-map, plus a cycle-guard set of `(orig_ptr, upd_ptr)` pairs already
+/// visited.
 struct Ctx<'a> {
     orig_root: &'a Value,
     upd_root: &'a Value,
+    orig_refs: &'a RefMap,
+    upd_refs: &'a RefMap,
     visited: HashSet<(String, String)>,
 }
 
 impl<'a> Ctx<'a> {
-    fn new(orig_root: &'a Value, upd_root: &'a Value) -> Self {
+    fn new(
+        orig_root: &'a Value,
+        upd_root: &'a Value,
+        orig_refs: &'a RefMap,
+        upd_refs: &'a RefMap,
+    ) -> Self {
         Ctx {
             orig_root,
             upd_root,
+            orig_refs,
+            upd_refs,
             visited: HashSet::new(),
         }
     }
 }
 
+/// Diff two JSON Schema documents. Each side carries a registry ref-map so a
+/// `$ref` whose target is not an intra-document `#/...` pointer can resolve
+/// against a registered reference's document. With empty ref-maps an unmatched
+/// non-`#` `$ref` stays permissive.
 #[must_use]
-pub fn compare(original: &Value, update: &Value) -> Vec<Difference> {
+pub fn compare_with_refs(
+    original: &Value,
+    update: &Value,
+    original_refs: &RefMap,
+    update_refs: &RefMap,
+) -> Vec<Difference> {
     let mut out = Vec::new();
-    let mut ctx = Ctx::new(original, update);
+    let mut ctx = Ctx::new(original, update, original_refs, update_refs);
     compare_schema("#", original, update, &mut ctx, &mut out);
     out
 }
@@ -635,19 +658,21 @@ fn compare_combinators(
 // $ref resolution
 // ---------------------------------------------------------------------------
 
-/// Follow a local JSON Pointer `$ref` (must start with `#`) against `root`.
-/// Returns `None` for remote refs or if the pointer doesn't resolve.
-fn resolve_ref<'a>(schema: &Value, root: &'a Value) -> Option<&'a Value> {
+/// Resolve a `$ref`. An intra-document `#/...` pointer resolves against `root`
+/// (unchanged). A non-`#` ref resolves against `refs` if its string matches a
+/// registered reference's `name`; otherwise it stays permissive (`None`). Both
+/// branches borrow for the same lifetime, so the result is a plain `&Value`.
+fn resolve_ref<'a>(schema: &Value, root: &'a Value, refs: &'a RefMap) -> Option<&'a Value> {
     let ref_str = schema.get("$ref").and_then(Value::as_str)?;
-    if !ref_str.starts_with('#') {
-        return None; // remote ref — treat permissively
+    if let Some(ptr) = ref_str.strip_prefix('#') {
+        return if ptr.is_empty() {
+            Some(root)
+        } else {
+            root.pointer(ptr)
+        };
     }
-    let ptr = ref_str.trim_start_matches('#');
-    if ptr.is_empty() {
-        Some(root)
-    } else {
-        root.pointer(ptr)
-    }
+    // Non-local ref: resolve against the registry ref-map by name, else permissive.
+    refs.iter().find(|(n, _)| n == ref_str).map(|(_, v)| v)
 }
 
 fn compare_refs(
@@ -674,13 +699,14 @@ fn compare_refs(
     }
     ctx.visited.insert(key.clone());
 
-    // Resolve both sides; if either is a non-local ref leave permissive
+    // Resolve each side against its own root + ref-map; an unmatched non-local
+    // ref leaves that side permissive (None). Don't cross the streams.
     let o_resolved = o_ref
         .as_deref()
-        .and_then(|_| resolve_ref(orig, ctx.orig_root));
+        .and_then(|_| resolve_ref(orig, ctx.orig_root, ctx.orig_refs));
     let u_resolved = u_ref
         .as_deref()
-        .and_then(|_| resolve_ref(upd, ctx.upd_root));
+        .and_then(|_| resolve_ref(upd, ctx.upd_root, ctx.upd_refs));
 
     match (o_resolved, u_resolved) {
         (Some(ores), Some(ures)) => {

@@ -1425,3 +1425,43 @@ async fn rest_protobuf_reference_resolves_end_to_end() {
     cancel.cancel();
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_json_reference_resolves_end_to_end() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    // The referenced schema: an integer with an upper bound.
+    let amount = r#"{"type":"integer","maximum":10}"#;
+    register(
+        &app,
+        "amount",
+        &serde_json::json!({ "schemaType": "JSON", "schema": amount }).to_string(),
+    )
+    .await;
+    // Order's property `a` points at the referenced schema via `$ref: "Amount"`.
+    // JSON refs are not inlined into the canonical form; the reference only feeds
+    // the compatibility diff, so registration succeeds and the link is recorded.
+    let order = r#"{"type":"object","properties":{"a":{"$ref":"Amount"}}}"#;
+    let body = serde_json::json!({
+        "schemaType": "JSON",
+        "schema": order,
+        "references": [{ "name": "Amount", "subject": "amount", "version": 1 }]
+    })
+    .to_string();
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/order/versions", &body))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "JSON $ref resolves via reference"
+    );
+    let order_id = body_json(r).await["id"].as_i64().unwrap();
+    // referencedby lists the referrer's id.
+    let refby = get_json(&app, "/subjects/amount/versions/1/referencedby").await;
+    assert_eq!(refby, serde_json::json!([order_id]));
+    cancel.cancel();
+    broker.shutdown().await;
+}
