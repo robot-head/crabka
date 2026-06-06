@@ -369,7 +369,8 @@ pub use membership::{
     TopicPartition,
 };
 pub use processor::{
-    BytesSerde, Consumed, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier,
+    BytesSerde, Consumed, FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyProcessorSupplier,
+    FixedKeyRecord, I64Serde, Processor, ProcessorContext, ProcessorError, ProcessorSupplier,
     Produced, Record, RecordContext, Serde, SerdeError, StringSerde,
 };
 pub use runtime::{KafkaStreams, KafkaStreamsState};
