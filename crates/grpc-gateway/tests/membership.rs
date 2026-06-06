@@ -120,3 +120,83 @@ async fn run_membership_builds_routing_with_offset_tiebreak() {
     let _ = h.await;
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_membership_tombstone_and_malformed_skip() {
+    use std::time::Duration;
+    use tokio_util::sync::CancellationToken;
+
+    let (broker, bootstrap, _dir) = boot().await;
+    ensure_membership_topic(&bootstrap, TOPIC, 1).await.unwrap();
+
+    let producer = Producer::builder()
+        .bootstrap(bootstrap.clone())
+        .client_id("memb-tombstone-test")
+        .enable_idempotence(true)
+        .acks(Acks::All)
+        .build()
+        .await
+        .unwrap();
+
+    // Publish node-a owning partition 0.
+    publish(
+        &producer,
+        "node-a",
+        &NodeInfo {
+            advertised_addr: "addr-a".into(),
+            owned: vec![0],
+            epoch: 0,
+        },
+    )
+    .await;
+
+    // Publish a MALFORMED record (non-JSON value) — the loop must skip it, not die.
+    let malformed = ProducerRecord {
+        topic: TOPIC.to_string(),
+        partition: None,
+        key: Some(Bytes::from_static(b"node-bad")),
+        value: Some(Bytes::from_static(b"not json{")),
+        headers: vec![],
+        timestamp_ms: None,
+    };
+    producer.send(malformed).await.await.unwrap().unwrap();
+
+    // Publish a TOMBSTONE for node-a (None value => remove from store).
+    let tombstone = ProducerRecord {
+        topic: TOPIC.to_string(),
+        partition: None,
+        key: Some(Bytes::from("node-a".as_bytes().to_vec())),
+        value: None,
+        headers: vec![],
+        timestamp_ms: None,
+    };
+    producer.send(tombstone).await.await.unwrap().unwrap();
+
+    let store = Arc::new(MembershipStore::new());
+    let token = CancellationToken::new();
+    let h = tokio::spawn(store.clone().run_membership(
+        bootstrap.clone(),
+        "memb-tombstone-reader".into(),
+        TOPIC.into(),
+        "memb-tombstone-unique-1".into(),
+        token.clone(),
+    ));
+
+    // Poll until owner_of(0) is None: node-a tombstoned AND malformed didn't crash loop.
+    let mut reached_none = false;
+    for _ in 0..80 {
+        if store.owner_of(0).is_none() {
+            reached_none = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(
+        reached_none,
+        "expected owner_of(0) to be None after tombstone (malformed record must not kill the loop)"
+    );
+
+    token.cancel();
+    let _ = h.await;
+    broker.shutdown().await;
+}
