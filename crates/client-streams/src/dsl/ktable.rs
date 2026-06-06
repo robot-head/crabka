@@ -488,6 +488,8 @@ where
         let parent_id = self.node;
         let mut g = self.builder.borrow_mut();
         let name = g.new_processor_name(names::KTABLE_SUPPRESS);
+        // Placeholder store name; T4 mints the real suppress-store name + registers it.
+        let store_name = format!("{name}-store");
         let id = g.graph.add(
             name.clone(),
             GraphNodeKind::TableProcessor { store_name: None },
@@ -501,10 +503,18 @@ where
                 .add_processor::<K, Change<V>, K, Change<V>, _, _, _>(
                     name.clone(),
                     move || {
+                        // NOTE: minimal signature adaptation for the T3 processor
+                        // refactor. T4 owns the real wiring (register a
+                        // `SuppressBytesStore` under `store_name`, pass the serde
+                        // thunk + `max_bytes` from `BufferConfig`). Until then the
+                        // store is unregistered, so this path panics at runtime —
+                        // exercised only by the integration/golden tests T4 lights up.
                         crate::dsl::processors::suppress::KTableSuppressProcessor::<K, V>::new(
+                            store_name.clone(),
                             wait_ms,
                             buffer_time,
                             max_records,
+                            None,
                             emit_early,
                         )
                     },
