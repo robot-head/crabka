@@ -8,13 +8,15 @@
 //! Dedup tests spin up a real single-owner store and wait for `has_warmed_once`
 //! before the first produce — exactly the pattern in `tests/integration_dedup.rs`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use bytes::Bytes;
+use crabka_authz::{AuthorizationRequest, AuthorizationResult, SimpleAclAuthorizer};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
@@ -28,6 +30,8 @@ use crabka_grpc_gateway::produce::ProduceCore;
 use crabka_grpc_gateway::state::AppState;
 use crabka_grpc_gateway::webhook::webhook_router;
 use crabka_grpc_gateway::webhook_config::WebhooksFile;
+use crabka_metadata::{AclOperation, ResourceType};
+use crabka_security::{AuthMethod, Principal};
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use tempfile::TempDir;
@@ -686,6 +690,296 @@ async fn unknown_endpoint_404() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    token.cancel();
+    broker.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Authz tests (SimpleAclAuthorizer)
+// ---------------------------------------------------------------------------
+
+/// Helper: build an `AppState` with a `SimpleAclAuthorizer` (empty super-users)
+/// backed by the provided `GatewayAuthz`. No dedup wiring.
+async fn webhook_state_with_authz(
+    bootstrap: &str,
+    client_prefix: &str,
+    webhooks_toml: &str,
+    authz: Arc<GatewayAuthz>,
+) -> Arc<AppState> {
+    let webhooks = toml::from_str::<WebhooksFile>(webhooks_toml)
+        .expect("parse toml")
+        .compile()
+        .expect("compile webhooks");
+
+    let produce = ProduceCore::new(
+        bootstrap,
+        &format!("{client_prefix}-prod"),
+        Arc::new(RawCodec),
+    )
+    .await
+    .unwrap();
+
+    Arc::new(AppState {
+        produce: Arc::new(produce),
+        config: Arc::new(GatewayConfig {
+            bootstrap: bootstrap.to_string(),
+            listen_addr: "127.0.0.1:0".parse().unwrap(),
+            client_id: client_prefix.into(),
+            dedup_topic: DEDUP_TOPIC.into(),
+            dedup_partitions: N,
+            dedup_window_ms: 3_600_000,
+            dedup_txn_id_prefix: format!("crabka-wh-dedup-{client_prefix}"),
+            advertised_addr: "127.0.0.1:0".into(),
+            membership_topic: "__crabka_wh_membership".into(),
+            tls: None,
+            authz: None,
+            webhooks,
+        }),
+        authz,
+    })
+}
+
+/// Helper: poll the ACL cache until the authorization result for the given
+/// probe matches `expect`. Times out after 20 s (80 × 250 ms).
+async fn wait_authz(
+    authz: &Arc<GatewayAuthz>,
+    probe_principal: &Principal,
+    rt: ResourceType,
+    name: &str,
+    op: AclOperation,
+    expect: AuthorizationResult,
+) {
+    let host: SocketAddr = "0.0.0.0:0".parse().unwrap();
+    for _ in 0..80 {
+        let cache = authz.cache();
+        let req = AuthorizationRequest {
+            principal: probe_principal,
+            host: &host,
+            resource_type: rt,
+            resource_name: name,
+            operation: op,
+        };
+        if authz.authorizer().authorize(&**cache, &req) == expect {
+            return;
+        }
+        drop(cache);
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    panic!("ACL cache never converged to the expected decision for {name}");
+}
+
+/// Build an `AclEntry` granting `User:{user}` Allow `op` on `Topic:{topic}`.
+fn topic_acl(
+    user: &str,
+    op: crabka_client_admin::AclOperation,
+    topic: &str,
+) -> crabka_client_admin::AclEntry {
+    crabka_client_admin::AclEntry {
+        resource_type: crabka_client_admin::ResourceType::Topic,
+        resource_name: topic.to_string(),
+        pattern_type: crabka_client_admin::PatternType::Literal,
+        principal: format!("User:{user}"),
+        host: "*".to_string(),
+        operation: op,
+        permission_type: crabka_client_admin::PermissionType::Allow,
+    }
+}
+
+/// `SimpleAclAuthorizer` with an EMPTY cache (default-deny) rejects a webhook
+/// produce even when the HMAC is valid, because the endpoint's principal
+/// (`webhook:acl-denied`) has no Write ACL on the target topic.
+///
+/// After granting the ACL and refreshing the cache the same request succeeds.
+#[allow(clippy::too_many_lines)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn simpleacl_denies_webhook_principal() {
+    let (broker, bootstrap, _dir) = boot().await;
+
+    let topic = "wh-acl-topic";
+    let endpoint_name = "acl-denied";
+    let principal_name = format!("webhook:{endpoint_name}");
+
+    // Create the target topic.
+    let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
+        .await
+        .unwrap();
+    admin
+        .create_topics(
+            &[CreateTopicSpec {
+                name: topic.into(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            10_000,
+        )
+        .await
+        .unwrap();
+
+    let toml = format!(
+        r#"
+[[endpoints]]
+name = "{endpoint_name}"
+target_topic = "{topic}"
+secret = "deny-secret"
+signature_header = "X-Sig"
+signature_encoding = "hex"
+"#
+    );
+
+    // SimpleAcl with EMPTY cache — default-deny for everyone.
+    let authz = Arc::new(GatewayAuthz::new(Arc::new(SimpleAclAuthorizer::new(
+        HashSet::new(),
+    ))));
+    let state = webhook_state_with_authz(&bootstrap, "acld", &toml, authz.clone()).await;
+    let app = webhook_router(state);
+
+    let body = b"some webhook payload";
+    let sig = hmac_hex(b"deny-secret", body);
+
+    // Valid HMAC but principal has no ACL → 403 FORBIDDEN, nothing produced.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/webhooks/{endpoint_name}"))
+                .header("X-Sig", &sig)
+                .body(Body::from(Bytes::from_static(body)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        count_topic(&bootstrap, topic, "acld-deny-verify").await,
+        0,
+        "denied request must not produce"
+    );
+
+    // Now grant `User:webhook:acl-denied` Allow Write Topic:wh-acl-topic and
+    // start the ACL refresh loop. Once the cache converges, the same request
+    // must succeed.
+    let outcomes = admin
+        .create_acls(&[topic_acl(
+            &principal_name,
+            crabka_client_admin::AclOperation::Write,
+            topic,
+        )])
+        .await
+        .unwrap();
+    assert!(
+        outcomes.iter().all(|o| o.error.is_none()),
+        "create_acls failed: {outcomes:?}"
+    );
+
+    let shutdown = CancellationToken::new();
+    {
+        let authz = authz.clone();
+        let bootstrap = bootstrap.clone();
+        let shutdown = shutdown.clone();
+        tokio::spawn(authz.run_acl_refresh(bootstrap, Duration::from_millis(200), shutdown));
+    }
+
+    // Build a Principal matching what the authorizer sees for this endpoint.
+    let probe = Principal {
+        name: principal_name.clone(),
+        auth_method: AuthMethod::MTls,
+        groups: vec![],
+    };
+    wait_authz(
+        &authz,
+        &probe,
+        ResourceType::Topic,
+        topic,
+        AclOperation::Write,
+        AuthorizationResult::Allow,
+    )
+    .await;
+
+    // Need a fresh state sharing the now-populated authz.
+    let toml2 = format!(
+        r#"
+[[endpoints]]
+name = "{endpoint_name}"
+target_topic = "{topic}"
+secret = "deny-secret"
+signature_header = "X-Sig"
+signature_encoding = "hex"
+"#
+    );
+    let state2 = webhook_state_with_authz(&bootstrap, "acla", &toml2, authz.clone()).await;
+    let app2 = webhook_router(state2);
+
+    let resp2 = app2
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/v1/webhooks/{endpoint_name}"))
+                .header("X-Sig", &sig)
+                .body(Body::from(Bytes::from_static(body)))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp2.status(),
+        StatusCode::OK,
+        "after granting ACL the request must succeed"
+    );
+    assert_eq!(
+        count_topic(&bootstrap, topic, "acla-allow-verify").await,
+        1,
+        "after granting ACL exactly one record must land"
+    );
+
+    shutdown.cancel();
+    broker.shutdown().await;
+}
+
+/// Sending `X-Timestamp: i64::MIN` (the most negative timestamp) must return
+/// 401 (stale) and NOT panic — this exercises the i128 overflow fix. Under the
+/// test profile's overflow-checks the old i64 subtraction would panic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_timestamp_overflow_rejected() {
+    let (broker, bootstrap, _dir) = boot().await;
+
+    // Endpoint with a timestamp header and a realistic tolerance.
+    let toml = r#"
+[[endpoints]]
+name = "ts-overflow"
+target_topic = "irrelevant"
+secret = "secret"
+signature_header = "X-Sig"
+signature_encoding = "hex"
+timestamp_header = "X-Timestamp"
+timestamp_tolerance_secs = 300
+"#;
+
+    let (state, token, _store) = webhook_state(&bootstrap, "tsof", toml, false).await;
+    let app = webhook_router(state);
+
+    let body = b"payload";
+    let sig = hmac_hex(b"secret", body);
+    // i64::MIN is maximally stale and triggers the overflow in the old code.
+    let extreme_ts = i64::MIN.to_string();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/webhooks/ts-overflow")
+                .header("X-Sig", sig)
+                .header("X-Timestamp", extreme_ts)
+                .body(Body::from(Bytes::from_static(body)))
+                .unwrap(),
+        )
+        .await
+        .unwrap(); // must complete, not panic
+
+    // Stale timestamp → 401.
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
     token.cancel();
     broker.shutdown().await;

@@ -13,6 +13,7 @@
 //! Both routes produce via [`crate::produce::ProduceCore::produce`] and return
 //! a [`WebhookResponse`] JSON body on success.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,6 +24,8 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use crabka_authz::AuthorizationResult;
+use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
 use serde::Serialize;
 use serde_json::Value;
@@ -71,6 +74,7 @@ pub fn webhook_router(state: Arc<AppState>) -> Router {
 pub async fn webhook_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(name): Path<String>,
+    peer: Option<Extension<SocketAddr>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -104,7 +108,8 @@ pub async fn webhook_handler(
                 Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
             };
             let now = now_unix_secs();
-            if (now - ts).abs() > cfg.timestamp_tolerance_secs {
+            let skew = (i128::from(now) - i128::from(ts)).abs();
+            if skew > i128::from(cfg.timestamp_tolerance_secs) {
                 return StatusCode::UNAUTHORIZED.into_response();
             }
         }
@@ -162,7 +167,8 @@ pub async fn webhook_handler(
     };
 
     // 9. Produce and map the result to HTTP status.
-    produce_and_respond(state, rec, &principal).await
+    let host = peer.map_or_else(crate::handlers::unknown_host, |p| p.0);
+    produce_and_respond(state, rec, &principal, host).await
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +183,7 @@ pub async fn webhook_handler(
 pub async fn produce_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(topic): Path<String>,
+    peer: Option<Extension<SocketAddr>>,
     headers: HeaderMap,
     principal: Option<Extension<Principal>>,
     body: Bytes,
@@ -198,8 +205,9 @@ pub async fn produce_handler(
     };
 
     let eff = principal.map_or_else(anonymous_principal, |Extension(p)| p);
+    let host = peer.map_or_else(crate::handlers::unknown_host, |p| p.0);
 
-    produce_and_respond(state, rec, &eff).await
+    produce_and_respond(state, rec, &eff, host).await
 }
 
 // ---------------------------------------------------------------------------
@@ -215,11 +223,26 @@ fn needs_json(cfg: &crate::webhook_config::CompiledWebhook) -> bool {
 }
 
 /// Produce the record and map [`GatewayError`] variants to HTTP status codes.
+///
+/// Authorizes `(ResourceType::Topic, rec.topic, AclOperation::Write)` for the
+/// effective principal before producing; returns `403 FORBIDDEN` on `Deny`.
 async fn produce_and_respond(
     state: Arc<AppState>,
     rec: GatewayRecord,
     principal: &Principal,
+    host: SocketAddr,
 ) -> Response {
+    if crate::handlers::authorize_resource(
+        &state,
+        principal,
+        &host,
+        ResourceType::Topic,
+        &rec.topic,
+        AclOperation::Write,
+    ) == AuthorizationResult::Deny
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     match state.produce.produce(rec, principal).await {
         Ok(o) => (
             StatusCode::OK,

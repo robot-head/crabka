@@ -113,6 +113,11 @@ impl WebhooksFile {
                 ));
             }
 
+            // An explicitly supplied secret must not be empty.
+            if e.secret.as_deref() == Some("") {
+                return Err(format!("{ctx}: secret must not be empty"));
+            }
+
             let signature_encoding = match e.signature_encoding.as_deref() {
                 None | Some("hex") => SigEncoding::Hex,
                 Some("base64") => SigEncoding::Base64,
