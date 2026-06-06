@@ -106,8 +106,12 @@ impl Forwarder {
     /// # Errors
     /// Returns `GatewayError::Forward` if the reqwest client cannot be built.
     pub fn with_tls(client_config: Arc<rustls::ClientConfig>) -> Result<Self, GatewayError> {
+        // reqwest's `use_preconfigured_tls(impl Any)` wraps its arg in `Some(..)`
+        // internally and downcasts `Option<rustls::ClientConfig>`, so it must be
+        // handed the BARE config (passing `Some(cfg)` double-wraps and fails at
+        // runtime with "Unknown TLS backend").
         let http = reqwest::Client::builder()
-            .use_preconfigured_tls(Some(Arc::unwrap_or_clone(client_config)))
+            .use_preconfigured_tls(Arc::unwrap_or_clone(client_config))
             .build()
             .map_err(|e| GatewayError::Forward(format!("build tls forward client: {e}")))?;
         Ok(Self {
