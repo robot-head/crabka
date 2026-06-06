@@ -9,7 +9,9 @@ use crate::error::StreamsClientError;
 use crate::membership::TopicPartition;
 use crate::processor::graph::Graph;
 use crate::runtime::eos::ProcessingGuarantee;
-use crate::runtime::io::{IsolationLevel, OffsetStore, RecordFetcher, RecordProducer};
+use crate::runtime::io::{
+    BeginTxnGate, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TaskRole {
@@ -240,9 +242,16 @@ impl StreamTask {
     /// sink outputs AND changelog entries; then flush + commit on the next
     /// `commit()` call. At-least-once ordering: sink produce → changelog
     /// produce → flush → commit.
+    ///
+    /// `begin_gate` is `Some` only under EOS-v2: the task calls
+    /// [`BeginTxnGate::ensure_begun`] right before its first produced record so
+    /// the thread opens a transaction lazily — an interval that fetches no
+    /// records produces nothing and opens no transaction (no empty-txn churn).
+    /// Under at-least-once `begin_gate` is `None` and this is a no-op gate.
     pub async fn process_once(
         &mut self,
         fetcher: &dyn RecordFetcher,
+        mut begin_gate: Option<&mut dyn BeginTxnGate>,
     ) -> Result<(), StreamsClientError> {
         let keys: Vec<(String, i32)> = self.positions.keys().cloned().collect();
         for (topic, partition) in keys {
@@ -251,6 +260,16 @@ impl StreamTask {
             let batch = fetcher
                 .fetch(&topic, partition, offset, IsolationLevel::ReadUncommitted)
                 .await?;
+            // An empty batch advances nothing and produces nothing — skip it so
+            // the EOS begin-gate is not tripped by an idle partition.
+            if batch.records.is_empty() {
+                continue;
+            }
+            // EOS: open the transaction lazily before the first produced record
+            // of this interval. Idempotent across partitions (begins once).
+            if let Some(gate) = begin_gate.as_deref_mut() {
+                gate.ensure_begun().await?;
+            }
             for rec in &batch.records {
                 self.graph
                     .pipe(
@@ -341,6 +360,7 @@ impl StreamTask {
     /// Clear pending after the thread's EOS txn commit succeeds.
     pub fn clear_pending(&mut self) {
         self.pending.clear();
+    }
 
     /// At-least-once commit: flush producer THEN commit advanced source offsets.
     pub async fn commit(&mut self) -> Result<(), StreamsClientError> {
@@ -602,7 +622,7 @@ mod tests {
         );
         );
         task.seek_to_start().await.unwrap(); // no committed → earliest (0)
-        task.process_once(&fetcher).await.unwrap(); // fetch+pipe+produce
+        task.process_once(&fetcher, None).await.unwrap(); // fetch+pipe+produce
         task.commit().await.unwrap(); // flush + commit
         check!(
             producer
@@ -650,7 +670,7 @@ mod tests {
         );
         );
         task_a.init().await.unwrap();
-        task_a.process_once(&fetcher_a).await.unwrap();
+        task_a.process_once(&fetcher_a, None).await.unwrap();
         task_a.commit().await.unwrap();
 
         {
@@ -722,7 +742,7 @@ mod tests {
                 }],
             },
         )]);
-        task_b.process_once(&fetcher_b2).await.unwrap();
+        task_b.process_once(&fetcher_b2, None).await.unwrap();
         let sent_b = producer_b.sent.lock().unwrap();
         // The "out" sink emits i64 value = 6 (big-endian)
         check!(
@@ -804,9 +824,10 @@ mod tests {
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
             TaskRole::Active,
+            crate::runtime::eos::ProcessingGuarantee::AtLeastOnce,
         );
         task.init().await.unwrap(); // schedules the punctuator (base i64::MIN)
-        task.process_once(&fetcher).await.unwrap(); // pipe ts=25 → stream-time=25 → fire
+        task.process_once(&fetcher, None).await.unwrap(); // pipe ts=25 → stream-time=25 → fire
 
         let sent = producer.sent.lock().unwrap();
         check!(
@@ -854,14 +875,11 @@ mod tests {
             }],
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
-<<<<<<< HEAD
             TaskRole::Active,
-=======
             ProcessingGuarantee::AtLeastOnce,
->>>>>>> 5d8b2e20 (feat(streams): read_committed changelog restore under EOS (RecordFetcher isolation level))
         );
         task.init().await.unwrap();
-        task.process_once(&fetcher).await.unwrap();
+        task.process_once(&fetcher, None).await.unwrap();
 
         let sent = producer.sent.lock().unwrap();
 

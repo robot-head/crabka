@@ -229,16 +229,21 @@ impl RecordProducer for BrokerProducer {
 // ─── BrokerTransactionalProducer ────────────────────────────────────────────────
 
 /// A transactional (EOS-v2 / KIP-447) [`RecordProducer`] backed by a real Kafka
-/// `Producer` built with a `transactional_id`. In addition to `send`/`flush`
-/// (identical to [`BrokerProducer`]) it implements
+/// `Producer` built with a `transactional_id`. It implements
 /// [`crate::runtime::eos::TransactionalProducer`] so the runtime can wrap each
 /// process-then-commit cycle in a transaction.
-// consumed by the EOS commit path in T3
-#[allow(dead_code)]
+///
+/// Unlike [`BrokerProducer`], this wrapper does NOT accumulate per-record ack
+/// receivers: the EOS commit path never calls `flush` — it goes
+/// `send` → `send_offsets_to_transaction` → `commit_transaction`, and the inner
+/// `Producer::commit_transaction` already flushes the batch buffer and blocks on
+/// every in-flight ack before sending the COMMIT marker. The dropped receiver
+/// does NOT cancel the send: the record's ack sender lives in the accumulator
+/// batch (see `Producer::send` / `Accumulator::try_append`), so the record is
+/// produced and durably committed regardless of whether the receiver is awaited.
+/// Accumulating receivers here would leak unboundedly for the app's lifetime.
 pub(crate) struct BrokerTransactionalProducer {
     inner: Producer,
-    /// Receivers from pending `Producer::send` calls. Drained by `flush`.
-    pending: Mutex<Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>>>,
 }
 
 #[async_trait::async_trait]
@@ -250,45 +255,30 @@ impl RecordProducer for BrokerTransactionalProducer {
         key: Option<Bytes>,
         value: Option<Bytes>,
     ) -> Result<(), StreamsClientError> {
-        let rx = self
-            .inner
-            .send(ProducerRecord {
-                topic: topic.to_string(),
-                partition,
-                key,
-                value,
-                ..Default::default()
-            })
-            .await;
-        self.pending.lock().await.push(rx);
+        // Drop the returned ack receiver: under EOS the commit barrier is
+        // `commit_transaction` (which flushes + awaits all in-flight records),
+        // so per-record acks need not be tracked here. Dropping the receiver
+        // does not cancel the queued send. Explicit `drop` (not `let _ =`)
+        // because the receiver is itself a `Future`; we intentionally never
+        // await it.
+        drop(
+            self.inner
+                .send(ProducerRecord {
+                    topic: topic.to_string(),
+                    partition,
+                    key,
+                    value,
+                    ..Default::default()
+                })
+                .await,
+        );
         Ok(())
     }
 
-    /// Flush: first ask the inner producer to drain its batch buffer, then
-    /// await every pending per-record ack. Any `Err` result from a record ack
-    /// is surfaced so the caller knows a commit would be unsafe.
+    /// No-op: the EOS path never calls `flush`. `commit_transaction` is the
+    /// durability barrier (it flushes the inner producer and awaits in-flight
+    /// acks before the COMMIT marker), so there is nothing to drain here.
     async fn flush(&self) -> Result<(), StreamsClientError> {
-        self.inner
-            .flush()
-            .await
-            .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
-
-        let receivers: Vec<_> = std::mem::take(&mut *self.pending.lock().await);
-        for rx in receivers {
-            match rx.await {
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    return Err(StreamsClientError::Runtime(format!(
-                        "produce ack failed: {e}"
-                    )));
-                }
-                Err(_) => {
-                    return Err(StreamsClientError::Runtime(
-                        "produce ack receiver dropped".to_string(),
-                    ));
-                }
-            }
-        }
         Ok(())
     }
 }
@@ -706,8 +696,6 @@ pub(crate) async fn build(
 /// Mirrors [`build`] exactly, except the producer is constructed with a
 /// `transactional_id` (and `enable_idempotence` is implied by transactions) and
 /// wrapped in a [`BrokerTransactionalProducer`].
-// consumed by the EOS commit path in T3
-#[allow(dead_code)]
 pub(crate) async fn build_eos(
     bootstrap: &str,
     group_id: &str,
@@ -775,10 +763,7 @@ pub(crate) async fn build_eos(
         max_wait_ms: 500,
         partition_max_bytes: 1 << 20,
     };
-    let txn_producer = Arc::new(BrokerTransactionalProducer {
-        inner: producer,
-        pending: Mutex::new(Vec::new()),
-    });
+    let txn_producer = Arc::new(BrokerTransactionalProducer { inner: producer });
     let offset_store = Arc::new(BrokerOffsetStore::new(offset_client, group_id));
 
     Ok((fetcher, txn_producer, offset_store))

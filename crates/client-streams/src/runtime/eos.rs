@@ -18,8 +18,6 @@ pub enum ProcessingGuarantee {
 
 /// Streams group metadata for `send_offsets_to_transaction` (maps to the native
 /// `crabka_client_consumer::ConsumerGroupMetadata`).
-// consumed by the EOS commit path in T2/T3
-#[allow(dead_code)]
 // Field names mirror the Kafka `ConsumerGroupMetadata` mapping (group_id /
 // generation_id / member_id / group_instance_id) — keep them verbatim.
 #[allow(clippy::struct_field_names)]
@@ -32,10 +30,9 @@ pub struct StreamsGroupMeta {
     pub group_instance_id: Option<String>,
 }
 
-/// EOS-v2 transactional producer seam (DI'd; `BrokerTransactionalProducer` in T2,
-/// `MockTransactionalProducer` for tests). Also impls `RecordProducer` for `send`.
-// consumed by the EOS commit path in T2/T3
-#[allow(dead_code)]
+/// EOS-v2 transactional producer seam (DI'd; `BrokerTransactionalProducer` in
+/// production, `MockTransactionalProducer` for tests). Also impls
+/// `RecordProducer` for `send`.
 #[async_trait]
 pub trait TransactionalProducer: crate::runtime::io::RecordProducer {
     async fn init_transactions(&self) -> Result<(), StreamsClientError>;
@@ -51,8 +48,6 @@ pub trait TransactionalProducer: crate::runtime::io::RecordProducer {
 
 /// KIP-447 transactional id: stable per (application, thread) so a restart fences
 /// a zombie via the producer-epoch bump in `init_transactions`.
-// consumed by the EOS commit path in T2/T3
-#[allow(dead_code)]
 #[must_use]
 pub fn transactional_id(application_id: &str, thread_idx: usize) -> String {
     format!("{application_id}-{thread_idx}")

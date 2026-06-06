@@ -83,6 +83,19 @@ pub trait RecordProducer: Send + Sync + 'static {
     async fn flush(&self) -> Result<(), StreamsClientError>;
 }
 
+/// Lazy "begin the transaction" gate handed to [`StreamTask::process_once`]
+/// under EOS-v2. The task invokes [`BeginTxnGate::ensure_begun`] exactly before
+/// its first produced record in a commit interval, so an interval that fetches
+/// no records opens no transaction (no empty-txn churn on an idle app). Under
+/// at-least-once no gate is passed.
+#[async_trait::async_trait]
+pub trait BeginTxnGate: Send {
+    /// Ensure a transaction is open, beginning one on the first call within the
+    /// interval and a no-op on subsequent calls. Called by the task right before
+    /// the first sink/changelog `send`.
+    async fn ensure_begun(&mut self) -> Result<(), StreamsClientError>;
+}
+
 #[async_trait::async_trait]
 pub trait OffsetStore: Send + Sync + 'static {
     /// Committed offset for `(topic, partition)`, or `None` if never committed.

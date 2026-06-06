@@ -5,7 +5,7 @@ use tokio::sync::Mutex as TokioMutex;
 use crate::error::StreamsClientError;
 use crate::membership::StreamsAssignment;
 use crate::runtime::eos::{ProcessingGuarantee, StreamsGroupMeta, TransactionalProducer};
-use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
+use crate::runtime::io::{BeginTxnGate, OffsetStore, RecordFetcher, RecordProducer};
 use crate::runtime::iq::{IqRequest, answer_iq};
 use crate::runtime::task::{StreamTask, TaskRole};
 use crate::topology::BuiltTopology;
@@ -279,16 +279,19 @@ impl StreamThread {
         match self.guarantee {
             ProcessingGuarantee::AtLeastOnce => {
                 for task in self.tasks.values_mut() {
-                    task.process_once(fetcher).await?;
+                    task.process_once(fetcher, None).await?;
                 }
             }
             ProcessingGuarantee::ExactlyOnceV2 => {
-                // EOS: open a transaction before producing any sink/changelog
-                // records, so the whole process-then-commit cycle is one atomic
-                // txn. Idempotent across polls within a commit interval — `in_txn`
-                // stays set until `commit_all`. Any error mid-begin or mid-process
-                // aborts the txn and rolls every task back to the last commit; the
-                // cycle is then re-begun on the next poll (so `poll_all` returns Ok).
+                // EOS: the transaction is opened lazily, on the FIRST produced
+                // record of the interval (via the begin-gate handed to each
+                // task). An interval that fetches no records opens no
+                // transaction, so `commit_all` is a no-op (no empty-txn churn on
+                // an idle app). Idempotent across polls within a commit interval
+                // — `in_txn` stays set until `commit_all`. Any error mid-begin or
+                // mid-process aborts the txn and rolls every task back to the last
+                // commit; the cycle is then re-begun on the next poll (so
+                // `poll_all` returns Ok).
                 let res = self.eos_begin_and_process(fetcher).await;
                 if res.is_err() {
                     self.abort_and_rollback().await?;
@@ -296,33 +299,10 @@ impl StreamThread {
                 }
             }
         }
-        Ok(())
-    }
-
-    /// EOS begin-on-first-poll + per-task process, captured so `poll_all` can turn
-    /// any `Err` into an abort + rollback.
-    async fn eos_begin_and_process(
-        &mut self,
-        fetcher: &dyn RecordFetcher,
-    ) -> Result<(), StreamsClientError> {
-        if !self.in_txn {
-            self.txn
-                .as_ref()
-                .expect("EOS txn producer")
-                .begin_transaction()
-                .await?;
-            self.in_txn = true;
-        }
-        for task in self.tasks.values_mut() {
-            if task.role == TaskRole::Active {
-                task.process_once(fetcher).await?;
-            } else {
-                task.restore_step(fetcher).await?;
-            }
-        }
-        // Wall-clock punctuation tick: read the clock once, then fire every task's
-        // due WALL_CLOCK_TIME punctuators. Forwarded records are produced through
-        // each task's own producer (same plumbing as `process_once`).
+        // Wall-clock punctuation tick (independent of the delivery guarantee): read
+        // the clock once, then fire every task's due WALL_CLOCK_TIME punctuators.
+        // Forwarded records go through each task's producer — under EOS they join
+        // the interval's open transaction (committed by the next `commit_all`).
         let now = self.clock.now_ms();
         for task in self.tasks.values_mut() {
             if task.role == TaskRole::Active {
@@ -345,6 +325,41 @@ impl StreamThread {
         }
 
         Ok(())
+    }
+
+    /// EOS begin-on-first-record + per-task process, captured so `poll_all` can
+    /// turn any `Err` into an abort + rollback.
+    ///
+    /// The transaction is NOT begun up front. Instead each task is handed an
+    /// [`EosBeginGate`] that begins the transaction lazily, right before the
+    /// task's first produced record of the interval. If no task fetches any
+    /// records the gate is never tripped, so the interval opens no transaction
+    /// (and `commit_all` becomes a no-op) — matching the JVM's "gate on records
+    /// processed since last commit" behaviour.
+    async fn eos_begin_and_process(
+        &mut self,
+        fetcher: &dyn RecordFetcher,
+    ) -> Result<(), StreamsClientError> {
+        let txn = Arc::clone(self.txn.as_ref().expect("EOS txn producer"));
+        let mut gate = EosBeginGate {
+            txn,
+            begun: self.in_txn,
+        };
+        let res: Result<(), StreamsClientError> = async {
+            for task in self.tasks.values_mut() {
+                if task.role == TaskRole::Active {
+                    task.process_once(fetcher, Some(&mut gate)).await?;
+                } else {
+                    task.restore_step(fetcher).await?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        // Reflect any lazily-opened transaction back onto the thread so
+        // `commit_all` / `abort_and_rollback` see it, even on the error path.
+        self.in_txn = gate.begun;
+        res
     }
 
     /// EOS commit barrier: fold every task's pending source offsets into a single
@@ -456,6 +471,30 @@ impl StreamThread {
             }
         }
         self.tasks.clear();
+        Ok(())
+    }
+}
+
+/// Lazy begin-transaction gate handed to each task's `process_once` under
+/// EOS-v2. The first task to produce a record this interval calls
+/// [`BeginTxnGate::ensure_begun`], which begins the transaction exactly once;
+/// subsequent calls (further records / partitions / tasks) are no-ops. When no
+/// task produces anything the gate is never tripped and no transaction opens.
+struct EosBeginGate {
+    txn: Arc<dyn TransactionalProducer>,
+    /// Whether a transaction is currently open. Seeded from the thread's
+    /// `in_txn` (so a re-poll within an already-open interval doesn't re-begin)
+    /// and read back into it after processing.
+    begun: bool,
+}
+
+#[async_trait::async_trait]
+impl BeginTxnGate for EosBeginGate {
+    async fn ensure_begun(&mut self) -> Result<(), StreamsClientError> {
+        if !self.begun {
+            self.txn.begin_transaction().await?;
+            self.begun = true;
+        }
         Ok(())
     }
 }
@@ -746,7 +785,14 @@ mod tests {
         )
         .with_clock(clock);
         thread
-            .apply_assignment(&assignment(), &built, &producer, &store)
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                crate::runtime::eos::ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -1308,6 +1354,61 @@ mod tests {
                 .iter()
                 .any(|(t, _p, _k, v)| t == "out" && v.as_deref() == Some(b"HI".as_ref()))
         );
+    }
+
+    /// EOS-v2 idle interval: when a `poll_all` fetches NO records, the runtime
+    /// must NOT begin a transaction, and the following `commit_all` must be a
+    /// no-op — no `Begin`, no `Send`, no `SendOffsets`, no `Commit`. (Regression
+    /// guard for the empty-transaction churn the begin-on-first-record gate
+    /// fixes: the old eager begin opened + committed an empty txn every interval
+    /// on an idle app.) Only `Init` (from `apply_assignment`) is recorded.
+    #[tokio::test]
+    async fn eos_idle_interval_opens_no_transaction() {
+        use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
+
+        let mock = Arc::new(MockTransactionalProducer::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&mock) as _;
+        let txn: Arc<dyn TransactionalProducer> = Arc::clone(&mock) as _;
+        let store: Arc<dyn OffsetStore> = Arc::new(MemStore::default());
+
+        let built = built();
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+        thread
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::ExactlyOnceV2,
+                Some(Arc::clone(&txn)),
+            )
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        // Idle interval: the fetcher returns empty for every fetch.
+        let idle_fetcher = empty_fetcher();
+        thread.poll_all(&*idle_fetcher).await.unwrap();
+
+        let meta = crate::runtime::eos::StreamsGroupMeta {
+            group_id: "app".into(),
+            generation_id: 3,
+            member_id: "m".into(),
+            group_instance_id: None,
+        };
+        thread.commit_all(Some(&meta)).await.unwrap();
+
+        // Only the one-time Init ran — no transaction was opened or committed.
+        check!(
+            *mock.calls.lock().unwrap() == vec![Step::Init],
+            "idle interval must open no transaction; got {:?}",
+            *mock.calls.lock().unwrap()
+        );
+        check!(mock.sent.lock().unwrap().is_empty());
     }
 
     /// EOS-v2 abort + rollback: a `commit_transaction` failure mid-cycle must

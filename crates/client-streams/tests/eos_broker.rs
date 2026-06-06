@@ -18,14 +18,19 @@
 //!    committed end offset (not `-1`).
 //! 3. **True cross-restart exactly-once.** A fresh `KafkaStreams` with the SAME
 //!    `application_id` and `ExactlyOnceV2` resumes from the committed SOURCE
-//!    offsets — it does NOT re-read the committed input. The committed output
-//!    therefore stays exactly the original three records (`a→1, a→2, b→1`) after
-//!    restart: no `a→3` re-emitted from a re-read of the 2nd `"a"`, no `b→2` —
-//!    committed input is processed exactly once across the restart. This is the
-//!    invariant the broker fix unlocks: pre-fix the source offset read back as
-//!    `-1`, so the restarted consumer reset to `earliest`, re-read the input,
-//!    and re-emitted committed records (double-counting); post-fix it resumes
-//!    from the materialized offset and does not.
+//!    offsets — it does NOT re-read the committed input. After one more `"a"` is
+//!    produced post-restart, the committed output grows to EXACTLY four records,
+//!    `[a→1, a→2, b→1, a→3]`: the original three (committed input processed
+//!    exactly once across the restart) plus the single new `a→3` (the restored
+//!    store `a=2` advanced by the one genuinely new `"a"`). This proves the
+//!    invariant in both directions — no committed input is re-read (a re-read
+//!    would re-emit `a→3` from the 2nd `"a"` and `b→2` at higher offsets, failing
+//!    the exact-set assertion), AND the restarted instance correctly fetches,
+//!    processes, and commits genuinely new input. This is the invariant the
+//!    broker fix unlocks: pre-fix the source offset read back as `-1`, so the
+//!    restarted consumer reset to `earliest`, re-read the input, and re-emitted
+//!    committed records (double-counting); post-fix it resumes from the
+//!    materialized offset and processes only the new record.
 #![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
@@ -417,12 +422,13 @@ async fn eos_v2_atomic_output_and_restart_resume() {
     // 5. True cross-restart EOS. Close the first instance, produce one more "a",
     // start a FRESH instance with the SAME application_id under EXACTLY_ONCE_V2.
     // The new instance resumes from the committed SOURCE offset (3, surfaced
-    // above) and therefore does NOT re-read the original ["a","a","b"]. The
-    // committed output must stay exactly the original three records — the
-    // committed input is processed exactly once across the restart. (One more
-    // "a" is produced so the restarted instance has fresh input to advance past;
-    // the assertion below is on the no-reprocessing invariant, not on the new
-    // record's downstream output.)
+    // above) and therefore does NOT re-read the original ["a","a","b"]. It then
+    // processes ONLY the single new "a" at input offset 3, which — with the
+    // restored store (a→2, b→1) — emits exactly `a→3`. So the committed output
+    // must grow to EXACTLY four records: the original three plus the one new
+    // `a→3`, proving BOTH no-reprocessing (committed input processed once across
+    // the restart) AND that the restarted instance correctly fetches/processes/
+    // commits genuinely new input.
     streams.close().await.unwrap();
     produce(&producer, &["a"]).await;
 
@@ -431,47 +437,46 @@ async fn eos_v2_atomic_output_and_restart_resume() {
     // Collect the FULL committed output from offset 0 (READ_COMMITTED) until the
     // 4th committed record appears. Reading from 0 is robust to the EOS control
     // (COMMIT-marker) batches that occupy output offsets between data records, so
-    // we don't depend on the exact offset the new record lands at. With true
-    // cross-restart EOS the committed output is exactly the original three plus
-    // ONE new record `a→3`: the restored store (a→2, b→1) plus the single new "a"
-    // at input offset 3. The committed source offset (3) means the original
-    // ["a","a","b"] is NOT re-read.
-    // Let the restarted instance run several commit cycles so any reprocessing
-    // of the committed input would have landed in the committed output by now.
-    tokio::time::sleep(Duration::from_secs(8)).await;
-
-    // The committed output must STILL be exactly the original three records.
-    // This is the true cross-restart exactly-once invariant: because the
-    // restarted instance resumed from the committed SOURCE offset (3, surfaced
-    // above via the broker's txn-offset materialization), it did NOT re-read the
-    // original ["a","a","b"]. Pre-fix, the source offset read back as -1, so the
-    // restarted consumer reset to `earliest`, re-read the committed input, and
-    // re-emitted committed records (a→3 from the re-read 2nd "a", then b→2) —
-    // double-counting. With the fix, no committed input is reprocessed, so the
-    // committed output does not grow with duplicates.
-    let after_restart = collect_committed(&admin, &bootstrap, 3, 0).await;
-    let a_counts: Vec<i64> = after_restart
-        .iter()
-        .filter(|(k, _)| k == "a")
-        .map(|(_, v)| *v)
-        .collect();
-    let b_counts: Vec<i64> = after_restart
-        .iter()
-        .filter(|(k, _)| k == "b")
-        .map(|(_, v)| *v)
-        .collect();
-    assert_eq!(
-        a_counts,
-        vec![1, 2],
-        "after EOS restart the committed 'a' counts must stay [1,2]: the committed \
-         'a' input must NOT be re-read/re-counted across restart (a re-read would \
-         re-emit a→3 from the restored store); got {after_restart:?}",
+    // we don't depend on the exact offset the new record lands at. Wait with the
+    // same generous 40s budget as the within-run wait: the restarted instance has
+    // to (re)join the streams group, get assigned, restore its store from the
+    // changelog, seek to the committed source offset, then fetch + process +
+    // commit the one new record — several round-trips before `a→3` is committed.
+    let after_restart = tokio::time::timeout(
+        Duration::from_secs(40),
+        collect_committed(&admin, &bootstrap, 4, 0),
+    )
+    .await
+    .expect(
+        "restarted EOS streams must commit the 4th output record (a→3 from the new \
+         input) within 40s",
     );
+
+    // The committed output must be EXACTLY the original three records PLUS the
+    // single new `a→3` — no more, no less. This is the true cross-restart
+    // exactly-once invariant in both directions:
+    //   * No reprocessing: because the restarted instance resumed from the
+    //     committed SOURCE offset (3, surfaced above via the broker's txn-offset
+    //     materialization), it did NOT re-read the original ["a","a","b"]. A
+    //     re-read would re-emit a→3 (from the restored store) and b→2 at HIGHER
+    //     output offsets — so a 5th/6th record, or an `a→3` arriving from the
+    //     re-read 2nd "a" rather than the genuinely new "a", would fail this
+    //     exact-set assertion. Pre-broker-fix the source offset read back as -1
+    //     and the consumer reset to `earliest`, double-counting.
+    //   * New input IS processed: the lone new "a" at input offset 3 advances the
+    //     restored count a=2 → 3 and is committed as `a→3`.
     assert_eq!(
-        b_counts,
-        vec![1],
-        "after EOS restart the committed 'b' count must stay [1]: the committed \
-         'b' input must NOT be reprocessed across restart; got {after_restart:?}",
+        after_restart,
+        vec![
+            ("a".to_string(), 1),
+            ("a".to_string(), 2),
+            ("b".to_string(), 1),
+            ("a".to_string(), 3),
+        ],
+        "after EOS restart the committed output must be EXACTLY [a→1, a→2, b→1, a→3]: \
+         the original three (committed input processed exactly once across the \
+         restart) plus the single new `a→3` (restored store a=2 + one new 'a'); \
+         got {after_restart:?}",
     );
 
     streams2.close().await.unwrap();
