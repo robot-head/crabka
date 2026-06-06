@@ -649,7 +649,7 @@ jobs:
           flags: operator-integration
           fail_ci_if_error: false
 
-  gatekeeper:
+  gatekeeper-ci:
     needs:
       - changes
       - rust
