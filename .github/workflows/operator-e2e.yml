@@ -4097,7 +4097,7 @@ jobs:
           retention-days: 14
           if-no-files-found: ignore
 
-  gatekeeper:
+  gatekeeper-operator:
     needs:
       - changes
       - build-images
