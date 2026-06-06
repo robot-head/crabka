@@ -141,6 +141,8 @@ impl DedupStore {
                 *self.owned.write().expect("owned lock") = assigned;
                 self.warm.store(false, Ordering::SeqCst);
                 empty_polls = 0;
+                crate::metrics::metrics()
+                    .set_owned_partitions(i64::try_from(current.len()).unwrap_or(0));
                 if let Some(publisher) = self.membership.get()
                     && let Err(e) = publisher.publish(&current).await
                 {

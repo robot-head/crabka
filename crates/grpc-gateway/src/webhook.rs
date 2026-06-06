@@ -32,6 +32,7 @@ use serde_json::Value;
 
 use crate::error::GatewayError;
 use crate::handlers::anonymous_principal;
+use crate::metrics::metrics;
 use crate::state::AppState;
 use crate::types::GatewayRecord;
 use crate::webhook_config::{Source, extract_source, verify_signature};
@@ -80,36 +81,45 @@ pub async fn webhook_handler(
 ) -> Response {
     // 1. Look up the compiled endpoint config.
     let Some(cfg) = state.config.webhooks.get(&name) else {
+        metrics().record_webhook_in("not_found");
         return StatusCode::NOT_FOUND.into_response();
     };
 
     // 2. Body size guard.
     if body.len() > cfg.max_body_bytes {
+        metrics().record_webhook_in("too_large");
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     }
 
     // 3. HMAC signature verification (when configured).
     if let Some(sig_header) = &cfg.signature_header {
         // Read the signature header value.
-        let provided = match headers.get(sig_header).and_then(|v| v.to_str().ok()) {
-            Some(v) => v.to_owned(),
-            None => return StatusCode::UNAUTHORIZED.into_response(),
+        let provided = if let Some(v) = headers.get(sig_header).and_then(|v| v.to_str().ok()) {
+            v.to_owned()
+        } else {
+            metrics().record_webhook_in("unauthenticated");
+            return StatusCode::UNAUTHORIZED.into_response();
         };
 
         // Replay guard: validate the timestamp before the HMAC check so a
         // stale-timestamp request is rejected without doing crypto work.
         if let Some(ts_header) = &cfg.timestamp_header {
-            let ts_str = match headers.get(ts_header).and_then(|v| v.to_str().ok()) {
-                Some(v) => v.to_owned(),
-                None => return StatusCode::UNAUTHORIZED.into_response(),
+            let ts_str = if let Some(v) = headers.get(ts_header).and_then(|v| v.to_str().ok()) {
+                v.to_owned()
+            } else {
+                metrics().record_webhook_in("unauthenticated");
+                return StatusCode::UNAUTHORIZED.into_response();
             };
-            let ts: i64 = match ts_str.parse() {
-                Ok(v) => v,
-                Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+            let ts: i64 = if let Ok(v) = ts_str.parse() {
+                v
+            } else {
+                metrics().record_webhook_in("unauthenticated");
+                return StatusCode::UNAUTHORIZED.into_response();
             };
             let now = now_unix_secs();
             let skew = (i128::from(now) - i128::from(ts)).abs();
             if skew > i128::from(cfg.timestamp_tolerance_secs) {
+                metrics().record_webhook_in("unauthenticated");
                 return StatusCode::UNAUTHORIZED.into_response();
             }
         }
@@ -122,6 +132,7 @@ pub async fn webhook_handler(
             &cfg.signature_encoding,
             cfg.signature_prefix.as_deref(),
         ) {
+            metrics().record_webhook_in("unauthenticated");
             return StatusCode::UNAUTHORIZED.into_response();
         }
     }
@@ -135,10 +146,14 @@ pub async fn webhook_handler(
 
     // 5. Idempotency key extraction.
     let idempotency_key: Option<String> = match &cfg.idempotency_source {
-        Some(src) => match extract_source(src, &headers, body_json.as_ref()) {
-            Some(k) => Some(k),
-            None => return StatusCode::BAD_REQUEST.into_response(),
-        },
+        Some(src) => {
+            if let Some(k) = extract_source(src, &headers, body_json.as_ref()) {
+                Some(k)
+            } else {
+                metrics().record_webhook_in("bad_request");
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+        }
         None => None,
     };
 
@@ -241,21 +256,34 @@ async fn produce_and_respond(
         AclOperation::Write,
     ) == AuthorizationResult::Deny
     {
+        metrics().record_webhook_in("unauthorized");
         return StatusCode::FORBIDDEN.into_response();
     }
     match state.produce.produce(rec, principal).await {
-        Ok(o) => (
-            StatusCode::OK,
-            Json(WebhookResponse {
-                partition: o.partition,
-                offset: o.offset,
-                deduplicated: o.deduplicated,
-            }),
-        )
-            .into_response(),
-        Err(GatewayError::Unauthorized(_)) => StatusCode::FORBIDDEN.into_response(),
-        Err(GatewayError::Unavailable) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Ok(o) => {
+            metrics().record_webhook_in("ok");
+            (
+                StatusCode::OK,
+                Json(WebhookResponse {
+                    partition: o.partition,
+                    offset: o.offset,
+                    deduplicated: o.deduplicated,
+                }),
+            )
+                .into_response()
+        }
+        Err(GatewayError::Unauthorized(_)) => {
+            metrics().record_webhook_in("unauthorized");
+            StatusCode::FORBIDDEN.into_response()
+        }
+        Err(GatewayError::Unavailable) => {
+            metrics().record_webhook_in("error");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+        Err(_) => {
+            metrics().record_webhook_in("error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 

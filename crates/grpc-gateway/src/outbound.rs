@@ -24,7 +24,19 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::GatewayError;
+use crate::metrics::metrics;
 use crate::outbound_config::CompiledSubscription;
+
+/// RAII guard that decrements the active-subscriptions gauge exactly once on
+/// drop, regardless of how `run_subscription` exits (normal shutdown, poll
+/// error, or early return).
+struct ActiveSubscriptionGuard;
+
+impl Drop for ActiveSubscriptionGuard {
+    fn drop(&mut self) {
+        metrics().dec_active_subscriptions();
+    }
+}
 
 /// Run a subscription's delivery loop until `shutdown` fires.
 ///
@@ -64,6 +76,9 @@ pub async fn run_subscription(
         .assignor(Assignor::CooperativeSticky)
         .build()
         .await?;
+
+    metrics().inc_active_subscriptions();
+    let _guard = ActiveSubscriptionGuard;
 
     let mut poll_err: Option<GatewayError> = None;
     loop {
@@ -183,7 +198,10 @@ async fn deliver_one(
         }
 
         match req.send().await {
-            Ok(resp) if resp.status().is_success() => return, // delivered
+            Ok(resp) if resp.status().is_success() => {
+                metrics().record_webhook_out("delivered");
+                return; // delivered
+            }
             Ok(resp) => tracing::debug!(
                 subscription = %sub.name,
                 event = %event_id,
@@ -204,6 +222,7 @@ async fn deliver_one(
             dead_letter(producer, sub, rec, &event_id).await;
             return;
         }
+        metrics().record_webhook_retry();
         tokio::time::sleep(backoff_with_jitter(
             attempt,
             sub.base_backoff_ms,
@@ -297,6 +316,9 @@ async fn dead_letter(
         );
         return;
     };
+
+    metrics().record_dead_letter();
+    metrics().record_webhook_out("dead_letter");
 
     let prec = ProducerRecord {
         topic: dlq.clone(),

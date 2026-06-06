@@ -20,6 +20,7 @@ use crabka_security::{AuthMethod, Principal};
 use serde::{Deserialize, Serialize};
 
 use crate::error::GatewayError;
+use crate::metrics::metrics;
 use crate::state::AppState;
 use crate::types::{GatewayRecord, RecordOutcome};
 
@@ -203,13 +204,10 @@ impl Forwarder {
     ) -> Result<RecordOutcome, GatewayError> {
         let url = format!("{}://{}/internal/v1/forward", self.scheme, owner_addr);
         let body = ForwardRecord::from_record(rec, principal);
-        let resp = self
-            .http
-            .post(&url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| GatewayError::Unavailable)?;
+        let resp = self.http.post(&url).json(&body).send().await.map_err(|_| {
+            metrics().record_forward("unavailable");
+            GatewayError::Unavailable
+        })?;
         // Parse the body regardless of status: the owner returns a JSON
         // ForwardResult even on 403 (authz deny / unauthenticated peer). A
         // denied forward must surface as a NON-retriable error, not a retriable
@@ -217,26 +215,43 @@ impl Forwarder {
         let status = resp.status();
         match resp.json::<ForwardResult>().await {
             Ok(result) => match result.error {
-                None if status.is_success() => Ok(RecordOutcome {
-                    partition: result.partition,
-                    offset: result.offset,
-                    deduplicated: result.deduplicated,
-                }),
-                None => Err(GatewayError::Unavailable),
-                Some(e) if e.retriable => Err(GatewayError::Unavailable),
+                None if status.is_success() => {
+                    metrics().record_forward("ok");
+                    Ok(RecordOutcome {
+                        partition: result.partition,
+                        offset: result.offset,
+                        deduplicated: result.deduplicated,
+                    })
+                }
+                None => {
+                    metrics().record_forward("unavailable");
+                    Err(GatewayError::Unavailable)
+                }
+                Some(e) if e.retriable => {
+                    metrics().record_forward("unavailable");
+                    Err(GatewayError::Unavailable)
+                }
                 // A non-retriable owner error on a 403 is an authorization
                 // denial: surface it as permanent PERMISSION_DENIED, never retry.
                 Some(e) if status == reqwest::StatusCode::FORBIDDEN => {
+                    metrics().record_forward("unauthorized");
                     Err(GatewayError::Unauthorized(e.message))
                 }
-                Some(e) => Err(GatewayError::Forward(e.message)),
+                Some(e) => {
+                    metrics().record_forward("forward_error");
+                    Err(GatewayError::Forward(e.message))
+                }
             },
             // A 2xx with an undecodable body is a malformed owner response (fatal);
             // a non-2xx with no JSON body is a transient transport-level failure.
             Err(e) if status.is_success() => {
+                metrics().record_forward("forward_error");
                 Err(GatewayError::Forward(format!("decode forward result: {e}")))
             }
-            Err(_) => Err(GatewayError::Unavailable),
+            Err(_) => {
+                metrics().record_forward("unavailable");
+                Err(GatewayError::Unavailable)
+            }
         }
     }
 }

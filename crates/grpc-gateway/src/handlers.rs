@@ -10,6 +10,7 @@ use crabka_authz::{AuthorizationRequest, AuthorizationResult};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
 
+use crate::metrics::metrics;
 use crate::pb;
 use crate::state::AppState;
 
@@ -136,19 +137,42 @@ pub async fn send(
             AclOperation::Write,
         ) == AuthorizationResult::Deny
         {
+            metrics().record_send("unauthorized");
             results.push(error_result(&crate::error::GatewayError::Unauthorized(
                 format!("Write Topic:{}", rec.topic),
             )));
             continue;
         }
-        let result = match state.produce.produce(rec, &eff).await {
-            Ok(o) => pb::RecordResult {
-                partition: o.partition,
-                offset: o.offset,
-                deduplicated: o.deduplicated,
-                error: None,
-            },
-            Err(e) => crate::handlers::error_result(&e),
+        let t0 = std::time::Instant::now();
+        let produce_result = state.produce.produce(rec, &eff).await;
+        metrics().observe_produce_latency(t0.elapsed().as_secs_f64());
+        let result = match produce_result {
+            Ok(ref o) if o.deduplicated => {
+                metrics().record_send("deduplicated");
+                pb::RecordResult {
+                    partition: o.partition,
+                    offset: o.offset,
+                    deduplicated: o.deduplicated,
+                    error: None,
+                }
+            }
+            Ok(o) => {
+                metrics().record_send("ok");
+                pb::RecordResult {
+                    partition: o.partition,
+                    offset: o.offset,
+                    deduplicated: o.deduplicated,
+                    error: None,
+                }
+            }
+            Err(ref e @ crate::error::GatewayError::Unauthorized(_)) => {
+                metrics().record_send("unauthorized");
+                crate::handlers::error_result(e)
+            }
+            Err(ref e) => {
+                metrics().record_send("error");
+                crate::handlers::error_result(e)
+            }
         };
         results.push(result);
     }
