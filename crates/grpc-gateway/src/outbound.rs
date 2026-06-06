@@ -315,6 +315,7 @@ async fn dead_letter(
             event = %event_id,
             "outbound delivery exhausted; no dead_letter_topic configured, dropping",
         );
+        metrics().record_webhook_out("dropped");
         return;
     };
 

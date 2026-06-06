@@ -22,8 +22,8 @@
 //! Per-request spans are emitted under the dedicated
 //! [`REQUEST_TARGET`] target at `DEBUG`, so they cost nothing (a disabled
 //! level check) on a broker without OTLP, and the stdout `fmt` layer never
-//! prints them. Only the OTLP layer enables that target (see
-//! [`OtlpConfig::otel_filter`]).
+//! prints them. Only the OTLP layer enables that target (via the
+//! `otel_default_filter` passed to [`init`]).
 
 use std::net::SocketAddr;
 
