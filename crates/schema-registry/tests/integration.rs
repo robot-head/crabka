@@ -1345,3 +1345,43 @@ async fn rest_reference_not_found_rejected() {
     cancel.cancel();
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_avro_reference_resolves_end_to_end() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    let money = r#"{"type":"record","name":"Money","fields":[{"name":"cents","type":"long"}]}"#;
+    register(
+        &app,
+        "money",
+        &serde_json::json!({ "schema": money }).to_string(),
+    )
+    .await;
+    // Order uses Money by name; without the reference it would not parse.
+    let order = r#"{"type":"record","name":"Order","fields":[{"name":"price","type":"Money"}]}"#;
+    let body = serde_json::json!({
+        "schema": order,
+        "references": [{ "name": "Money", "subject": "money", "version": 1 }]
+    })
+    .to_string();
+    let r = app
+        .clone()
+        .oneshot(req_post("/subjects/order/versions", &body))
+        .await
+        .unwrap();
+    assert_eq!(
+        r.status(),
+        StatusCode::OK,
+        "Order resolves Money via reference"
+    );
+    // And without the reference, the same Order is rejected (unresolved type).
+    let no_ref = serde_json::json!({ "schema": order }).to_string();
+    let bad = app
+        .clone()
+        .oneshot(req_post("/subjects/order2/versions", &no_ref))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    cancel.cancel();
+    broker.shutdown().await;
+}
