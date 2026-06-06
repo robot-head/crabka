@@ -90,4 +90,33 @@ mod tests {
         assert!(s.verify("alice", "pw"));
         assert!(!s.verify("alice", "bad"));
     }
+
+    #[test]
+    fn load_inline_users_win_over_file() {
+        // htpasswd file says alice:filepw; inline config says alice:inlinepw.
+        // Inline (CLI/config) is more explicit and must win the conflict.
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "crabka-sr-basic-auth-{}.htpasswd",
+            std::process::id()
+        ));
+        std::fs::write(&path, "# comment\n\nalice:filepw\nbob:bobpw\n").unwrap();
+
+        let cfg = crate::config::BasicAuthConfig {
+            users: [("alice".to_string(), "inlinepw".to_string())]
+                .into_iter()
+                .collect(),
+            file: Some(path.clone()),
+        };
+        let store = BasicAuthStore::load(&cfg).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        assert!(store.verify("alice", "inlinepw"), "inline credential wins");
+        assert!(
+            !store.verify("alice", "filepw"),
+            "file credential is overridden"
+        );
+        // File-only entries (no inline override) still load.
+        assert!(store.verify("bob", "bobpw"), "file-only entry preserved");
+    }
 }

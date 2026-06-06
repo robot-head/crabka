@@ -208,7 +208,11 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Authentication state ────────────────────────────────────────────────
     let basic = match &cfg.security.basic {
-        Some(b) => Some(Arc::new(load_basic_store(b)?)),
+        Some(b) => {
+            Some(Arc::new(BasicAuthStore::load(b).map_err(|e| {
+                anyhow::anyhow!("load basic-auth credentials: {e}")
+            })?))
+        }
         None => None,
     };
     let bearer = cfg.security.bearer.as_ref().map(|b| b.validator.clone());
@@ -432,26 +436,6 @@ fn build_sasl(args: &Args) -> anyhow::Result<SaslCredentials> {
              GSSAPI is not yet CLI-exposed"
         ),
     }
-}
-
-/// Load a [`BasicAuthStore`] from inline users + an optional htpasswd-style
-/// file. File entries layer over inline users (file wins on conflict).
-fn load_basic_store(cfg: &BasicAuthConfig) -> anyhow::Result<BasicAuthStore> {
-    let mut users = cfg.users.clone();
-    if let Some(path) = &cfg.file {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| anyhow::anyhow!("read basic-auth file {}: {e}", path.display()))?;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            if let Some((u, c)) = line.split_once(':') {
-                users.insert(u.to_string(), c.to_string());
-            }
-        }
-    }
-    Ok(BasicAuthStore::from_users(users))
 }
 
 /// Split a comma-separated `host:port,host:port` bootstrap string into the
