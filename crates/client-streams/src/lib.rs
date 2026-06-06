@@ -231,6 +231,24 @@
 //! `KSTREAM-OUTERTHIS-`/`KSTREAM-OUTEROTHER-` to match the JVM. As with the other
 //! joins, a key-changing stream must `.repartition(..)` before joining.
 //!
+//! [`StreamsBuilder::global_table`] sources a [`GlobalKTable`]: a **fully-replicated**
+//! lookup table. Every application instance reads *all* partitions of the source
+//! topic into one shared global store, so the source topic itself is the truth —
+//! there is **no copartitioning, no repartition, and no changelog** (the global
+//! store is rebuilt from the source on startup). The store is *invisible in the
+//! wire topology* (no subtopology of its own), though its global source node still
+//! consumes a node-group index during grouping (so declaring `global_table` before
+//! `stream` shifts the stream subtopology id). [`KStream::join_global`] /
+//! [`KStream::left_join_global`] join a stream to it by a **per-record-derived
+//! key** — `key_mapper(&streamKey, &streamValue)` selects the global key (which may
+//! differ from the stream key) — and emit `joiner(&streamValue, &globalValue)` keyed
+//! by the *stream* key. An inner `join_global` skips a record on a store miss; a
+//! `left_join_global` always emits, passing `None` for the global side. Because the
+//! store is fully replicated, any record can look up any key on every instance.
+//! The runtime's global consumer **bootstraps** the store — draining every partition
+//! of the source topic to end-of-log — *before* any task begins processing, so the
+//! first joined record already sees the complete global table.
+//!
 //! ```
 //! use crabka_client_streams::{
 //!     Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder, StringSerde,
