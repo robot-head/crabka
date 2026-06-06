@@ -313,6 +313,72 @@
 //! assert_eq!(driver.store_get::<String, i64>("counts", &"b".to_string()), Some(1));
 //! ```
 //!
+//! ## Punctuation (timers)
+//!
+//! A Processor-API node can register **punctuators** — periodic callbacks — via
+//! [`ProcessorContext::schedule`]`(interval, `[`PunctuationType`]`, `[`Punctuator`]`)`,
+//! typically from `init`. A [`Punctuator`] is a trait object (like [`Processor`])
+//! that on each fire receives a `ProcessorContext` positioned at the scheduling node,
+//! so it may `forward(...)` records downstream and read/write state stores; share
+//! mutable state with the owning processor via `Arc<Mutex<_>>`. `schedule` returns a
+//! [`Cancellable`] (`.cancel()` stops it). Two clocks drive firing:
+//!
+//! - [`PunctuationType::StreamTime`] — driven by the task's observed max record
+//!   timestamp (deterministic; advances as records are piped).
+//! - [`PunctuationType::WallClockTime`] — driven by the system clock between polls
+//!   (in tests, by [`TopologyTestDriver::advance_wall_clock_time`]).
+//!
+//! Both fire **at most once per driving action**, passing the **current** time
+//! (stream-time / wall-clock) to `punctuate`; a schedule that has fallen more than one
+//! interval behind resyncs ahead rather than replaying every missed boundary. A
+//! stream-time schedule first-fires on the first record; a wall-clock schedule first-
+//! fires one interval after it was scheduled. (Punctuation is invisible in the wire
+//! topology — it is purely runtime behavior; these semantics match the JVM
+//! `TopologyTestDriver`.)
+//!
+//! ```
+//! use async_trait::async_trait;
+//! use std::time::Duration;
+//! use crabka_client_streams::{
+//!     Consumed, I64Serde, Processor, ProcessorContext, Produced, PunctuationType, Punctuator,
+//!     Record, StringSerde, Topology, TopologyTestDriver,
+//! };
+//!
+//! // A punctuator that forwards the fire timestamp downstream.
+//! struct Emit;
+//! #[async_trait]
+//! impl Punctuator<String, i64> for Emit {
+//!     async fn punctuate(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>, ts: i64) {
+//!         ctx.forward(Record::new(None, ts, ts));
+//!     }
+//! }
+//! // A processor that schedules `Emit` every 10ms of stream-time (and drops records).
+//! struct Scheduler;
+//! #[async_trait]
+//! impl Processor<String, String, String, i64> for Scheduler {
+//!     async fn init(&mut self, ctx: &mut ProcessorContext<'_, '_, String, i64>) {
+//!         ctx.schedule(Duration::from_millis(10), PunctuationType::StreamTime, Emit);
+//!     }
+//!     async fn process(&mut self, _ctx: &mut ProcessorContext<'_, '_, String, i64>, _r: Record<String, String>) {}
+//! }
+//!
+//! let mut topo = Topology::new();
+//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+//! let p = topo.add_processor("p", || Scheduler, [&src]);
+//! topo.add_sink("out", "out", [&p], Produced::with(StringSerde, I64Serde));
+//! let built = topo.build("app").unwrap();
+//!
+//! let mut driver = TopologyTestDriver::new(&built).unwrap();
+//! // Stream-time advances with each record's timestamp; the punctuator fires once per
+//! // crossed 10ms boundary, stamped with the CURRENT stream-time (5 is skipped).
+//! for ts in [0_i64, 5, 10] {
+//!     driver.pipe_input("in", Consumed::with(StringSerde, StringSerde), Some("k".to_string()), "v".to_string(), ts);
+//! }
+//! assert_eq!(driver.read_output("out", Produced::with(StringSerde, I64Serde)), Some((None, 0_i64)));
+//! assert_eq!(driver.read_output("out", Produced::with(StringSerde, I64Serde)), Some((None, 10_i64)));
+//! assert_eq!(driver.read_output("out", Produced::with(StringSerde, I64Serde)), None);
+//! ```
+//!
 //! ## Running an app (`KafkaStreams`)
 //!
 //! Once built, run a topology against a broker with the managed runtime — it
