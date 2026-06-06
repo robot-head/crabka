@@ -67,25 +67,68 @@ impl BufferConfig {
     pub(crate) fn record_cap(&self) -> Option<usize> {
         self.max_records
     }
-    #[allow(dead_code)] // wired in T2 (KTableSuppressProcessor::process)
     pub(crate) fn is_emit_early(&self) -> bool {
         self.emit_early
     }
 }
 
-/// A suppression configuration. Slice A: `until_window_closes`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Suppressed {
-    #[allow(dead_code)] // read by the lowering once Slice B/C branch on the buffer
+/// A suppression configuration, parameterized by the table key `K`. Carries a
+/// `fn(&K, i64) -> i64` (record key + timestamp → buffer time): window-close reads
+/// `window.end`, time-limit reads the record timestamp. Fn pointers are `Copy`, so
+/// `Suppressed<K>` is `Copy` without requiring `K: Copy`.
+#[derive(Debug)]
+pub struct Suppressed<K> {
     pub(crate) buffer: BufferConfig,
+    pub(crate) buffer_time: fn(&K, i64) -> i64,
+    pub(crate) wait: WaitKind,
 }
 
-impl Suppressed {
-    /// Emit each window's final result once the window closes
-    /// (`stream_time >= window.end + grace`). Requires a windowed `KTable`.
+// All fields are Copy independently of K (fn pointer + two plain enums).
+impl<K> Clone for Suppressed<K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<K> Copy for Suppressed<K> {}
+
+/// How long to wait before emitting a buffered record.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum WaitKind {
+    /// Window-close: wait = the upstream window's grace (from the `KTable` handle).
+    UpstreamGrace,
+    /// Time-limit: wait = the configured duration (ms).
+    Fixed(i64),
+}
+
+impl<KInner> Suppressed<crate::dsl::windows::Windowed<KInner>> {
+    /// Emit each window's final result once it closes (`stream_time >= window.end +
+    /// grace`). Requires a windowed `KTable` + a STRICT buffer (shutDownWhenFull).
     #[must_use]
     pub fn until_window_closes(buffer: BufferConfig) -> Self {
-        Self { buffer }
+        assert!(
+            !buffer.is_emit_early(),
+            "untilWindowCloses requires a strict (shutDownWhenFull) buffer config"
+        );
+        Self {
+            buffer,
+            buffer_time: |k, _ts| k.window.end,
+            wait: WaitKind::UpstreamGrace,
+        }
+    }
+}
+
+impl<K> Suppressed<K> {
+    /// Rate-limiter: emit at most one update per key per `wait_ms` (stream-time); a
+    /// newer record for a key replaces the buffered one and resets the timer.
+    #[must_use]
+    pub fn until_time_limit(wait_ms: i64, buffer: BufferConfig) -> Self {
+        assert!(wait_ms >= 0, "time limit must be >= 0");
+        Self {
+            buffer,
+            buffer_time: |_k, ts| ts,
+            wait: WaitKind::Fixed(wait_ms),
+        }
     }
 }
 
@@ -109,5 +152,18 @@ mod tests {
                 .emit_early_when_full()
                 .is_emit_early()
         );
+    }
+
+    #[test]
+    fn suppressed_constructors() {
+        use crate::dsl::windows::{Window, Windowed};
+        let wc = Suppressed::until_window_closes(BufferConfig::unbounded());
+        let wk = Windowed {
+            key: "k".to_string(),
+            window: Window { start: 0, end: 99 },
+        };
+        assert_eq!((wc.buffer_time)(&wk, 5), 99); // window.end
+        let tl = Suppressed::<String>::until_time_limit(50, BufferConfig::max_records(2));
+        assert_eq!((tl.buffer_time)(&"k".to_string(), 5), 5); // record ts
     }
 }

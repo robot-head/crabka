@@ -468,21 +468,23 @@ where
     }
 }
 
-impl<KInner, V> KTable<crate::dsl::windows::Windowed<KInner>, V>
+impl<K, V> KTable<K, V>
 where
-    KInner: Any + Send + Sync + Clone + Eq + std::hash::Hash,
+    K: Any + Send + Sync + Clone + Eq + std::hash::Hash,
     V: Any + Send + Clone,
 {
-    /// `suppress(untilWindowCloses(..))`: buffer per-window updates and emit each
-    /// window's final value once it closes (`stream_time >= window.end + grace`).
-    /// The grace comes from the upstream windowed aggregation.
+    /// `suppress(Suppressed)`: buffer updates and emit on a delay. `until_window_closes`
+    /// (windowed tables) emits each window's final value once it closes;
+    /// `until_time_limit` rate-limits any table to one update per key per wait.
     #[must_use]
-    pub fn suppress(
-        &self,
-        suppressed: crate::dsl::suppress::Suppressed,
-    ) -> KTable<crate::dsl::windows::Windowed<KInner>, V> {
-        let grace_ms = self.window_grace_ms.unwrap_or(0);
+    pub fn suppress(&self, suppressed: crate::dsl::suppress::Suppressed<K>) -> KTable<K, V> {
+        let wait_ms = match suppressed.wait {
+            crate::dsl::suppress::WaitKind::UpstreamGrace => self.window_grace_ms.unwrap_or(0),
+            crate::dsl::suppress::WaitKind::Fixed(ms) => ms,
+        };
+        let buffer_time = suppressed.buffer_time;
         let max_records = suppressed.buffer.record_cap();
+        let emit_early = suppressed.buffer.is_emit_early();
         let parent_id = self.node;
         let mut g = self.builder.borrow_mut();
         let name = g.new_processor_name(names::KTABLE_SUPPRESS);
@@ -492,26 +494,18 @@ where
             vec![parent_id],
         );
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
-            // Parent forwards Change<V>; suppress buffers and forwards Change<V>.
-            let parent = NodeHandle::<crate::dsl::windows::Windowed<KInner>, Change<V>>::from_name(
-                state.handle_name[&parent_id].clone(),
-            );
+            let parent =
+                NodeHandle::<K, Change<V>>::from_name(state.handle_name[&parent_id].clone());
             let h = state
                 .topology
-                .add_processor::<
-                    crate::dsl::windows::Windowed<KInner>,
-                    Change<V>,
-                    crate::dsl::windows::Windowed<KInner>,
-                    Change<V>,
-                    _,
-                    _,
-                    _,
-                >(
+                .add_processor::<K, Change<V>, K, Change<V>, _, _, _>(
                     name.clone(),
                     move || {
-                        crate::dsl::processors::suppress::KTableSuppressProcessor::<KInner, V>::new(
-                            grace_ms,
+                        crate::dsl::processors::suppress::KTableSuppressProcessor::<K, V>::new(
+                            wait_ms,
+                            buffer_time,
                             max_records,
+                            emit_early,
                         )
                     },
                     [parent],
@@ -519,7 +513,8 @@ where
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, None, None).with_window_grace(Some(grace_ms))
+        KTable::new(Rc::clone(&self.builder), id, None, None)
+            .with_window_grace(self.window_grace_ms)
     }
 }
 
