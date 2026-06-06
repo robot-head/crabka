@@ -27,6 +27,9 @@ base64 = { workspace = true }
 bcrypt = "0.15"
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { workspace = true, features = ["util"] }
 axum = { workspace = true, features = ["query"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "macros", "signal", "time", "sync"] }
 tokio-util = { workspace = true, features = ["rt"] }
@@ -52,7 +55,6 @@ assert2 = { workspace = true }
 crabka-broker = { version = "0.2", path = "../broker", features = ["test-helpers"] }
 crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
 tempfile.workspace = true
-tower.workspace = true
 testcontainers.workspace = true
 testcontainers-modules = { workspace = true }
 

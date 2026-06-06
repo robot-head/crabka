@@ -1852,6 +1852,8 @@ dependencies = [
  "crabka-protocol",
  "crabka-security",
  "hex",
+ "hyper",
+ "hyper-util",
  "parking_lot",
  "percent-encoding",
  "prost-reflect",
