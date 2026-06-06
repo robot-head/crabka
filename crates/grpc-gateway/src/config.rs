@@ -1,9 +1,12 @@
 //! Gateway configuration, parsed from CLI flags / env in `bin/gateway.rs`.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
 pub use crabka_security::ClientAuthMode;
+
+use crate::webhook_config::CompiledWebhook;
 
 /// TLS / mTLS settings for the gateway listener and the forward channel.
 /// Present ⇒ the gateway serves over rustls; absent ⇒ plaintext.
@@ -125,6 +128,9 @@ pub struct GatewayConfig {
     pub tls: Option<TlsSettings>,
     /// Authorization settings; `None` ⇒ `AllowAll` (no enforcement; default).
     pub authz: Option<AuthzSettings>,
+    /// Named webhook endpoints; compiled from a TOML config file at startup.
+    /// Empty ⇒ `/v1/webhooks/{name}` returns 404 for every name.
+    pub webhooks: HashMap<String, CompiledWebhook>,
 }
 
 impl GatewayConfig {

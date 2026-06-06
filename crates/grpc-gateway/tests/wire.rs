@@ -134,6 +134,7 @@ async fn send_handler_ok_and_error_arms() {
             membership_topic: "__crabka_grpc_gateway_membership".into(),
             tls: None,
             authz: None,
+            webhooks: std::collections::HashMap::new(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,

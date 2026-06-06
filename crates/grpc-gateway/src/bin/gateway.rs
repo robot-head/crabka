@@ -135,6 +135,10 @@ struct Args {
         default_value = "sub"
     )]
     bearer_principal_claim: String,
+
+    /// Optional TOML file defining `[[webhooks.endpoints]]` for HTTP webhook inbound.
+    #[arg(long, env = "CRABKA_GATEWAY_WEBHOOKS_CONFIG")]
+    webhooks_config: Option<std::path::PathBuf>,
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -186,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let authz = build_authz_settings(&args)?;
+    let webhooks = load_webhooks(&args)?;
 
     let config = GatewayConfig {
         bootstrap: args.bootstrap_servers.clone(),
@@ -199,6 +204,7 @@ async fn main() -> anyhow::Result<()> {
         membership_topic: args.membership_topic.clone(),
         tls: tls.clone(),
         authz,
+        webhooks,
     };
 
     let bearer = build_bearer(&args)?;
@@ -224,6 +230,25 @@ fn build_authz_settings(args: &Args) -> anyhow::Result<Option<AuthzSettings>> {
             }))
         }
         other => anyhow::bail!("invalid --authz: {other}"),
+    }
+}
+
+/// Load and compile the optional webhooks TOML config file.
+fn load_webhooks(
+    args: &Args,
+) -> anyhow::Result<
+    std::collections::HashMap<String, crabka_grpc_gateway::webhook_config::CompiledWebhook>,
+> {
+    match args.webhooks_config.as_ref() {
+        Some(path) => {
+            let raw = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("read webhooks config {}: {e}", path.display()))?;
+            let file: crabka_grpc_gateway::webhook_config::WebhooksFile =
+                toml::from_str(&raw).map_err(|e| anyhow::anyhow!("parse webhooks config: {e}"))?;
+            file.compile()
+                .map_err(|e| anyhow::anyhow!("webhooks config: {e}"))
+        }
+        None => Ok(std::collections::HashMap::new()),
     }
 }
 
@@ -338,6 +363,7 @@ async fn run(
     let app = crabka_grpc_gateway::router(state.clone())
         .merge(health::router(readiness))
         .merge(forward::forward_router(state.clone()))
+        .merge(crabka_grpc_gateway::webhook::webhook_router(state.clone()))
         .layer(axum::middleware::from_fn(
             crabka_grpc_gateway::authz::auth_layer::resolve_principal,
         ));

@@ -201,6 +201,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             // TLS configured ⇒ /internal/v1/forward enforces the mTLS principal gate.
             tls: Some(settings.clone()),
             authz: None,
+            webhooks: std::collections::HashMap::new(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
