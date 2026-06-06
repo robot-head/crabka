@@ -2803,3 +2803,101 @@ fn dsl_process_values_is_not_key_changing_no_repartition() {
         "expected NO repartition topic from non-key-changing process_values; wire = {wire:?}"
     );
 }
+
+/// `process_values` reading a CONNECTED store via `get_state_store` and the source
+/// `record_context`: a `Tagger` counts per-key occurrences in the `seen` store and
+/// forwards `value#count`, keeping the key. Exercises the fixed-key context's
+/// store/record-context accessors over the real runtime path. Pipe `("k","a")`,
+/// `("k","b")` → `("k","a#1")`,`("k","b#2")`.
+#[test]
+fn dsl_process_values_reads_store_and_record_context() {
+    use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
+    struct Tagger;
+    #[async_trait::async_trait]
+    impl FixedKeyProcessor<String, String, String> for Tagger {
+        async fn process(
+            &mut self,
+            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
+            r: FixedKeyRecord<String, String>,
+        ) {
+            // Source metadata is available on every record.
+            assert!(!ctx.record_context().topic.is_empty());
+            let n = {
+                let store = ctx.get_state_store::<String, i64>("seen").unwrap();
+                let n = store.get(&r.key).await.unwrap_or(0) + 1;
+                store.put(r.key.clone(), n).await;
+                n
+            };
+            let v = r.value.clone();
+            ctx.forward(r.with_value(format!("{v}#{n}")));
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.add_state_store::<String, i64, _, _>("seen", StringSerde, I64Serde);
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process_values(|| Tagger, ["seen"])
+        .to("out", Produced::with(StringSerde, StringSerde));
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    for v in ["a", "b"] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some("k".to_string()),
+            v.to_string(),
+            0,
+        );
+    }
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "a#1".to_string()))
+    );
+    assert_eq!(
+        d.read_output("out", Produced::with(StringSerde, StringSerde)),
+        Some((Some("k".to_string()), "b#2".to_string()))
+    );
+}
+
+/// `process` referencing a store that was never `add_state_store`-ed panics at call
+/// time (the missing-store guard) — the store thunk is looked up when `process` is
+/// called, not deferred to lowering.
+#[test]
+#[should_panic(expected = "was not added via add_state_store")]
+fn dsl_process_unknown_store_panics() {
+    use crabka_client_streams::{Processor, ProcessorContext, Record};
+    struct Fwd;
+    #[async_trait::async_trait]
+    impl Processor<String, String, String, String> for Fwd {
+        async fn process(
+            &mut self,
+            ctx: &mut ProcessorContext<'_, '_, String, String>,
+            r: Record<String, String>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process(|| Fwd, ["missing"]);
+}
+
+/// `process_values` referencing an unadded store panics at call time, same guard.
+#[test]
+#[should_panic(expected = "was not added via add_state_store")]
+fn dsl_process_values_unknown_store_panics() {
+    use crabka_client_streams::{FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyRecord};
+    struct FixedFwd;
+    #[async_trait::async_trait]
+    impl FixedKeyProcessor<String, String, String> for FixedFwd {
+        async fn process(
+            &mut self,
+            ctx: &mut FixedKeyProcessorContext<'_, '_, '_, String, String>,
+            r: FixedKeyRecord<String, String>,
+        ) {
+            ctx.forward(r);
+        }
+    }
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .process_values(|| FixedFwd, ["missing"]);
+}

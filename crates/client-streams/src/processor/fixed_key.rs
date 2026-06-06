@@ -67,30 +67,13 @@ where
     }
 
     /// Access a connected key/value state store, typed. Delegates to
-    /// [`ProcessorContext::get_state_store`].
+    /// [`ProcessorContext::get_state_store`]. (Window/session-store accessors are
+    /// omitted: no DSL path connects those to a `process_values` node yet.)
     pub fn get_state_store<K2: Send + Sync + 'static, V2: Send + 'static>(
         &mut self,
         name: &str,
     ) -> Option<&mut dyn crate::store::api::KeyValueStore<K2, V2>> {
         self.inner.get_state_store::<K2, V2>(name)
-    }
-
-    /// Access a connected window store, typed. Delegates to
-    /// [`ProcessorContext::get_window_store`].
-    pub fn get_window_store<K2: Send + Sync + 'static, V2: Send + 'static>(
-        &mut self,
-        name: &str,
-    ) -> Option<&mut dyn crate::store::window::WindowStore<K2, V2>> {
-        self.inner.get_window_store::<K2, V2>(name)
-    }
-
-    /// Access a connected session store, typed. Delegates to
-    /// [`ProcessorContext::get_session_store`].
-    pub fn get_session_store<K2: Send + Sync + 'static, V2: Send + 'static>(
-        &mut self,
-        name: &str,
-    ) -> Option<&mut dyn crate::store::session::SessionStore<K2, V2>> {
-        self.inner.get_session_store::<K2, V2>(name)
     }
 
     /// Metadata of the source record currently being processed.
