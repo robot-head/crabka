@@ -1465,3 +1465,59 @@ async fn rest_json_reference_resolves_end_to_end() {
     cancel.cancel();
     broker.shutdown().await;
 }
+
+// GET-by-id includes references, GET /schemas carries schemaType, and
+// soft-deleting a whole referenced SUBJECT is reference-protected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_references_get_by_id_list_and_subject_delete_protection() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+    register(
+        &app,
+        "base",
+        &format!(r#"{{"schema":{:?}}}"#, av_named("Base", "int")),
+    )
+    .await;
+    let body = format!(
+        r#"{{"schema":{:?},"references":[{{"name":"Base","subject":"base","version":1}}]}}"#,
+        av_named("Dep", "long")
+    );
+    let dep_id = body_json(
+        app.clone()
+            .oneshot(req_post("/subjects/dep/versions", &body))
+            .await
+            .unwrap(),
+    )
+    .await["id"]
+        .as_i64()
+        .unwrap();
+    // GET /schemas/ids/{referrer_id} includes the references array.
+    let by_id = get_json(&app, &format!("/schemas/ids/{dep_id}")).await;
+    assert_eq!(by_id["references"][0]["name"], "Base");
+    assert_eq!(by_id["references"][0]["subject"], "base");
+    // GET /schemas surfaces a non-Avro schema's schemaType.
+    register(
+        &app,
+        "pb",
+        r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { int32 id = 1; }"}"#,
+    )
+    .await;
+    let all = get_json(&app, "/schemas").await;
+    assert!(
+        all.as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["schemaType"] == "PROTOBUF"),
+        "GET /schemas should carry schemaType for non-Avro rows"
+    );
+    // Soft-deleting the WHOLE referenced subject is rejected (42206).
+    let blocked = app
+        .clone()
+        .oneshot(req_delete("/subjects/base"))
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(blocked).await["error_code"], 42206);
+    cancel.cancel();
+    broker.shutdown().await;
+}
