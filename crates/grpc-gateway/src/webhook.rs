@@ -72,6 +72,7 @@ pub fn webhook_router(state: Arc<AppState>) -> Router {
 // ---------------------------------------------------------------------------
 
 /// `POST /v1/webhooks/{name}` — named, config-driven inbound webhook.
+#[tracing::instrument(skip_all)]
 pub async fn webhook_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(name): Path<String>,

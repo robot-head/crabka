@@ -84,6 +84,7 @@ impl DedupEngine {
     /// EOS produce: fast-path map hit returns the cached offset; a miss takes
     /// the partition's transactional producer and writes the data record +
     /// claim atomically, then updates the local map.
+    #[tracing::instrument(skip_all)]
     pub async fn dedup_produce(
         &self,
         rec: &GatewayRecord,

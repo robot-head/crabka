@@ -109,6 +109,7 @@ pub(crate) fn to_gateway_record(r: crate::pb::Record) -> crate::types::GatewayRe
     }
 }
 
+#[tracing::instrument(skip_all)]
 pub async fn send(
     Extension(state): Extension<Arc<AppState>>,
     principal: Option<Extension<Principal>>,

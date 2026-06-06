@@ -1537,6 +1537,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
+ "crabka-telemetry",
  "dashmap",
  "futures-util",
  "hex",

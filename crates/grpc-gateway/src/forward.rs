@@ -196,6 +196,7 @@ impl Forwarder {
     /// failures and owner-`retriable` errors become `Unavailable` so the origin
     /// retries / re-resolves to the (possibly new) owner; an owner authorization
     /// denial (HTTP 403) becomes a non-retriable `Unauthorized`.
+    #[tracing::instrument(skip_all)]
     pub async fn forward(
         &self,
         owner_addr: &str,

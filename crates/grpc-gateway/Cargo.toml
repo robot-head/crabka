@@ -16,6 +16,7 @@ path = "src/bin/gateway.rs"
 
 [dependencies]
 crabka-authz = { version = "0.2", path = "../authz" }
+crabka-telemetry = { version = "0.2", path = "../telemetry" }
 crabka-client-producer = { version = "0.2", path = "../client-producer" }
 crabka-client-consumer = { version = "0.2", path = "../client-consumer" }
 crabka-client-admin = { version = "0.2", path = "../client-admin" }

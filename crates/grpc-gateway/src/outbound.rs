@@ -156,6 +156,7 @@ async fn deliver_batch(
 /// retries → dead-letter on exhaustion. Returns once the record is delivered
 /// (2xx), skipped by the filter, or dead-lettered/dropped after `max_attempts`
 /// — i.e. once it may be committed as part of the batch.
+#[tracing::instrument(skip_all)]
 async fn deliver_one(
     http: &reqwest::Client,
     sub: &CompiledSubscription,
