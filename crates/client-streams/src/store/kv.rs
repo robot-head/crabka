@@ -87,6 +87,10 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for KeyValueBytesStore<K, 
     fn as_iq(&self) -> Option<&dyn crate::store::iq::IqQueryable> {
         Some(self)
     }
+    async fn clear(&mut self) {
+        self.backend.clear().await;
+        self.changelog.clear();
+    }
 }
 
 // The store struct holds only `Box<dyn Serde<_>>` + byte buffers (no bare `K`/`V`

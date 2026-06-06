@@ -188,6 +188,19 @@ impl StreamTask {
         Ok((current_sum, end_sum))
     }
 
+    /// Roll back to the last committed state after a txn abort: rewind source
+    /// positions to committed offsets, wipe stores, re-restore from the committed
+    /// changelog. Reuses [`seek_to_start`](Self::seek_to_start) + [`restore`](Self::restore).
+    pub async fn rollback(
+        &mut self,
+        fetcher: &dyn RecordFetcher,
+    ) -> Result<(), StreamsClientError> {
+        self.pending.clear();
+        self.seek_to_start().await?; // positions ← committed (or earliest)
+        self.graph.clear_stores().await;
+        self.restore(fetcher).await?; // replay committed changelog
+        Ok(())
+    }
     /// Seek each assigned partition to its committed offset, or `earliest` if
     /// none (auto.offset.reset = earliest).
     pub async fn seek_to_start(&mut self) -> Result<(), StreamsClientError> {
@@ -323,7 +336,7 @@ impl StreamTask {
 
     /// Test-only: typed read from a KV store by name.
     #[cfg(test)]
-    async fn store_get_i64(&mut self, name: &str, key: &String) -> Option<i64> {
+    pub(crate) async fn store_get_i64(&mut self, name: &str, key: &String) -> Option<i64> {
         match self.graph.stores.get_kv::<String, i64>(name) {
             Some(s) => s.get(key).await,
             None => None,

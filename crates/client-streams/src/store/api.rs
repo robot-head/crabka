@@ -28,6 +28,10 @@ pub trait StateStore: Any + Send {
     fn as_iq(&self) -> Option<&dyn crate::store::iq::IqQueryable> {
         None
     }
+    /// Wipe every entry (and any buffered changelog) — used by the EOS rollback
+    /// path to reset the store to a clean slate before re-restoring from the
+    /// committed changelog.
+    async fn clear(&mut self);
 }
 
 /// A keyed store. Implemented by the in-memory store; the typed view a processor

@@ -85,6 +85,25 @@ impl StreamThread {
         self.tasks.len()
     }
 
+    /// Test-only: typed read from a named KV store on the task at `key`.
+    #[cfg(test)]
+    async fn task_store_get_i64(
+        &mut self,
+        task: &(String, i32),
+        store: &str,
+        k: &String,
+    ) -> Option<i64> {
+        self.tasks.get_mut(task)?.store_get_i64(store, k).await
+    }
+
+    /// Test-only: whether the task at `key` has pending (uncommitted) offsets.
+    #[cfg(test)]
+    fn task_has_pending(&self, task: &(String, i32)) -> bool {
+        self.tasks
+            .get(task)
+            .is_some_and(|t| !t.pending_offsets().is_empty())
+    }
+
     /// Reconcile tasks to `assignment`. Reconciles active, standby, and warmup tasks.
     ///
     /// `guarantee` + `txn` configure the EOS commit path: under
@@ -224,6 +243,25 @@ impl StreamThread {
         Ok(())
     }
 
+    /// Abort the in-flight txn and roll back every task to the last committed
+    /// state (rewind source offsets, wipe stores, re-restore from the committed
+    /// changelog). Called on any error during an EOS process/commit cycle.
+    //
+    // All EOS-cycle errors are treated as retryable abort+rollback here; the
+    // fenced-fatal distinction (a `ProducerFenced` must shut the thread down, not
+    // retry) is a follow-up.
+    async fn abort_and_rollback(&mut self) -> Result<(), StreamsClientError> {
+        if let Some(txn) = self.txn.as_ref() {
+            let _ = txn.abort_transaction().await;
+        }
+        self.in_txn = false;
+        let fetcher = Arc::clone(&self.fetcher);
+        for task in self.tasks.values_mut() {
+            task.rollback(&*fetcher).await?;
+        }
+        Ok(())
+    }
+
     pub async fn poll_all(
         &mut self,
         fetcher: &dyn RecordFetcher,
@@ -237,10 +275,36 @@ impl StreamThread {
                 .poll_once(fetcher, &mut self.global_offsets)
                 .await?;
         }
-        // EOS: open a transaction before producing any sink/changelog records, so
-        // the whole process-then-commit cycle is one atomic txn. Idempotent across
-        // polls within a commit interval — `in_txn` stays set until `commit_all`.
-        if self.guarantee == ProcessingGuarantee::ExactlyOnceV2 && !self.in_txn {
+        match self.guarantee {
+            ProcessingGuarantee::AtLeastOnce => {
+                for task in self.tasks.values_mut() {
+                    task.process_once(fetcher).await?;
+                }
+            }
+            ProcessingGuarantee::ExactlyOnceV2 => {
+                // EOS: open a transaction before producing any sink/changelog
+                // records, so the whole process-then-commit cycle is one atomic
+                // txn. Idempotent across polls within a commit interval — `in_txn`
+                // stays set until `commit_all`. Any error mid-begin or mid-process
+                // aborts the txn and rolls every task back to the last commit; the
+                // cycle is then re-begun on the next poll (so `poll_all` returns Ok).
+                let res = self.eos_begin_and_process(fetcher).await;
+                if res.is_err() {
+                    self.abort_and_rollback().await?;
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// EOS begin-on-first-poll + per-task process, captured so `poll_all` can turn
+    /// any `Err` into an abort + rollback.
+    async fn eos_begin_and_process(
+        &mut self,
+        fetcher: &dyn RecordFetcher,
+    ) -> Result<(), StreamsClientError> {
+        if !self.in_txn {
             self.txn
                 .as_ref()
                 .expect("EOS txn producer")
@@ -282,6 +346,25 @@ impl StreamThread {
         Ok(())
     }
 
+    /// EOS commit barrier: fold every task's pending source offsets into a single
+    /// `send_offsets_to_transaction`, then `commit_transaction`. Captured so
+    /// `commit_all` can turn any `Err` into an abort + rollback. Does NOT clear
+    /// pending (the caller does that only on success).
+    async fn eos_send_offsets_and_commit(
+        &mut self,
+        meta: Option<&StreamsGroupMeta>,
+    ) -> Result<(), StreamsClientError> {
+        let txn = self.txn.as_ref().expect("EOS txn producer");
+        let mut offsets = Vec::new();
+        for task in self.tasks.values() {
+            offsets.extend(task.pending_offsets());
+        }
+        let meta = meta.expect("EOS commit requires group metadata");
+        txn.send_offsets_to_transaction(&offsets, meta).await?;
+        txn.commit_transaction().await?;
+        Ok(())
+    }
+
     /// Commit advanced offsets.
     ///
     /// At-least-once: per-task `flush` + offset commit (`meta` ignored).
@@ -304,14 +387,15 @@ impl StreamThread {
                 if !self.in_txn {
                     return Ok(()); // nothing produced since last commit
                 }
-                let txn = self.txn.as_ref().expect("EOS txn producer");
-                let mut offsets = Vec::new();
-                for task in self.tasks.values() {
-                    offsets.extend(task.pending_offsets());
+                // Capture the txn-commit sequence so any error (e.g. a failed
+                // `commit_transaction`) aborts the txn and rolls every task back to
+                // the last committed state. The cycle is then retried on the next
+                // interval (so `commit_all` returns Ok after a clean rollback).
+                let res = self.eos_send_offsets_and_commit(meta).await;
+                if res.is_err() {
+                    self.abort_and_rollback().await?;
+                    return Ok(());
                 }
-                let meta = meta.expect("EOS commit requires group metadata");
-                txn.send_offsets_to_transaction(&offsets, meta).await?;
-                txn.commit_transaction().await?;
                 for task in self.tasks.values_mut() {
                     task.clear_pending();
                 }
@@ -1218,6 +1302,136 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|(t, _p, _k, v)| t == "out" && v.as_deref() == Some(b"HI".as_ref()))
+        );
+    }
+
+    /// EOS-v2 abort + rollback: a `commit_transaction` failure mid-cycle must
+    /// abort the txn and roll every task back to its last committed state —
+    /// rewinding source offsets, wiping the stores, and re-restoring from the
+    /// (here empty) changelog. A subsequent successful cycle then reprocesses the
+    /// re-fetched batch without double-counting.
+    ///
+    /// Topology: stateful `source → counter (counts store) → sink`. The fetcher
+    /// returns the SAME "a" record for `("in", 0, 0)` on every fetch (so the
+    /// rewound cycle re-reads it) and an empty changelog (so re-restore yields an
+    /// empty store).
+    #[tokio::test]
+    async fn eos_commit_failure_aborts_and_rolls_back() {
+        use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
+
+        /// A fetcher that ALWAYS returns the "a" record at `("in", 0, 0)`
+        /// regardless of how many times it's fetched (it never consumes the
+        /// script), and an empty changelog. Re-fetching after a rewind re-reads
+        /// the same input — proving the rollback rewound the source offset.
+        struct ReplayFetcher;
+        #[async_trait::async_trait]
+        impl RecordFetcher for ReplayFetcher {
+            async fn fetch(
+                &self,
+                t: &str,
+                p: i32,
+                o: i64,
+            ) -> Result<FetchBatch, crate::StreamsClientError> {
+                if t == "in" && p == 0 && o == 0 {
+                    Ok(FetchBatch {
+                        records: vec![FetchedRec {
+                            offset: 0,
+                            key: None,
+                            value: Some("a".into()),
+                            timestamp: -1,
+                        }],
+                    })
+                } else {
+                    Ok(FetchBatch::default())
+                }
+            }
+        }
+
+        // One mock object, two trait-object views (same Arc). Fail the FIRST commit.
+        let mock = Arc::new(MockTransactionalProducer {
+            fail_at: StdMutex::new(Some(Step::Commit)),
+            ..Default::default()
+        });
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&mock) as _;
+        let txn: Arc<dyn TransactionalProducer> = Arc::clone(&mock) as _;
+        let store: Arc<dyn OffsetStore> = Arc::new(MemStore::default());
+
+        let built = stateful_built();
+        let replay: Arc<dyn RecordFetcher> = Arc::new(ReplayFetcher);
+        let mut thread = StreamThread::new(
+            Arc::clone(&replay),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+        thread
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::ExactlyOnceV2,
+                Some(Arc::clone(&txn)),
+            )
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        let meta = crate::runtime::eos::StreamsGroupMeta {
+            group_id: "app".into(),
+            generation_id: 3,
+            member_id: "m".into(),
+            group_instance_id: None,
+        };
+        let key = ("0".to_string(), 0);
+
+        // ── Cycle 1: begin + process (count "a" → 1, store dirty), then commit
+        //    FAILS → abort + rollback. ──────────────────────────────────────────
+        thread.poll_all(&*replay).await.unwrap();
+        // The dirty count is in the store before commit.
+        check!(
+            thread
+                .task_store_get_i64(&key, "counts", &"a".to_string())
+                .await
+                == Some(1)
+        );
+        // Commit fails internally → abort + rollback, but commit_all returns Ok
+        // (the cycle is rolled back; the next interval re-begins).
+        thread.commit_all(Some(&meta)).await.unwrap();
+
+        // The mock recorded the abort.
+        check!(mock.calls.lock().unwrap().contains(&Step::Abort));
+        // Pending offsets were cleared by the rollback.
+        check!(!thread.task_has_pending(&key));
+        // The store was rolled back: re-restored from the empty changelog, so the
+        // dirty count is gone.
+        check!(
+            thread
+                .task_store_get_i64(&key, "counts", &"a".to_string())
+                .await
+                == None,
+            "store must be rolled back to the (empty) committed changelog state"
+        );
+
+        // ── Cycle 2: fail_at is now None → the re-fetched "a" batch reprocesses
+        //    and yields count = 1 (NOT double-counted to 2). ────────────────────
+        thread.poll_all(&*replay).await.unwrap();
+        thread.commit_all(Some(&meta)).await.unwrap();
+        check!(
+            thread
+                .task_store_get_i64(&key, "counts", &"a".to_string())
+                .await
+                == Some(1),
+            "after rollback + reprocess the count must be 1, not double-counted"
+        );
+        // The second commit succeeded.
+        check!(
+            mock.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| **s == Step::Commit)
+                .count()
+                == 2
         );
     }
 }

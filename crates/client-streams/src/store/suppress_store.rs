@@ -208,6 +208,15 @@ impl<K: 'static, V: 'static> StateStore for SuppressBytesStore<K, V> {
     fn set_logging(&mut self, on: bool) {
         self.logging = on;
     }
+    async fn clear(&mut self) {
+        // No pluggable backend: wipe the in-memory time-ordered buffer + index +
+        // accounting + the changelog buffer (re-restore replays the committed log).
+        self.entries.clear();
+        self.index.clear();
+        self.seq = 0;
+        self.byte_size = 0;
+        self.changelog.clear();
+    }
 }
 
 #[async_trait]

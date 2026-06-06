@@ -107,6 +107,10 @@ impl<K: 'static, V: 'static> StateStore for SessionBytesStore<K, V> {
     fn as_iq(&self) -> Option<&dyn crate::store::iq::IqQueryable> {
         Some(self)
     }
+    async fn clear(&mut self) {
+        self.backend.clear().await;
+        self.changelog.clear();
+    }
 }
 
 // `SessionBytesStore` holds only `Box<dyn Serde<_>>` + byte buffers, so it is
