@@ -2178,3 +2178,40 @@ fn dsl_suppress_closes_multiple_windows_in_order() {
     // The [60000,120000) "a" entry stays buffered → no further output.
     assert_eq!(d.read_output("out", out), None);
 }
+
+/// Suppress with a record cap: exceeding `maxRecords` shuts the task down
+/// (shutDownWhenFull). Three distinct keys land in one still-open window
+/// [0,60000) with a cap of 2 → the third overflows → panic.
+#[test]
+#[should_panic(expected = "max capacity")]
+fn dsl_suppress_max_records_shuts_down_when_full() {
+    use crabka_client_streams::{
+        BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows,
+    };
+    let b = StreamsBuilder::new();
+    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key(Grouped::with(StringSerde, StringSerde))
+        .windowed_by(TimeWindows::of_size(60_000))
+        .count(Materialized::with(StringSerde, I64Serde))
+        .suppress(Suppressed::until_window_closes(
+            BufferConfig::unbounded().with_max_records(2),
+        ))
+        .to_stream()
+        .to(
+            "out",
+            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+        );
+    let built = b.build("app").unwrap();
+    let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
+    // Three distinct keys in window [0,60000) (ts < 60000 → none close) → the third
+    // brings the buffer to 3 > cap 2 → panic.
+    for (k, ts) in [("a", 1_000i64), ("b", 2_000), ("c", 3_000)] {
+        d.pipe_input(
+            "in",
+            Consumed::with(StringSerde, StringSerde),
+            Some(k.to_string()),
+            "x".to_string(),
+            ts,
+        );
+    }
+}
