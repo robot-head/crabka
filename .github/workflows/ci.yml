@@ -9,6 +9,13 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Minimal default GITHUB_TOKEN scope for every job (CodeQL hardening). All jobs
+# only read the repo + download release assets (protoc via setup-protoc); none
+# write to the repo or use the token for write APIs, so contents: read suffices.
+# Coverage uploads authenticate with CODECOV_TOKEN, not GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   rust:
     strategy:
