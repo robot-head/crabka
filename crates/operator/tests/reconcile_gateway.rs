@@ -277,6 +277,27 @@ async fn happy_path_all_objects_created_ready() {
         "Deployment args must include tls-cert; args = {args_joined}"
     );
 
+    // --- Assert the broker bootstrap + SNI resolve to the TLS listener ---
+    // The parent fixture exposes a plaintext PLAIN:9092 AND a TLS+mTLS
+    // `tls-internal`:9093. The gateway must dial the SECURED listener
+    // (port 9093), never the plaintext :9092, and its SNI must be the
+    // broker headless-svc SAN.
+    assert!(
+        args_joined
+            .contains("--bootstrap-servers=demo-broker-headless.default.svc.cluster.local:9093"),
+        "bootstrap must resolve the TLS listener (:9093), not plaintext :9092; args = {args_joined}"
+    );
+    assert!(
+        !args_joined
+            .contains("--bootstrap-servers=demo-broker-headless.default.svc.cluster.local:9092"),
+        "bootstrap must NOT point at the plaintext :9092 listener; args = {args_joined}"
+    );
+    assert!(
+        args_joined
+            .contains("--broker-tls-server-name=demo-broker-headless.default.svc.cluster.local"),
+        "broker SNI must be the headless-svc SAN; args = {args_joined}"
+    );
+
     // --- Assert final status carries Ready=True / Available ---
     let status_patch = observed
         .iter()
@@ -307,6 +328,190 @@ async fn happy_path_all_objects_created_ready() {
     );
 
     // All 12 rules must have been consumed.
+    assert!(
+        state.remaining_rules() == 0,
+        "all FIFO rules must be consumed, {} remaining",
+        state.remaining_rules()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// No-TLS-listener degraded path
+// ---------------------------------------------------------------------------
+
+/// Parent Kafka exposes ONLY a plaintext `PLAIN` listener (no TLS + mTLS
+/// internal listener). The gateway requires full mTLS to the broker, so
+/// reconcile must surface `Ready=False reason=NoTlsListener`, requeue, and
+/// render NO Deployment / Service.
+///
+/// The reconcile still walks the child-KafkaUser + serving-cert + config-Secret
+/// steps (those don't depend on the broker endpoint), then bails at step (6)
+/// when `resolve_broker_endpoint` returns `None`.
+#[allow(clippy::too_many_lines)]
+#[tokio::test]
+async fn no_tls_listener_blocks_with_degraded_and_no_deployment() {
+    let cluster_ca =
+        crabka_security::ca::generate_cluster_ca("demo-cluster-ca", 365).expect("CA gen");
+
+    let broker_user_name = format!("{GW}-broker");
+    let serving_name = format!("{GW}-serving");
+    let config_name = format!("{GW}-config");
+    let cluster_ca_key_name = format!("{KAFKA}-cluster-ca");
+    let cluster_ca_cert_name = format!("{KAFKA}-cluster-ca-cert");
+
+    // A validated parent with only a plaintext PLAIN listener — no TLS+mTLS
+    // listener for the gateway to dial.
+    let plain_only_kafka = serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "Kafka",
+        "metadata": { "name": KAFKA, "namespace": NS, "uid": "kafka-uid" },
+        "spec": {
+            "kafkaVersion": "0.1.1",
+            "listeners": [
+                { "name": "PLAIN", "port": 9092, "type": "internal", "tls": false }
+            ]
+        },
+        "status": {
+            "conditions": [{
+                "type": "KafkaVersionValid",
+                "status": "True",
+                "reason": "Valid",
+                "message": "ok",
+                "lastTransitionTime": "2026-05-22T00:00:00Z"
+            }],
+            "metadataVersion": "0.1",
+            "listeners": [
+                {
+                    "name": "PLAIN",
+                    "type": "internal",
+                    "bootstrapServers": format!("{KAFKA}-broker-headless.{NS}.svc.cluster.local:9092")
+                }
+            ]
+        }
+    });
+
+    let rules = vec![
+        // 1. GET parent Kafka → validated, plaintext-only
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/kafkas/{KAFKA}"),
+            response: json_response(200, &plain_only_kafka),
+        },
+        // 2. PATCH child KafkaUser (SSA) → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkausers/{broker_user_name}"),
+            response: json_response(200, &fake_kafkauser_body(&broker_user_name, NS)),
+        },
+        // 3. GET broker cert Secret → 200 (cert issued, don't wait)
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{broker_user_name}"),
+            response: json_response(200, &fake_broker_user_secret(GW, NS)),
+        },
+        // 4. GET serving cert Secret → 404 (first reconcile, need to issue)
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{serving_name}"),
+            response: Response::builder()
+                .status(404)
+                .header("content-type", "application/json")
+                .body(not_found_body("not found"))
+                .expect("404 builds"),
+        },
+        // 5. GET cluster-CA key Secret → 200
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_key_name}"),
+            response: json_response(
+                200,
+                &fake_cluster_ca_key_secret(KAFKA, NS, &cluster_ca.key_pem),
+            ),
+        },
+        // 6. GET cluster-CA cert Secret → 200
+        MockRule {
+            method: Method::GET,
+            path_substr: format!("/secrets/{cluster_ca_cert_name}"),
+            response: json_response(
+                200,
+                &fake_cluster_ca_cert_secret(KAFKA, NS, &cluster_ca.cert_pem),
+            ),
+        },
+        // 7. PATCH serving cert Secret → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{serving_name}"),
+            response: json_response(200, &fake_serving_secret(GW, NS)),
+        },
+        // 8. PATCH config Secret → 200
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/secrets/{config_name}"),
+            response: json_response(200, &fake_config_secret(GW, NS)),
+        },
+        // 9. PATCH gateway status (NoTlsListener degraded early return)
+        MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkagrpcgateways/{GW}/status"),
+            response: json_response(200, &fake_gateway_body(GW, NS, KAFKA)),
+        },
+        // No Deployment / Service rules: reconcile must bail before them.
+    ];
+
+    let (ctx, state) = build_ctx(NS, rules);
+    let gw = gw_cr(GW);
+    let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
+
+    assert!(
+        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
+        "expected requeue(30s) from no-TLS-listener gate, got {action:?}"
+    );
+
+    let observed = state.take_observed();
+
+    // Status PATCH must carry Ready=False reason=NoTlsListener.
+    let status_patch = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH
+                && r.uri()
+                    .to_string()
+                    .contains(&format!("/kafkagrpcgateways/{GW}/status"))
+        })
+        .expect("gateway status PATCH must have been captured");
+    let body: serde_json::Value =
+        serde_json::from_slice(status_patch.body()).expect("status PATCH body is JSON");
+    let conds = body["status"]["conditions"]
+        .as_array()
+        .expect("status must have conditions array");
+    let ready = conds
+        .iter()
+        .find(|c| c["type"] == "Ready")
+        .unwrap_or_else(|| panic!("Ready condition missing; body = {body}"));
+    assert!(
+        ready["status"] == "False",
+        "Ready must be False without a TLS listener; body = {body}"
+    );
+    assert!(
+        ready["reason"] == "NoTlsListener",
+        "reason must be NoTlsListener; body = {body}"
+    );
+
+    // No Deployment or Service PATCH must have happened.
+    let unexpected: Vec<_> = observed
+        .iter()
+        .filter(|r| {
+            r.method() == Method::PATCH
+                && (r.uri().to_string().contains("/deployments/")
+                    || r.uri().to_string().contains("/services/"))
+        })
+        .map(|r| r.uri().to_string())
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "no-TLS-listener gate must prevent Deployment/Service render; unexpected PATCHes: {unexpected:?}"
+    );
+
     assert!(
         state.remaining_rules() == 0,
         "all FIFO rules must be consumed, {} remaining",

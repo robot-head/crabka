@@ -862,6 +862,60 @@ fn version_gate(parent: &Kafka) -> Option<KafkaCondition> {
 }
 
 // ---------------------------------------------------------------------------
+// Broker endpoint resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve the broker `(bootstrap, sni)` the gateway should dial.
+///
+/// The gateway authenticates to the broker with its **clients-CA-signed**
+/// client cert (issued by the child `KafkaUser`) and is recognised as
+/// `User:CN=<gw>-broker`. That only works against a broker listener that is
+/// (a) **internal** (in-cluster headless DNS), (b) **TLS** (the transport the
+/// gateway's `--broker-tls-*` flags speak), and (c) **`authentication: tls`**
+/// (mTLS — the broker maps the client cert subject to a Kafka principal). A
+/// plaintext `PLAIN` listener on 9092 is none of these, so the gateway must
+/// never be pointed at it.
+///
+/// The predicate (internal + `tls` + `authentication == tls`) lives on
+/// `spec.listeners`; the resolved in-cluster `host:port` lives on
+/// `status.listeners[name].bootstrap_servers` (populated once
+/// `ListenersReady`). We correlate the two by listener `name`. The SNI is the
+/// broker serving-cert SAN at that listener — the shared headless-svc DNS
+/// `<kafka>-broker-headless.<ns>.svc.cluster.local` (see the broker keystore
+/// SANs in `controller::kafka`), which is stable across every internal
+/// listener regardless of port.
+///
+/// Returns `None` when no internal TLS+mTLS listener exists *or* its bootstrap
+/// has not yet resolved into `status.listeners` — the caller surfaces that as a
+/// `Ready=False reason=NoTlsListener` degraded condition and renders no
+/// Deployment.
+fn resolve_broker_endpoint(parent: &Kafka, namespace: &str) -> Option<(String, String)> {
+    let status = parent.status.as_ref()?;
+    // The eligible listener: internal, TLS transport, mTLS client auth.
+    let listener = parent.spec.listeners.iter().find(|l| {
+        l.type_ == crate::crd::ListenerType::Internal
+            && l.tls
+            && matches!(
+                l.authentication,
+                Some(crate::crd::ListenerAuthentication::Tls)
+            )
+    })?;
+    // Its resolved in-cluster bootstrap host:port from status.listeners.
+    let bootstrap = status
+        .listeners
+        .iter()
+        .find(|s| s.name == listener.name)
+        .map(|s| s.bootstrap_servers.clone())?;
+    // SNI = the broker serving-cert SAN at the headless Service (matches the
+    // SANs minted in `controller::kafka`'s broker keystore).
+    let sni = format!(
+        "{}-broker-headless.{namespace}.svc.cluster.local",
+        parent.name_any()
+    );
+    Some((bootstrap, sni))
+}
+
+// ---------------------------------------------------------------------------
 // Status helpers
 // ---------------------------------------------------------------------------
 
@@ -976,9 +1030,34 @@ pub async fn reconcile(
     let cfg = config_secret(&gw, &webhook_secrets, &outbound_secrets)?;
     apply_object(&secret_api, &config_secret_name(&name), &cfg).await?;
 
-    // (6) Resolve the broker bootstrap + SNI, then SSA the Deployment + Service.
-    let bootstrap = format!("{parent_name}-broker-headless.{ns}.svc.cluster.local:9092");
-    let broker_sni = format!("{parent_name}-broker-headless.{ns}.svc.cluster.local");
+    // (6) Resolve the broker bootstrap + SNI from the parent's TLS+mTLS
+    //     internal listener. Full-mTLS to the broker is the P9 design: the
+    //     gateway's clients-CA client cert authenticates it as a Kafka
+    //     principal, which only works against a `tls` + `authentication: tls`
+    //     listener. If no such listener exists (or its bootstrap hasn't
+    //     resolved into status yet), refuse to render the Deployment — pointing
+    //     the gateway's forced TLS handshake at a plaintext listener would fail
+    //     every broker connection.
+    let Some((bootstrap, broker_sni)) = resolve_broker_endpoint(&parent, &ns) else {
+        let ready = condition(
+            "Ready",
+            "False",
+            "NoTlsListener",
+            &format!(
+                "no internal TLS listener with authentication=tls found on Kafka '{parent_name}'; the gateway requires mTLS to the broker"
+            ),
+        );
+        let degraded = condition(
+            "Degraded",
+            "True",
+            "NoTlsListener",
+            &format!(
+                "Kafka '{parent_name}' exposes no internal TLS+mTLS listener for the gateway to dial"
+            ),
+        );
+        patch_conditions(&gw_api, &name, observed_generation, vec![ready, degraded]).await?;
+        return Ok(Action::requeue(Duration::from_secs(30)));
+    };
 
     // Image: spec override > operator default (--default-gateway-image) > built-in default.
     let image = gw
@@ -1645,5 +1724,135 @@ mod tests {
         assert!(joined.contains("--dedup-window-ms=123"), "{joined}");
         assert!(joined.contains("--dedup-txn-id-prefix=pfx"), "{joined}");
         assert!(joined.contains("--tls-client-auth=optional"), "{joined}");
+    }
+
+    // ── resolve_broker_endpoint ───────────────────────────────
+
+    use crate::crd::{
+        KafkaSpec, KafkaStatus, Listener, ListenerAuthentication, ListenerStatus, ListenerType,
+    };
+
+    /// Build a parent `Kafka` named `demo` in `default` with the given
+    /// `spec.listeners` + `status.listeners`.
+    fn parent_with_listeners(
+        spec_listeners: Vec<Listener>,
+        status_listeners: Vec<ListenerStatus>,
+    ) -> Kafka {
+        let mut parent = Kafka::new(
+            "demo",
+            KafkaSpec {
+                kafka_version: "0.1.1".into(),
+                metadata_version: None,
+                config: None,
+                listeners: spec_listeners,
+                inter_broker_listener_name: None,
+                metrics_config: None,
+                network_policy: None,
+                cluster_ca: None,
+                clients_ca: None,
+                logging: None,
+                delegation_token: None,
+                authorization: None,
+                tiered_storage: None,
+                inter_broker_kerberos: None,
+                krb5_conf_secret_ref: None,
+                tracing: None,
+            },
+        );
+        parent.metadata.namespace = Some("default".into());
+        parent.status = Some(KafkaStatus {
+            listeners: status_listeners,
+            ..Default::default()
+        });
+        parent
+    }
+
+    fn tls_mtls_listener(name: &str, port: i32) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls: true,
+            authentication: Some(ListenerAuthentication::Tls),
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    fn plain_listener(name: &str, port: i32) -> Listener {
+        Listener {
+            name: name.into(),
+            port,
+            type_: ListenerType::Internal,
+            tls: false,
+            authentication: None,
+            configuration: None,
+            network_policy_peers: None,
+        }
+    }
+
+    fn internal_status(name: &str, port: i32) -> ListenerStatus {
+        ListenerStatus {
+            name: name.into(),
+            type_: ListenerType::Internal,
+            bootstrap_servers: format!("demo-broker-headless.default.svc.cluster.local:{port}"),
+            addresses: vec![],
+        }
+    }
+
+    #[test]
+    fn resolve_broker_endpoint_picks_tls_mtls_internal_listener() {
+        // PLAIN/9092 (plaintext) + secured/9093 (tls + mtls). Must pick the
+        // secured one's bootstrap, NOT the plaintext :9092.
+        let parent = parent_with_listeners(
+            vec![
+                plain_listener("PLAIN", 9092),
+                tls_mtls_listener("secured", 9093),
+            ],
+            vec![
+                internal_status("PLAIN", 9092),
+                internal_status("secured", 9093),
+            ],
+        );
+        let (bootstrap, sni) = resolve_broker_endpoint(&parent, "default").expect("resolved");
+        assert!(
+            bootstrap == "demo-broker-headless.default.svc.cluster.local:9093",
+            "must resolve the secured listener bootstrap, got {bootstrap}"
+        );
+        assert!(
+            sni == "demo-broker-headless.default.svc.cluster.local",
+            "SNI must be the headless-svc SAN, got {sni}"
+        );
+    }
+
+    #[test]
+    fn resolve_broker_endpoint_none_without_tls_listener() {
+        // Only a plaintext PLAIN listener → no eligible endpoint.
+        let parent = parent_with_listeners(
+            vec![plain_listener("PLAIN", 9092)],
+            vec![internal_status("PLAIN", 9092)],
+        );
+        assert!(resolve_broker_endpoint(&parent, "default").is_none());
+    }
+
+    #[test]
+    fn resolve_broker_endpoint_none_when_tls_listener_has_no_auth() {
+        // A TLS listener with no `authentication` is anonymous-over-TLS, not
+        // mTLS — the gateway's client cert wouldn't authenticate it, so it is
+        // not eligible.
+        let anon_tls = Listener {
+            authentication: None,
+            ..tls_mtls_listener("anon", 9093)
+        };
+        let parent = parent_with_listeners(vec![anon_tls], vec![internal_status("anon", 9093)]);
+        assert!(resolve_broker_endpoint(&parent, "default").is_none());
+    }
+
+    #[test]
+    fn resolve_broker_endpoint_none_when_bootstrap_not_in_status() {
+        // Eligible spec listener, but its bootstrap hasn't resolved into
+        // status.listeners yet (ListenersReady not reached) → None.
+        let parent = parent_with_listeners(vec![tls_mtls_listener("secured", 9093)], vec![]);
+        assert!(resolve_broker_endpoint(&parent, "default").is_none());
     }
 }

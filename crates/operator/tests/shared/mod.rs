@@ -358,11 +358,31 @@ pub fn fake_parent_kafka_body(name: &str, namespace: &str) -> serde_json::Value 
     // `status.metadataVersion`. The pool reconciler gates pod creation on
     // this (see `kafka_node_pool::version_gate`), so the fixture must look
     // like a validated cluster for the happy-path STS-apply tests to fire.
+    //
+    // It also exposes a realistic dual-listener topology: a plaintext `PLAIN`
+    // listener on 9092 plus a TLS + `authentication: tls` (mTLS) internal
+    // listener `tls-internal` on 9093. The gateway reconciler resolves its
+    // broker mTLS bootstrap + SNI from the SECURED listener (not the
+    // plaintext :9092). Both `spec.listeners` (for the tls/auth predicate)
+    // and `status.listeners` (for the resolved bootstrap host:port) carry it.
+    let tls_bootstrap = format!("{name}-broker-headless.{namespace}.svc.cluster.local:9093");
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
         "kind": "Kafka",
         "metadata": { "name": name, "namespace": namespace, "uid": "kafka-uid" },
-        "spec": { "kafkaVersion": "0.1.1" },
+        "spec": {
+            "kafkaVersion": "0.1.1",
+            "listeners": [
+                { "name": "PLAIN", "port": 9092, "type": "internal", "tls": false },
+                {
+                    "name": "tls-internal",
+                    "port": 9093,
+                    "type": "internal",
+                    "tls": true,
+                    "authentication": { "type": "tls" }
+                }
+            ]
+        },
         "status": {
             "conditions": [{
                 "type": "KafkaVersionValid",
@@ -371,7 +391,19 @@ pub fn fake_parent_kafka_body(name: &str, namespace: &str) -> serde_json::Value 
                 "message": "kafkaVersion 0.1.1 metadata.version 0.1",
                 "lastTransitionTime": "2026-05-22T00:00:00Z"
             }],
-            "metadataVersion": "0.1"
+            "metadataVersion": "0.1",
+            "listeners": [
+                {
+                    "name": "PLAIN",
+                    "type": "internal",
+                    "bootstrapServers": format!("{name}-broker-headless.{namespace}.svc.cluster.local:9092")
+                },
+                {
+                    "name": "tls-internal",
+                    "type": "internal",
+                    "bootstrapServers": tls_bootstrap
+                }
+            ]
         }
     })
 }
