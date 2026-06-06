@@ -7,6 +7,7 @@ pub mod forward;
 pub mod mode;
 pub mod response;
 pub mod schemas;
+pub mod serve;
 pub mod subjects;
 
 use std::sync::Arc;
@@ -87,5 +88,38 @@ pub fn router_with_forwarding(state: AppState, fwd: forward::ForwardState) -> Ro
     router(state).layer(axum::middleware::from_fn_with_state(
         fwd,
         forward::forward_layer,
+    ))
+}
+
+/// The three middleware components composed by [`router_with_security`].
+pub struct SecurityLayers {
+    /// Authentication (mTLS → Bearer → Basic → Anonymous).
+    pub auth: crate::auth::AuthState,
+    /// Topic-ACL authorization. `None` disables authz entirely (allow-all).
+    pub authz: Option<std::sync::Arc<crate::authz::SchemaRegistryAuthz>>,
+    /// Secondary → primary write-forwarding.
+    pub forward: forward::ForwardState,
+}
+
+/// Router wrapped with the full security stack.
+///
+/// axum runs the *last*-added `.layer()` first, so to get an execution order of
+/// auth → authz → forward → handler we add them in the reverse order (forward,
+/// then authz, then auth on the outside). Authentication therefore runs first
+/// and inserts the [`crabka_security::Principal`] that authorization reads.
+pub fn router_with_security(state: AppState, sec: SecurityLayers) -> Router {
+    let mut r = router(state).layer(axum::middleware::from_fn_with_state(
+        sec.forward,
+        forward::forward_layer,
+    ));
+    if let Some(az) = sec.authz {
+        r = r.layer(axum::middleware::from_fn_with_state(
+            az,
+            crate::authz::authz_layer,
+        ));
+    }
+    r.layer(axum::middleware::from_fn_with_state(
+        std::sync::Arc::new(sec.auth),
+        crate::auth::auth_layer,
     ))
 }

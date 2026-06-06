@@ -310,6 +310,7 @@ mod tests {
 
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -317,6 +318,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(&mut ctx, Record::new(Some("k".into()), 42i64, 1))
@@ -351,6 +356,7 @@ mod tests {
         // Update record: the `new` value is extracted and forwarded as plain V.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -358,6 +364,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
             proc.process(
@@ -372,6 +382,7 @@ mod tests {
         // Tombstone record: dropped — a KStream has no deletion record.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -379,6 +390,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, i64>::new(&mut dispatch);
             proc.process(
@@ -422,6 +437,7 @@ mod tests {
         // Update: both sides map; the mapped `new` materializes.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -429,6 +445,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores2,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
             proc.process(
@@ -454,6 +474,7 @@ mod tests {
         // Tombstone: mapped `new` is None → the store entry is deleted.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -461,6 +482,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores2,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
             proc.process(
@@ -499,6 +524,7 @@ mod tests {
 
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -506,6 +532,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<String>>::new(&mut dispatch);
             proc.process(
@@ -524,6 +554,9 @@ mod tests {
     }
 
     #[tokio::test]
+    // Three inline Dispatch blocks (each now carrying the punctuation fields) push
+    // this exhaustive filter test just over the 100-line lint threshold.
+    #[allow(clippy::too_many_lines)]
     async fn ktable_filter_materializes_matches_and_emits_tombstones() {
         let mut stores = make_stores();
         let children = [0usize];
@@ -547,6 +580,7 @@ mod tests {
         // Matching record (old None → new 42) — stored and forwarded as an update.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -554,6 +588,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(
@@ -580,6 +618,7 @@ mod tests {
         // it. old_p survives the predicate (99 > 10); new_p is filtered out.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -587,6 +626,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(
@@ -611,6 +654,7 @@ mod tests {
         // A row that never matched (old & new both filtered out) → no forward.
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
+            let mut scheds = Vec::new();
             let mut dispatch = Dispatch {
                 buffer: &mut buffer,
                 children: &children,
@@ -618,6 +662,10 @@ mod tests {
                 record_ctx: &rc,
                 stores: &mut stores,
                 globals: &globals,
+                node_idx: 0,
+                schedules: &mut scheds,
+                sched_stream_time: i64::MIN,
+                sched_wall_clock: 0,
             };
             let mut ctx = ProcessorContext::<'_, '_, String, Change<i64>>::new(&mut dispatch);
             proc.process(

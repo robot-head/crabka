@@ -2,6 +2,7 @@
 //! returning the produced offset for read-your-writes gating.
 
 use bytes::Bytes;
+use crabka_client_core::ClientSecurity;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 
 use crate::config::RegistryConfig;
@@ -12,12 +13,16 @@ pub struct SchemaWriter {
 }
 
 impl SchemaWriter {
-    pub async fn start(cfg: &RegistryConfig) -> anyhow::Result<Self> {
+    pub async fn start(
+        cfg: &RegistryConfig,
+        security: Option<ClientSecurity>,
+    ) -> anyhow::Result<Self> {
         let producer = Producer::builder()
             .bootstrap(cfg.bootstrap.clone())
             .client_id(format!("{}-writer", cfg.client_id))
             .enable_idempotence(true)
             .acks(Acks::All)
+            .maybe_security(security)
             .build()
             .await?;
         Ok(Self {

@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
+use crabka_client_core::ClientSecurity;
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
 use crate::config::RegistryConfig;
@@ -12,13 +13,16 @@ const TOPIC_ALREADY_EXISTS: i16 = 36;
 
 /// Create `_schemas` (1 partition, cleanup.policy=compact) if absent and return
 /// its `topic_id`. Idempotent.
-pub async fn ensure_schemas_topic(cfg: &RegistryConfig) -> anyhow::Result<WireUuid> {
+pub async fn ensure_schemas_topic(
+    cfg: &RegistryConfig,
+    security: Option<ClientSecurity>,
+) -> anyhow::Result<WireUuid> {
     let bootstrap: Vec<String> = cfg
         .bootstrap
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
-    let mut admin = AdminClient::connect(&bootstrap).await?;
+    let mut admin = AdminClient::connect_secured(&bootstrap, security).await?;
 
     let spec = CreateTopicSpec {
         name: cfg.schemas_topic.clone(),

@@ -29,7 +29,7 @@ use axum::http::Request;
 use tower::ServiceExt;
 
 use crabka_broker::{Broker, BrokerConfig};
-use crabka_schema_registry::config::RegistryConfig;
+use crabka_schema_registry::config::{RegistryConfig, SecurityConfig};
 use crabka_schema_registry::kafkastore::KafkaStore;
 use crabka_schema_registry::rest::{self, AppState};
 use tokio_util::sync::CancellationToken;
@@ -276,6 +276,7 @@ async fn our_store_decodes_cp_schema_registry_records() {
         advertised_url: "http://127.0.0.1:0".into(),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
+        security: SecurityConfig::default(),
     };
     let cancel = CancellationToken::new();
     let store = KafkaStore::start(&cfg, cancel.clone())

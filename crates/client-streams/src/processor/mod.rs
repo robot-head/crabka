@@ -6,6 +6,7 @@ pub(crate) mod factory;
 pub mod fixed_key;
 pub(crate) mod graph;
 pub(crate) mod node;
+pub mod punctuation;
 pub mod record;
 pub mod serde;
 
@@ -14,5 +15,6 @@ pub use erased::ProcessorError;
 pub use fixed_key::{
     FixedKeyProcessor, FixedKeyProcessorContext, FixedKeyProcessorSupplier, FixedKeyRecord,
 };
+pub use punctuation::{Cancellable, PunctuationType, Punctuator};
 pub use record::{Record, RecordContext};
 pub use serde::{BytesSerde, Consumed, I64Serde, Produced, Serde, SerdeError, StringSerde};

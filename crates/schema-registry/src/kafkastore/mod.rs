@@ -49,9 +49,12 @@ impl KafkaStore {
         cfg: &RegistryConfig,
         cancel: CancellationToken,
     ) -> anyhow::Result<Arc<Self>> {
-        let topic_id = topic::ensure_schemas_topic(cfg).await?;
-        let r = reader::spawn(cfg, topic_id, cancel);
-        let writer = writer::SchemaWriter::start(cfg).await?;
+        // SR-to-broker Kafka-client security (SASL/TLS). `None` = plaintext, the
+        // pre-security default; threaded identically into every client below.
+        let security = cfg.security.client.clone();
+        let topic_id = topic::ensure_schemas_topic(cfg, security.clone()).await?;
+        let r = reader::spawn(cfg, topic_id, security.clone(), cancel);
+        let writer = writer::SchemaWriter::start(cfg, security).await?;
         Ok(Arc::new(Self {
             store: r.store,
             applied_rx: r.applied_rx,
