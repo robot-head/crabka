@@ -134,15 +134,14 @@ fn fk_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     // source tables must be released explicitly (same as the FK exec tests).
     drop(ta);
     drop(tb);
-    // `build` (not `build_optimized`): each `builder.table` store gets its own
-    // derived `<app>-<store>-changelog`. The `REUSE_KTABLE_SOURCE_TOPICS`
-    // optimizer would instead reuse the source topic (`fk-a` / `fk-b`) as the
-    // store's changelog, and the runtime's unconditional changelog write-back
-    // then re-produces each stored row back onto the source topic — an unbounded
-    // re-emit loop over the live broker. That optimizer/runtime interaction is a
-    // separate runtime bug (orthogonal to the FK join); `build` sidesteps it and
-    // exercises the full two-subtopology / two-repartition-hop FK topology.
-    b.build(app_id).unwrap()
+    // `build_optimized` (optimization=all, the JVM default): the
+    // `REUSE_KTABLE_SOURCE_TOPICS` pass reuses each `builder.table` source topic
+    // (`fk-a` / `fk-b`) as its store's changelog. The runtime suppresses the
+    // changelog write-back for such reuse-source stores (a store whose changelog
+    // topic is one of the task's source topics is drained but not re-produced —
+    // see `Graph::drain_changelogs`), so this no longer loops. Exercises the full
+    // two-subtopology / two-repartition-hop FK topology under optimization.
+    b.build_optimized(app_id).unwrap()
 }
 
 // ─── output collector (mirrors dsl_integration.rs) ─────────────────────────────

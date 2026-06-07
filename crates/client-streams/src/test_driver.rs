@@ -133,7 +133,11 @@ impl TopologyTestDriver {
         }
         // Drain changelog buffers so they don't grow unbounded; the test driver
         // has no broker, so we discard them (restore is a no-op with fresh stores).
-        let _ = self.graph.drain_changelogs();
+        // No reuse-source suppression needed — the result is discarded and the
+        // driver never re-produces, so the write-back loop can't occur here.
+        let _ = self
+            .graph
+            .drain_changelogs(&std::collections::HashSet::new());
     }
 
     /// Inspect a state store's contents after piping (mirrors the JVM
