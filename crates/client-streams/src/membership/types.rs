@@ -23,6 +23,13 @@ pub struct StreamsAssignment {
     pub warmup: Vec<TaskAssignment>,
 }
 
+/// A tracker to share task restored and end offsets with the coordinator loop.
+#[derive(Debug, Clone, Default)]
+pub struct TaskOffsetTracker {
+    pub task_offsets: std::collections::HashMap<(String, i32), i64>,
+    pub task_end_offsets: std::collections::HashMap<(String, i32), i64>,
+}
+
 /// A non-ready status reported by the coordinator (KIP-1071 status codes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamsStatus {

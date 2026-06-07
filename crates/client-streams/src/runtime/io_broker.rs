@@ -384,6 +384,46 @@ impl OffsetStore for BrokerOffsetStore {
             )
     }
 
+    async fn latest(&self, topic: &str, partition: i32) -> Result<i64, StreamsClientError> {
+        let resp = self
+            .client
+            .send(ListOffsetsRequest {
+                replica_id: -1,
+                topics: vec![ListOffsetsTopic {
+                    name: topic.to_string(),
+                    partitions: vec![ListOffsetsPartition {
+                        partition_index: partition,
+                        timestamp: -1, // LIST_OFFSETS_LATEST
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await?;
+
+        resp.topics
+            .first()
+            .and_then(|t| t.partitions.first())
+            .map_or_else(
+                || {
+                    Err(StreamsClientError::Runtime(format!(
+                        "ListOffsets: no partition in response for {topic}/{partition}"
+                    )))
+                },
+                |p| {
+                    if p.error_code != 0 {
+                        Err(StreamsClientError::Runtime(format!(
+                            "ListOffsets error code {} for {topic}/{partition}",
+                            p.error_code
+                        )))
+                    } else {
+                        Ok(p.offset)
+                    }
+                },
+            )
+    }
+
     /// Commit `offsets` to the group coordinator. Each topic is tagged with its
     /// `topic_id` (required at `OffsetCommit` v10; encoder ignores it at v0-9).
     /// Returns an error if the broker reports a non-zero partition error code so

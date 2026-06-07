@@ -82,6 +82,7 @@ impl KafkaStreams {
             let mut thread = StreamThread::new(fetcher_for_thread, store_backend, application_id);
             let mut poll = tokio::time::interval(poll_interval);
             let mut commit = tokio::time::interval(commit_interval);
+            let tracker = membership.tracker();
             loop {
                 tokio::select! {
                     () = sd.cancelled() => {
@@ -100,7 +101,7 @@ impl KafkaStreams {
                         Err(e) => { tracing::warn!(error = %e, "membership event stream ended"); break; }
                     },
                     _ = poll.tick() => {
-                        if let Err(e) = thread.poll_all(&*fetcher).await {
+                        if let Err(e) = thread.poll_all(&*fetcher, &tracker).await {
                             tracing::warn!(error = %e, "poll_all failed");
                         }
                     }

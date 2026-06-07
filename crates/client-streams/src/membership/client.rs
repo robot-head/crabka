@@ -19,7 +19,7 @@ use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbe
 
 use super::coordinator::{self, CoordinatorState};
 use super::status::map_status;
-use super::types::{StreamsAssignment, StreamsEvent};
+use super::types::{StreamsAssignment, StreamsEvent, TaskOffsetTracker};
 use crate::error::StreamsClientError;
 use crate::membership::assignment::resolve;
 
@@ -32,6 +32,7 @@ pub struct StreamsMembership {
     events: mpsc::UnboundedReceiver<StreamsEvent>,
     shutdown: CancellationToken,
     hb_handle: Option<JoinHandle<()>>,
+    tracker: Arc<Mutex<TaskOffsetTracker>>,
 }
 
 #[bon::bon]
@@ -99,6 +100,9 @@ impl StreamsMembership {
             ));
         }
         let owned_active = Arc::new(Mutex::new(join.active_tasks.clone().unwrap_or_default()));
+        let owned_standby = Arc::new(Mutex::new(join.standby_tasks.clone().unwrap_or_default()));
+        let owned_warmup = Arc::new(Mutex::new(join.warmup_tasks.clone().unwrap_or_default()));
+        let tracker = Arc::new(Mutex::new(TaskOffsetTracker::default()));
         let initial = StreamsAssignment {
             active: resolve(join.active_tasks.as_ref(), &topology),
             standby: resolve(join.standby_tasks.as_ref(), &topology),
@@ -125,6 +129,9 @@ impl StreamsMembership {
             topology: Arc::clone(&topology),
             member_epoch: Arc::new(Mutex::new(member_epoch_val)),
             owned_active,
+            owned_standby,
+            owned_warmup,
+            tracker: tracker.clone(),
             heartbeat_interval: hb_interval,
             events: events_tx,
             last_assignment: tokio::sync::Mutex::new(initial),
@@ -137,6 +144,7 @@ impl StreamsMembership {
             events: events_rx,
             shutdown,
             hb_handle: Some(hb_handle),
+            tracker,
         })
     }
 }
@@ -146,6 +154,12 @@ impl StreamsMembership {
     #[must_use]
     pub fn member_id(&self) -> &str {
         &self.member_id
+    }
+
+    /// Get the shared task offset tracker.
+    #[must_use]
+    pub fn tracker(&self) -> Arc<Mutex<TaskOffsetTracker>> {
+        self.tracker.clone()
     }
 
     /// The streams group id.

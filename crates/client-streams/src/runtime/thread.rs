@@ -1,14 +1,12 @@
-//! Owns the active `StreamTask`s and drives poll/commit. Reconciles to the
-//! membership's active assignment.
-
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::error::StreamsClientError;
 use crate::membership::StreamsAssignment;
 use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
 use crate::runtime::iq::{IqRequest, answer_iq};
-use crate::runtime::task::StreamTask;
+use crate::runtime::task::{StreamTask, TaskRole};
 use crate::topology::BuiltTopology;
 
 pub(crate) struct StreamThread {
@@ -71,7 +69,7 @@ impl StreamThread {
         self.tasks.len()
     }
 
-    /// Reconcile active tasks to `assignment.active`. standby/warmup ignored.
+    /// Reconcile tasks to `assignment`. Reconciles active, standby, and warmup tasks.
     pub async fn apply_assignment(
         &mut self,
         assignment: &StreamsAssignment,
@@ -100,12 +98,22 @@ impl StreamThread {
             self.globals_ready = true;
         }
 
-        // Desired (subtopology_id, partition) -> the owning TaskAssignment.
-        let mut desired: HashMap<(String, i32), &crate::membership::TaskAssignment> =
+        // Desired (subtopology_id, partition) -> (TaskRole, &TaskAssignment).
+        let mut desired: HashMap<(String, i32), (TaskRole, &crate::membership::TaskAssignment)> =
             HashMap::new();
         for ta in &assignment.active {
             for &p in &ta.partitions {
-                desired.insert((ta.subtopology_id.clone(), p), ta);
+                desired.insert((ta.subtopology_id.clone(), p), (TaskRole::Active, ta));
+            }
+        }
+        for ta in &assignment.standby {
+            for &p in &ta.partitions {
+                desired.insert((ta.subtopology_id.clone(), p), (TaskRole::Standby, ta));
+            }
+        }
+        for ta in &assignment.warmup {
+            for &p in &ta.partitions {
+                desired.insert((ta.subtopology_id.clone(), p), (TaskRole::Warmup, ta));
             }
         }
 
@@ -117,15 +125,33 @@ impl StreamThread {
             .cloned()
             .collect();
         for k in to_remove {
-            if let Some(mut t) = self.tasks.remove(&k) {
+            if let Some(mut t) = self.tasks.remove(&k).filter(|t| t.role == TaskRole::Active) {
                 t.close_processors().await;
                 t.commit().await?;
             }
         }
 
+        // Transition existing tasks whose role has changed.
+        for (key, &(desired_role, _ta)) in &desired {
+            if let Some(task) = self.tasks.get_mut(key).filter(|t| t.role != desired_role) {
+                let old_role = task.role;
+                if desired_role == TaskRole::Active {
+                    // Promotion: catch up remaining restore, seek source partitions, and init processors.
+                    task.restore(&*self.fetcher).await?;
+                    task.seek_to_start().await?;
+                    task.init().await?;
+                } else if old_role == TaskRole::Active {
+                    // Demotion: close processors and commit offsets.
+                    task.close_processors().await;
+                    task.commit().await?;
+                }
+                task.role = desired_role;
+            }
+        }
+
         // Add new.
-        for (key, ta) in desired {
-            if self.tasks.contains_key(&key) {
+        for (key, &(desired_role, ta)) in &desired {
+            if self.tasks.contains_key(key) {
                 continue;
             }
             let mut graph = topology
@@ -147,14 +173,17 @@ impl StreamThread {
                 sources,
                 Arc::clone(producer),
                 Arc::clone(store),
+                desired_role,
             );
-            // Seek positions to committed offsets (or earliest) BEFORE restore so
-            // that normal processing knows where to start after restore completes.
-            task.seek_to_start().await?;
-            // Restore state stores from changelog, then initialise processors.
-            task.restore(&*self.fetcher).await?;
-            task.init().await?;
-            self.tasks.insert(key, task);
+            if desired_role == TaskRole::Active {
+                // Seek positions to committed offsets (or earliest) BEFORE restore so
+                // that normal processing knows where to start after restore completes.
+                task.seek_to_start().await?;
+                // Restore state stores from changelog, then initialise processors.
+                task.restore(&*self.fetcher).await?;
+                task.init().await?;
+            }
+            self.tasks.insert(key.clone(), task);
         }
         Ok(())
     }
@@ -162,6 +191,7 @@ impl StreamThread {
     pub async fn poll_all(
         &mut self,
         fetcher: &dyn RecordFetcher,
+        tracker: &Arc<TokioMutex<crate::membership::TaskOffsetTracker>>,
     ) -> Result<(), StreamsClientError> {
         // Apply any new global-topic records to the shared global store(s) before
         // processing, so stream-globaltable joins see live updates (Kafka keeps the
@@ -172,15 +202,36 @@ impl StreamThread {
                 .await?;
         }
         for task in self.tasks.values_mut() {
-            task.process_once(fetcher).await?;
+            if task.role == TaskRole::Active {
+                task.process_once(fetcher).await?;
+            } else {
+                task.restore_step(fetcher).await?;
+            }
         }
         // Wall-clock punctuation tick: read the clock once, then fire every task's
         // due WALL_CLOCK_TIME punctuators. Forwarded records are produced through
         // each task's own producer (same plumbing as `process_once`).
         let now = self.clock.now_ms();
         for task in self.tasks.values_mut() {
-            task.punctuate_wall_clock(now).await?;
+            if task.role == TaskRole::Active {
+                task.punctuate_wall_clock(now).await?;
+            }
         }
+
+        // Update task offsets in the shared tracker.
+        let mut task_offsets = std::collections::HashMap::new();
+        let mut task_end_offsets = std::collections::HashMap::new();
+        for (key, task) in &mut self.tasks {
+            let (curr, end) = task.compute_changelog_offsets().await?;
+            task_offsets.insert(key.clone(), curr);
+            task_end_offsets.insert(key.clone(), end);
+        }
+        {
+            let mut lock = tracker.lock().await;
+            lock.task_offsets = task_offsets;
+            lock.task_end_offsets = task_end_offsets;
+        }
+
         Ok(())
     }
 
@@ -228,7 +279,7 @@ impl StreamThread {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::membership::{StreamsAssignment, TaskAssignment, TopicPartition};
+    use crate::membership::{StreamsAssignment, TaskAssignment, TaskOffsetTracker, TopicPartition};
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
     use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
@@ -441,6 +492,10 @@ mod tests {
             Ok(0)
         }
 
+        async fn latest(&self, _t: &str, _p: i32) -> Result<i64, crate::StreamsClientError> {
+            Ok(0)
+        }
+
         async fn commit(
             &self,
             offs: &[(String, i32, i64)],
@@ -491,6 +546,7 @@ mod tests {
         let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
         let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
         let built = wall_clock_built();
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
 
         let now = Arc::new(AtomicI64::new(0));
         let clock: Arc<dyn crate::runtime::clock::Clock> =
@@ -508,7 +564,7 @@ mod tests {
         check!(thread.task_count() == 1);
 
         // clock=0 → no record source, no wall-clock fire yet (now=0 < next=100).
-        thread.poll_all(&*empty_fetcher()).await.unwrap();
+        thread.poll_all(&*empty_fetcher(), &tracker).await.unwrap();
         check!(
             !producer_c
                 .sent
@@ -522,7 +578,7 @@ mod tests {
         // Advance wall time past one interval; the next poll must fire the
         // punctuator (value = now = 150) and produce it to "out".
         now.store(150, std::sync::atomic::Ordering::SeqCst);
-        thread.poll_all(&*empty_fetcher()).await.unwrap();
+        thread.poll_all(&*empty_fetcher(), &tracker).await.unwrap();
         check!(
             producer_c
                 .sent
@@ -553,6 +609,7 @@ mod tests {
             .unwrap();
         check!(thread.task_count() == 1);
 
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
         let fetcher = OneShot {
             batch: StdMutex::new(Some(FetchBatch {
                 records: vec![FetchedRec {
@@ -563,7 +620,7 @@ mod tests {
                 }],
             })),
         };
-        thread.poll_all(&fetcher).await.unwrap();
+        thread.poll_all(&fetcher, &tracker).await.unwrap();
         thread.commit_all().await.unwrap();
         check!(
             producer_c
@@ -628,6 +685,7 @@ mod tests {
         check!(thread.task_count() == 1);
 
         // Now process one "a" record.  Restored count is 7, so output must be 8.
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
         let process_fetcher = ScriptedFetcher::new(vec![(
             ("in".to_string(), 0, 0),
             FetchBatch {
@@ -639,7 +697,7 @@ mod tests {
                 }],
             },
         )]);
-        thread.poll_all(&process_fetcher).await.unwrap();
+        thread.poll_all(&process_fetcher, &tracker).await.unwrap();
         thread.commit_all().await.unwrap();
 
         let sent = producer_c.sent.lock().unwrap();
@@ -817,6 +875,7 @@ mod tests {
         // Now process one stream record (key "k", value "gk"). The key-mapper derives
         // lookup key "gk", which the bootstrapped global store resolves to "GV", so
         // the join emits key "k", value "gk" + "GV" = "gkGV".
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
         let process_fetcher = ScriptedFetcher::new(vec![(
             ("in".to_string(), 0, 0),
             FetchBatch {
@@ -828,7 +887,7 @@ mod tests {
                 }],
             },
         )]);
-        thread.poll_all(&process_fetcher).await.unwrap();
+        thread.poll_all(&process_fetcher, &tracker).await.unwrap();
         thread.commit_all().await.unwrap();
 
         let sent = producer_c.sent.lock().unwrap();
@@ -838,5 +897,104 @@ mod tests {
                 && v.as_deref() == Some(b"gkGV".as_ref())),
             "join must see the bootstrapped global value: ('out', key 'k', value 'gkGV')"
         );
+    }
+
+    #[tokio::test]
+    async fn reconciles_active_standby_warmup_roles_and_transitions() {
+        let producer_c = Arc::new(CollectProducer::default());
+        let store_c = Arc::new(MemStore::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
+        let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
+        let built = built();
+
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+
+        // 1. Initial assignment:
+        // Subtopology 0 Partition 0 -> Active
+        // Subtopology 0 Partition 1 -> Standby
+        // Subtopology 0 Partition 2 -> Warmup
+        let assignment1 = StreamsAssignment {
+            active: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![0],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 0,
+                }],
+            }],
+            standby: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![1],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 1,
+                }],
+            }],
+            warmup: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![2],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 2,
+                }],
+            }],
+        };
+
+        thread
+            .apply_assignment(&assignment1, &built, &producer, &store)
+            .await
+            .unwrap();
+        check!(thread.task_count() == 3);
+
+        check!(thread.tasks.get(&("0".to_string(), 0)).map(|t| t.role) == Some(TaskRole::Active));
+        check!(thread.tasks.get(&("0".to_string(), 1)).map(|t| t.role) == Some(TaskRole::Standby));
+        check!(thread.tasks.get(&("0".to_string(), 2)).map(|t| t.role) == Some(TaskRole::Warmup));
+
+        // 2. Updated assignment:
+        // Subtopology 0 Partition 0 -> Standby (Demoted)
+        // Subtopology 0 Partition 1 -> removed
+        // Subtopology 0 Partition 2 -> Active (Promoted)
+        // Subtopology 0 Partition 3 -> Warmup (New)
+        let assignment2 = StreamsAssignment {
+            active: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![2],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 2,
+                }],
+            }],
+            standby: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![0],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 0,
+                }],
+            }],
+            warmup: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![3],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 3,
+                }],
+            }],
+        };
+
+        thread
+            .apply_assignment(&assignment2, &built, &producer, &store)
+            .await
+            .unwrap();
+        check!(thread.task_count() == 3);
+
+        check!(thread.tasks.get(&("0".to_string(), 0)).map(|t| t.role) == Some(TaskRole::Standby));
+        check!(!thread.tasks.contains_key(&("0".to_string(), 1)));
+        check!(thread.tasks.get(&("0".to_string(), 2)).map(|t| t.role) == Some(TaskRole::Active));
+        check!(thread.tasks.get(&("0".to_string(), 3)).map(|t| t.role) == Some(TaskRole::Warmup));
     }
 }

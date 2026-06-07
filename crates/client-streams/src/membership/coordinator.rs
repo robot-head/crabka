@@ -13,13 +13,14 @@ use tokio_util::sync::CancellationToken;
 
 use crabka_client_core::{Client, ClientError};
 use crabka_protocol::owned::common::streams_group_heartbeat_request::task_ids::TaskIds as ReqTaskIds;
+use crabka_protocol::owned::common::streams_group_heartbeat_request::task_offset::TaskOffset;
 use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds as RespTaskIds;
 use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
 use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
 
 use super::assignment::resolve;
 use super::status::map_status;
-use super::types::{StreamsAssignment, StreamsEvent};
+use super::types::{StreamsAssignment, StreamsEvent, TaskOffsetTracker};
 use crate::topology::BuiltTopology;
 
 const FENCED_MEMBER_EPOCH: i16 = 110;
@@ -59,6 +60,12 @@ pub(crate) struct CoordinatorState<T: HeartbeatTransport> {
     pub member_epoch: Arc<Mutex<i32>>,
     /// Owned tasks last adopted, echoed back as `active_tasks` next heartbeat.
     pub owned_active: Arc<Mutex<Vec<RespTaskIds>>>,
+    /// Owned standby tasks last adopted, echoed back next heartbeat.
+    pub owned_standby: Arc<Mutex<Vec<RespTaskIds>>>,
+    /// Owned warmup tasks last adopted, echoed back next heartbeat.
+    pub owned_warmup: Arc<Mutex<Vec<RespTaskIds>>>,
+    /// Tracker containing current and end offsets of all tasks.
+    pub tracker: Arc<Mutex<TaskOffsetTracker>>,
     pub heartbeat_interval: Duration,
     pub events: mpsc::UnboundedSender<StreamsEvent>,
     /// The last assignment emitted, to suppress duplicate `Assigned` events
@@ -94,6 +101,13 @@ pub(crate) async fn run<T: HeartbeatTransport>(
                 Outcome::Rejoin => {
                     *state.member_epoch.lock().await = 0;
                     state.owned_active.lock().await.clear();
+                    state.owned_standby.lock().await.clear();
+                    state.owned_warmup.lock().await.clear();
+                    {
+                        let mut lock = state.tracker.lock().await;
+                        lock.task_offsets.clear();
+                        lock.task_end_offsets.clear();
+                    }
                     *state.last_assignment.lock().await = StreamsAssignment::default();
                     rejoining = true;
                     let _ = state.events.send(StreamsEvent::Fenced);
@@ -127,6 +141,47 @@ async fn heartbeat_once<T: HeartbeatTransport>(
     } else {
         Some(owned.iter().map(resp_to_req).collect())
     };
+    let owned_standby = state.owned_standby.lock().await.clone();
+    let standby_tasks = if owned_standby.is_empty() {
+        None
+    } else {
+        Some(owned_standby.iter().map(resp_to_req).collect())
+    };
+    let owned_warmup = state.owned_warmup.lock().await.clone();
+    let warmup_tasks = if owned_warmup.is_empty() {
+        None
+    } else {
+        Some(owned_warmup.iter().map(resp_to_req).collect())
+    };
+
+    let (task_offsets, task_end_offsets) = {
+        let tracker = state.tracker.lock().await;
+        let to_wire =
+            |map: &std::collections::HashMap<(String, i32), i64>| -> Option<Vec<TaskOffset>> {
+                if map.is_empty() {
+                    None
+                } else {
+                    let mut list: Vec<TaskOffset> = map
+                        .iter()
+                        .map(|(key, &offset)| TaskOffset {
+                            subtopology_id: key.0.clone(),
+                            partition: key.1,
+                            offset,
+                            ..Default::default()
+                        })
+                        .collect();
+                    list.sort_by(|a, b| match a.subtopology_id.cmp(&b.subtopology_id) {
+                        std::cmp::Ordering::Equal => a.partition.cmp(&b.partition),
+                        other => other,
+                    });
+                    Some(list)
+                }
+            };
+        (
+            to_wire(&tracker.task_offsets),
+            to_wire(&tracker.task_end_offsets),
+        )
+    };
 
     let req = StreamsGroupHeartbeatRequest {
         group_id: state.group_id.clone(),
@@ -137,6 +192,10 @@ async fn heartbeat_once<T: HeartbeatTransport>(
         rebalance_timeout_ms: state.rebalance_timeout_ms,
         topology,
         active_tasks,
+        standby_tasks,
+        warmup_tasks,
+        task_offsets,
+        task_end_offsets,
         ..Default::default()
     };
 
@@ -186,6 +245,12 @@ async fn emit_response<T: HeartbeatTransport>(
     }
     if let Some(tasks) = &r.active_tasks {
         *state.owned_active.lock().await = tasks.clone();
+    }
+    if let Some(tasks) = &r.standby_tasks {
+        *state.owned_standby.lock().await = tasks.clone();
+    }
+    if let Some(tasks) = &r.warmup_tasks {
+        *state.owned_warmup.lock().await = tasks.clone();
     }
     let mut last = state.last_assignment.lock().await;
     if let Some(ev) = assignment_event(r, &state.topology, &mut last) {
@@ -328,6 +393,9 @@ mod tests {
             topology: built(),
             member_epoch: Arc::new(Mutex::new(7)),
             owned_active: Arc::new(Mutex::new(Vec::new())),
+            owned_standby: Arc::new(Mutex::new(Vec::new())),
+            owned_warmup: Arc::new(Mutex::new(Vec::new())),
+            tracker: Arc::new(Mutex::new(TaskOffsetTracker::default())),
             heartbeat_interval: Duration::from_millis(1),
             events: tx,
             last_assignment: tokio::sync::Mutex::new(StreamsAssignment::default()),
