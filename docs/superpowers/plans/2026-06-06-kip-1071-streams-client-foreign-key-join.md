@@ -35,6 +35,50 @@ implementation matches the JVM exactly.
 
 ---
 
+## Captured pinned values (T1 results — authoritative)
+
+T1 ran and committed the fixtures. These supersede any earlier guess in this plan:
+
+- **Murmur3-128**: Kafka `Murmur3.hash128` uses **`DEFAULT_SEED = 104729`** (NOT 0).
+  Stored as two longs each **big-endian, h0 then h1**. Empty input →
+  `9d2764a018e329428c3cf3b035938518`.
+- **`SubscriptionWrapper` (version 1)** byte layout:
+  `[ version | (isHashNull << 7) : 1 ] [ instruction : 1 ] [ hash : 16 if present ] [ primaryKeyBytes… ] [ primaryPartition : 4 BE, trailing ]`.
+  The high bit of byte 0 is the hash-null flag (so `0x81` = v1 + null hash). The hash
+  is **omitted** when null. `primaryPartition` is a trailing 4-byte BE int (captured
+  as 0). Example: `DELETE_KEY_NO_PROPAGATE, hash=null, pk="pk", pp=0` → `8100706b00000000`.
+- **`Instruction` byte values** (== ordinal): `DELETE_KEY_NO_PROPAGATE=0`,
+  `DELETE_KEY_AND_PROPAGATE=1`, `PROPAGATE_NULL_IF_NO_FK_VAL_AVAILABLE=2`,
+  `PROPAGATE_ONLY_IF_FK_VAL_AVAILABLE=3`.
+- **`SubscriptionResponseWrapper` (version 0)** byte layout:
+  `[ version | (isHashNull << 7) : 1 ] [ hash : 16 if present ] [ foreignValueBytes… ]`.
+  **No `primaryPartition`**, **no foreign-value present-flag** — the foreign value is
+  the trailing bytes (null foreign value ⇒ no trailing bytes). Example: hash present,
+  fv="vfk" → `00` + 16-byte hash + `76666b`.
+- **`CombinedKeySchema`**: `[fkLen:4BE][fk][pk]`; prefix `[fkLen:4BE][fk]`; arg order
+  `(foreignKey, primaryKey)`.
+- **Topology shape**: the FK join spans **TWO subtopologies** (NOT one merge node,
+  NOT a cross-table `[a,b]` copartition). sub0 = left (`a` source, subscription-send →
+  registration-sink, response-source → resolver; changelog reuses `a`). sub1 = right
+  (`b` source, registration-source → receive/subscription-join, foreign-table-join →
+  response-sink; subscription-store changelog + `b`). Each subtopology carries a
+  per-subtopology copartition group binding its external source with its repartition
+  source. **The committed `fk_join_inner.topology.json` / `fk_join_left.topology.json`
+  are byte-identical and are the lowering oracle for T6** (left/inner differ only at
+  runtime).
+- **Names / counter indices** (from the optimized `app` topology): node prefixes
+  `KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-`, `KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-`,
+  `KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-RESOLVER-PROCESSOR-`, `KTABLE-FK-JOIN-OUTPUT-`,
+  FK `KTABLE-SOURCE-`/`KTABLE-SINK-`; store
+  `KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-0000000008`; registration topic
+  `app-KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-0000000004-topic`; response topic
+  `app-KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-0000000012-topic`; subscription changelog
+  `app-KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-0000000008-changelog`. Repartition
+  topic config: `cleanup.policy=delete`, `retention.ms=-1`, `segment.bytes=52428800`.
+  T6 must mint names so these numeric suffixes land exactly.
+
+---
+
 ## File structure
 
 **New files:**
@@ -284,13 +328,16 @@ with the other `mod` lines).
 mod tests {
     use super::*;
 
-    // Hand-checked MurmurHash3 x64 128-bit vectors (seed 0). The JVM
-    // `Murmur3.hash128` is the x64 128-bit variant; these confirm the algorithm
-    // independent of the capture.
+    // The JVM `Murmur3.hash128` is the x64 128-bit variant with DEFAULT_SEED=104729
+    // (NOT 0), so the empty hash is NON-zero. Pinned by T1.
     #[test]
     fn empty_input() {
-        // x64_128("", seed=0) = 0x00000000000000000000000000000000
-        assert_eq!(hash128(b""), [0u8; 16]);
+        // Murmur3.hash128("", seed=104729) — captured value from behavior.json.
+        assert_eq!(hex_bytes("9d2764a018e329428c3cf3b035938518"), hash128(b"").to_vec());
+    }
+
+    fn hex_bytes(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
     }
 
     #[test]
@@ -327,16 +374,20 @@ order is PINNED BY T1** — set `to_bytes` to match `behavior.json`, almost cert
 each long big-endian, h1 then h2):
 
 ```rust
-//! MurmurHash3 x64 128-bit (seed 0) — JVM `org.apache.kafka.streams.state.internals.Murmur3.hash128`.
+//! MurmurHash3 x64 128-bit — JVM `org.apache.kafka.streams.state.internals.Murmur3.hash128`.
 
 const C1: u64 = 0x87c3_7b91_1142_53d5;
 const C2: u64 = 0x4cf5_ad43_2745_937f;
+/// Kafka `Murmur3.DEFAULT_SEED` (PINNED BY T1 — empty input must hash to
+/// `9d2764a018e329428c3cf3b035938518`).
+const DEFAULT_SEED: u32 = 104_729;
 
-/// 128-bit MurmurHash3 (x64 variant, seed 0) of `data`, serialized to 16 bytes in
-/// the JVM FK-join order (PINNED BY T1: each 64-bit half big-endian, h1 then h2).
+/// 128-bit MurmurHash3 (x64 variant, Kafka default seed) of `data`, serialized to
+/// 16 bytes in the JVM FK-join order (PINNED BY T1: each 64-bit half big-endian,
+/// h1 then h2).
 #[must_use]
 pub(crate) fn hash128(data: &[u8]) -> [u8; 16] {
-    let (h1, h2) = hash128_longs(data, 0);
+    let (h1, h2) = hash128_longs(data, DEFAULT_SEED);
     let mut out = [0u8; 16];
     out[..8].copy_from_slice(&h1.to_be_bytes());
     out[8..].copy_from_slice(&h2.to_be_bytes());
@@ -580,7 +631,8 @@ mod tests {
                 u8::try_from(e["instruction_byte"].as_u64().unwrap()).unwrap()).unwrap();
             let hash = e["hash_hex"].as_str().map(hex);
             let pk = e["pk"].as_str().unwrap().as_bytes();
-            let w = SubscriptionWrapper { instruction: instr, hash: hash.clone(), primary_key: Bytes::copy_from_slice(pk) };
+            let pp = i32::try_from(e["primary_partition"].as_i64().unwrap()).unwrap();
+            let w = SubscriptionWrapper { instruction: instr, hash: hash.clone(), primary_key: Bytes::copy_from_slice(pk), primary_partition: pp };
             assert_eq!(w.serialize(), Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
                 "subscription wrapper bytes mismatch: {e}");
             assert_eq!(SubscriptionWrapper::deserialize(&w.serialize()), w);
@@ -628,8 +680,11 @@ the `Instruction` byte mapping, and the optional `primaryPartition` field to mat
 //! primaryPartition int) are PINNED by the `--fkjoin` capture.
 use bytes::{BufMut, Bytes, BytesMut};
 
-/// Wrapper format version (PINNED BY T1 — the JVM `SubscriptionWrapper` VERSION).
-const VERSION: u8 = 1;
+/// `SubscriptionWrapper` version (PINNED BY T1 = 1). `SubscriptionResponseWrapper`
+/// version is 0. In BOTH, the high bit of byte 0 is the `isHashNull` flag.
+const SUB_VERSION: u8 = 1;
+const RESP_VERSION: u8 = 0;
+const HASH_NULL_FLAG: u8 = 0x80;
 const HASH_LEN: usize = 16;
 
 /// What the right side must do with a subscription (JVM
@@ -648,29 +703,29 @@ pub(crate) enum Instruction {
 
 impl Instruction {
     pub(crate) fn to_byte(self) -> u8 {
-        // PINNED BY T1 — match behavior.json `instruction_ordinals`.
+        // PINNED BY T1 (behavior.json `instruction_ordinals`).
         match self {
             Instruction::DeleteKeyNoPropagate => 0,
-            Instruction::PropagateNullIfNoFkValAvailable => 1,
-            Instruction::PropagateOnlyIfFkValAvailable => 2,
-            Instruction::DeleteKeyAndPropagate => 3,
+            Instruction::DeleteKeyAndPropagate => 1,
+            Instruction::PropagateNullIfNoFkValAvailable => 2,
+            Instruction::PropagateOnlyIfFkValAvailable => 3,
         }
     }
     pub(crate) fn from_byte(b: u8) -> Option<Self> {
         Some(match b {
             0 => Instruction::DeleteKeyNoPropagate,
-            1 => Instruction::PropagateNullIfNoFkValAvailable,
-            2 => Instruction::PropagateOnlyIfFkValAvailable,
-            3 => Instruction::DeleteKeyAndPropagate,
+            1 => Instruction::DeleteKeyAndPropagate,
+            2 => Instruction::PropagateNullIfNoFkValAvailable,
+            3 => Instruction::PropagateOnlyIfFkValAvailable,
             _ => return None,
         })
     }
     pub(crate) fn name(self) -> &'static str {
         match self {
             Instruction::DeleteKeyNoPropagate => "DELETE_KEY_NO_PROPAGATE",
-            Instruction::PropagateNullIfNoFkValAvailable => "PROPAGATE_NULL_IF_NO_FK_VALUE_AVAILABLE",
-            Instruction::PropagateOnlyIfFkValAvailable => "PROPAGATE_ONLY_IF_FK_VAL_AVAILABLE",
             Instruction::DeleteKeyAndPropagate => "DELETE_KEY_AND_PROPAGATE",
+            Instruction::PropagateNullIfNoFkValAvailable => "PROPAGATE_NULL_IF_NO_FK_VAL_AVAILABLE",
+            Instruction::PropagateOnlyIfFkValAvailable => "PROPAGATE_ONLY_IF_FK_VAL_AVAILABLE",
         }
     }
     pub(crate) fn is_propagate(self) -> bool {
@@ -684,32 +739,42 @@ pub(crate) struct SubscriptionWrapper {
     /// Murmur3-128 of the serialized left value; `None` on delete instructions.
     pub hash: Option<Vec<u8>>,
     pub primary_key: Bytes,
+    /// Trailing 4-byte BE int (PINNED BY T1). Crabka writes 0 (single-partition test
+    /// + we don't route by it); the field exists so bytes match the JVM exactly.
+    pub primary_partition: i32,
 }
 
 impl SubscriptionWrapper {
+    // Layout (PINNED BY T1): [version|(isHashNull<<7)][instruction][hash:16?][pk…][primaryPartition:4BE].
     pub(crate) fn serialize(&self) -> Bytes {
         let mut b = BytesMut::new();
-        b.put_u8(VERSION);
+        let v0 = if self.hash.is_none() { SUB_VERSION | HASH_NULL_FLAG } else { SUB_VERSION };
+        b.put_u8(v0);
         b.put_u8(self.instruction.to_byte());
-        // hash-presence marker (PINNED BY T1: JVM writes a length byte / sentinel;
-        // confirm exact encoding from behavior.json). Common form: 1 byte present-flag.
-        match &self.hash {
-            Some(h) => { b.put_u8(1); debug_assert_eq!(h.len(), HASH_LEN); b.extend_from_slice(h); }
-            None => { b.put_u8(0); }
+        if let Some(h) = &self.hash {
+            debug_assert_eq!(h.len(), HASH_LEN);
+            b.extend_from_slice(h);
         }
         b.extend_from_slice(&self.primary_key);
+        b.put_i32(self.primary_partition);
         b.freeze()
     }
     pub(crate) fn deserialize(bytes: &[u8]) -> Self {
-        let _version = bytes[0];
+        let is_hash_null = bytes[0] & HASH_NULL_FLAG != 0;
         let instruction = Instruction::from_byte(bytes[1]).expect("valid instruction");
-        let present = bytes[2];
-        let (hash, rest) = if present == 1 {
-            (Some(bytes[3..3 + HASH_LEN].to_vec()), &bytes[3 + HASH_LEN..])
+        let mut i = 2;
+        let hash = if is_hash_null {
+            None
         } else {
-            (None, &bytes[3..])
+            let h = bytes[i..i + HASH_LEN].to_vec();
+            i += HASH_LEN;
+            Some(h)
         };
-        Self { instruction, hash, primary_key: Bytes::copy_from_slice(rest) }
+        // primary_key = everything between here and the trailing 4-byte partition.
+        let pk_end = bytes.len() - 4;
+        let primary_key = Bytes::copy_from_slice(&bytes[i..pk_end]);
+        let primary_partition = i32::from_be_bytes(bytes[pk_end..].try_into().expect("4 bytes"));
+        Self { instruction, hash, primary_key, primary_partition }
     }
 }
 
@@ -722,34 +787,44 @@ pub(crate) struct SubscriptionResponseWrapper {
 }
 
 impl SubscriptionResponseWrapper {
+    // Layout (PINNED BY T1): [version0|(isHashNull<<7)][hash:16?][foreignValueBytes…].
+    // NO primaryPartition, NO foreign-value present-flag: null fv ⇒ no trailing bytes.
     pub(crate) fn serialize(&self) -> Bytes {
         let mut b = BytesMut::new();
-        b.put_u8(VERSION);
-        match &self.hash {
-            Some(h) => { b.put_u8(1); debug_assert_eq!(h.len(), HASH_LEN); b.extend_from_slice(h); }
-            None => { b.put_u8(0); }
+        let v0 = if self.hash.is_none() { RESP_VERSION | HASH_NULL_FLAG } else { RESP_VERSION };
+        b.put_u8(v0);
+        if let Some(h) = &self.hash {
+            debug_assert_eq!(h.len(), HASH_LEN);
+            b.extend_from_slice(h);
         }
-        match &self.foreign_value {
-            Some(fv) => { b.put_u8(1); b.extend_from_slice(fv); }
-            None => { b.put_u8(0); }
+        if let Some(fv) = &self.foreign_value {
+            b.extend_from_slice(fv);
         }
         b.freeze()
     }
     pub(crate) fn deserialize(bytes: &[u8]) -> Self {
-        let _version = bytes[0];
+        let is_hash_null = bytes[0] & HASH_NULL_FLAG != 0;
         let mut i = 1;
-        let hash = if bytes[i] == 1 { i += 1; let h = bytes[i..i + HASH_LEN].to_vec(); i += HASH_LEN; Some(h) } else { i += 1; None };
-        let foreign_value = if bytes[i] == 1 { i += 1; Some(Bytes::copy_from_slice(&bytes[i..])) } else { None };
+        let hash = if is_hash_null {
+            None
+        } else {
+            let h = bytes[i..i + HASH_LEN].to_vec();
+            i += HASH_LEN;
+            Some(h)
+        };
+        // Remaining bytes are the foreign value. Empty remainder ⇒ None.
+        // NOTE: confirm the empty-vs-null distinction from behavior.json's null-fv
+        // entry; if the JVM uses a present-flag for the null case, match that instead.
+        let foreign_value = if i < bytes.len() { Some(Bytes::copy_from_slice(&bytes[i..])) } else { None };
         Self { hash, foreign_value }
     }
 }
 ```
 
-> **PINNING NOTE:** the JVM's exact hash-presence + foreign-value-presence encoding
-> (a flag byte vs. a length-prefix vs. relying on remaining length) is determined by
-> `behavior.json`. If the fixture shows a different framing (e.g. no present-flag and
-> the hash is always 16 bytes for propagate / 0 bytes for delete), adjust
-> `serialize`/`deserialize` until `*_matches_capture` passes. Do NOT edit the fixture.
+> **PINNING NOTE:** the wrapper layouts above are the T1-captured truth. The
+> `*_matches_capture` tests assert against `behavior.json`; if the null-foreign-value
+> response encoding differs (e.g. an empty-vs-absent ambiguity), match the fixture.
+> Do NOT edit the fixture.
 
 - [ ] **Step 3: Run, clippy, fmt, commit**
 
@@ -794,6 +869,7 @@ mod tests {
             instruction: Instruction::PropagateOnlyIfFkValAvailable,
             hash: Some(vec![7u8; 16]),
             primary_key: Bytes::copy_from_slice(pk.as_bytes()),
+            primary_partition: 0,
         }
     }
 
@@ -1115,17 +1191,17 @@ pub(crate) fn plan_send(is_left: bool, old: Option<Vec<u8>>, new: Option<Vec<u8>
             // in the processor the extractor runs on the typed value before serialization.
             let new_fk = nv.clone();
             let hash = hash128(nv).to_vec();
-            out.push(SendPlan { fk: new_fk.clone(), wrapper: SubscriptionWrapper { instruction: propagate, hash: Some(hash), primary_key: Bytes::copy_from_slice(pk) } });
+            out.push(SendPlan { fk: new_fk.clone(), wrapper: SubscriptionWrapper { instruction: propagate, hash: Some(hash), primary_key: Bytes::copy_from_slice(pk), primary_partition: 0 } });
             if let Some(ov) = &old {
                 let old_fk = ov.clone();
                 if old_fk != new_fk {
-                    out.push(SendPlan { fk: old_fk, wrapper: SubscriptionWrapper { instruction: Instruction::DeleteKeyNoPropagate, hash: None, primary_key: Bytes::copy_from_slice(pk) } });
+                    out.push(SendPlan { fk: old_fk, wrapper: SubscriptionWrapper { instruction: Instruction::DeleteKeyNoPropagate, hash: None, primary_key: Bytes::copy_from_slice(pk), primary_partition: 0 } });
                 }
             }
         }
         (Some(ov), None) => {
             let del = if is_left { Instruction::DeleteKeyAndPropagate } else { Instruction::DeleteKeyNoPropagate };
-            out.push(SendPlan { fk: ov.clone(), wrapper: SubscriptionWrapper { instruction: del, hash: None, primary_key: Bytes::copy_from_slice(pk) } });
+            out.push(SendPlan { fk: ov.clone(), wrapper: SubscriptionWrapper { instruction: del, hash: None, primary_key: Bytes::copy_from_slice(pk), primary_partition: 0 } });
         }
         (None, None) => {}
     }
@@ -1204,18 +1280,24 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ```rust
 /// KIP-213 FK-join node-name prefixes + the subscription store name prefix +
-/// repartition topic name segments (PINNED by the --fkjoin capture, behavior.json).
-pub(crate) const FK_SUBSCRIPTION_SEND: &str = "KTABLE-SUBSCRIPTION-REGISTRATION-PROCESSOR-";
-pub(crate) const FK_SUBSCRIPTION_RECEIVE: &str = "KTABLE-SUBSCRIPTION-RECEIVE-";
-pub(crate) const FK_SUBSCRIPTION_JOIN: &str = "KTABLE-SUBSCRIPTION-JOIN-";
-pub(crate) const FK_FOREIGN_JOIN: &str = "KTABLE-FK-JOIN-";
-pub(crate) const FK_RESPONSE_RESOLVER: &str = "KTABLE-SUBSCRIPTION-RESPONSE-RESOLVER-";
+/// repartition topic name segments (PINNED by the --fkjoin capture, behavior.json
+/// `names` / the wire golden). Topic names are
+/// `<app>-<prefix><index>-topic` (registration) / `…RESPONSE-<index>-topic` (response);
+/// the store is `<prefix><index>`; their changelog is `<store>-changelog`.
+pub(crate) const FK_SUBSCRIPTION_REGISTRATION: &str = "KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-";
+pub(crate) const FK_SUBSCRIPTION_PROCESSOR: &str = "KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-";
+pub(crate) const FK_RESPONSE_RESOLVER: &str = "KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-RESOLVER-PROCESSOR-";
+pub(crate) const FK_OUTPUT: &str = "KTABLE-FK-JOIN-OUTPUT-";
 pub(crate) const FK_SUBSCRIPTION_STORE: &str = "KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-";
-pub(crate) const FK_REGISTRATION_TOPIC: &str = "-subscription-registration-topic";
-pub(crate) const FK_RESPONSE_TOPIC: &str = "-subscription-response-topic";
+pub(crate) const FK_SUBSCRIPTION_RESPONSE: &str = "KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-";
 pub(crate) const FK_SINK: &str = "KTABLE-SINK-";
 pub(crate) const FK_SOURCE: &str = "KTABLE-SOURCE-";
 ```
+
+> The exact set of nodes that consume counter indices (and therefore the numeric
+> suffixes) must be read off the wire golden + `behavior.json` `names.describe_inner`.
+> Add only the prefixes you actually mint; match the golden's suffixes by adjusting
+> mint order.
 
 - [ ] **Step 2: Write the execution tests (drive the inner/left sequences)**
 
@@ -1260,12 +1342,28 @@ Cross-check expected outputs against `behavior.json`'s sequences exactly.
 
 Run: `cargo test -p crabka-client-streams fk_inner_join_executes` → FAIL (no method).
 
-Add to `dsl/ktable.rs` (mirror `join_impl`'s multi-node lowering — mint the five
+Add to `dsl/ktable.rs` (mirror `join_impl`'s multi-node lowering — mint the FK
 processor names + the two sink/source pairs + the subscription store name; add the
 graph nodes; attach lowering thunks that call `add_processor` / `add_sink` /
 `add_repartition_topic` / `add_source` / `add_fk_subscription_store` /
-`connect_processor_store`; declare the `[a_src, b_src]` copartition group). The two
-public methods wrap the joiner to outer form and set `is_left`:
+`connect_processor_store`). **The wire golden `fk_join_inner.topology.json` is the
+authoritative oracle** — match it exactly. Key facts from T1 (see "Captured pinned
+values"):
+- FK join produces **TWO subtopologies** (left: a-source + send → registration-sink,
+  response-source → resolver; right: b-source + registration-source → receive/
+  subscription-join, foreign-table-join → response-sink). Do **NOT** add a cross-table
+  `[a_src, b_src]` copartition group. The per-subtopology copartition that binds each
+  external source to its repartition source is produced by the existing repartition
+  wiring (the same mechanism `repartition()`/aggregation uses) — verify it appears in
+  the wire output; only add an explicit copartition call if the golden shows one the
+  framework didn't generate.
+- Mint node names in the JVM order so the topic/store numeric suffixes land exactly:
+  registration topic at `…-0000000004-topic`, subscription store at `…-0000000008`,
+  response topic at `…-0000000012-topic` (burn counter indices to match — the same
+  discipline as the `KSTREAM-WINDOWED-` burns). Use the `names.rs` prefixes pinned in
+  Step 1. Iterate against the golden until the suffixes match.
+
+The two public methods wrap the joiner to outer form and set `is_left`:
 
 ```rust
 impl<K, VA> KTable<K, VA>
