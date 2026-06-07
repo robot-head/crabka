@@ -6,6 +6,7 @@
 use bytes::Bytes;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::dsl::windows::{Window, Windowed};
 use crate::error::StreamsClientError;
 use crate::processor::serde::Serde;
 use crate::runtime::iq::{IqError, IqOp, IqPayload, IqRequest};
@@ -196,6 +197,46 @@ impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
     }
 }
 
+/// Read-only composite session store view. `fetch` yields each session as a
+/// `Windowed<K>` (key + `[start, end]`) with its value.
+pub struct ReadOnlySessionStore<K, V> {
+    pub(crate) tx: mpsc::Sender<IqRequest>,
+    pub(crate) store: String,
+    pub(crate) key_serde: Box<dyn Serde<K>>,
+    pub(crate) value_serde: Box<dyn Serde<V>>,
+}
+
+impl<K: 'static, V: 'static> ReadOnlySessionStore<K, V> {
+    /// All sessions for `key`, in store order.
+    pub async fn fetch(&self, key: &K) -> Result<Vec<(Windowed<K>, V)>, StreamsClientError> {
+        let kb = self.key_serde.serialize(key);
+        match query(
+            &self.tx,
+            &self.store,
+            StoreKind::Session,
+            IqOp::SessionFetchKey { key: kb },
+        )
+        .await?
+        {
+            IqPayload::SessionEntries(rows) => rows
+                .into_iter()
+                .map(|((start, end), vb)| {
+                    // Re-deserialize the key per row (avoids a `K: Clone` bound).
+                    let k = deser(&*self.key_serde, &self.key_serde.serialize(key))?;
+                    Ok((
+                        Windowed {
+                            key: k,
+                            window: Window { start, end },
+                        },
+                        deser(&*self.value_serde, &vb)?,
+                    ))
+                })
+                .collect(),
+            other => Err(unexpected(&other)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +325,37 @@ mod tests {
         assert_eq!(view.fetch_single(&"k".to_string(), 5).await.unwrap(), None);
         let r = view.fetch(&"k".to_string(), 0, 1000).await.unwrap();
         assert_eq!(r, vec![(0, 10), (1000, 20)]);
+    }
+
+    async fn session_registry() -> StoreRegistry {
+        use crate::store::session::{SessionBytesStore, SessionStore};
+        let mut s = SessionBytesStore::<String, i64>::in_memory(
+            "sc".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "sc-changelog".into(),
+        );
+        s.put("k".into(), 0, 10, 1).await;
+        s.put("k".into(), 20, 30, 2).await;
+        let mut reg = StoreRegistry::default();
+        reg.insert(Box::new(s));
+        reg
+    }
+
+    #[tokio::test]
+    async fn session_view_fetch() {
+        use crate::dsl::windows::Window;
+        let tx = servicer(session_registry().await);
+        let view = ReadOnlySessionStore::<String, i64> {
+            tx,
+            store: "sc".into(),
+            key_serde: Box::new(StringSerde),
+            value_serde: Box::new(I64Serde),
+        };
+        let rows = view.fetch(&"k".to_string()).await.unwrap();
+        let got: Vec<(Window, i64)> = rows.into_iter().map(|(w, v)| (w.window, v)).collect();
+        assert!(got.contains(&(Window { start: 0, end: 10 }, 1)));
+        assert!(got.contains(&(Window { start: 20, end: 30 }, 2)));
+        assert_eq!(got.len(), 2);
     }
 }
