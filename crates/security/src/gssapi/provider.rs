@@ -21,7 +21,6 @@ use sspi::{
 use super::keytab::{ENCTYPE_AES256_CTS_HMAC_SHA1_96, load_service_key, load_service_keys};
 use super::{AcceptStep, GssAcceptor, GssError, GssInitiator, InitStep};
 
-
 /// Default KDC URL used when `SSPI_KDC_URL` is unset. The accept path does not
 /// hit the network, but `KerberosConfig::new` requires a URL string.
 const DEFAULT_KDC_URL: &str = "tcp://localhost:88";
