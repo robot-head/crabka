@@ -664,7 +664,7 @@ jobs:
             --test reconcile_user \
             --test reconcile_user_tls_external \
             --lcov --output-path coverage/operator-integration.lcov -- --nocapture
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/operator-integration.lcov
