@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "Confluent Schema Registry-compatible REST service for Crabka (binary: crabka-schema-registry)"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-schema-registry"
+readme = "../../README.md"
+keywords = ["kafka", "schema", "registry", "avro", "crabka"]
+categories = ["web-programming::http-server", "encoding"]
 
 [lints]
 workspace = true

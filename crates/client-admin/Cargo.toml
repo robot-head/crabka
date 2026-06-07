@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Operator-side admin client for Crabka clusters"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-client-admin"
+readme = "../../README.md"
+keywords = ["kafka", "admin", "client", "crabka"]
+categories = ["api-bindings", "network-programming"]
 
 [lints]
 workspace = true

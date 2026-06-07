@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "Topic-backed RemoteLogMetadataManager for Crabka tiered storage"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-remote-storage-topic"
+readme = "../../README.md"
+keywords = ["kafka", "tiered-storage", "metadata", "crabka"]
+categories = ["database-implementations", "encoding"]
 
 [lints]
 workspace = true

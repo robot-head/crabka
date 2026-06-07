@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "Connection management and request dispatch for Apache Kafka in Rust"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-client-core"
+readme = "../../README.md"
+keywords = ["kafka", "client", "protocol", "crabka"]
+categories = ["api-bindings", "network-programming"]
 
 [lints]
 workspace = true

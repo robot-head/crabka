@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Load driver + report aggregator for the Crabka vs Strimzi benchmark harness"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-bench-driver"
+readme = "../../README.md"
+keywords = ["kafka", "benchmark", "load-test", "crabka"]
+categories = ["development-tools::profiling"]
 
 [[bin]]
 name = "crabka-bench-driver"

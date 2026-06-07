@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "Metadata KRaft quorum (KIP-595 KraftController) for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-raft"
+readme = "../../README.md"
+keywords = ["kafka", "raft", "kraft", "consensus", "crabka"]
+categories = ["algorithms", "database-implementations"]
 
 [lints]
 workspace = true

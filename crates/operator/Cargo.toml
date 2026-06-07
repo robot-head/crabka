@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Kubernetes operator for Crabka clusters"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-operator"
+readme = "../../README.md"
+keywords = ["kafka", "kubernetes", "operator", "crabka"]
+categories = ["config", "network-programming"]
 
 [[bin]]
 name = "crabka-operator"

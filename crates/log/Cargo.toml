@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "Byte-compatible reader/writer for Apache Kafka's on-disk log format"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-log"
+readme = "../../README.md"
+keywords = ["kafka", "log", "storage", "records", "crabka"]
+categories = ["database-implementations", "encoding"]
 
 [lints]
 workspace = true

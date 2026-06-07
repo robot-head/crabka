@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "gRPC / Connect-RPC + HTTP gateway into Crabka (Kafka) topics"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-grpc-gateway"
+readme = "../../README.md"
+keywords = ["kafka", "grpc", "connectrpc", "gateway", "crabka"]
+categories = ["web-programming::http-server", "network-programming"]
 
 [lints]
 workspace = true

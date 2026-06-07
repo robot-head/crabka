@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "Idempotent producer client for Apache Kafka in Rust"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-client-producer"
+readme = "../../README.md"
+keywords = ["kafka", "producer", "client", "streaming", "crabka"]
+categories = ["api-bindings", "network-programming"]
 
 [lints]
 workspace = true

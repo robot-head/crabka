@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Operator CLI for Crabka (binary: `crabka`)"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-cli"
+readme = "../../README.md"
+keywords = ["kafka", "cli", "operator", "crabka"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "crabka"

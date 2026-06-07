@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "Single-node Apache Kafka-compatible broker (MVP)"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-broker"
+readme = "../../README.md"
+keywords = ["kafka", "broker", "streaming", "crabka"]
+categories = ["database-implementations", "network-programming"]
 
 [lints]
 workspace = true

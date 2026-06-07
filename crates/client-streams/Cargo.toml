@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "KIP-1071 Kafka Streams rebalance-protocol client for Apache Kafka in Rust"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-client-streams"
+readme = "../../README.md"
+keywords = ["kafka", "streams", "client", "crabka"]
+categories = ["api-bindings", "network-programming"]
 
 [lints]
 workspace = true

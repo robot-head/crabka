@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Shared Kafka-ACL authorization evaluator for the Crabka broker and gateway"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-authz"
+readme = "../../README.md"
+keywords = ["kafka", "authorization", "acl", "security", "crabka"]
+categories = ["authentication", "network-programming"]
 
 [lints]
 workspace = true
