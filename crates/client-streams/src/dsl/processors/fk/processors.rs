@@ -6,19 +6,19 @@
 //!
 //! ## Pipeline
 //!
-//! Left table `a` (`KTable<K, VA>`) → **SubscriptionSend** (keyed by the foreign
-//! key `KO`) → registration repartition topic → **SubscriptionReceive** (writes
-//! the subscription store) → **SubscriptionJoin** (reads `sb`, the right table)
+//! Left table `a` (`KTable<K,VA>`) → `SubscriptionSend` (keyed by the foreign
+//! key `KO`) → registration repartition topic → `SubscriptionReceive` (writes
+//! the subscription store) → `SubscriptionJoin` (reads `sb`, the right table)
 //! → response repartition topic. Independently, right table `b`
-//! (`KTable<KO, VB>`) → **ForeignTableJoin** (prefix-scans the subscription
+//! (`KTable<KO,VB>`) → `ForeignTableJoin` (prefix-scans the subscription
 //! store, re-emits for every subscribed primary key on a right-side change) →
-//! response repartition topic. The response topic → **SubscriptionResolver**
-//! (reads `sa`, staleness-checks the hash, applies the joiner) → **OUTPUT**
-//! (the result `KTable<K, VR>`).
+//! response repartition topic. The response topic → `SubscriptionResolver`
+//! (reads `sa`, staleness-checks the hash, applies the joiner) → `OUTPUT`
+//! (the result `KTable<K,VR>`).
 //!
 //! ## fk extractor and the hash
 //! The foreign key is `fk_extractor(&VA)`. The subscription wrapper carries
-//! `hash = murmur3(va_serde.serialize(newVA))` (None when the new value is
+//! `hash = murmur3(va_serde.serialize(newVA))` (`None` when the new value is
 //! null). The resolver re-hashes the *current* `sa` value and drops the response
 //! if it disagrees with the wrapper's hash — discarding results made stale by a
 //! rapid foreign-key change on the same primary key.
@@ -104,123 +104,123 @@ where
     ) {
         let key = r.key.expect("FK subscription-send requires a non-null key");
         let ts = r.timestamp;
-        // hash of the NEW value (None when newValue is null).
-        let new_hash = r
+        // Murmur3-128 hash of the serialized NEW value (None when newValue is null).
+        let hash = r
             .value
             .new
             .as_ref()
-            .map(|v| self.va_serde.serialize(v).to_vec());
-        // Serialized FKs let us compare for equality the same way the JVM does
-        // (`Arrays.equals(serialize(newFk), serialize(oldFk))`).
+            .map(|v| hash128(&self.va_serde.serialize(v)).to_vec());
         let old_fk = r.value.old.as_ref().map(|v| (self.fk_extractor)(v));
         let new_fk = r.value.new.as_ref().map(|v| (self.fk_extractor)(v));
-        let old_fk_bytes = old_fk.as_ref().map(|fk| self.ko_serde.serialize(fk));
-        let new_fk_bytes = new_fk.as_ref().map(|fk| self.ko_serde.serialize(fk));
+        let had_old = r.value.old.is_some();
 
         if self.is_left {
-            // leftJoinInstructions
-            if r.value.old.is_some() {
-                if let (Some(ofk_b), Some(ofk)) = (&old_fk_bytes, old_fk) {
-                    if new_fk_bytes.as_ref() != Some(ofk_b) {
-                        self.forward(
-                            ctx,
-                            &key,
-                            ofk,
-                            Instruction::DeleteKeyNoPropagate,
-                            new_hash.clone(),
-                            ts,
-                        );
-                    }
-                }
-                // newFk may be null (newValue null) — the JVM forwards with a null
-                // key in that case; our test never exercises that, but mirror it.
-                if let Some(nfk) = new_fk {
-                    self.forward(
-                        ctx,
-                        &key,
-                        nfk,
-                        Instruction::PropagateNullIfNoFkValAvailable,
-                        new_hash,
-                        ts,
-                    );
-                }
-            } else if let Some(nfk) = new_fk {
+            self.left_join_instructions(ctx, &key, had_old, old_fk, new_fk, hash.as_deref(), ts);
+        } else {
+            self.default_join_instructions(ctx, &key, had_old, old_fk, new_fk, hash.as_deref(), ts);
+        }
+    }
+}
+
+impl<K, VA, KO, FKE> SubscriptionSendProcessor<K, VA, KO, FKE>
+where
+    K: Send + 'static,
+    VA: Send + 'static,
+    KO: Send + Clone + 'static,
+    FKE: Fn(&VA) -> KO + Send + 'static,
+{
+    /// True iff `serialize(a) != serialize(b)` (the JVM compares FKs by their
+    /// serialized bytes, not by `Eq`). `a`/`b` here are both `Some`.
+    fn fk_differs(&self, a: &KO, b: &KO) -> bool {
+        self.ko_serde.serialize(a) != self.ko_serde.serialize(b)
+    }
+
+    /// JVM `leftJoinInstructions`.
+    #[allow(clippy::too_many_arguments)] // mirrors the JVM signature + the cached hash
+    fn left_join_instructions(
+        &self,
+        ctx: &mut ProcessorContext<'_, '_, KO, SubscriptionWrapper>,
+        key: &K,
+        had_old: bool,
+        old_fk: Option<KO>,
+        new_fk: Option<KO>,
+        hash: Option<&[u8]>,
+        ts: i64,
+    ) {
+        use Instruction::{DeleteKeyNoPropagate, PropagateNullIfNoFkValAvailable};
+        if had_old {
+            // Delete the OLD key's subscription when the FK changed (or vanished).
+            if let Some(ofk) = old_fk
+                && new_fk.as_ref().is_none_or(|nfk| self.fk_differs(nfk, &ofk))
+            {
                 self.forward(
                     ctx,
-                    &key,
-                    nfk,
-                    Instruction::PropagateNullIfNoFkValAvailable,
-                    new_hash,
+                    key,
+                    ofk,
+                    DeleteKeyNoPropagate,
+                    hash.map(<[u8]>::to_vec),
                     ts,
                 );
             }
-        } else {
-            // defaultJoinInstructions (inner)
-            if r.value.old.is_some() {
-                match (old_fk, new_fk) {
-                    (None, None) => { /* both FKs null → skip */ }
-                    (None, Some(nfk)) => {
-                        self.forward(
-                            ctx,
-                            &key,
-                            nfk,
-                            Instruction::PropagateOnlyIfFkValAvailable,
-                            new_hash,
-                            ts,
-                        );
-                    }
-                    (Some(ofk), None) => {
-                        self.forward(
-                            ctx,
-                            &key,
-                            ofk,
-                            Instruction::DeleteKeyAndPropagate,
-                            new_hash,
-                            ts,
-                        );
-                    }
-                    (Some(ofk), Some(nfk)) => {
-                        if old_fk_bytes != new_fk_bytes {
-                            // Different FK: delete from old key's store, propagate
-                            // null under the new key (unset the previous output).
-                            self.forward(
-                                ctx,
-                                &key,
-                                ofk,
-                                Instruction::DeleteKeyNoPropagate,
-                                new_hash.clone(),
-                                ts,
-                            );
-                            self.forward(
-                                ctx,
-                                &key,
-                                nfk,
-                                Instruction::PropagateNullIfNoFkValAvailable,
-                                new_hash,
-                                ts,
-                            );
-                        } else {
-                            // Unchanged FK.
-                            self.forward(
-                                ctx,
-                                &key,
-                                nfk,
-                                Instruction::PropagateOnlyIfFkValAvailable,
-                                new_hash,
-                                ts,
-                            );
-                        }
-                    }
-                }
-            } else if let Some(nfk) = new_fk {
+            if let Some(nfk) = new_fk {
                 self.forward(
                     ctx,
-                    &key,
+                    key,
                     nfk,
-                    Instruction::PropagateOnlyIfFkValAvailable,
-                    new_hash,
+                    PropagateNullIfNoFkValAvailable,
+                    hash.map(<[u8]>::to_vec),
                     ts,
                 );
+            }
+        } else if let Some(nfk) = new_fk {
+            self.forward(
+                ctx,
+                key,
+                nfk,
+                PropagateNullIfNoFkValAvailable,
+                hash.map(<[u8]>::to_vec),
+                ts,
+            );
+        }
+    }
+
+    /// JVM `defaultJoinInstructions` (inner).
+    #[allow(clippy::too_many_arguments)] // mirrors the JVM signature + the cached hash
+    fn default_join_instructions(
+        &self,
+        ctx: &mut ProcessorContext<'_, '_, KO, SubscriptionWrapper>,
+        key: &K,
+        had_old: bool,
+        old_fk: Option<KO>,
+        new_fk: Option<KO>,
+        hash: Option<&[u8]>,
+        ts: i64,
+    ) {
+        use Instruction::{
+            DeleteKeyAndPropagate, DeleteKeyNoPropagate, PropagateNullIfNoFkValAvailable,
+            PropagateOnlyIfFkValAvailable,
+        };
+        let h = || hash.map(<[u8]>::to_vec);
+        if !had_old {
+            if let Some(nfk) = new_fk {
+                self.forward(ctx, key, nfk, PropagateOnlyIfFkValAvailable, h(), ts);
+            }
+            return;
+        }
+        match (old_fk, new_fk) {
+            (None, None) => { /* both FKs null → skip */ }
+            (Some(ofk), None) => {
+                self.forward(ctx, key, ofk, DeleteKeyAndPropagate, h(), ts);
+            }
+            (Some(ofk), Some(nfk)) if self.fk_differs(&ofk, &nfk) => {
+                // Different FK: delete from the old key's store, propagate null under
+                // the new key (unset the previous output).
+                self.forward(ctx, key, ofk, DeleteKeyNoPropagate, h(), ts);
+                self.forward(ctx, key, nfk, PropagateNullIfNoFkValAvailable, h(), ts);
+            }
+            // First arrival of this FK (old null) or unchanged FK: propagate-only.
+            (_, Some(nfk)) => {
+                self.forward(ctx, key, nfk, PropagateOnlyIfFkValAvailable, h(), ts);
             }
         }
     }
@@ -248,7 +248,9 @@ where
         ctx: &mut ProcessorContext<'_, '_, KO, SubscriptionWrapper>,
         r: Record<KO, SubscriptionWrapper>,
     ) {
-        let fk = r.key.expect("FK subscription-receive requires a non-null key");
+        let fk = r
+            .key
+            .expect("FK subscription-receive requires a non-null key");
         let fk_bytes = self.ko_serde.serialize(&fk);
         let w = r.value;
         let pk = w.primary_key.clone();
@@ -314,12 +316,12 @@ where
                 hash: w.hash.clone(),
                 foreign_value: fk_val_bytes,
             }),
-            Instruction::PropagateOnlyIfFkValAvailable => fk_val_bytes.map(|fv| {
-                SubscriptionResponseWrapper {
+            Instruction::PropagateOnlyIfFkValAvailable => {
+                fk_val_bytes.map(|fv| SubscriptionResponseWrapper {
                     hash: w.hash.clone(),
                     foreign_value: Some(fv),
-                }
-            }),
+                })
+            }
             Instruction::DeleteKeyNoPropagate => None,
         };
         if let Some(resp) = response {
@@ -355,7 +357,9 @@ where
         ctx: &mut ProcessorContext<'_, '_, K, SubscriptionResponseWrapper>,
         r: Record<KO, Change<VB>>,
     ) {
-        let fk = r.key.expect("FK foreign-table-join requires a non-null key");
+        let fk = r
+            .key
+            .expect("FK foreign-table-join requires a non-null key");
         let fk_bytes = self.ko_serde.serialize(&fk);
         // The current right value (None on a tombstone).
         let new_vb: Option<Bytes> = r.value.new.as_ref().map(|v| self.vb_serde.serialize(v));
@@ -434,23 +438,29 @@ where
             .as_ref()
             .and_then(|b| self.vb_serde.deserialize(b).ok());
 
-        let result: Option<VR> = if resp.foreign_value.is_none()
-            && (!self.is_left || current_va.is_none())
-        {
-            None // tombstone
-        } else {
-            // joiner(currentVA, foreignVB); currentVA is Some here for INNER (it
-            // matched the hash, and a null hash only matches a null current value
-            // — in which case the foreign value is also null → handled above).
-            current_va
-                .as_ref()
-                .map(|va| (self.joiner)(va, foreign_vb.as_ref()))
-        };
+        let result: Option<VR> =
+            if resp.foreign_value.is_none() && (!self.is_left || current_va.is_none()) {
+                None // tombstone
+            } else {
+                // joiner(currentVA, foreignVB); currentVA is Some here for INNER (it
+                // matched the hash, and a null hash only matches a null current value
+                // — in which case the foreign value is also null → handled above).
+                current_va
+                    .as_ref()
+                    .map(|va| (self.joiner)(va, foreign_vb.as_ref()))
+            };
 
         // old is None: the FK-join output node is a non-materialized KTableSource,
         // so it never has a prior value to report (matches the JVM, which feeds the
         // resolver's raw value into a store-less KTableSource).
-        ctx.forward(Record::new(Some(key), Change { old: None, new: result }, r.timestamp));
+        ctx.forward(Record::new(
+            Some(key),
+            Change {
+                old: None,
+                new: result,
+            },
+            r.timestamp,
+        ));
     }
 }
 
@@ -477,5 +487,39 @@ where
         r: Record<K, Change<VR>>,
     ) {
         ctx.forward(r);
+    }
+}
+
+// ── Test-only change collector ───────────────────────────────────────────────
+
+/// Shared buffer of collected `(key, new-value)` pairs (tombstone → `None`).
+#[cfg(test)]
+pub(crate) type ChangeBuffer<K, V> = std::sync::Arc<std::sync::Mutex<Vec<(Option<K>, Option<V>)>>>;
+
+/// Terminal processor (test-only): records each `Change<V>`'s key + **new** value
+/// (tombstone → `None`) into a shared buffer, in arrival order, and forwards
+/// nothing. Backs [`KTable::collect_changes`], used by the FK-join exec tests to
+/// observe a table's full change-stream including `None` tombstones.
+///
+/// [`KTable::collect_changes`]: crate::dsl::ktable::KTable::collect_changes
+#[cfg(test)]
+pub(crate) struct ChangeCollectorProcessor<K, V> {
+    pub buf: ChangeBuffer<K, V>,
+    pub _pd: Marker<(K, V)>,
+}
+
+#[cfg(test)]
+#[async_trait]
+impl<K, V> Processor<K, Change<V>, K, V> for ChangeCollectorProcessor<K, V>
+where
+    K: Send + Sync + Clone + 'static,
+    V: Send + Sync + Clone + 'static,
+{
+    async fn process(
+        &mut self,
+        _ctx: &mut ProcessorContext<'_, '_, K, V>,
+        r: Record<K, Change<V>>,
+    ) {
+        self.buf.lock().unwrap().push((r.key, r.value.new));
     }
 }

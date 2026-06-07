@@ -19,7 +19,7 @@ use crate::dsl::kstream::KStream;
 use crate::dsl::names;
 use crate::dsl::processors::change::Change;
 use crate::dsl::processors::fk::processors::{
-    ForeignTableJoinProcessor, FkJoinOutputProcessor, SubscriptionJoinProcessor,
+    FkJoinOutputProcessor, ForeignTableJoinProcessor, SubscriptionJoinProcessor,
     SubscriptionReceiveProcessor, SubscriptionResolverProcessor, SubscriptionSendProcessor,
 };
 use crate::dsl::processors::fk::subscription::{SubscriptionResponseWrapper, SubscriptionWrapper};
@@ -95,12 +95,12 @@ pub struct KTable<K, V> {
     /// `suppress` to register its store with the right serdes. `None` on derived
     /// tables whose value type changed (`map_values`) — `suppress` then panics.
     suppress_store_factory: Option<SuppressStoreFactory>,
-    /// The table's key + value serdes, captured by `builder.table` (the only
+    /// The table's key and value serdes, captured by `builder.table` (the only
     /// source-backed `KTable` constructor). Read by the FK-join DSL, which needs
     /// the left key/value and right value serdes to (de)serialize the subscription
-    /// + response wrappers. `None` on derived tables (aggregations / `map_values`),
-    /// which can't be an FK-join input anyway (FK join requires both inputs to be
-    /// materialized source tables).
+    /// and response wrappers. `None` on derived tables (aggregations /
+    /// `map_values`), which can't be an FK-join input anyway (FK join requires both
+    /// inputs to be materialized source tables).
     key_serde: Option<Arc<dyn Serde<K>>>,
     value_serde: Option<Arc<dyn Serde<V>>>,
     _pd: PhantomData<fn() -> (K, V)>,
@@ -193,6 +193,44 @@ where
     K: Any + Send + Sync + Clone,
     V: Any + Send + Clone,
 {
+    /// Test-only terminal: collect each forwarded `Change<V>`'s key + **new**
+    /// value (including tombstones, where `new == None`) into a shared buffer, in
+    /// arrival order. Unlike [`to_stream`](Self::to_stream) it preserves
+    /// tombstones, so an exec test can assert a table's full change-stream
+    /// (value updates *and* `None` deletions) — matching the JVM
+    /// `toStream().to(topic)` capture, which writes null-valued records.
+    #[cfg(test)]
+    pub(crate) fn collect_changes(
+        &self,
+        buf: crate::dsl::processors::fk::processors::ChangeBuffer<K, V>,
+    ) where
+        K: 'static,
+        V: Sync + 'static,
+    {
+        let parent_id = self.node;
+        let mut g = self.builder.borrow_mut();
+        let name = g.new_processor_name(names::TABLE_TOSTREAM);
+        let id = g.graph.add(
+            name.clone(),
+            GraphNodeKind::TableProcessor { store_name: None },
+            vec![parent_id],
+        );
+        g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
+            let parent =
+                NodeHandle::<K, Change<V>>::from_name(state.handle_name[&parent_id].clone());
+            let buf = buf.clone();
+            let h = state.topology.add_processor::<K, Change<V>, K, V, _, _, _>(
+                name.clone(),
+                move || crate::dsl::processors::fk::processors::ChangeCollectorProcessor::<K, V> {
+                    buf: buf.clone(),
+                    _pd: PhantomData,
+                },
+                [parent],
+            );
+            state.handle_name.insert(id, h.name().to_string());
+        }));
+    }
+
     /// `toStream`: view the table's change-stream as a `KStream`, forwarding
     /// every record unchanged. Not key-changing.
     #[must_use]
@@ -639,6 +677,7 @@ where
     /// (`toStream`=18, sink=19) lands at the JVM index; the thunk then registers
     /// the Topology sources/processors/sinks/stores/repartition-topics/copartition.
     #[allow(clippy::too_many_lines)] // the 14-node KIP-213 graph is one cohesive lowering
+    #[allow(clippy::similar_names)] // va_serde/vb_serde are the FK-join domain names (left/right value)
     fn fk_join_impl<KO, VB, VR, FKE, JF, KOS>(
         &self,
         other: &KTable<KO, VB>,
@@ -758,7 +797,9 @@ where
                         SubscriptionWrapperSerde,
                     ),
                 );
-            state.topology.add_repartition_topic(registration_topic.clone());
+            state
+                .topology
+                .add_repartition_topic(registration_topic.clone());
             let reg_src_h = state
                 .topology
                 .add_source::<KO, SubscriptionWrapper, KOS, SubscriptionWrapperSerde>(
@@ -830,10 +871,15 @@ where
             // subtopology (subtopology 1).
             state.topology.add_fk_subscription_store(
                 subscription_store.clone(),
-                [receive_h.name().to_string(), foreign_join_h.name().to_string()],
+                [
+                    receive_h.name().to_string(),
+                    foreign_join_h.name().to_string(),
+                ],
             );
             // sub-join reads sb → connect so it joins sb's subtopology.
-            state.topology.connect_processor_store(sub_join_h.name(), &sb);
+            state
+                .topology
+                .connect_processor_store(sub_join_h.name(), &sb);
 
             // ── Response sink (sub1) ← {sub-join, foreign-join} ───────────────
             state
@@ -881,13 +927,17 @@ where
                     [&resp_src_h],
                 );
             // Resolver reads sa → connect so it joins sa's subtopology (subtopology 0).
-            state.topology.connect_processor_store(resolver_h.name(), &sa);
+            state
+                .topology
+                .connect_processor_store(resolver_h.name(), &sa);
 
-            let output_h = state.topology.add_processor::<K, Change<VR>, K, Change<VR>, _, _, _>(
-                output_name.clone(),
-                || FkJoinOutputProcessor::<K, VR> { _pd: PhantomData },
-                [&resolver_h],
-            );
+            let output_h = state
+                .topology
+                .add_processor::<K, Change<VR>, K, Change<VR>, _, _, _>(
+                    output_name.clone(),
+                    || FkJoinOutputProcessor::<K, VR> { _pd: PhantomData },
+                    [&resolver_h],
+                );
 
             // Copartition: the left source topic + the registration repartition
             // source (subtopology 1) and the response repartition source +
@@ -903,7 +953,9 @@ where
                 .topology
                 .add_copartition_group([b_src.clone(), registration_topic.clone()]);
 
-            state.handle_name.insert(output_id, output_h.name().to_string());
+            state
+                .handle_name
+                .insert(output_id, output_h.name().to_string());
         };
         g.graph.nodes[output_id].lower = Some(Box::new(thunk));
         drop(g);
@@ -998,5 +1050,146 @@ fn mint_table_store<KS, VS>(
     match &materialized.store_name {
         Some(name) => name.clone(),
         None => builder.borrow_mut().new_processor_name(prefix),
+    }
+}
+
+#[cfg(test)]
+mod fk_exec_tests {
+    use std::sync::{Arc, Mutex};
+
+    use crate::dsl::builder::StreamsBuilder;
+    use crate::processor::serde::{Consumed, StringSerde};
+    use crate::test_driver::TopologyTestDriver;
+
+    type Out = Arc<Mutex<Vec<(Option<String>, Option<String>)>>>;
+    /// One sequence step: `(input_topic, key, value, ts, expected_emissions)`,
+    /// where each expected emission is `(key, Some(value)|None-tombstone)`.
+    type Step<'a> = (
+        &'a str,
+        &'a str,
+        &'a str,
+        i64,
+        &'a [(&'a str, Option<&'a str>)],
+    );
+
+    /// One input record: `topic:key=val@ts`. (The runtime has no null-value
+    /// source-record path — a `Record`'s value is always present — so the
+    /// behavior.json `a:k1=null@6` tombstone-into-the-table step can't be piped
+    /// here; it's a redundant `k1=null` after step 5 already emits `k1=null`, so
+    /// dropping it leaves every distinct FK retraction case covered.)
+    fn pipe(d: &mut TopologyTestDriver, topic: &str, key: &str, val: &str, ts: i64) {
+        d.pipe_input(
+            topic,
+            Consumed::with(StringSerde, StringSerde),
+            Some(key.to_string()),
+            val.to_string(),
+            ts,
+        );
+    }
+
+    /// Drive the (k, v, ts) input steps, asserting each step's *incremental*
+    /// collected output equals `want` (the collector preserves tombstones as
+    /// `(Some(k), None)`).
+    fn run_sequence(buf: &Out, d: &mut TopologyTestDriver, steps: &[Step]) {
+        let mut seen = 0usize;
+        for (topic, key, val, ts, want) in steps {
+            pipe(d, topic, key, val, *ts);
+            let all = buf.lock().unwrap().clone();
+            let step_out: Vec<(Option<String>, Option<String>)> = all[seen..].to_vec();
+            seen = all.len();
+            let want_owned: Vec<(Option<String>, Option<String>)> = want
+                .iter()
+                .map(|(k, v)| (Some((*k).to_string()), v.map(str::to_string)))
+                .collect();
+            assert_eq!(step_out, want_owned, "step {topic}:{key}={val}@{ts}");
+        }
+    }
+
+    fn tables(
+        b: &StreamsBuilder,
+    ) -> (super::KTable<String, String>, super::KTable<String, String>) {
+        let ta = b.table::<String, String, _, _>(
+            "a",
+            Consumed::with(StringSerde, StringSerde),
+            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("sa"),
+        );
+        let tb = b.table::<String, String, _, _>(
+            "b",
+            Consumed::with(StringSerde, StringSerde),
+            crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("sb"),
+        );
+        (ta, tb)
+    }
+
+    /// Inner FK join over the behavior.json `inner_sequence` (steps 0–5). fk
+    /// extractor = identity on the left String value; joiner = va+vb. Validates:
+    /// first-arrival skip (`a:k1=A` → []), match emit (`b:A=X` → `k1=AX`),
+    /// FK-change retraction tombstone (`a:k1=A2` → `k1=null`, since fk "A"→"A2"
+    /// and "A2" has no foreign value), a second primary key, the right-table
+    /// re-emit (`b:A=Y` → `k2=AY`), and another FK-change tombstone.
+    #[test]
+    fn fk_inner_sequence_matches_behavior_json() {
+        let b = StreamsBuilder::new();
+        let (ta, tb) = tables(&b);
+        let buf: Out = Arc::new(Mutex::new(Vec::new()));
+        ta.join_on_foreign_key(
+            &tb,
+            |va: &String| va.clone(),
+            |va: &String, vb: &String| format!("{va}{vb}"),
+            StringSerde,
+        )
+        .collect_changes(buf.clone());
+        drop(ta);
+        drop(tb);
+        let built = b.build("app").unwrap();
+        let mut d = TopologyTestDriver::new(&built).unwrap();
+        run_sequence(
+            &buf,
+            &mut d,
+            &[
+                ("a", "k1", "A", 0, &[]),
+                ("b", "A", "X", 1, &[("k1", Some("AX"))]),
+                ("a", "k1", "A2", 2, &[("k1", None)]),
+                ("a", "k2", "A", 3, &[("k2", Some("AX"))]),
+                ("b", "A", "Y", 4, &[("k2", Some("AY"))]),
+                ("a", "k1", "B", 5, &[("k1", None)]),
+            ],
+        );
+    }
+
+    /// Left FK join over the behavior.json `left_sequence` (steps 0–5). joiner =
+    /// va + (vb? vb : "_"). Validates the left-join non-match emit (`a:k1=A` →
+    /// `k1=A_`), the match (`b:A=X` → `k1=AX`), the FK-change re-evaluation
+    /// (`a:k1=A2` → `k1=A2_` — fk "A2" has no foreign value, so left emits the
+    /// left value with the empty marker rather than a tombstone), and the
+    /// right-table re-emit.
+    #[test]
+    fn fk_left_sequence_matches_behavior_json() {
+        let b = StreamsBuilder::new();
+        let (ta, tb) = tables(&b);
+        let buf: Out = Arc::new(Mutex::new(Vec::new()));
+        ta.left_join_on_foreign_key(
+            &tb,
+            |va: &String| va.clone(),
+            |va: &String, vb: Option<&String>| format!("{va}{}", vb.map_or("_", String::as_str)),
+            StringSerde,
+        )
+        .collect_changes(buf.clone());
+        drop(ta);
+        drop(tb);
+        let built = b.build("app").unwrap();
+        let mut d = TopologyTestDriver::new(&built).unwrap();
+        run_sequence(
+            &buf,
+            &mut d,
+            &[
+                ("a", "k1", "A", 0, &[("k1", Some("A_"))]),
+                ("b", "A", "X", 1, &[("k1", Some("AX"))]),
+                ("a", "k1", "A2", 2, &[("k1", Some("A2_"))]),
+                ("a", "k2", "A", 3, &[("k2", Some("AX"))]),
+                ("b", "A", "Y", 4, &[("k2", Some("AY"))]),
+                ("a", "k1", "B", 5, &[("k1", Some("B_"))]),
+            ],
+        );
     }
 }

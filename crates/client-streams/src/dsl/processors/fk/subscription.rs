@@ -38,6 +38,8 @@ impl Instruction {
             _ => return None,
         })
     }
+    /// JVM enum name — used only to assert ordinal parity against the capture.
+    #[cfg(test)]
     pub(crate) fn name(self) -> &'static str {
         match self {
             Instruction::DeleteKeyNoPropagate => "DELETE_KEY_NO_PROPAGATE",

@@ -62,6 +62,9 @@ impl SubscriptionBytesStore {
         }
     }
 
+    /// Point lookup of a single `(fk, pk)` subscription. The processors drive the
+    /// store via `put`/`delete`/`range_by_foreign` only; `get` backs the unit test.
+    #[cfg(test)]
     pub(crate) async fn get(&self, fk: &[u8], pk: &[u8]) -> Option<SubscriptionWrapper> {
         let raw = self.backend.get(&combined_key(fk, pk)).await?;
         let (_ts, w) = unwrap_value(&raw);
