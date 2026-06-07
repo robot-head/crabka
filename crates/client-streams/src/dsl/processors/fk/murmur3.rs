@@ -1,7 +1,6 @@
 //! `MurmurHash3` x64 128-bit — JVM `org.apache.kafka.streams.state.internals.Murmur3.hash128`.
-// Codec consumed by the FK-join subscription wrappers (Task 3+); unused at this
-// task's boundary in a non-test build.
-#![allow(dead_code)]
+//! Consumed by the FK-join subscription-send / resolver processors (hashing the
+//! left value to staleness-check responses).
 
 const C1: u64 = 0x87c3_7b91_1142_53d5;
 const C2: u64 = 0x4cf5_ad43_2745_937f;

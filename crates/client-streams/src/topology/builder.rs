@@ -616,7 +616,6 @@ impl Topology {
     /// taken.
     ///
     /// [`add_state_store`]: Topology::add_state_store
-    #[allow(dead_code)] // called by the FK-join DSL lowering (T6)
     pub(crate) fn add_fk_subscription_store(
         &mut self,
         name: impl Into<String>,

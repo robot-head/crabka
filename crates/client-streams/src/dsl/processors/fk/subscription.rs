@@ -4,10 +4,7 @@
 //! `SubscriptionWrapper`  : `version1 | (isHashNull<<7)` ‖ `instruction(1)` ‖ `[hash:16]` ‖ `pk…` ‖ `primaryPartition:4BE`
 //! `SubscriptionResponse` : `version0 | (isHashNull<<7)` ‖ `[hash:16]` ‖ `[foreignValue…]`
 //! Byte-exact vs the `--fkjoin` capture.
-//! Consumed by the FK-join subscription store + processors, which are only wired
-//! into a reachable path in T5 — so this whole module is dead-code until then in
-//! a non-test build.
-#![allow(dead_code)]
+//! Consumed by the FK-join subscription store + the five FK-join processors.
 use bytes::{BufMut, Bytes, BytesMut};
 
 const SUB_VERSION: u8 = 1;
@@ -48,13 +45,6 @@ impl Instruction {
             Instruction::PropagateNullIfNoFkValAvailable => "PROPAGATE_NULL_IF_NO_FK_VAL_AVAILABLE",
             Instruction::PropagateOnlyIfFkValAvailable => "PROPAGATE_ONLY_IF_FK_VAL_AVAILABLE",
         }
-    }
-    pub(crate) fn is_propagate(self) -> bool {
-        matches!(
-            self,
-            Instruction::PropagateOnlyIfFkValAvailable
-                | Instruction::PropagateNullIfNoFkValAvailable
-        )
     }
 }
 

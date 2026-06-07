@@ -132,6 +132,12 @@ impl StreamsBuilder {
             materialized.key_serde.clone(),
             materialized.value_serde.clone(),
         );
+        // Capture the table's key/value serdes for the FK-join DSL (which needs the
+        // left key/value + right value serdes to (de)serialize the FK wrappers).
+        let key_serde_arc: std::sync::Arc<dyn Serde<K>> =
+            std::sync::Arc::new(materialized.key_serde.clone());
+        let value_serde_arc: std::sync::Arc<dyn Serde<V>> =
+            std::sync::Arc::new(materialized.value_serde.clone());
         let mut g = self.internal.borrow_mut();
         // Store name at the JVM position (minted before the source/processor name).
         let store_name = match &materialized.store_name {
@@ -208,6 +214,7 @@ impl StreamsBuilder {
             Some(topic_for_ktable),
         )
         .with_suppress_factory(Some(suppress_factory))
+        .with_serdes(key_serde_arc, value_serde_arc)
     }
 
     /// Source a [`GlobalKTable`] from a topic: a fully-replicated lookup table,

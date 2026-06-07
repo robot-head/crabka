@@ -447,3 +447,65 @@ fn global_table_join_matches_jvm() {
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "global_table_join");
 }
+
+#[test]
+fn fk_join_inner_matches_jvm() {
+    use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
+    // Mirrors the JVM `--fkjoin` capture: two source tables `a`/`b` (stores sa/sb),
+    // an inner foreign-key join with fk extractor = identity on the left value,
+    // joiner va+vb, fk serde = String. Result `.toStream().to("out")`.
+    let b = StreamsBuilder::new();
+    let ta = b.table::<String, String, _, _>(
+        "a",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sa"),
+    );
+    let tb = b.table::<String, String, _, _>(
+        "b",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sb"),
+    );
+    ta.join_on_foreign_key(
+        &tb,
+        |va: &String| va.clone(),
+        |va: &String, vb: &String| format!("{va}{vb}"),
+        StringSerde,
+    )
+    .to_stream()
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(ta);
+    drop(tb);
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "fk_join_inner");
+}
+
+#[test]
+fn fk_join_left_matches_jvm() {
+    use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
+    // Like the inner FK join but `left_join_on_foreign_key`. The wire topology is
+    // byte-identical to the inner golden (the left/inner difference is runtime
+    // instruction/joiner only, not graph shape).
+    let b = StreamsBuilder::new();
+    let ta = b.table::<String, String, _, _>(
+        "a",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sa"),
+    );
+    let tb = b.table::<String, String, _, _>(
+        "b",
+        Consumed::with(StringSerde, StringSerde),
+        Materialized::with(StringSerde, StringSerde).as_store("sb"),
+    );
+    ta.left_join_on_foreign_key(
+        &tb,
+        |va: &String| va.clone(),
+        |va: &String, vb: Option<&String>| format!("{va}{}", vb.map_or("_", |s| s.as_str())),
+        StringSerde,
+    )
+    .to_stream()
+    .to("out", Produced::with(StringSerde, StringSerde));
+    drop(ta);
+    drop(tb);
+    let wire = b.build_optimized("app").unwrap().to_wire();
+    assert_matches_fixture(&wire, "fk_join_left");
+}

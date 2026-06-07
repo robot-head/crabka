@@ -4,5 +4,6 @@
 //! capture in `tests/testdata/fk_join/behavior.json`).
 pub(crate) mod combined_key;
 pub(crate) mod murmur3;
+pub(crate) mod processors;
 pub(crate) mod subscription;
-// `processors` is added in Task 5.
+pub(crate) mod wrapper_serde;

@@ -19,9 +19,6 @@ use crate::store::window_schema::{unwrap_value, wrap_value};
 /// Subscription store keyed by `combined_key(fk, pk)` → `ValueAndTimestamp`
 /// wrapped `SubscriptionWrapper` bytes. `range_by_foreign` scans every primary
 /// key subscribed to a given foreign key (drives the right-table re-emit).
-// The typed put/get/delete/range surface is consumed by the FK-join processors
-// (T5); only `new` (via the builder factory) is reachable before then.
-#[allow(dead_code)]
 pub(crate) struct SubscriptionBytesStore {
     name: String,
     changelog_topic: String,
@@ -30,7 +27,6 @@ pub(crate) struct SubscriptionBytesStore {
     logging: bool,
 }
 
-#[allow(dead_code)] // put/get/delete/range_by_foreign consumed by FK-join processors (T5)
 impl SubscriptionBytesStore {
     pub(crate) fn new(
         name: String,

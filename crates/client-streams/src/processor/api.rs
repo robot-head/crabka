@@ -204,7 +204,6 @@ where
     ///
     /// `pub(crate)`: the subscription store is an internal KIP-213 FK-join
     /// mechanism, not a user-facing store.
-    #[allow(dead_code)] // called by the FK-join processors (T5)
     pub(crate) fn get_fk_subscription_store(
         &mut self,
         name: &str,

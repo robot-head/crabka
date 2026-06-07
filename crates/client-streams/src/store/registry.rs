@@ -87,7 +87,6 @@ impl StoreRegistry {
     }
 
     /// Mutable access to the FK subscription store. `None` if absent / wrong type.
-    #[allow(dead_code)] // used by the FK-join processors via the context (T5)
     pub(crate) fn get_fk_subscription(
         &mut self,
         name: &str,
