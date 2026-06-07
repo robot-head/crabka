@@ -37,7 +37,7 @@ pub struct LogOffsetMetadata {
 }
 
 /// Read-only view of the local replicated log the state machine reasons about.
-/// 3b supplies the real `crabka-log`-backed impl; tests supply a fake.
+/// Production uses the real `crabka-log`-backed implementation; tests supply a fake.
 pub trait LogView {
     /// Offset one past the last appended record (the log end offset).
     fn end_offset(&self) -> i64;
@@ -50,7 +50,7 @@ pub trait LogView {
 }
 
 /// The durable quorum state — the logical content of the `quorum-state` file.
-/// (File persistence itself is deferred to 3c; this is the in-memory model.)
+/// This is the in-memory model; file persistence is owned by the log layer.
 #[derive(Debug, Clone, PartialEq)]
 pub struct QuorumState {
     pub cluster_id: Uuid,

@@ -9,7 +9,7 @@
 //! [`MetadataEventRecord`]s into a shared mpsc. There is **no consumer
 //! group and no broker-side offset commit**: the read position is owned
 //! by the RLMM (the manager assigns all partitions from offset 0 today;
-//! 48p/48q resume from snapshot offsets and restrict the consumed set).
+//! resume from snapshot offsets and restrict the consumed set).
 //!
 //! A dedicated connection per partition is required because the broker
 //! is serial per-connection: a long-`max_wait_ms` fetch would
@@ -76,7 +76,7 @@ pub struct KafkaMetadataLogConfig {
     pub topic: String,
     /// Number of partitions to create the topic with on first startup.
     /// Ignored when the topic already exists — the existing count
-    /// wins (re-bucketing on partition growth is a non-goal of 48f).
+    /// wins (re-bucketing on partition growth is not supported).
     pub num_partitions: i32,
     /// Replication factor to create the topic with on first startup.
     /// Ignored when the topic already exists.
@@ -519,7 +519,7 @@ async fn partition_fetch_loop(
                     Ok(records) => {
                         for r in records {
                             // Re-check cancellation before every send: a
-                            // remove() (e.g. 48q reassignment) that fires
+                            // remove() (for reassignment) that fires
                             // after fetch_partition resolved must not flush
                             // the rest of an already-fetched batch, or a
                             // task spawned on re-add from a new start_offset

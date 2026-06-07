@@ -44,7 +44,6 @@ impl GlobalStateManager {
 
     /// Apply one consumed record into the named global store (raw bytes — the
     /// consumer's path). `value = None` deletes (tombstone).
-    // Consumed by app wiring in T8b/T9.
     pub(crate) async fn apply(&self, store: &str, key: Bytes, value: Option<Bytes>) {
         let mut g = self.stores.lock().await;
         if let Some(s) = g.get_mut(store) {
@@ -98,7 +97,6 @@ impl GlobalStateManager {
     /// partitions from offset 0 to end-of-log and apply each record. Returns the
     /// per-`(topic, partition)` next-offset map so a live poll can resume. Blocks
     /// until every partition is drained.
-    // Consumed by the app wiring in T8.
     pub(crate) async fn bootstrap(
         &self,
         fetcher: &dyn RecordFetcher,
@@ -150,7 +148,6 @@ impl GlobalStateManager {
     /// One live-update pass from the given resume offsets: fetch new records on
     /// each `(topic, partition)` and apply them, advancing the offsets in place.
     /// Fetches one batch per partition (not to end-of-log); the caller repeats.
-    // Consumed by the app wiring in T8.
     pub(crate) async fn poll_once(
         &self,
         fetcher: &dyn RecordFetcher,

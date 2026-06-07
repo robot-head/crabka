@@ -49,9 +49,9 @@ impl TlsSettings {
 /// Kafka `OAuthBearerUnsecuredValidatorCallbackHandler` equivalent, intended for
 /// development / testing environments.
 ///
-/// TODO: add a `Signed` variant that constructs a `SignedJwsValidator` backed by
-/// a `JwksHandle` when a JWKS endpoint URL is provided; requires spawning the
-/// background JWKS refresher in `bin/gateway.rs`.
+/// Signed JWKS-backed bearer validation is not part of this settings surface;
+/// callers that need it should configure validation in the broker-facing
+/// security layer instead.
 #[derive(Debug, Clone)]
 pub struct BearerSettings {
     /// The JWT claim whose string value becomes the principal name.
@@ -72,7 +72,7 @@ impl Default for BearerSettings {
 }
 
 impl BearerSettings {
-    /// Build an [`OAuthBearerValidator`] from these settings.
+    /// Build an [`crabka_security::OAuthBearerValidator`] from these settings.
     ///
     /// Currently produces an `Unsecured(UnsecuredJwsValidator)` — the
     /// development validator; always succeeds construction.

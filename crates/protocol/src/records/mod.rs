@@ -1,7 +1,8 @@
 //! Typed v2 record batch decoder/encoder.
 //!
-//! See `docs/superpowers/specs/2026-05-11-crabka-records-1c-design.md`.
-//! v0/v1 record batches are deferred to `crabka-log`.
+//! This module handles the modern Kafka `RecordBatch` format used by
+//! Produce, Fetch, and log storage. Legacy v0/v1 `MessageSet` conversion is
+//! implemented in `crabka-records-legacy`.
 
 pub(crate) mod borrowed;
 mod crc;

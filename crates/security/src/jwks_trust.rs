@@ -75,8 +75,8 @@ mod tests {
             .unwrap();
         let cfg = build_client_config_from_pem(&path).expect("single cert PEM should load");
         // Smoke-check it's actually a ClientConfig (compile-level type
-        // check is the main assertion; runtime use is exercised by T3's
-        // HTTPS integration tests).
+        // check is the main assertion; runtime use is exercised by HTTPS
+        // integration tests).
         let _: Arc<rustls::ClientConfig> = cfg;
     }
 

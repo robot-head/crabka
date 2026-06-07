@@ -5,13 +5,12 @@
 //! over the pluggable `ByteKeyValueStore` backend: a `KTable.suppress(...)` buffer
 //! evicts by `buffer_time`, not by key order, so its internal storage is a
 //! time-ordered `BTreeMap` keyed by `(buffer_time, seq)` with a side `index`
-//! (`key_bytes -> slot`) for replace-by-key. This mirrors the in-memory
-//! `TimeOrderedKeyValueBuffer` from slice A, but over BYTES + serdes + byte-size
-//! accounting + a JVM-exact changelog.
+//! (`key_bytes -> slot`) for replace-by-key. It stores serialized keys and
+//! values, tracks byte-size limits, and writes a JVM-compatible changelog.
 //!
 //! The changelog KEY is the serialized record-key bytes; the changelog VALUE is
-//! [`serialize_buffer_change`] (see [`crate::store::suppress_bufval`]). A buffer
-//! eviction logs a `(key_bytes, None)` tombstone.
+//! the JVM `BufferValue` payload. A buffer eviction logs a `(key_bytes, None)`
+//! tombstone.
 use std::any::Any;
 use std::collections::{BTreeMap, HashMap};
 
@@ -69,8 +68,8 @@ fn entry_size(key_bytes: &Bytes, new_bytes: Option<&Bytes>) -> usize {
     key_bytes.len() + new_bytes.map_or(0, Bytes::len)
 }
 
-/// Typed suppress store (holds the key/value serdes). Registered erased and
-/// downcast back via [`StoreRegistry::get_suppress`](crate::store::registry).
+/// Typed suppress store that holds the key/value serdes and is registered in the
+/// task's state-store registry for lookup by the suppress processor.
 pub struct SuppressBytesStore<K, V> {
     name: String,
     changelog_topic: String,
@@ -426,8 +425,8 @@ mod tests {
     /// (the `until_window_closes` shape, `Windowed<String>` keys via
     /// `TimeWindowedSerde`) survives `take_changelog` → fresh store →
     /// `apply_changelog`, and the restored buffered windows still emit their final
-    /// value when stream-time closes them. The generic `StreamTask::restore`
-    /// machinery drives exactly this drain/replay over the registered store.
+    /// value when stream-time closes them. Task restore drives exactly this
+    /// drain/replay over the registered store.
     #[tokio::test]
     async fn windowed_buffer_restores_and_emits_on_close() {
         use crate::dsl::windows::{TimeWindowedSerde, Window, Windowed};

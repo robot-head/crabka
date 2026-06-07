@@ -201,9 +201,9 @@ impl StreamsGroupStatePhase {
     }
 }
 
-/// A minimal stand-in for the resolved topology that lives in `topology.rs`
-/// (Slice 2). For now the state machine only tracks the topology's *presence*
-/// and *epoch*; the full subtopology/task derivation is filled in later.
+/// A minimal handle for the resolved topology that lives in `topology.rs`.
+/// The state machine tracks the topology's *presence* and *epoch*; full
+/// subtopology/task derivation lives in the topology module.
 #[derive(Debug, Clone, Default)]
 pub struct StoredTopologyHandle {
     pub epoch: i32,
@@ -309,7 +309,7 @@ impl StreamsGroupState {
     /// revoked (otherwise it stays/returns to `Stable`). The member's currently
     /// assigned `active` set is trimmed to the tasks it keeps (the intersection
     /// of current and target). Standby and warmup are *not* installed here —
-    /// they are handed over wholesale in [`advance_member_epoch`] — so the
+    /// they are handed over wholesale in [`Self::advance_member_epoch`] — so the
     /// member keeps serving its old standby/warmup until it advances.
     pub fn install_target(&mut self, target: StreamsTargetAssignment) {
         self.assignment_epoch = self.group_epoch;
@@ -385,8 +385,8 @@ fn normalize_task_map(mut map: BTreeMap<String, Vec<i32>>) -> BTreeMap<String, V
 
 /// Merge `src` into `dst` (union of partitions per subtopology), normalizing the
 /// result. Used by callers that accumulate a task map from multiple sources
-/// (e.g. the assignor in Slice 3); kept here as a shared task-map primitive.
-#[allow(dead_code)] // wired up by later slices; exercised by unit tests today.
+/// (e.g. the assignor); kept here as a shared task-map primitive.
+#[allow(dead_code)] // exercised by unit tests and shared task-map callers.
 fn merge_task_maps(dst: &mut BTreeMap<String, Vec<i32>>, src: &BTreeMap<String, Vec<i32>>) {
     for (sub, parts) in src {
         dst.entry(sub.clone()).or_default().extend_from_slice(parts);

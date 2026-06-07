@@ -100,14 +100,14 @@ impl Feature for GroupVersionFeature {
     // min_required_floor: inherits the default (supported min). Next-gen group
     // state lives in the coordinator / __consumer_offsets, NOT the
     // MetadataImage, so a live-state-aware downgrade floor can't be computed
-    // here (deferred). dependencies: inherits the empty default — Kafka 4.0
+    // here. dependencies: inherits the empty default — Kafka 4.0
     // declares no hard `UpdateFeatures` dependency for group.version.
 }
 
 /// `transaction.version` (KIP-890). Default jumps to 2 once the bootstrap
 /// metadata.version reaches 4.0-IV2; downgrade floor is the supported min
 /// (in-flight txn state lives in the `__transaction_state` log, not the
-/// [`MetadataImage`], so an image-derived floor can't be computed — deferred).
+/// [`MetadataImage`], so an image-derived floor is not computed here).
 pub struct TransactionVersionFeature;
 
 impl Feature for TransactionVersionFeature {
@@ -186,7 +186,7 @@ impl Feature for StreamsVersionFeature {
     // dependencies + min_required_floor: inherit the empty/supported-min
     // defaults. Streams group state lives in __consumer_offsets, not the
     // MetadataImage, so a live-state-aware downgrade floor can't be computed
-    // here (deferred, mirroring group.version / share.version).
+    // here, mirroring group.version / share.version.
 }
 
 /// All features this broker supports finalizing. Single source of truth.

@@ -10,9 +10,6 @@
 //! broker re-reads the topic from offset 0 and re-applies the full
 //! history to recover its cache.
 //!
-//! See the design doc at
-//! `docs/superpowers/specs/2026-05-27-crabka-tiered-storage-topic-based-rlmm-48f-design.md`.
-//!
 //! ## What this crate provides
 //!
 //! - [`TopicBasedRemoteLogMetadataManager`] — the
@@ -41,14 +38,34 @@
 //!   `[remote_storage.kafka_metadata]` config section is present and
 //!   `in_memory` is not set to `true`.
 //!
-//! ## What this crate does NOT do (yet)
+//! ## Operational boundaries
 //!
 //! - **No log compaction or snapshot** of the metadata topic — every
-//!   restart re-reads from offset 0. Snapshot/fast-bootstrap is a
-//!   future optimization.
+//!   restart re-reads from offset 0.
 //! - **No auth on the internal metadata client.** The manager connects
-//!   to its own broker over plaintext loopback; TLS / SASL on the
-//!   inter-broker metadata connection is a follow-up.
+//!   to its own broker over plaintext loopback.
+//!
+//! ## In-process manager for tests and local tools
+//!
+//! ```no_run
+//! use std::{path::PathBuf, time::Duration};
+//! use crabka_remote_storage_topic::{
+//!     InProcessMetadataEventLog, TopicBasedRemoteLogMetadataManager,
+//! };
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let event_log = InProcessMetadataEventLog::new(16);
+//! let manager = TopicBasedRemoteLogMetadataManager::start(
+//!     event_log,
+//!     tokio::runtime::Handle::current(),
+//!     PathBuf::from("/var/lib/crabka/rlmm-cache"),
+//!     Duration::from_secs(30),
+//! ).await?;
+//!
+//! manager.reconcile_assignment(&[0, 1]).await;
+//! # Ok(())
+//! # }
+//! ```
 
 #![doc(html_root_url = "https://docs.rs/crabka-remote-storage-topic/0.1.1")]
 

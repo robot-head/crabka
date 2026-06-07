@@ -202,7 +202,7 @@ impl ValidationError {
                 )
             }
             Self::ConflictingOAuthListenerConfig => {
-                "all OAuth listeners must share identical config (per-listener OAuth is a future broker slice)".to_string()
+                "all OAuth listeners must share identical config (the broker oauthbearer block is broker-global)".to_string()
             }
             Self::ListenerOauthAccessTokenIsJwtInvalid(msg)
             | Self::ListenerOauthValidTokenTypeRejectedInIntrospectionMode(msg)
@@ -768,7 +768,7 @@ pub(crate) const INGRESS_PORT: i32 = 443;
 /// writes through one canonical location.
 pub(crate) const TIER_STORAGE_PATH: &str = "/var/lib/crabka/remote";
 
-/// Fixed in-pod path where the operator mounts the GSSAPI keytab (Task 5).
+/// Fixed in-pod path where the operator mounts the GSSAPI keytab.
 /// Both the `[gssapi]` and `[inter_broker_credentials]` TOML blocks reference it.
 pub(crate) const GSSAPI_KEYTAB_PATH: &str = "/etc/crabka/gssapi-keytab/keytab";
 
@@ -3066,7 +3066,7 @@ pub fn render_broker_toml(
 
     // KIP-405: `[remote_storage]` block. Presence of
     // `Kafka.spec.tieredStorage` flips on the broker-wide tiered-storage
-    // stack (slices 48a-e). The storage path is operator-owned and
+    // stack. The storage path is operator-owned and
     // matches the `tier-storage` volume mounted at the same path by the
     // broker pod template (`kafka_node_pool.rs`).
     if let Some(ts) = tiered_storage {
@@ -3226,7 +3226,7 @@ pub fn render_broker_toml(
             if let Some(id) = &oauth_cfg.client_id {
                 let _ = writeln!(out, "introspection_client_id = \"{id}\"");
             }
-            // clientSecret bytes are mounted at this fixed path by T5's
+            // clientSecret bytes are mounted at this fixed path by the
             // pod-template plumbing; the path itself is constant so the
             // operator emits it whenever introspection mode is selected.
             let _ = writeln!(
@@ -3282,7 +3282,7 @@ pub fn render_broker_toml(
         }
         if let Some(expr) = &oauth_cfg.groups_claim {
             // TOML multi-line literal — JsonPath may contain `'` and `"`,
-            // same convention as 49g's custom_claim_check.
+            // same convention as custom_claim_check.
             let _ = writeln!(out, "groups_claim = '''{expr}'''");
         }
         if let Some(d) = &oauth_cfg.groups_claim_delimiter {
@@ -3303,7 +3303,7 @@ pub fn render_broker_toml(
     // Broker-global [gssapi] block. Emitted when any listener is type:gssapi.
     // Per-listener divergence is rejected by validate_listeners, so the first
     // GSSAPI listener's config is unambiguous here. Keytab is mounted at a
-    // fixed path by kafka_node_pool.rs (Task 5).
+    // fixed path by kafka_node_pool.rs.
     if let Some(g) = listeners.iter().find_map(|l| match &l.authentication {
         Some(ListenerAuthentication::Gssapi(c)) => Some(c),
         _ => None,
@@ -4684,7 +4684,7 @@ mod toml_rendering_tests {
         // When maxSecondsWithoutReauthentication is unset
         // (default), the rendered TOML must NOT contain the key — the
         // broker then leaves session lifetime at the token's natural exp
-        // (49e default behavior).
+        // Default behavior.
         use std::collections::BTreeMap;
         let listeners = vec![oauth_listener_for_render(
             "oauth",

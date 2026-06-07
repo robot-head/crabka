@@ -111,8 +111,7 @@ fn to_stored_copartition_group(c: &wire::CopartitionGroup) -> StoredCopartitionG
 
 /// KIP-1071 heartbeat-response status codes. A non-empty status list keeps the
 /// member in a `NotReady` state until the offending condition clears.
-// TODO(slice6): verify these byte values against the apache/kafka:4.1.0
-// StreamsGroupHeartbeatResponse.Status enum during JVM interop.
+// Byte values for the Kafka StreamsGroupHeartbeatResponse.Status enum.
 pub mod status {
     pub const STALE_TOPOLOGY: i8 = 0;
     pub const MISSING_SOURCE_TOPICS: i8 = 1;
@@ -276,11 +275,9 @@ pub fn validate_topology(
             }
         }
 
-        // TODO(slice6): regex source topics (`source_topic_regex`) are not yet
-        // resolved against the metadata image — treated as satisfiable for now
-        // and revisited when regex subscription is wired (it shares KIP-848's
-        // resolution path). A regex matching zero topics should eventually
-        // surface as MISSING_SOURCE_TOPICS.
+        // Regex source topics (`source_topic_regex`) are not resolved against
+        // the metadata image here. They are treated as satisfiable; exact source
+        // names still surface MISSING_SOURCE_TOPICS when absent.
 
         // Copartition groups: every member topic must have the same (known)
         // partition count. Indices map into this subtopology's topic arrays.
@@ -404,7 +401,7 @@ fn add_spec(
 }
 
 /// Create any of `specs` not already present in the controller's metadata,
-/// mirroring [`crate::txn::bootstrap::ensure_topic`]: round-robin replica
+/// mirroring `crate::txn::bootstrap::ensure_topic`: round-robin replica
 /// assignment, replication factor `spec.replication_factor` if `> 0` else
 /// `min(brokers, 3)`, plus a `V1TopicConfig` record when the spec carries
 /// configs. `TopicExists` (a concurrent create) is tolerated.

@@ -7,8 +7,8 @@ use crabka_compression::CompressionType;
 /// Per-topic policy for what to do with old log segments.
 ///
 /// `Delete` (default): age- or size-based segment deletion via
-/// [`crate::retention`]. `Compact`: newest-wins dedup-by-key,
-/// implemented in [`crate::compact`] and invoked through
+/// `crate::retention`. `Compact`: newest-wins dedup-by-key,
+/// implemented in `crate::compact` and invoked through
 /// [`crate::Log::compact`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CleanupPolicy {

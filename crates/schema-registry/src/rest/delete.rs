@@ -20,7 +20,7 @@ fn parse_concrete_version(v: &str) -> Result<i32, SrError> {
     }
 }
 
-/// DELETE /subjects/{subject}/versions/{version}[?permanent=true] -> <version:int>
+/// `DELETE /subjects/{subject}/versions/{version}[?permanent=true] -> <version:int>`
 pub async fn delete_version(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
@@ -44,7 +44,7 @@ pub async fn delete_version(
     Ok(ok_json(&deleted))
 }
 
-/// DELETE /subjects/{subject}[?permanent=true] -> [<versions>]
+/// `DELETE /subjects/{subject}[?permanent=true] -> [<versions>]`
 pub async fn delete_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,

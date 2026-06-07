@@ -78,7 +78,7 @@ pub struct NextGenConfig {
     pub assignors: Vec<Arc<dyn Assignor>>,
     pub max_size: usize,
     /// `group.consumer.migration.policy` — governs classic ↔ next-gen
-    /// conversion. Consulted by the conversion triggers (Slices 64d-D/E).
+    /// conversion. Consulted by the conversion triggers.
     pub migration_policy: ConsumerGroupMigrationPolicy,
 }
 

@@ -22,18 +22,65 @@
 //! - [`InmemoryRemoteLogMetadataManager`] — a process-memory
 //!   [`RemoteLogMetadataManager`].
 //!
-//! ## What this crate does NOT do (yet)
+//! ## Boundary with the broker
 //!
-//! This crate is the foundation layer only. There is **no broker wiring** —
-//! no copy task, no remote read path on `Fetch`, no local-vs-remote
-//! retention split, and no broker/topic config. See
-//! `docs/superpowers/specs/2026-05-25-crabka-tiered-storage-roadmap-design.md`.
+//! This crate is the SPI and reference-implementation layer. Broker-specific
+//! behavior such as segment-copy scheduling, `Fetch` remote reads,
+//! local-vs-remote retention policy, and topic config parsing lives in the
+//! broker.
 //!
 //! The SPIs are intentionally **synchronous** — they mirror Kafka's
 //! blocking `RemoteStorageManager` / `RemoteLogMetadataManager`, which the
 //! broker drives from a thread pool (the broker wraps calls in
 //! `spawn_blocking`). Keeping them sync keeps this crate free of the async
 //! runtime.
+//!
+//! ## Filesystem-backed remote tier
+//!
+//! ```no_run
+//! use std::path::PathBuf;
+//! use std::collections::BTreeMap;
+//! use bytes::Bytes;
+//! use crabka_remote_storage::{
+//!     IndexType, LocalTieredStorage, LogSegmentData, RemoteLogSegmentId,
+//!     RemoteLogSegmentMetadata, RemoteLogSegmentState, RemoteStorageManager,
+//!     TopicIdPartition,
+//! };
+//! use uuid::Uuid;
+//!
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let storage = LocalTieredStorage::new(PathBuf::from("/var/lib/crabka-remote"));
+//! let topic_partition = TopicIdPartition::new(Uuid::new_v4(), "orders", 0);
+//! let segment_id = RemoteLogSegmentId::new(topic_partition, Uuid::new_v4());
+//! let mut leader_epochs = BTreeMap::new();
+//! leader_epochs.insert(0, 0);
+//! let metadata = RemoteLogSegmentMetadata::new(
+//!     segment_id,
+//!     0,
+//!     999,
+//!     1_713_000_000_000,
+//!     1,
+//!     1_713_000_000_000,
+//!     1_048_576,
+//!     RemoteLogSegmentState::CopySegmentStarted,
+//!     leader_epochs,
+//! )?;
+//!
+//! // The broker fills these paths from a closed local log segment.
+//! let segment = LogSegmentData {
+//!     log_segment: PathBuf::from("/var/lib/crabka/orders-0/00000000000000000000.log"),
+//!     offset_index: PathBuf::from("/var/lib/crabka/orders-0/00000000000000000000.index"),
+//!     time_index: PathBuf::from("/var/lib/crabka/orders-0/00000000000000000000.timeindex"),
+//!     transaction_index: None,
+//!     producer_snapshot_index: None,
+//!     leader_epoch_index: Bytes::new(),
+//! };
+//! let _custom_metadata = storage.copy_log_segment_data(&metadata, &segment)?;
+//! let bytes = storage.fetch_index(&metadata, IndexType::Offset)?;
+//! # let _ = bytes;
+//! # Ok(())
+//! # }
+//! ```
 
 #![doc(html_root_url = "https://docs.rs/crabka-remote-storage/0.1.1")]
 

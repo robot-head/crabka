@@ -4,9 +4,9 @@
 //! Nodes are visited in id order. Because [`LogicalGraph::add`] assigns ids
 //! sequentially and a node's predecessors are passed in by id when it is added,
 //! every predecessor has a strictly smaller id than its child — so id order is a
-//! valid topological order (parents before children) for the stateless chain and
-//! merge. A node whose thunk is `None` (e.g. the repartition stub) is skipped;
-//! later tasks attach those thunks and refine optimizer/branch ordering.
+//! valid topological order (parents before children) for stateless chains,
+//! merges, joins, repartitions, and table operations. A node whose thunk is
+//! `None` is structural metadata and has no Processor-API node to lower.
 use crate::dsl::graph::{GraphNodeKind, LogicalGraph, LowerState};
 
 pub(crate) fn lower(mut graph: LogicalGraph, app_id: &str) -> crate::topology::Topology {

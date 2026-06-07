@@ -7,7 +7,7 @@
 //! and index read in `tokio::task::spawn_blocking` so the broker's reactor
 //! never stalls on remote-tier I/O. The pure index-decode helpers mirror
 //! `crabka_log::index::{OffsetIndex,TimeIndex}::lookup` against the
-//! Kafka-format index bytes the copy path (48b) wrote out verbatim.
+//! Kafka-format index bytes written verbatim by the copy path.
 
 use std::sync::Arc;
 
@@ -1021,7 +1021,7 @@ mod tests {
         assert!(got == None);
     }
 
-    // ── 48q: `NotReady` from the RLMM must propagate out of the reader
+    // `NotReady` from the RLMM must propagate out of the reader
     // ── (not be swallowed as a miss), so the handlers can keep
     // ── OFFSET_OUT_OF_RANGE / answer conservatively.
 

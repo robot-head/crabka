@@ -16,6 +16,19 @@
 //! Each codec is behind a Cargo feature (`gzip`, `snappy`, `lz4`, `zstd`), all
 //! enabled by default. Disabling a feature leaves the API stable but returns
 //! `Err(`[`CompressionError::FeatureDisabled`]`)` at runtime.
+//!
+//! ## Compress and decompress a record payload
+//!
+//! ```rust
+//! use crabka_compression::{CompressionType, compress, decompress};
+//!
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let compressed = compress(CompressionType::Lz4, b"order-created")?;
+//! let plain = decompress(CompressionType::Lz4, &compressed, 1024)?;
+//! assert_eq!(plain.as_ref(), b"order-created");
+//! # Ok(())
+//! # }
+//! ```
 
 mod codec_type;
 mod error;

@@ -31,7 +31,7 @@ pub(crate) struct Graph {
     pub output: Vec<OutputRecord>,
     pub stores: StoreRegistry,
     /// The app-wide, fully-replicated global stores (shared across tasks),
-    /// lent into each dispatch. Default-empty until the app wiring (T8b) or the
+    /// lent into each dispatch. Default-empty until the app runtime or
     /// `TopologyTestDriver` populates it; stream-globaltable joins read it.
     pub globals: crate::runtime::global::GlobalStateManager,
     /// Live punctuation schedules registered via `ProcessorContext::schedule`,

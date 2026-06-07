@@ -1,6 +1,6 @@
 //! Production `ClientFacade` over `crabka_client_core::Client`. Maps
 //! each trait method to the corresponding admin RPC via raw
-//! `Client::send`, mirroring the ingester pattern from 43a.
+//! `Client::send`, mirroring the ingester pattern.
 
 use async_trait::async_trait;
 use crabka_client_core::Client;

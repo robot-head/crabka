@@ -45,12 +45,10 @@ impl GoalRegistry {
                 Box::new(crate::goals::leader_distribution::LeaderDistribution),
                 Box::new(crate::goals::topic_replica_distribution::TopicReplicaDistribution),
                 Box::new(crate::goals::min_topic_leaders_per_broker::MinTopicLeadersPerBroker),
-                // New in 43e:
                 Box::new(crate::goals::disk_usage::DiskUsage),
                 Box::new(crate::goals::leader_bytes_in::LeaderBytesIn),
                 Box::new(crate::goals::network_in_usage::NetworkInUsage),
                 Box::new(crate::goals::network_out_usage::NetworkOutUsage),
-                // New in 43f:
                 Box::new(crate::goals::cpu_usage::CpuUsage),
             ],
         }
@@ -134,12 +132,10 @@ mod tests {
                     "LeaderDistribution",
                     "TopicReplicaDistribution",
                     "MinTopicLeadersPerBroker",
-                    // New in 43e:
                     "DiskUsage",
                     "LeaderBytesIn",
                     "NetworkInUsage",
                     "NetworkOutUsage",
-                    // New in 43f:
                     "CpuUsage",
                 ],
             "registry order must match the spec's documented priority"

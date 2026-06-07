@@ -1,6 +1,6 @@
 //! [`InmemoryRemoteLogMetadataManager`] — a process-memory reference
 //! [`RemoteLogMetadataManager`], mirroring Kafka's test fixture of the same
-//! name. Every later tiered-storage slice's tests run against this.
+//! name. Tiered-storage tests run against this manager.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -15,7 +15,7 @@ use crate::metadata::{
 use crate::metadata_manager::RemoteLogMetadataManager;
 
 /// In-memory [`RemoteLogMetadataManager`]: one
-/// [`RemoteLogMetadataCache`](crate::cache) per partition behind a single
+/// `RemoteLogMetadataCache` per partition behind a single
 /// mutex. Not durable — state is lost on restart — but enforces the full
 /// lifecycle state machine, so it is a faithful stand-in for the
 /// topic-backed production manager in tests and single-process setups.
@@ -32,7 +32,7 @@ impl InmemoryRemoteLogMetadataManager {
     }
 
     /// Dump every partition's segment + partition-delete metadata for
-    /// snapshotting (slice 48p). The result is order-independent;
+    /// snapshotting. The result is order-independent;
     /// [`Self::import`] re-derives ordering and the epoch index.
     #[must_use]
     pub fn export(&self) -> RlmmCacheDump {
@@ -71,7 +71,7 @@ impl InmemoryRemoteLogMetadataManager {
     }
 
     /// Seed the cache from a dump, bypassing transition validation
-    /// (slice 48p). Intended for a freshly-constructed manager during
+    /// Intended for a freshly-constructed manager during
     /// snapshot restore; existing partitions are overwritten.
     pub fn import(&self, dump: RlmmCacheDump) {
         let mut guard = self.partitions.lock().expect("metadata mutex poisoned");

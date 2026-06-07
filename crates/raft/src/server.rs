@@ -231,14 +231,12 @@ where
 
 /// `ApiVersionsResponse` advertising the controller-listener APIs.
 ///
-/// SPIKE TWEAK (KIP-595 Slice 5 — evaluate for promotion): a real
-/// `apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
+/// A real `apache/kafka:4.0.0` controller dials peers with `ApiVersions v4` over a
 /// flexible (v2) request header, then consults the returned table to decide
 /// which version of `Vote`/`Fetch`/etc. to send. An EMPTY `api_keys` list made
 /// the JVM treat every raft RPC as `UNSUPPORTED_VERSION` and refuse to send
-/// `Vote` on the wire (captured in the slice-5 findings). Advertising the
-/// KIP-595 APIs at the versions Crabka's engine speaks lets the JVM proceed to
-/// real `Vote`/`Fetch`.
+/// `Vote` on the wire. Advertising the KIP-595 APIs at the versions Crabka's
+/// engine speaks lets compatible peers proceed to real `Vote`/`Fetch`.
 ///
 /// Body is the flexible (v3+) `ApiVersionsResponse` shape: `error_code(i16)`,
 /// `api_keys` compact-array of `{api_key(i16), min(i16), max(i16), tagged(0)}`,

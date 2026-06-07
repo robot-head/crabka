@@ -17,7 +17,7 @@ use crate::types::{GatewayRecord, RecordOutcome};
 pub struct ProduceCore {
     producer: Arc<Producer>,
     codec: Arc<dyn RecordCodec>,
-    /// Filled by Task 12. `None` ⇒ keyed records take the plain path too.
+    /// When absent, keyed records take the plain producer path too.
     dedup: Option<Arc<crate::dedup::DedupEngine>>,
     forwarding: Option<Forwarding>,
 }
@@ -76,7 +76,7 @@ impl ProduceCore {
         })
     }
 
-    /// Inject the dedup engine (Task 12).
+    /// Inject the dedup engine used by keyed records.
     #[must_use]
     pub fn with_dedup(mut self, dedup: Arc<crate::dedup::DedupEngine>) -> Self {
         self.dedup = Some(dedup);

@@ -2,7 +2,7 @@
 //! controller-side Unclean Recovery Manager (URM) task. The URM polls
 //! surviving replicas for their log-end-offset and last-written leader
 //! epoch (`GetReplicaLogInfo`, `api_key` 93) and elects the most complete
-//! log. See docs/superpowers/specs/2026-05-28-crabka-unclean-recovery-kip966-design.md.
+//! log.
 
 use crabka_raft::NodeId;
 

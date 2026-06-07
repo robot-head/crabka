@@ -3,8 +3,8 @@
 //! JVM client so a tid hashes to the same `__transaction_state`
 //! partition on Crabka as it does on Apache Kafka.
 
-// The constants and murmur2 helper will be live once the TxnCoordinator
-// calls partition_for_tid in a later task; suppress dead_code until then.
+// The constants and murmur2 helper are retained for transaction-state
+// partition routing parity with Apache Kafka.
 #![allow(dead_code)]
 
 const SEED: u32 = 0x9747_b28c;

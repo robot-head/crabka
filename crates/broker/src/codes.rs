@@ -5,7 +5,7 @@
 //! client behavior — values here mirror the canonical Apache Kafka
 //! table.
 
-#![allow(dead_code)] // codes are consumed by handlers in Phase E.
+#![allow(dead_code)] // codes are consumed by handlers as APIs are enabled.
 
 pub const NONE: i16 = 0;
 pub const UNKNOWN_SERVER_ERROR: i16 = -1;

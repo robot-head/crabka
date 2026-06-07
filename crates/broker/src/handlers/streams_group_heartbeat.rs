@@ -38,8 +38,8 @@ pub(crate) async fn handle(
 
         // ── ACL preamble ────────────────────────────────────────────
         // `Read` on `Group(group_id)`. On Deny → whole-response
-        // `error_code = GROUP_AUTHORIZATION_FAILED (30)`. (No topology /
-        // topic ACLs here — that's a future slice.)
+        // `error_code = GROUP_AUTHORIZATION_FAILED (30)`. Topology/topic ACLs
+        // are not evaluated by this handler.
         if group_read_denied(
             broker.config.authorizer.as_ref(),
             &image,
@@ -63,10 +63,8 @@ pub(crate) async fn handle(
         ng.mark_streams(&req.group_id);
         let handle = ng.get_or_create_streams(&req.group_id);
         let (tx, rx) = oneshot::channel();
-        // TODO: the plain 4-arg handler has no request-header / peer access, so
-        // we pass empty client_id/host (matching the share-group handler). A
-        // future inline-intercept upgrade in `network::dispatch` can thread the
-        // real client_id + peer SocketAddr through for member metadata.
+        // The actor message shape carries client_id/client_host, but this
+        // handler does not use them for routing, so pass empty values.
         if handle
             .tx
             .send(StreamsGroupActorMessage::Heartbeat {

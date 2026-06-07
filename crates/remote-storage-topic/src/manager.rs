@@ -3,7 +3,7 @@
 //! subscribe [`MetadataEventLog`].
 //!
 //! The manager keeps the canonical in-memory view in an
-//! [`InmemoryRemoteLogMetadataManager`] (so the 48a lifecycle state
+//! [`InmemoryRemoteLogMetadataManager`] (so the lifecycle state
 //! machine is the single source of truth for cache mutation) and uses
 //! the [`MetadataEventLog`] as the durable event log.
 //!
@@ -11,7 +11,7 @@
 //!
 //! - [`TopicBasedRemoteLogMetadataManager::start`]: load any on-disk
 //!   snapshot into the cache and spawn the consumer pump subscribed to
-//!   NOTHING. 48q: the broker then drives the consumed set via
+//!   NOTHING. The broker then drives the consumed set via
 //!   [`TopicBasedRemoteLogMetadataManager::reconcile_assignment`], adding
 //!   only the `__remote_log_metadata` partitions covering the
 //!   user-partitions this broker leads or follows. A newly-added partition
@@ -85,25 +85,25 @@ pub struct TopicBasedRemoteLogMetadataManager {
     runtime: Handle,
     shutdown: CancellationToken,
     pump: std::sync::Mutex<Option<JoinHandle<()>>>,
-    /// 48p: directory the on-disk RLMM cache snapshot is written to (one
+    /// Directory the on-disk RLMM cache snapshot is written to (one
     /// [`SNAPSHOT_FILE_NAME`](crate::snapshot::SNAPSHOT_FILE_NAME) file).
     snapshot_dir: std::path::PathBuf,
-    /// 48p: handle of the background snapshotter task; aborted on `Drop`,
+    /// Handle of the background snapshotter task; aborted on `Drop`,
     /// joined on [`Self::shutdown_and_flush`].
     snapshotter: std::sync::Mutex<Option<JoinHandle<()>>>,
     /// Live assignment handle for the metadata-log subscription. Held so
-    /// 48p (resume from snapshot offsets) and 48q (per-broker partition
+    /// resume-from-snapshot and per-broker partition-assignment logic
     /// assignment) can mutate the consumed set at runtime. Driven by
-    /// [`Self::reconcile_assignment`] (48q).
+    /// [`Self::reconcile_assignment`].
     assignment: Arc<dyn AssignmentHandle>,
     /// Per-metadata-partition committed offsets loaded from the snapshot
     /// at `start()`, indexed by metadata partition (`-1` == no committed
     /// event for that partition / full replay). Retained as the single
-    /// canonical source for resume-offset lookups; 48q's assignment
+    /// canonical source for resume-offset lookups; assignment
     /// reconciler reads it via [`Self::committed_offset`] when it
     /// dynamically adds a partition (to start at `committed + 1`).
     committed_offsets: Vec<i64>,
-    /// 48q: metadata partition → target HWM observed at assignment time.
+    /// Metadata partition → target HWM observed at assignment time.
     /// Presence == this manager is currently assigned that partition;
     /// reads for a user-partition hashing into it return
     /// [`RemoteStorageError::NotReady`] until `applied[mp] >= target - 1`.
@@ -161,7 +161,7 @@ impl TopicBasedRemoteLogMetadataManager {
         if let Some(snap) = &snapshot {
             inner.import(snap.dump.clone());
         }
-        // 48q: a freshly-started manager consumes NOTHING. The broker drives
+        // A freshly-started manager consumes NOTHING. The broker drives
         // the consumed set via [`Self::reconcile_assignment`], adding only the
         // metadata partitions covering user-partitions this broker leads or
         // follows (each resumed at its snapshot `committed + 1`). This is what
@@ -334,7 +334,7 @@ impl TopicBasedRemoteLogMetadataManager {
 
     /// Committed offset loaded from the snapshot for a single metadata
     /// partition, or `-1` when the partition is out of range or had no
-    /// committed event (full replay). 48q's assignment reconciler uses
+    /// committed event (full replay). The assignment reconciler uses
     /// this to start a dynamically-added partition at `committed + 1`.
     #[must_use]
     pub fn committed_offset(&self, partition: i32) -> i64 {
@@ -404,15 +404,15 @@ impl TopicBasedRemoteLogMetadataManager {
         v
     }
 
-    /// Diff `desired` against the current assignment and drive the 48o
+    /// Diff `desired` against the current assignment and drive the
     /// [`AssignmentHandle`]: add newly-needed partitions (seeded from the
-    /// 48p snapshot committed offset + 1, falling back to 0 when there is
+    /// snapshot committed offset + 1, falling back to 0 when there is
     /// no committed event) and remove ones no longer needed. Records each
     /// added partition's assignment-time HWM so reads gate on `NotReady`
     /// until the pump catches up.
     ///
     /// HWM-fetch failure fails CLOSED: a partition whose real high-water
-    /// mark could not be obtained is recorded with the [`HWM_UNKNOWN`]
+    /// mark could not be obtained is recorded with the `HWM_UNKNOWN`
     /// sentinel target so the gate returns `NotReady` (retryable), never a
     /// false `Ok(None)`. Such partitions are re-attempted on every
     /// subsequent reconcile (which the broker drives on each image change /
@@ -856,7 +856,7 @@ mod tests {
         .unwrap()
     }
 
-    /// Start a manager and assign EVERY metadata partition (the pre-48q
+    /// Start a manager and assign EVERY metadata partition (the eager
     /// "consume all" behavior). Used by tests that publish through the
     /// manager and read the result back, and by the multi-broker pre-seed
     /// writers. Blocks until each non-empty partition has caught up to its
@@ -1119,7 +1119,7 @@ mod tests {
         .await
         .unwrap();
         // The manager exposes the same committed offset via its canonical
-        // accessor (what 48q's reconciler will read).
+        // accessor used by the assignment reconciler.
         assert!(fresh.committed_offset(p) == committed);
         // Assign every partition and wait for catch-up so the gated read
         // methods delegate to the (snapshot-seeded) inner cache. The orders
@@ -1315,8 +1315,7 @@ mod tests {
         b.shutdown();
     }
 
-    /// 48o code-review guard: the runtime `remove` then `add` reassignment
-    /// path (which 48q is the first slice to actually drive) must not
+    /// Runtime `remove` then `add` reassignment must not
     /// double-deliver a metadata partition's events into the cache. A
     /// re-applied `AddSegment` is harmlessly rejected by the lifecycle state
     /// machine, so the segment list stays at exactly one entry — proving no
@@ -1355,7 +1354,7 @@ mod tests {
         m.reconcile_assignment(&[]).await;
         assert!(m.assigned_metadata_partitions().is_empty());
 
-        // … then re-add. The 48o pump re-injects the backlog from the resume
+        // … then re-add. The pump re-injects the backlog from the resume
         // offset; the re-applied AddSegment is rejected by the lifecycle
         // machine, so NO duplicate lands in the cache.
         m.reconcile_assignment(&[mp]).await;

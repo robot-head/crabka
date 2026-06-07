@@ -1,4 +1,5 @@
-//! `/config` endpoints. Stored (and replayed) but NOT enforced in slice 1.
+//! `/config` endpoints. Stored and replayed; compatibility enforcement lives
+//! with the format validators.
 
 use axum::extract::{Path, State};
 use axum::response::Response;

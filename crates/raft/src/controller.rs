@@ -8,9 +8,9 @@
 //! recovers from its on-disk metadata log + checkpoint + quorum-state file
 //! (handled inside [`KraftController::open`]).
 //!
-//! Static voters only this slice — `add_voter`/`remove_voter`/`update_voter`/
+//! Static voters only — `add_voter`/`remove_voter`/`update_voter`/
 //! `change_membership`/`add_learner` return [`RaftError::Unsupported`]
-//! ("dynamic reconfig: Slice 5").
+//! ("dynamic reconfig unsupported").
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -92,7 +92,7 @@ pub struct ControllerHandle {
     client_id: String,
     /// This node's own id. Used by [`ReconfigOps::is_leader`].
     self_node_id: NodeId,
-    /// Static voter set (this slice; KIP-853 dynamic membership is Slice 5).
+    /// Static voter set. KIP-853 dynamic membership is not supported.
     /// Used to resolve voter endpoints for `quorum_state().voter_nodes` and
     /// `forward_submit_to`.
     voters: crabka_metadata::VoterSet,
@@ -238,7 +238,7 @@ impl ControllerHandle {
         }
     }
 
-    /// Reconfiguration is static this slice. (KIP-853 dynamic voters: Slice 5.)
+    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
@@ -247,19 +247,19 @@ impl ControllerHandle {
         &self,
         _new_voters: std::collections::BTreeSet<NodeId>,
     ) -> Result<(), RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig: Slice 5"))
+        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
     }
 
-    /// Reconfiguration is static this slice. (KIP-853 dynamic voters: Slice 5.)
+    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
     #[allow(clippy::unused_async)] // async to match the stable handle API
     pub async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig: Slice 5"))
+        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
     }
 
-    /// Reconfiguration is static this slice. (KIP-853 dynamic voters: Slice 5.)
+    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
@@ -268,10 +268,10 @@ impl ControllerHandle {
         &self,
         _req: crate::reconfig::AddVoter,
     ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig: Slice 5"))
+        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
     }
 
-    /// Reconfiguration is static this slice. (KIP-853 dynamic voters: Slice 5.)
+    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
@@ -280,10 +280,10 @@ impl ControllerHandle {
         &self,
         _req: crate::reconfig::RemoveVoter,
     ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig: Slice 5"))
+        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
     }
 
-    /// Reconfiguration is static this slice. (KIP-853 dynamic voters: Slice 5.)
+    /// Reconfiguration is static. KIP-853 dynamic voters are not supported.
     ///
     /// # Errors
     /// Always [`RaftError::Unsupported`].
@@ -292,7 +292,7 @@ impl ControllerHandle {
         &self,
         _req: crate::reconfig::UpdateVoter,
     ) -> Result<crate::reconfig::ReconfigOutcome, RaftError> {
-        Err(RaftError::Unsupported("dynamic reconfig: Slice 5"))
+        Err(RaftError::Unsupported("dynamic reconfig unsupported"))
     }
 
     /// Resolve a voter's controller listener address from the static voter set's
@@ -534,7 +534,7 @@ impl Controller {
     ) -> Result<ControllerHandle, RaftError> {
         // The static voter set for this node. Bootstrap/Join nodes carry it in
         // `initial_voters`; a Rejoin node recovers the quorum-state file but the
-        // voter set is reconstructed from config (static voters this slice).
+        // voter set is reconstructed from config (static voters).
         let voters = config.initial_voters.clone();
 
         // First-boot orchestration validates mode against on-disk log state. The
@@ -584,8 +584,7 @@ impl Controller {
         let election_ms = u64::try_from(config.election_timeout.as_millis()).unwrap_or(1_000);
 
         // Build / recover the engine. `Join` nodes with an empty log + empty
-        // voter set sit unattached until Slice 5's dynamic join; `Bootstrap`
-        // seeds the static voter set.
+        // voter set sit unattached; `Bootstrap` seeds the static voter set.
         let engine = KraftController::open(
             data_dir.clone(),
             config.node_id,

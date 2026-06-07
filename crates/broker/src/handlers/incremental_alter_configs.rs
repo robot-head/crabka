@@ -54,7 +54,7 @@ fn is_known_broker_config(name: &str) -> bool {
 
 /// Validates the value for a broker-scoped config key.
 /// Returns `Err` if the key is unknown or the value cannot be parsed as an
-/// `i64`. T5 wires this into the broker-scoped dispatch path.
+/// `i64`.
 fn validate_broker_config_value(name: &str, value: &str) -> Result<(), String> {
     match name {
         crate::throttle::LEADER_THROTTLED_RATE_KEY
@@ -260,7 +260,7 @@ fn handle_broker_scoped(
     out: &mut AlterConfigsResourceResponse,
     to_submit: &mut Vec<MetadataRecord>,
 ) {
-    // Empty resource_name = cluster-wide default; not supported in 15b.
+    // Empty resource_name = cluster-wide default; not currently supported.
     if resource.resource_name.is_empty() {
         out.error_code = codes::INVALID_REQUEST;
         out.error_message = Some("cluster-wide broker config not supported".into());

@@ -82,7 +82,7 @@ pub struct ConfigValue {
 }
 
 /// Key for a `MODE` record. `subject = None` is the global mode. Field order is
-/// fixed to match Confluent's compaction key (seeded; confirmed in Task 4).
+/// fixed to match Confluent's compaction key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModeKey {
     pub keytype: String,

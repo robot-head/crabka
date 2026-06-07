@@ -5,8 +5,7 @@
 //! `__share_group_state` partition on Crabka as on Apache Kafka.
 
 // `murmur2` is exercised by `partition_for_share_key`; the constants and the
-// helper become live once the share coordinator / FindCoordinator path call
-// it in later tasks.
+// helper keep share-state partition routing byte-compatible with Kafka.
 
 const SEED: u32 = 0x9747_b28c;
 const M: u32 = 0x5bd1_e995;

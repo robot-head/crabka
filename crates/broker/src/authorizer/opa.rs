@@ -4,7 +4,7 @@
 //!
 //! The trait method [`Authorizer::authorize`] is synchronous (called
 //! from sync handler hot paths), but `reqwest` is async. We bridge with
-//! [`tokio::task::block_in_place`] + a captured runtime [`Handle`] —
+//! [`tokio::task::block_in_place`] + a captured runtime [`tokio::runtime::Handle`] —
 //! acceptable for a tail authorization check (sub-millisecond on cache
 //! hit, low-double-digit-ms on miss). Cache misses on a single-threaded
 //! runtime would deadlock; the broker is multi-thread, so this is fine.
@@ -40,9 +40,9 @@ const OPA_HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// # Security
 ///
-/// The [`allow_on_error`](Self::allow_on_error) knob is
+/// The `allow_on_error` knob is
 /// **security-sensitive**. When it is `true`, any OPA outage (timeout,
-/// 5xx, unparseable response) causes [`error_decision`](Self::error_decision)
+/// 5xx, unparseable response) causes `error_decision`
 /// to return `Allow` — i.e. an unreachable policy server authorizes
 /// *every* request (fail-open). The default is `false` (fail-closed),
 /// matching the upstream Open Policy Agent Kafka plugin's

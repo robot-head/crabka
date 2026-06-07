@@ -36,12 +36,10 @@ pub struct AppState {
     pub goal_registry: Arc<super::GoalRegistry>,
     pub goal_ctx: crate::goals::GoalContext,
     pub metrics: RebalancerMetrics,
-    // new in 43b:
     pub executor: crate::executor::ExecutorState,
     pub client_facade: Arc<dyn crate::executor::phases::ClientFacade>,
-    // new in 43g:
     pub anomaly_store: Arc<crate::detector::AnomalyStore>,
-    // new in 43i: gates /readyz and execute_proposal
+    // Gates /readyz and execute_proposal.
     pub state_topic: Arc<dyn crate::state_topic::StateBackend>,
 }
 
