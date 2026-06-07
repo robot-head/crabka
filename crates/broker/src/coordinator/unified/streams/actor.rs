@@ -63,6 +63,18 @@ pub enum StreamsGroupActorMessage {
     Describe {
         reply: oneshot::Sender<StreamsDescribeView>,
     },
+    /// Validate an `OffsetCommit` / `TxnOffsetCommit` against the streams
+    /// group's membership (KIP-1071 fences by `member_epoch`, like a KIP-848
+    /// consumer group). `Ok(())` = allowed; `Err(code)` = reject. A
+    /// simple-consumer commit (empty `member_id`, `member_epoch == -1`) is not
+    /// fenced. Mirrors the consumer-group `ValidateCommit`.
+    ValidateCommit {
+        member_id: String,
+        /// The request's `generation_id_or_member_epoch` field, interpreted as
+        /// the streams `member_epoch`.
+        member_epoch: i32,
+        reply: oneshot::Sender<Result<(), i16>>,
+    },
     Seed(super::super::StreamsGroupSeed),
     Shutdown(oneshot::Sender<()>),
 }
@@ -122,6 +134,40 @@ impl StreamsGroupActorHandle {
             rx,
         ));
         Self { tx, _task: task }
+    }
+}
+
+/// Validate an `OffsetCommit` / `TxnOffsetCommit` against a streams group's
+/// membership by messaging its actor. Returns `Some(error_code)` to reject,
+/// `None` to allow. KIP-447: a streams group fences offset commits by
+/// `member_epoch` (the request's `generation_id_or_member_epoch`), exactly as a
+/// KIP-848 consumer group does. The shared `validate_group_commit` only knows
+/// about the classic/consumer `GroupActorHandle`, so a streams-group consumer
+/// (whose membership lives in the streams actor, not a classic one) must be
+/// validated here instead — otherwise its commit is fenced against an empty
+/// classic actor and rejected with `UNKNOWN_MEMBER_ID`.
+pub(crate) async fn validate_streams_group_commit(
+    handle: &StreamsGroupActorHandle,
+    member_id: &str,
+    member_epoch: i32,
+) -> Option<i16> {
+    let (tx, rx) = oneshot::channel();
+    if handle
+        .tx
+        .send(StreamsGroupActorMessage::ValidateCommit {
+            member_id: member_id.to_string(),
+            member_epoch,
+            reply: tx,
+        })
+        .await
+        .is_err()
+    {
+        return Some(codes::UNKNOWN_SERVER_ERROR);
+    }
+    match rx.await {
+        Ok(Ok(())) => None,
+        Ok(Err(code)) => Some(code),
+        Err(_) => Some(codes::UNKNOWN_SERVER_ERROR),
     }
 }
 
@@ -197,6 +243,23 @@ async fn actor_loop(
                     }
                     StreamsGroupActorMessage::Describe { reply } => {
                         let _ = reply.send(build_describe(&actor.state, actor.topology.as_ref()));
+                    }
+                    StreamsGroupActorMessage::ValidateCommit { member_id, member_epoch, reply } => {
+                        // KIP-447 fencing for a streams group: member_epoch must
+                        // match the member's current epoch, mirroring the KIP-848
+                        // consumer-group check. A simple-consumer commit (empty
+                        // member_id, member_epoch == -1) is not fenced.
+                        let result: Result<(), i16> = if member_id.is_empty() {
+                            Ok(())
+                        } else {
+                            match actor.state.members.get(&member_id) {
+                                None => Err(codes::UNKNOWN_MEMBER_ID),
+                                Some(m) if member_epoch < m.member_epoch => Err(codes::STALE_MEMBER_EPOCH),
+                                Some(m) if member_epoch > m.member_epoch => Err(codes::FENCED_MEMBER_EPOCH),
+                                Some(_) => Ok(()),
+                            }
+                        };
+                        let _ = reply.send(result);
                     }
                     StreamsGroupActorMessage::Seed(seed) => {
                         apply_seed(&mut actor, seed);

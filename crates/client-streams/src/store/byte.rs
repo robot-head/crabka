@@ -23,6 +23,8 @@ pub(crate) trait ByteKeyValueStore: Send + Sync {
     async fn scan_all(&self) -> Vec<(Bytes, Bytes)>;
     /// Entry count (exact for in-memory; `approximateNumEntries` for IQ).
     async fn approx_len(&self) -> u64;
+    /// Remove every entry (EOS-rollback clean slate before re-restore).
+    async fn clear(&mut self);
 }
 
 /// In-memory backend over a `BTreeMap` (ordered → serves `range`).
@@ -57,6 +59,9 @@ impl ByteKeyValueStore for InMemoryBytes {
     }
     async fn approx_len(&self) -> u64 {
         self.map.len() as u64
+    }
+    async fn clear(&mut self) {
+        self.map.clear();
     }
 }
 

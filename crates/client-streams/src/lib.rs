@@ -530,6 +530,54 @@
 //! [`IqError::WrongStoreKind`] (queried the wrong store kind),
 //! [`IqError::NotRunning`] (instance closed), or
 //! [`IqError::RebalanceInProgress`] (no tasks assigned yet — retry).
+//!
+//! ## Exactly-once (EOS v2)
+//!
+//! The runtime's delivery guarantee is set by
+//! [`ProcessingGuarantee`]: [`AtLeastOnce`](ProcessingGuarantee::AtLeastOnce)
+//! (the default — produce, then commit source offsets; a crash mid-cycle may
+//! replay) or [`ExactlyOnceV2`](ProcessingGuarantee::ExactlyOnceV2) (KIP-447
+//! `exactly_once_v2`). Under EOS-v2 the [`StreamThread`] runs **one Kafka
+//! transaction per commit interval** over a single transactional producer
+//! (`transactional.id = <application.id>-<thread>`): it `begin`s the txn,
+//! produces sink **and** changelog records into it, commits the consumed source
+//! offsets *inside* the same transaction (`send_offsets_to_transaction`), and
+//! `commit`s — so output, changelog, and offsets land atomically. On any error
+//! in the cycle it `abort`s, rewinds the source offsets, and rolls back state
+//! stores by wiping + re-restoring from the **committed** changelog
+//! (`read_committed`). State-store restore under EOS reads `read_committed`, so
+//! aborted changelog writes are never replayed.
+//!
+//! Committed source offsets are surfaced through `OffsetFetch` once the
+//! transaction's COMMIT marker lands, so a restarted instance resumes from the
+//! committed offset (the committed input is processed **exactly once across the
+//! restart** — it is not re-read/double-counted), rebuilding its stores from the
+//! committed changelog.
+//!
+//! [`StreamThread`]: runtime
+//!
+//! ```no_run
+//! use crabka_client_streams::{
+//!     Consumed, KafkaStreams, ProcessingGuarantee, Produced, StringSerde, Topology,
+//! };
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut topo = Topology::new();
+//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+//! topo.add_sink("out", "out", [&src], Produced::with(StringSerde, StringSerde));
+//! let built = topo.build("my-app")?;
+//!
+//! // Opt into exactly-once: output + changelog + source offsets commit atomically.
+//! let mut streams = KafkaStreams::builder()
+//!     .bootstrap("localhost:9092")
+//!     .application_id("my-app")
+//!     .topology(built)
+//!     .processing_guarantee(ProcessingGuarantee::ExactlyOnceV2)
+//!     .build()
+//!     .await?;
+//! streams.close().await?;
+//! # Ok(())
+//! # }
+//! ```
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.0.0")]
 
 pub mod dsl;
@@ -558,6 +606,7 @@ pub use processor::{
     ProcessorError, ProcessorSupplier, Produced, PunctuationType, Punctuator, Record,
     RecordContext, Serde, SerdeError, StringSerde,
 };
+pub use runtime::eos::ProcessingGuarantee;
 pub use runtime::iq::IqError;
 pub use runtime::{
     KafkaStreams, KafkaStreamsState, ReadOnlyKeyValueStore, ReadOnlySessionStore,

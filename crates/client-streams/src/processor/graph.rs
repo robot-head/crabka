@@ -310,6 +310,15 @@ impl Graph {
             }
         }
     }
+
+    /// Wipe every state store (for EOS rollback before re-restore).
+    pub async fn clear_stores(&mut self) {
+        for name in self.stores.names() {
+            if let Some(s) = self.stores.get_mut(&name) {
+                s.clear().await;
+            }
+        }
+    }
 }
 
 /// Placeholder swapped into a `ScheduleEntry` while its real punctuator is taken

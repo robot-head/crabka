@@ -47,11 +47,47 @@ pub async fn fetch_partition(
     max_wait_ms: i32,
     partition_max_bytes: i32,
 ) -> Result<Vec<FetchedRecord>, ClientError> {
+    // Default to READ_UNCOMMITTED (isolation_level = 0): every record visible.
+    fetch_partition_with_isolation(
+        conn,
+        topic,
+        topic_id,
+        partition,
+        fetch_offset,
+        max_wait_ms,
+        partition_max_bytes,
+        0,
+    )
+    .await
+}
+
+/// Like [`fetch_partition`], but lets the caller set the Kafka
+/// `Fetch.isolation_level` (`0` = `READ_UNCOMMITTED`, `1` = `READ_COMMITTED`).
+///
+/// `READ_COMMITTED` restricts the result to records below the last stable
+/// offset and excludes records from aborted transactions — required for
+/// exactly-once changelog restore so that aborted writes are not replayed.
+///
+/// # Errors
+///
+/// Same as [`fetch_partition`].
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_partition_with_isolation(
+    conn: &Connection,
+    topic: &str,
+    topic_id: WireUuid,
+    partition: i32,
+    fetch_offset: i64,
+    max_wait_ms: i32,
+    partition_max_bytes: i32,
+    isolation_level: i8,
+) -> Result<Vec<FetchedRecord>, ClientError> {
     let resp = conn
         .send(FetchRequest {
             max_wait_ms,
             min_bytes: 1,
             max_bytes: 50 * 1024 * 1024,
+            isolation_level,
             topics: vec![FetchTopic {
                 topic: topic.to_string(),
                 topic_id,

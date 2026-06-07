@@ -10,7 +10,7 @@ use bytes::Bytes;
 use tokio::sync::Mutex;
 
 use crate::error::StreamsClientError;
-use crate::runtime::io::RecordFetcher;
+use crate::runtime::io::{IsolationLevel, RecordFetcher};
 use crate::store::backend::StoreBackend;
 use crate::store::registry::StoreRegistry;
 
@@ -114,7 +114,9 @@ impl GlobalStateManager {
             for partition in fetcher.partitions(topic).await? {
                 let mut offset: i64 = 0;
                 loop {
-                    let batch = fetcher.fetch(topic, partition, offset).await?;
+                    let batch = fetcher
+                        .fetch(topic, partition, offset, IsolationLevel::ReadUncommitted)
+                        .await?;
                     if batch.records.is_empty() {
                         break;
                     }
@@ -162,7 +164,9 @@ impl GlobalStateManager {
                 continue;
             };
             let offset = offsets[&(topic.clone(), partition)];
-            let batch = fetcher.fetch(&topic, partition, offset).await?;
+            let batch = fetcher
+                .fetch(&topic, partition, offset, IsolationLevel::ReadUncommitted)
+                .await?;
             let mut next = offset;
             for rec in &batch.records {
                 self.apply(
@@ -284,7 +288,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl RecordFetcher for ScriptedFetcher {
-        async fn fetch(&self, t: &str, p: i32, o: i64) -> Result<FetchBatch, StreamsClientError> {
+        async fn fetch(
+            &self,
+            t: &str,
+            p: i32,
+            o: i64,
+            _isolation: IsolationLevel,
+        ) -> Result<FetchBatch, StreamsClientError> {
             Ok(self
                 .scripts
                 .lock()
