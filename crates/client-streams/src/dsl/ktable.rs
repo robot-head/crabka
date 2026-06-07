@@ -1,6 +1,6 @@
 //! `KTable<K,V>`: a materialized, changelog-backed table view. Produced by a
 //! terminal aggregation (`count`/`reduce`/`aggregate`) or by
-//! [`StreamsBuilder::table`], and convertible back to a `KStream` via
+//! [`StreamsBuilder::table`](crate::dsl::StreamsBuilder::table), and convertible back to a `KStream` via
 //! [`KTable::to_stream`].
 //!
 //! Each op records a logical node + a lowering thunk in the same style as
@@ -538,8 +538,8 @@ where
     ///
     /// The buffer is a registered [`SuppressBytesStore`](crate::store::suppress_store)
     /// — durable (changelog + restore) when `logging` is on. The serdes come from
-    /// the producing op's [`SuppressStoreFactory`]; calling `suppress` on a table
-    /// that changed its value type (`map_values`) panics (no serde factory).
+    /// the table-producing operation; calling `suppress` on a table that changed
+    /// its value type (`map_values`) panics because no serde factory is available.
     #[must_use]
     pub fn suppress(&self, suppressed: crate::dsl::suppress::Suppressed<K>) -> KTable<K, V> {
         let wait_ms = match suppressed.wait {

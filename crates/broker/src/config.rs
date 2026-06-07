@@ -473,12 +473,12 @@ pub struct KafkaRlmmConfig {
     /// Replication factor to create `__remote_log_metadata` with on
     /// first startup. Ignored when the topic already exists.
     pub replication: i32,
-    /// 48p: how often the topic-backed manager flushes its RLMM cache
+    /// How often the topic-backed manager flushes its RLMM cache
     /// snapshot to disk. Maps to Kafka's
     /// `remote.log.metadata.snapshot.interval`. Default
     /// [`DEFAULT_RLMM_SNAPSHOT_INTERVAL`].
     pub snapshot_interval: std::time::Duration,
-    /// 48p: directory the RLMM cache snapshot is written to (one
+    /// Directory the RLMM cache snapshot is written to (one
     /// `snapshot` file). Derived from the broker `log.dir`.
     pub snapshot_dir: std::path::PathBuf,
     /// Client TLS/SASL security for the metadata client. `None` =
@@ -493,7 +493,7 @@ pub struct KafkaRlmmConfig {
     pub security: Option<Box<crabka_client_core::security::ClientSecurity>>,
 }
 
-/// 48p: default cadence of the topic-backed RLMM snapshot flush. 60s,
+/// Default cadence of the topic-backed RLMM snapshot flush. 60s,
 /// matching Kafka's `remote.log.metadata.snapshot.interval` default.
 pub const DEFAULT_RLMM_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
 
@@ -646,7 +646,7 @@ impl BrokerConfig {
             metrics_listen_addr: None,
             // Disable the disk scanner by default in tests so the
             // background task doesn't tick during short-lived fixtures.
-            // The dedicated 43e integration test enables it explicitly.
+            // Integration tests enable this explicitly when needed.
             partition_disk_scan_interval_secs: 0,
             max_incremental_fetch_session_cache_slots: 1000,
             // Connection caps unlimited by default (Kafka's

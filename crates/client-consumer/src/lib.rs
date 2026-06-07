@@ -5,9 +5,6 @@
 //! `Fetch` → `OffsetCommit` → `LeaveGroup`) and a built-in heartbeat
 //! task.
 //!
-//! See the design at
-//! `docs/superpowers/specs/2026-05-11-crabka-consumer-groups-design.md`.
-//!
 //! ## Quick start
 //!
 //! ```no_run
@@ -34,12 +31,36 @@
 //! # }
 //! ```
 //!
-//! ## Out of scope
+//! ## Share-group consumption
+//!
+//! ```no_run
+//! use std::time::Duration;
+//! use crabka_client_consumer::{ShareAckMode, ShareAckType, ShareConsumer};
+//!
+//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut consumer = ShareConsumer::builder()
+//!     .bootstrap("localhost:9092")
+//!     .group_id("share-workers")
+//!     .subscribe(["jobs".to_string()])
+//!     .ack_mode(ShareAckMode::Explicit)
+//!     .build()
+//!     .await?;
+//!
+//! let records = consumer.poll(Duration::from_secs(1)).await?;
+//! for record in &records {
+//!     consumer.acknowledge(record, ShareAckType::Accept)?;
+//! }
+//! consumer.commit().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Current boundaries
 //!
 //! - `assign()` (manual partition consumption) — use `crabka-client-core`
 //!   directly.
 //! - Admin RPCs (`DescribeGroups`, `ListGroups`).
-//! - KIP-848 / cooperative-sticky rebalance.
+//! - KIP-848 broker-side migration is not exposed through this client API.
 //! - Full EOS transactional consumer guarantees.
 //!
 //! ## Cargo features

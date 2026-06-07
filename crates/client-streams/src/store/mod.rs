@@ -1,4 +1,4 @@
-//! State stores + changelog backing (sub-project #3).
+//! State stores, byte backends, changelog metadata, and interactive-query views.
 pub mod api;
 pub mod backend;
 pub(crate) mod byte;

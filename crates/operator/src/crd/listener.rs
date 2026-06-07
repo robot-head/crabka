@@ -183,8 +183,7 @@ pub struct ListenerAuthenticationOAuth {
     /// from Strimzi rewrite expressions accordingly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_claim_check: Option<String>,
-    /// JWKS refresh cadence in seconds. Reconciler (T3) enforces
-    /// `>= 30`.
+    /// JWKS refresh cadence in seconds. The reconciler enforces `>= 30`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_refresh_seconds: Option<u32>,
     /// Allowed clock skew in seconds for `exp`/`nbf`/`iat` checks.
@@ -276,8 +275,7 @@ pub struct ListenerAuthenticationOAuth {
     /// (Keycloak realm-roles shape). When the path resolves to an
     /// array, each string element is a group; when it resolves to a
     /// string and `groupsClaimDelimiter` is set, the string is split.
-    /// Result attached to the Kafka principal but not yet consumed by
-    /// any broker-side authorizer.
+    /// Result attached to the Kafka principal for broker-side authorization.
     /// CRD-validated `minLength: 1`.
     ///
     /// Note: Strimzi uses Jayway `JsonPath` (`$[?(@.x == 'y')]`); Crabka
@@ -359,7 +357,7 @@ pub struct OauthClientSecretRef {
 /// broker's `GssapiConfig`. The reconciler renders these into the
 /// broker-global `[gssapi]` TOML block and appends `GSSAPI` to the
 /// listener's `sasl_mechanisms`. `[gssapi]` is broker-global, so all
-/// GSSAPI listeners on a cluster must agree (validated in a later task).
+/// GSSAPI listeners on a cluster must agree.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListenerAuthenticationGssapi {

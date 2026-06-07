@@ -1,5 +1,5 @@
 //! SASL/GSSAPI (Kerberos) support. See
-//! docs/superpowers/specs/2026-05-28-crabka-sasl-gssapi-kerberos-design.md
+//! SASL/GSSAPI Kerberos support.
 
 pub mod client;
 pub mod keytab;

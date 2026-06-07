@@ -2,15 +2,14 @@
 //! [`TopicBasedRemoteLogMetadataManager`](crate::TopicBasedRemoteLogMetadataManager)
 //! and the underlying durable event store.
 //!
-//! 48f ships one implementation: [`InProcessMetadataEventLog`], an
+//! The in-process implementation, [`InProcessMetadataEventLog`], is an
 //! in-memory broadcast-channel fixture used by unit tests (and a
 //! single-process model for the multi-broker case — multiple manager
 //! instances that share the same fixture observe each other's writes).
-//! The production Kafka-backed adapter lands in the broker-integration
-//! follow-up.
+//! The production Kafka-backed adapter implements the same trait.
 //!
-//! 48o reworks the subscription seam: instead of consuming every
-//! partition from offset 0, [`MetadataEventLog::subscribe`] takes an
+//! Instead of consuming every partition from offset 0,
+//! [`MetadataEventLog::subscribe`] takes an
 //! explicit [`PartitionStart`] assignment (a subset of partitions, each
 //! with its own start offset) and returns an [`AssignmentHandle`] that
 //! can mutate the live assignment at runtime.

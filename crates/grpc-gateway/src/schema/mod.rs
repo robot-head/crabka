@@ -9,7 +9,7 @@
 //! - [`client`] — HTTP client against a Confluent Schema Registry REST API.
 //! - [`wire`] — Confluent binary framing (5-byte magic+id header, Protobuf
 //!   message-index prefix).
-//! - [`format`] — per-format serialize/deserialize/validate dispatch
+//! - [`mod@format`] — per-format serialize/deserialize/validate dispatch
 //!   (Avro / JSON Schema / Protobuf).
 //! - [`codec`] — [`crate::codec::RecordCodec`] impl that glues the above.
 

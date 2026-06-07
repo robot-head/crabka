@@ -1,8 +1,10 @@
 //! `Record<K,V>` flowing through the processor graph + `RecordContext`.
 
-/// A key/value record with a timestamp. `key` is optional (Kafka allows null
-/// keys); `value` is required (tombstones — null values — are a stateful/#3
-/// concern and out of scope here).
+/// A key/value record with a timestamp.
+///
+/// `key` is optional because Kafka records may have null keys. `value` is typed
+/// and present at this layer; table deletions are represented in the DSL as
+/// change records whose `new` value is `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record<K, V> {
     pub key: Option<K>,
@@ -22,7 +24,8 @@ impl<K, V> Record<K, V> {
 }
 
 /// Metadata about the source record currently being processed (JVM
-/// `RecordContext`). Exposed via [`ProcessorContext::record_context`].
+/// `RecordContext`). Exposed via
+/// [`ProcessorContext::record_context`](crate::processor::ProcessorContext::record_context).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordContext {
     pub topic: String,

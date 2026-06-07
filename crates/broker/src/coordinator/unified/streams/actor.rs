@@ -5,11 +5,11 @@
 //! overall shape — a `tokio::select!` loop over an mpsc message channel plus a
 //! `heartbeat_interval` session tick, the `Pending*Records` → `RecordBatch` →
 //! `OffsetsLog::append` flush, and a last-known-good cache hand-off via
-//! [`GroupCoordinator::update_streams_cache`] — but assigns *tasks*
+//! `GroupCoordinator::update_streams_cache` — but assigns *tasks*
 //! `(subtopology, partition)` across the active/standby/warmup roles rather than
-//! topic partitions, and reconciles against a full [`MetadataImage`] (topology
+//! topic partitions, and reconciles against a full `MetadataImage` (topology
 //! resolution + internal-topic creation) via the [`MetadataSource`] instead of
-//! the consumer [`MetadataProvider`].
+//! the consumer `MetadataProvider`.
 //!
 //! Reconciliation is gated on a wired [`MetadataSource`]: in the pure-coordinator
 //! unit tests (no source) the group stays `NotReady` with empty assignments —

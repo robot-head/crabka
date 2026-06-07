@@ -9,8 +9,8 @@
 //! `RequestHeader` and strips the v1 `ResponseHeader`, so the returned bytes are the
 //! bare response body the engine decodes back into a `Receive*Response` event.
 //!
-//! Peer addresses are resolved from the (static, this-slice) voter set's
-//! CONTROLLER endpoints — KIP-853 dynamic membership is Slice 5.
+//! Peer addresses are resolved from the static voter set's CONTROLLER
+//! endpoints.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

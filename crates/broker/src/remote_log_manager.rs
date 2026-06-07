@@ -8,9 +8,9 @@
 //! [`RemoteLogMetadataManager`] (`CopySegmentStarted` →
 //! `CopySegmentFinished`).
 //!
-//! This is the copy path only. Local-retention deletion of copied
-//! segments and the remote read path on `Fetch` land in later slices
-//! (48c / 48d). The remote-storage SPIs are blocking, so each copy / delete
+//! This is the copy path. Local-retention deletion of copied segments and the
+//! remote read path on `Fetch` are implemented in their own modules. The
+//! remote-storage SPIs are blocking, so each copy / delete
 //! runs on the `tokio` blocking pool.
 
 use std::collections::{BTreeMap, HashSet};
@@ -162,7 +162,7 @@ pub(crate) async fn copy_eligible(
 ///
 /// Size-based eviction ignores the active segment — operators set
 /// local.retention.bytes in MB/GB ranges where the active segment
-/// (bounded by `segment.bytes`) is negligible. 48c simplification.
+/// (bounded by `segment.bytes`) is negligible.
 pub(crate) fn local_retention_target(
     exports: &[SegmentExport],
     finished_bases: &HashSet<i64>,
@@ -203,7 +203,7 @@ pub(crate) fn local_retention_target(
 /// per-topic local-retention window. Returns the count of segments
 /// physically removed from disk.
 // Async mirrors `copy_eligible` and gives the call site a stable signature
-// for the day the RLMM SPI grows async fetch methods (48f).
+// for the day the RLMM SPI grows async fetch methods.
 #[allow(clippy::unused_async)]
 pub(crate) async fn local_retention_pass(
     tp: &TopicIdPartition,

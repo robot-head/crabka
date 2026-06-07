@@ -106,9 +106,9 @@ impl QuorumStateMachine {
         )
     }
 
-    // `event` is taken by value: it models a consumed input message, and 3b/3c
-    // hand ownership to the machine. The current arms happen to only read Copy
-    // fields, but that is an implementation detail of slice 3a.
+    // `event` is taken by value: it models a consumed input message and hands
+    // ownership to the machine. The current arms happen to only read Copy
+    // fields, but future events can carry owned records/snapshots.
     #[allow(clippy::needless_pass_by_value)]
     pub fn on_event(&mut self, event: Event, log: &dyn LogView, now: SimInstant) -> Vec<Action> {
         match event {
@@ -208,8 +208,8 @@ impl QuorumStateMachine {
     /// past `epoch_start_offset` (where this leader's first current-epoch record
     /// sits). Otherwise the HWM is left unchanged. Never regresses.
     ///
-    /// NOTE: full per-offset epoch validation against the real log lands in 3b;
-    /// 3a uses the tracked `epoch_start_offset` as a faithful stand-in.
+    /// Full per-offset epoch validation happens against the durable log; the
+    /// core tracks `epoch_start_offset` as its in-memory stand-in.
     fn recompute_high_watermark(&self, log_end: i64) -> i64 {
         let Role::Leader {
             replicas,

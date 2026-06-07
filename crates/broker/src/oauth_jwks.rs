@@ -236,7 +236,7 @@ mod tests {
     /// terse. `signal_rx` is given but never sent on in these tests;
     /// `min_on_demand_pause` is irrelevant; the timestamps are isolated
     /// per test.
-    fn slice_49b_refresher(
+    fn test_refresher(
         endpoint: String,
         handle: JwksHandle,
         interval: Duration,
@@ -286,7 +286,7 @@ mod tests {
         let handle = JwksHandle::default();
         assert!(handle.load().is_empty());
         let shutdown = CancellationToken::new();
-        let refresher = slice_49b_refresher(
+        let refresher = test_refresher(
             format!("http://{addr}/jwks"),
             handle.clone(),
             Duration::from_millis(50),
@@ -392,7 +392,7 @@ mod tests {
         let (addr, srv_shutdown, ca_path) = serve_jwks_https(JWKS_BODY).await;
         let handle = JwksHandle::default();
         let shutdown = CancellationToken::new();
-        let refresher = slice_49b_refresher(
+        let refresher = test_refresher(
             format!("https://127.0.0.1:{}/jwks", addr.port()),
             handle.clone(),
             Duration::from_millis(50),
@@ -427,7 +427,7 @@ mod tests {
 
         let handle = JwksHandle::default();
         let shutdown = CancellationToken::new();
-        let refresher = slice_49b_refresher(
+        let refresher = test_refresher(
             format!("https://127.0.0.1:{}/jwks", addr.port()),
             handle.clone(),
             Duration::from_millis(50),

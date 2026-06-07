@@ -14,10 +14,9 @@ use super::record::{Record, RecordContext};
 ///
 /// ## Lifecycle
 ///
-/// `init` is invoked once before the first record and `close` once at task
-/// shutdown — **by the runtime (`KafkaStreams`, sub-project #2b)**. The
-/// [`TopologyTestDriver`](crate::TopologyTestDriver) (#2a) does **not** yet
-/// invoke `init`/`close`; keep processors usable as-constructed for now.
+/// The runtime invokes `init` once before the first record and `close` once at
+/// task shutdown. [`TopologyTestDriver`](crate::TopologyTestDriver) invokes
+/// `init` when it instantiates a topology for tests.
 #[async_trait]
 pub trait Processor<KIn: Send, VIn: Send, KOut: Send, VOut: Send>: Send + 'static {
     async fn init(&mut self, _ctx: &mut ProcessorContext<'_, '_, KOut, VOut>) {}

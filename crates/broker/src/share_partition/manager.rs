@@ -1,7 +1,7 @@
-//! Share-partition leader manager (KIP-932 Slice C).
+//! Share-partition leader manager (KIP-932).
 //!
 //! Owns one [`AcquisitionState`] machine per `(group, topic_id, partition)`
-//! this broker leads, lazily loaded from the durable [`SharePersister`] and
+//! this broker leads, lazily loaded from the durable `SharePersister` and
 //! re-persisted whenever it goes dirty. The `ShareFetch`/`ShareAcknowledge`
 //! handlers drive the per-cell state under its `tokio::sync::Mutex`; a
 //! background sweeper expires acquisition locks.
@@ -120,7 +120,7 @@ impl SharePartitionLeaderManager {
     /// metadata image (the share path carries only `topic_id`) and compares
     /// the partition leader to `node_id`.
     ///
-    /// Consumed by the ShareFetch/ShareAcknowledge handlers (Slice C T4/T5).
+    /// Consumed by the ShareFetch/ShareAcknowledge handlers.
     pub(crate) fn topic_leader_is_self(&self, topic_id: uuid::Uuid, partition: i32) -> bool {
         let image = self.controller.current_image();
         let Some(topic) = image.topics().find(|t| t.topic_id == topic_id) else {
@@ -152,7 +152,7 @@ impl SharePartitionLeaderManager {
     /// The `DashMap` guard is dropped before the load `.await`; a concurrent
     /// loader losing the insert race adopts the winner's cell.
     ///
-    /// Consumed by the ShareFetch/ShareAcknowledge handlers (Slice C T4/T5).
+    /// Consumed by the ShareFetch/ShareAcknowledge handlers.
     pub(crate) async fn get_or_load(
         &self,
         group: &str,
@@ -204,8 +204,8 @@ impl SharePartitionLeaderManager {
     /// so the next `get_or_load` re-reads the durable SPSO. The admin offset
     /// RPCs call this after `AlterShareGroupOffsets`/`DeleteShareGroupOffsets`
     /// rewrite the persister state, so an in-flight reset is observed by
-    /// subsequent `ShareFetch` on this broker. (Cross-broker cells are stale until
-    /// their own next load — a deferred concern, same as classic offset resets.)
+    /// subsequent `ShareFetch` on this broker. Cross-broker cells refresh on
+    /// their own next load, matching the classic offset-reset behavior.
     pub(crate) fn invalidate(&self, group: &str, topic_id: uuid::Uuid, partition: i32) {
         self.leaders
             .remove(&(group.to_string(), topic_id, partition));
@@ -310,8 +310,7 @@ mod tests {
     /// share-state topic can't be bootstrapped against it (no brokers), so the
     /// persister's `read_state` short-circuits with an error before any
     /// routing — exercising `get_or_load`'s best-effort empty-window fallback
-    /// without standing up an inter-broker server. The full load/persist round
-    /// trip is covered by the Task 7 integration tests.
+    /// without standing up an inter-broker server.
     struct MockSource {
         image: Arc<MetadataImage>,
         leader_rx: watch::Receiver<Option<NodeId>>,

@@ -170,8 +170,8 @@ pub async fn referencedby(
     if s.versions(&subject, true).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    // Resolve `latest`/numeric to a concrete version (404 if absent), matching
-    // slice-3 behaviour, then list its live referrers.
+    // Resolve `latest`/numeric to a concrete version (404 if absent), then list
+    // its live referrers.
     let (_, concrete, _, _, _) = s
         .version(&subject, want, true)
         .ok_or(SrError::VersionNotFound)?;

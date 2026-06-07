@@ -187,7 +187,7 @@ fi\n\
 printf '%s' \"$NODE_ID\" > /var/lib/crabka/data/.node-id\n";
 
 // Main script (zero-metrics variant). Retained as a const so the
-// `build_main_script_disabled_matches_slice_25_constant` test gives a
+// `build_main_script_disabled_matches_constant` test gives a
 // loud failure if the upgrade-stability contract breaks.
 //
 // Copies the per-broker TOML from the ConfigMap volume into a writable
@@ -216,7 +216,7 @@ fn build_main_script(metrics_enabled: bool) -> String {
         return MAIN_SCRIPT.to_string();
     }
     // NB: the enabled-variant body intentionally duplicates the disabled
-    // one. See the `build_main_script_disabled_matches_slice_25_constant`
+    // one. See the `build_main_script_disabled_matches_constant`
     // test — keeping the literals separate is the upgrade-stability
     // contract. Don't refactor to a `format!`.
     "set -eu\n\
@@ -388,7 +388,7 @@ fn render_broker_container(
     // Cluster-wide tracing → broker pod env vars. The broker's
     // `TelemetryConfig::from_env` reads these and installs the OTLP
     // tracer at startup. Omitted entirely when `tracing` is `None` so
-    // the rendered pod template stays byte-identical to the pre-42b
+    // the rendered pod template stays byte-identical to the established
     // shape for non-tracing clusters.
     if let Some(t) = tracing
         && let crate::crd::kafka::TracingType::Otlp = t.kind
@@ -448,7 +448,7 @@ fn render_broker_container(
     // mount the source Secret directly at
     // `/etc/crabka/oauth-introspection` so the broker can read the
     // introspection-endpoint Basic-Auth client secret from
-    // `<mount>/client-secret` (matching T3's TOML render).
+    // `<mount>/client-secret` (matching the broker TOML render).
     if let Some(mount_path) = oauth_introspection_mount_path {
         volume_mounts.push(json!({
             "name": "oauth-introspection-secret",
@@ -1314,7 +1314,7 @@ async fn patch_status_for_pool(
 /// posture) and refuses to format pods until the model has cleared —
 /// otherwise an invalid `spec.kafkaVersion` on a brand-new cluster would
 /// bring the brokers up at an unvalidated version instead of surfacing the
-/// error and waiting (Slice 28).
+/// error and waiting.
 #[derive(Debug)]
 enum VersionGate {
     /// The parent's version model is valid (or already finalized): render
@@ -1437,7 +1437,7 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(30)));
     };
 
-    // 2b. Gate on the parent's version model. Version validation lives in
+    // Gate on the parent's version model. Version validation lives in
     //     the Kafka controller; until it has declared the version valid
     //     (KafkaVersionValid=True) or finalized a metadata version, refrain
     //     from formatting/creating broker pods. This surfaces an invalid
@@ -2470,7 +2470,7 @@ mod tests {
     }
 
     #[test]
-    fn build_main_script_disabled_matches_slice_25_constant() {
+    fn build_main_script_disabled_matches_constant() {
         // Upgrade-stability contract: clusters with metrics_config=None
         // must get a byte-identical pod template.
         assert!(build_main_script(false) == MAIN_SCRIPT);
@@ -2991,7 +2991,7 @@ mod tests {
     ///   projected `items` mapping that pins the user's key to the
     ///   fixed in-pod filename `client-secret`;
     /// - mount that volume on the broker container at the canonical
-    ///   path `/etc/crabka/oauth-introspection` (matching T3's TOML
+    ///   path `/etc/crabka/oauth-introspection` (matching the broker TOML
     ///   render).
     #[test]
     fn render_statefulset_mounts_oauth_introspection_secret_when_introspection_mode() {
@@ -3042,7 +3042,7 @@ mod tests {
         let pod_spec = ss.spec.unwrap().template.spec.unwrap();
 
         // VolumeMount on the broker container points at the canonical
-        // path T3's TOML render uses (`/etc/crabka/oauth-introspection`).
+        // path the broker TOML render uses (`/etc/crabka/oauth-introspection`).
         let mount = pod_spec.containers[0]
             .volume_mounts
             .as_ref()
@@ -3680,8 +3680,7 @@ mod tests {
     }
 
     // --- Version gate: the pool reconciler must not format/create broker
-    // pods until the parent Kafka's version model has cleared (Slice 28
-    // "surface the error and wait"). The decision is the pure
+    // pods until the parent Kafka's version model has cleared. The decision is the pure
     // `version_gate`; the reconciler just acts on it. ---
 
     /// Attach a `KafkaVersionValid` condition + finalized metadata version

@@ -189,7 +189,7 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
 /// whose `serde(rename_all)`-free `snake_case` field names match the captured
 /// fixture shape exactly. Field *order* is irrelevant — fixtures are compared as
 /// `serde_json::Value` (a key-sorted map), and topic/subtopology array order is
-/// already fixed by [`to_wire`].
+/// already fixed by [`BuiltTopology::to_wire`](crate::topology::BuiltTopology::to_wire).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WireTopology {
     pub epoch: i32,

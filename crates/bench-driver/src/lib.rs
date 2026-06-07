@@ -18,8 +18,11 @@
 //! Load driver + report aggregator for the Crabka vs Strimzi benchmark
 //! harness on Kubernetes.
 //!
-//! See `bench/README.md` and the plan at
-//! `/root/.claude/plans/build-a-comprehensive-benchmark-humming-thimble.md`.
+//! Scenarios describe a target Kafka stack, a workload shape, and optional
+//! disturbance windows. The driver applies the scenario to Kubernetes, runs
+//! the producer/consumer load, samples Prometheus, and writes a `RunOutput`
+//! JSON artifact. The report binary reads those artifacts back and renders
+//! the side-by-side Markdown summary used in benchmark reports.
 //!
 //! The crate ships two binaries:
 //!
@@ -30,6 +33,31 @@
 //! - `crabka-bench-report` — walks a directory of `RunOutput` files,
 //!   groups them by scenario name, and emits a side-by-side Markdown
 //!   summary.
+//!
+//! ## Command-line workflow
+//!
+//! ```text
+//! crabka-bench-driver \
+//!   --scenario bench/scenarios/steady_1p1r.toml \
+//!   --stack crabka \
+//!   --namespace kafka-bench \
+//!   --out runs/crabka-steady.json
+//!
+//! crabka-bench-report --input runs --out report.md
+//! ```
+//!
+//! ## Programmatic report aggregation
+//!
+//! ```no_run
+//! use std::path::Path;
+//! use crabka_bench_driver::report;
+//!
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let markdown = report::render_markdown(Path::new("runs"), true)?;
+//! std::fs::write("report.md", markdown)?;
+//! # Ok(())
+//! # }
+//! ```
 
 pub mod failover;
 pub mod hist;

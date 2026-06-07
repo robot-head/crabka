@@ -3,7 +3,7 @@
 //! This is the pure core the share-partition leader drives. It owns no I/O: it
 //! tracks per-offset delivery state over the live window
 //! `[start_offset, end_offset)` (SPSO..SPEO) as a list of contiguous
-//! [`InFlightBatch`] runs and answers `acquire` / `acknowledge` /
+//! `InFlightBatch` runs and answers `acquire` / `acknowledge` /
 //! `expire_locks` queries. Bytes, logs, locks, and persistence live elsewhere.
 //!
 //! Delivery-state codes match Kafka's on-the-wire values

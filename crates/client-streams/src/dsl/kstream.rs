@@ -2,11 +2,12 @@
 //!
 //! Each op (1) mints a JVM-matching node name, (2) adds a type-erased
 //! `StatelessProcessor` node to the logical graph with the right
-//! `key_changing_operation` flag, and (3) attaches a **lowering thunk**
-//! ([`LowerFn`]) that — when the lowering driver (Task 5) runs it — performs the
-//! typed [`Topology::add_processor`] call and records the resulting node name.
+//! `key_changing_operation` flag, and (3) attaches a lowering thunk that performs
+//! the typed [`Topology::add_processor`] call and records the resulting node name.
 //! The thunk captures the op's concrete K/V types and the user closure, so types
 //! are statically known *inside* the thunk even though the graph is type-erased.
+//!
+//! [`Topology::add_processor`]: crate::topology::Topology::add_processor
 use std::any::Any;
 use std::cell::RefCell;
 use std::marker::PhantomData;
@@ -1147,7 +1148,7 @@ where
     ///
     /// **Byte-exactness vs JVM:** the JVM assigns a distinct `KSTREAM-REPARTITION-`
     /// counter for standalone `repartition()` calls. That counter is NOT validated
-    /// against a golden fixture in this slice — functional correctness (no panic,
+    /// against a golden fixture — functional correctness (no panic,
     /// records flow through) is the bar here.
     #[must_use]
     pub fn repartition<KS, VS>(
@@ -1211,7 +1212,7 @@ where
     /// `split`: begin a branching fan-out. Returns a [`BranchedStream`] builder
     /// from which individual [`branch`](BranchedStream::branch) calls create
     /// filtered child streams. The split itself adds no node to the topology —
-    /// each `branch` call creates a [`FilterProcessor`]-backed child wired
+    /// each `branch` call creates a filter-backed child wired
     /// directly to this stream's node.
     ///
     /// **Simplification vs JVM:** each branch receives a record when its predicate
@@ -1219,7 +1220,6 @@ where
     /// predicates the behaviour is identical to the JVM first-match-wins semantics.
     ///
     /// [`branch`]: BranchedStream::branch
-    /// [`FilterProcessor`]: crate::dsl::processors::stateless::FilterProcessor
     #[must_use]
     pub fn split(&self) -> BranchedStream<K, V> {
         // The JVM mints a `KSTREAM-BRANCH-` node at split() time (counter-only:
@@ -1371,7 +1371,7 @@ where
     /// Unlike [`process`](Self::process), the key is preserved — so the result is
     /// **non-key-changing** and carries the single-source-topic lineage unchanged
     /// (a downstream aggregation/join needs no repartition). The supplier is wrapped
-    /// in a [`FixedKeyAdapter`] so the runtime sees a `Processor<K, V, K, VOut>`.
+    /// in an internal adapter so the runtime sees a `Processor<K, V, K, VOut>`.
     ///
     /// # Panics
     /// Panics if any name in `store_names` was not registered via
@@ -1379,7 +1379,6 @@ where
     ///
     /// [`FixedKeyProcessorSupplier`]: crate::processor::fixed_key::FixedKeyProcessorSupplier
     /// [`FixedKeyProcessorContext::get_state_store`]: crate::processor::fixed_key::FixedKeyProcessorContext::get_state_store
-    /// [`FixedKeyAdapter`]: crate::processor::fixed_key::FixedKeyAdapter
     /// [`add_state_store`]: crate::dsl::builder::StreamsBuilder::add_state_store
     pub fn process_values<VOut, PS>(
         &self,
@@ -1447,7 +1446,7 @@ where
 
     /// `toTable`: materialize this stream into a [`KTable`] by writing each record
     /// into a state store and forwarding a `Change<V>` change-stream (prior store
-    /// value as `old`). Backed by [`KStreamToTableProcessor`].
+    /// value as `old`).
     ///
     /// The key is carried through unchanged, so `to_table` never inserts a
     /// repartition (the JVM only repartitions when the upstream key is rewritten
@@ -1456,7 +1455,6 @@ where
     /// standard `<app>-<store>-changelog` changelog (or none when
     /// [`Materialized::with_logging(false)`]).
     ///
-    /// [`KStreamToTableProcessor`]: crate::dsl::processors::table::KStreamToTableProcessor
     /// [`Materialized::with_logging(false)`]: crate::dsl::config::Materialized::with_logging
     pub fn to_table<KS, VS>(&self, materialized: Materialized<KS, VS>) -> KTable<K, V>
     where
@@ -1531,7 +1529,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// Builder returned by [`KStream::split`]. Each [`branch`](Self::branch) call
-/// adds a [`FilterProcessor`]-backed child node wired to the parent node and
+/// adds a filter-backed child node wired to the parent node and
 /// returns a new [`KStream`] carrying only the records for which the predicate
 /// returns `true`.
 ///
@@ -1544,7 +1542,6 @@ where
 /// `Rc::try_unwrap` inside `build` to fail.
 ///
 /// [`StreamsBuilder::build`]: crate::dsl::builder::StreamsBuilder::build
-/// [`FilterProcessor`]: crate::dsl::processors::stateless::FilterProcessor
 pub struct BranchedStream<K, V> {
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     pub(crate) parent: NodeId,
@@ -1560,9 +1557,7 @@ where
 {
     /// Add a branch: records for which `predicate(key, value)` returns `true`
     /// are forwarded to the returned [`KStream`]. Uses a `KSTREAM-BRANCHCHILD-`
-    /// node backed by a [`FilterProcessor`] (negate = false).
-    ///
-    /// [`FilterProcessor`]: crate::dsl::processors::stateless::FilterProcessor
+    /// node backed by the same filter processor used by [`KStream::filter`].
     pub fn branch<P>(&self, predicate: P) -> KStream<K, V>
     where
         P: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,

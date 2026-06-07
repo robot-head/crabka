@@ -1,6 +1,6 @@
 //! KIP-932 share-group record types persisted in `__consumer_offsets`.
 //!
-//! Wire encoding mirrors [`persistence_next_gen`] (the KIP-848 consumer
+//! Wire encoding mirrors `persistence_next_gen` (the KIP-848 consumer
 //! next-gen codecs): a leading `i16` key-version discriminator on keys and an
 //! `i16(0)` version preamble on values. Share-group records reuse the same
 //! length-prefixed array / nullable-string leaf encoders but drop the

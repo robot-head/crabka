@@ -1,4 +1,4 @@
-//! Unified group-coordinator subsystem (KIP-848 64d-B). Shared infra and
+//! Unified group-coordinator subsystem for KIP-848. Shared infra and
 //! persistence for both the classic and next-gen group protocols.
 //!
 //! [`GroupCoordinator`] is the single owner of the next-gen consumer-group
@@ -201,7 +201,7 @@ impl GroupCoordinator {
 
     /// After an in-place downgrade (KIP-848), drop the consumer seed so a
     /// respawn does not re-hydrate the group as next-gen, and record it as
-    /// classic. Unlike [`mark_classic`] (first-mark-wins via `or_insert`), this
+    /// classic. Unlike [`Self::mark_classic`] (first-mark-wins via `or_insert`), this
     /// FORCES the type to `Classic` — a downgrade must override any prior
     /// `NextGen` lock the group carried while it was a consumer group.
     pub fn mark_classic_after_downgrade(&self, group_id: &str) {
@@ -1087,7 +1087,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn get_or_create_group_returns_the_one_actor_regardless_of_kind() {
-        // KIP-848 64d live migration: BOTH RPC families route to the one actor.
+        // KIP-848 live migration: BOTH RPC families route to the one actor.
         // The kind argument only decides the spawn kind for a brand-new group;
         // a later request of the other kind returns the SAME actor (the kind
         // lock now lives in the actor's message arms, not in this registry).

@@ -150,7 +150,7 @@ impl OffsetCommitValue {
 // `current_state_timestamp_ms` field are wire-faithful but not yet exercised
 // in production: classic group membership is in-memory and only committed
 // offsets (k0/k1) are persisted today. Bootstrap *decodes* k2 records, and the
-// migration slices (64d-D/E) will *write* them on conversion. Retained per the
+// migration code writes them on conversion. Retained per the
 // B1 merge; allow until those slices wire the write path.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

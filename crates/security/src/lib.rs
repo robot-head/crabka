@@ -2,6 +2,29 @@
 //!
 //! No I/O, no async, no networking. The broker plumbs streams in; this
 //! crate produces verifiers, hashes, and TLS configs.
+//!
+//! ## SASL/PLAIN verification
+//!
+//! ```rust
+//! use std::collections::HashMap;
+//! use crabka_security::{AuthMethod, verify_plain};
+//!
+//! let mut users = HashMap::new();
+//! users.insert("alice".to_string(), "wonderland".to_string());
+//!
+//! let principal = verify_plain(&users, "alice", b"wonderland").unwrap();
+//! assert_eq!(principal.name, "alice");
+//! assert_eq!(principal.auth_method, AuthMethod::SaslPlain);
+//! ```
+//!
+//! ## Storing SCRAM credentials
+//!
+//! ```rust
+//! use crabka_security::{SaslMechanism, hash_scram_password};
+//!
+//! let credential = hash_scram_password(b"correct horse battery staple", SaslMechanism::ScramSha512, 4096);
+//! assert_eq!(credential.iterations, 4096);
+//! ```
 
 pub mod ca;
 pub mod delegation_token;

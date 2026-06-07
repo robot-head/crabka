@@ -335,7 +335,7 @@ async fn acquire_pass(
         } else {
             hwm
         };
-        // TODO(slice-F): archive aborted (committed-range) records. The LSO
+        // Archive aborted (committed-range) records. The LSO
         // clamp above already guarantees no OPEN-transaction records are
         // surfaced; aborted-but-stable records still get acquired because
         // `AbortedTxn` carries only `producer_id + start_offset`, not the

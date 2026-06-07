@@ -116,7 +116,7 @@ pub(crate) async fn compute_failover_changes(
                                 topic = %pr.topic, partition = pr.partition, leader = new_leader,
                                 "unclean leader election: ISR empty, electing out-of-ISR replica (possible data loss)"
                             );
-                            // Slice 10c (KIP-841): account this election so
+                            // KIP-841: account this election so
                             // operators can alert on a non-zero rate of unclean
                             // failovers in their cluster.
                             metrics.record_unclean_leader_election();

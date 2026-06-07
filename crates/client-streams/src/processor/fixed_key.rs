@@ -1,11 +1,11 @@
 //! Fixed-key Processor API (KIP-820 `processValues`): a processor that may change
 //! the value but NOT the key. A thin typed facade over the regular [`Processor`]
-//! runtime — [`FixedKeyAdapter`] bridges a [`FixedKeyProcessor`] into a
+//! runtime. An internal adapter bridges a [`FixedKeyProcessor`] into a
 //! `Processor<KIn, VIn, KIn, VOut>` (the output key type equals the input key
 //! type, so the runtime keeps the partition assignment unchanged).
 //!
 //! The DSL surface `KStream::process_values` wraps a
-//! [`FixedKeyProcessorSupplier`] in a [`FixedKeyAdapter`]; this module is the
+//! [`FixedKeyProcessorSupplier`] in that adapter; this module is the
 //! typed facade + adapter it builds on.
 
 use std::any::Any;
@@ -99,7 +99,7 @@ pub trait FixedKeyProcessor<KIn: Send, VIn: Send, VOut: Send>: Send + 'static {
 /// the inner value. Mirrors the `Box<dyn Processor>` blanket impl in
 /// [`crate::processor::api`]: it lets a [`FixedKeyProcessorSupplier`] closure
 /// return `Box<dyn FixedKeyProcessor<…>>` (chosen at runtime) and still feed a
-/// [`FixedKeyAdapter`], which requires `P: FixedKeyProcessor`.
+/// the internal fixed-key adapter, which requires `P: FixedKeyProcessor`.
 #[async_trait]
 impl<KIn, VIn, VOut> FixedKeyProcessor<KIn, VIn, VOut>
     for Box<dyn FixedKeyProcessor<KIn, VIn, VOut>>
@@ -250,8 +250,7 @@ mod tests {
     #[tokio::test]
     async fn supplier_blanket_impl_boxes_processor() {
         // A closure `|| UpperValue` is a `FixedKeyProcessorSupplier`; `get()`
-        // returns a boxed processor that itself impls `FixedKeyProcessor` (the
-        // blanket impl T5 relies on).
+        // returns a boxed processor that itself impls `FixedKeyProcessor`.
         let supplier = || UpperValue;
         let mut boxed = FixedKeyProcessorSupplier::get(&supplier);
 

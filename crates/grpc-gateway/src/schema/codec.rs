@@ -1,4 +1,4 @@
-//! [`RecordCodec`] implementation backed by the Confluent Schema Registry.
+//! [`crate::codec::RecordCodec`] implementation backed by the Confluent Schema Registry.
 //!
 //! [`SchemaRegistryCodec`] wraps a [`SchemaResolver`] (in production, a
 //! [`super::client::SchemaRegistryClient`]) and, on the encode path, resolves

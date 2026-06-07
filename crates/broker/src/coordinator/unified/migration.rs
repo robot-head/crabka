@@ -1,10 +1,8 @@
-//! Classic ↔ next-gen consumer-group conversion predicates (KIP-848 64d-C).
+//! Classic ↔ next-gen consumer-group conversion predicates (KIP-848).
 //!
-//! This slice adds the *machinery* the conversion triggers in Slices 64d-D/E
-//! consume — the [`super::config::ConsumerGroupMigrationPolicy`] and the
-//! convertibility predicate — without performing any live conversion yet. The
-//! predicates are unit-tested here and wired into the conversion triggers in
-//! D/E.
+//! This module owns the [`super::config::ConsumerGroupMigrationPolicy`], the
+//! convertibility predicates, and the state translation helpers used by live
+//! migration.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -65,13 +63,13 @@ pub(crate) fn classic_is_convertible(state: &ClassicState) -> bool {
 /// Can this consumer group be downgraded to a classic group? Always `true` in
 /// Kafka — a server-managed consumer group can always be re-expressed as a
 /// classic group (members become classic members, the server target becomes the
-/// seed assignment). Provided for symmetry; the real work is in Slice 64d-E.
+/// seed assignment). Provided for symmetry with the upgrade path.
 pub(crate) fn consumer_is_convertible() -> bool {
     true
 }
 
 /// Convert a classic group into a consumer group that **hosts its classic
-/// members** (KIP-848 64d-D upgrade). Each classic member becomes a
+/// members** during KIP-848 upgrade. Each classic member becomes a
 /// [`MemberState`] carrying a [`ClassicMemberFacade`]; its subscription is
 /// decoded from its `ConsumerProtocolSubscription` metadata (topic names — the
 /// reconciler resolves them to topic-IDs against the metadata image). The
@@ -128,7 +126,7 @@ pub(crate) fn upgrade_pending_records(state: &ConsumerState) -> super::actor::Pe
     pending
 }
 
-/// Convert a consumer group back into a classic group (KIP-848 downgrade, 64d-E).
+/// Convert a consumer group back into a classic group during KIP-848 downgrade.
 /// Every member is re-expressed as a classic [`ClassicMember`] restored from its
 /// [`ClassicMemberFacade`]; its assignment seed is the server-computed target
 /// translated to a `ConsumerProtocolAssignment` blob, so the member keeps its
@@ -254,7 +252,7 @@ pub(crate) fn target_to_consumer_assignment(
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Serving hosted classic members from the consumer-group reconciler (64d-F).
+// Serving hosted classic members from the consumer-group reconciler.
 //
 // A classic member hosted in an upgraded consumer group keeps speaking the
 // classic Heartbeat/JoinGroup/SyncGroup RPCs. We map those onto the next-gen

@@ -14,7 +14,7 @@
 //! (`CRABKA_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
 //! `OTEL_EXPORTER_OTLP_ENDPOINT`) or `CRABKA_OTLP_ENABLED=true`, and is
 //! force-disabled by `OTEL_SDK_DISABLED=true`. The follow-up operator
-//! slice surfaces these knobs through `Kafka.spec` and injects the env on
+//! the operator surfaces these knobs through `Kafka.spec` and injects the env on
 //! the broker pods.
 //!
 //! ## Request spans

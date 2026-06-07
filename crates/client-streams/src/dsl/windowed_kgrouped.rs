@@ -7,14 +7,13 @@
 //! `Grouped` name, repartition-lowering thunk) plus the [`TimeWindows`] spec, and
 //! its terminal ops mirror [`KGroupedStream::aggregate`]/`reduce` exactly — except
 //!
-//! 1. the aggregate processor is [`KStreamWindowAggregateProcessor`] (resp.
-//!    [`KStreamWindowReduceProcessor`]), whose output key is `Windowed<K>`, and
+//! 1. the aggregate processor emits `Windowed<K>` keys, and
 //! 2. the materialized store is a **window store**
 //!    ([`crate::topology::Topology::add_window_store`]) carrying the window size +
 //!    grace for changelog retention.
 //!
-//! The result is a `KTable<Windowed<K>, _>`; this slice always logs the windowed
-//! changelog (`Materialized::with_logging(false)` for windowed is out of scope).
+//! The result is a `KTable<Windowed<K>, _>` whose changelog is logged with
+//! `compact,delete` retention derived from the window size and grace.
 
 use std::any::Any;
 use std::cell::RefCell;
@@ -98,8 +97,8 @@ where
     /// `reduce`: combine values per (key, window) with `reducer`, materialized as
     /// `KTable<Windowed<K>, V>`. The first value in a window seeds the accumulator
     /// (the JVM `Reducer` has no separate `init`); later values fold via
-    /// `reducer(&acc, &value)`. Backed by [`KStreamWindowReduceProcessor`], which
-    /// keeps the public value type `V`.
+    /// `reducer(&acc, &value)`. The backing processor keeps the public value
+    /// type `V`.
     pub fn reduce<KS, VS, R>(
         self,
         reducer: R,
@@ -156,8 +155,8 @@ where
         self.lower_aggregate_windowed::<KS, VS, VA, I, A>(materialized, store_name, init, agg)
     }
 
-    /// Record the (optional) repartition node + a windowed
-    /// [`KStreamWindowAggregateProcessor`] node, returning the resulting
+    /// Record the (optional) repartition node + a windowed aggregate node,
+    /// returning the resulting
     /// `KTable<Windowed<K>, VA>`. Mirrors `KGroupedStream::lower_aggregate`, but
     /// emits `Windowed<K>` keys and a window store.
     #[allow(clippy::too_many_lines)]
@@ -228,7 +227,7 @@ where
                     },
                     [parent],
                 );
-            // Windowed stores always carry a changelog in this slice.
+            // Windowed stores carry a changelog so they can be restored by the runtime.
             state.topology.add_window_store::<K, VA, KS, VS>(
                 store_for_thunk.clone(),
                 key_serde.clone(),
@@ -246,8 +245,8 @@ where
             .with_suppress_factory(Some(suppress_factory))
     }
 
-    /// Record the (optional) repartition node + a windowed
-    /// [`KStreamWindowReduceProcessor`] node (first value in a window seeds, later
+    /// Record the (optional) repartition node + a windowed reduce node (first
+    /// value in a window seeds, later
     /// values fold), returning the `KTable<Windowed<K>, V>`.
     #[allow(clippy::too_many_lines)]
     fn lower_reduce_windowed<KS, VS, R>(

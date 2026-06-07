@@ -120,7 +120,7 @@ pub struct KafkaSpec {
     /// Distributed-tracing wiring for the broker pods. When
     /// `Some`, the operator renders the matching `CRABKA_OTLP_*` env
     /// vars onto every broker pod — the broker's telemetry
-    /// pipeline reads them via [`TelemetryConfig::from_env`] and
+    /// pipeline reads them via `TelemetryConfig::from_env` and
     /// installs the OTLP tracer at startup. When `None`, no OTLP env
     /// vars are emitted and the broker leaves tracing off (the
     /// default).
@@ -175,8 +175,8 @@ pub struct TieredStorage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub s3: Option<S3StorageSpec>,
     /// KIP-405: pick the
-    /// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-    /// the broker pods run. When absent (or set to `type: Topic`),
+    /// `RemoteLogMetadataManager` the broker pods run. When absent (or set
+    /// to `type: Topic`),
     /// the broker activates the durable
     /// `crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`
     /// against the internal `__remote_log_metadata` topic, so
@@ -227,7 +227,7 @@ pub struct TieredStoragePersistence {
 /// KIP-405: the set of RSM backends the operator knows how
 /// to render. Adding a backend means extending this enum AND the
 /// matching render path in
-/// [`crate::controller::listeners::render_broker_toml`].
+/// `crate::controller::listeners::render_broker_toml`.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub enum TieredStorageType {
     /// On-pod filesystem store via `LocalTieredStorage` (the
@@ -337,8 +337,8 @@ impl TieredStorage {
 }
 
 /// KIP-405: which
-/// [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-/// the broker pods use. Defaults to topic-backed (`type: Topic`)
+/// `RemoteLogMetadataManager` the broker pods use. Defaults to topic-backed
+/// (`type: Topic`)
 /// when this field is omitted.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

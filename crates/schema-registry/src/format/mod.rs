@@ -1,6 +1,5 @@
-//! Schema formats: parse + canonical form (the dedup key). Slice 1 does no
-//! compatibility checking (that is slice 2); canonical form is needed now for
-//! global-id deduplication.
+//! Schema formats: parse, canonical storage form, and directional
+//! compatibility checks. Canonical form is the global-id deduplication key.
 
 pub mod avro;
 pub mod json;
@@ -91,7 +90,7 @@ pub fn normalized_storage_form(
 
 /// Directional compatibility check: can a reader using `reader` read data
 /// written with `writer`, per format `ty`? `Err(messages)` on incompatibility.
-/// Avro is real (apache-avro); Protobuf/JSON are permissive until 2b/2c.
+/// Avro is backed by `apache-avro`; Protobuf and JSON Schema are permissive.
 pub fn check(
     ty: SchemaType,
     reader: &str,

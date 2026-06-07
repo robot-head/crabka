@@ -1,4 +1,4 @@
-//! Per-group tokio actor. Owns one unified [`Group`] — either the classic
+//! Per-group tokio actor. Owns one unified `Group` — either the classic
 //! 5-state machine or the next-gen epoch machine. Next-gen heartbeats are
 //! non-parking mpsc messages with `oneshot` replies; classic
 //! `JoinGroup`/`SyncGroup` parking is re-expressed as a park/wake message
@@ -38,7 +38,7 @@ use super::offsets_log::OffsetsLog;
 use super::persistence_next_gen::MemberAssignmentState;
 use super::reconciler::{self, ReconcileInput};
 
-/// Which protocol an actor's [`Group`] speaks. Fixed at spawn; exposed on the
+/// Which protocol an actor's `Group` speaks. Fixed at spawn; exposed on the
 /// handle so the coordinator can route/reject cross-protocol RPCs and filter
 /// admin views without messaging the actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,7 +343,7 @@ async fn actor_loop(
     let mut parked = ParkedWaiters::default();
     // A single 1-second session-expiry tick, kind-agnostic. The tick arm
     // dispatches on the live `group.kind`, so the cadence must not depend on
-    // the spawn-time kind (which a later task may flip in place). Expiry is a
+    // the spawn-time kind. Expiry is a
     // `last_seen`-vs-`session_timeout` comparison, so ticking once a second
     // (rather than on the heartbeat interval for consumer groups) only changes
     // how often we check, never the outcome.
@@ -620,9 +620,8 @@ async fn actor_loop(
                 }
             }
             _ = tick.tick() => {
-                // Dispatch on the LIVE `group.kind`: a later task may flip the
-                // kind in place, so the captured spawn-time `kind` is no longer
-                // a reliable discriminator here.
+                // Dispatch on the LIVE `group.kind`; the captured spawn-time
+                // `kind` is not a reliable discriminator after migration.
                 let gid = group.group_id.clone();
                 if let Some(state) = group.as_consumer_mut() {
                     if handle_session_tick(state, &config, &*metadata, &*offsets_log, &coordinator)
@@ -1815,7 +1814,7 @@ mod tests {
     }
 
     /// As [`make_coordinator_with_topic`], but with an explicit migration
-    /// policy. The hosted-classic 64d-F tests pin `Upgrade` so the native
+    /// policy. Hosted-classic tests pin `Upgrade` so the native
     /// member's leave in `seed_and_upgrade` does NOT trigger a downgrade back
     /// to classic (which would strand them on the wrong RPC path); the
     /// downgrade trigger itself is exercised with `Bidirectional`/`Downgrade`.
@@ -2287,7 +2286,7 @@ mod tests {
         );
     }
 
-    // ── classic actor arms + coordinator admin surface (64d-B) ──────────────
+    // ── classic actor arms + coordinator admin surface ──────────────
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn classic_admin_surface_and_immediate_join() {
@@ -2470,7 +2469,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cross_protocol_get_or_create_returns_the_one_actor() {
-        // KIP-848 64d live migration: the registry no longer pins a group to its
+        // KIP-848 live migration: the registry no longer pins a group to its
         // spawn kind. Both getters return the SAME actor for an id; the per-group
         // kind lock now lives in the actor's message arms, not the registry.
         let (coord, _log) = make_coordinator();
@@ -2579,7 +2578,7 @@ mod tests {
         assert!(log.has_classic_group_metadata_tombstone("g").await);
     }
 
-    // ── KIP-848 64d-F: serving hosted classic members off the reconciler ─────
+    // ── KIP-848: serving hosted classic members off the reconciler ─────
 
     /// A real classic consumer client's `JoinGroup` protocol metadata: a
     /// `ConsumerProtocolSubscription` with the leading version-negotiation
@@ -3058,7 +3057,7 @@ mod tests {
         })
     }
 
-    // ── KIP-848 Task 10: bidirectional migration integration suite ──────────
+    // ── KIP-848 bidirectional migration integration suite ──────────
     //
     // These scenarios exercise the in-process classic↔next-gen migration end to
     // end (upgrade, downgrade, the two together, and the kind-agnostic state
