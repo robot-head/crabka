@@ -40,9 +40,12 @@ case "$MODE" in
     ;;
 
   --javac)
-    # Self-contained: download the three jars and compile/run with plain javac/java.
+    # Self-contained: download the jars and compile/run with plain javac/java.
+    # Mount the parent tests/ dir (like --bufval/--iq) so the fixtures persist to the
+    # host at /tests/testdata/golden/dsl.
+    TESTS_DIR="$(cd "$HERE/.." && pwd)"
     docker run --rm \
-      -v "$HERE":/work -w /work \
+      -v "$TESTS_DIR":/tests -w /tests/jvm-capture \
       "$JDK_IMAGE" bash -c '
         set -euo pipefail
         M=https://repo1.maven.org/maven2
@@ -54,9 +57,9 @@ case "$MODE" in
         get org/slf4j/slf4j-api/1.7.36 slf4j-api-1.7.36.jar
         CP="$J/kafka-streams-'"$KAFKA_VERSION"'.jar:$J/kafka-clients-'"$KAFKA_VERSION"'.jar"
         RT="$CP:$J/rocksdbjni-'"$ROCKSDB_VERSION"'.jar:$J/slf4j-api-1.7.36.jar"
-        mkdir -p /tmp/build
+        mkdir -p /tmp/build /tests/testdata/golden/dsl
         javac -cp "$CP" -d /tmp/build src/main/java/crabka/capture/Capture.java
-        java -cp "/tmp/build:$RT" crabka.capture.Capture /work/../testdata/golden/dsl
+        java -cp "/tmp/build:$RT" crabka.capture.Capture /tests/testdata/golden/dsl
       '
     ;;
 
@@ -134,6 +137,35 @@ case "$MODE" in
       '
     ;;
 
+  --fkjoin)
+    # Pin the JVM FK-join (KIP-213) byte + semantic oracle into
+    # testdata/fk_join/behavior.json, for the Rust FK-join codec + processor parity
+    # tests. Mirrors --iq; same jars (incl. streams-test-utils + rocksdb). Captures the
+    # internal CombinedKeySchema / SubscriptionWrapper / SubscriptionResponseWrapper /
+    # Murmur3 serialized bytes plus inner/left TopologyTestDriver output sequences.
+    TESTS_DIR="$(cd "$HERE/.." && pwd)"
+    docker run --rm \
+      -v "$TESTS_DIR":/tests -w /tests/jvm-capture \
+      "$JDK_IMAGE" bash -c '
+        set -euo pipefail
+        M=https://repo1.maven.org/maven2
+        J=/tmp/j; mkdir -p "$J"
+        get() { f=$(basename "$2"); [ -f "$J/$f" ] || curl -sSfL "$M/$1/$2" -o "$J/$f"; }
+        get org/apache/kafka/kafka-streams/'"$KAFKA_VERSION"' kafka-streams-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-streams-test-utils/'"$KAFKA_VERSION"' kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-clients/'"$KAFKA_VERSION"' kafka-clients-'"$KAFKA_VERSION"'.jar
+        get org/slf4j/slf4j-api/1.7.36 slf4j-api-1.7.36.jar
+        get org/rocksdb/rocksdbjni/'"$ROCKSDB_VERSION"' rocksdbjni-'"$ROCKSDB_VERSION"'.jar
+        CP="$J/kafka-streams-'"$KAFKA_VERSION"'.jar:$J/kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar:$J/kafka-clients-'"$KAFKA_VERSION"'.jar:$J/rocksdbjni-'"$ROCKSDB_VERSION"'.jar"
+        RT="$CP:$J/slf4j-api-1.7.36.jar"
+        mkdir -p /tmp/build /tests/testdata/fk_join
+        javac -cp "$CP" -d /tmp/build \
+          src/main/java/crabka/capture/Capture.java \
+          src/main/java/crabka/capture/ForeignKeyJoinBehavior.java
+        java -cp "/tmp/build:$RT" crabka.capture.ForeignKeyJoinBehavior /tests/testdata/fk_join
+      '
+    ;;
+
   --verify-broker)
     # Mechanism B: stand up a real Kafka 4.1 broker (KRaft, streams groups enabled),
     # run the count topology with group.protocol=streams, dump the live rebalance data.
@@ -180,7 +212,7 @@ case "$MODE" in
     ;;
 
   *)
-    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--verify-broker]" >&2
+    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--fkjoin|--verify-broker]" >&2
     exit 2
     ;;
 esac

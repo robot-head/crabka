@@ -2,7 +2,7 @@
 //! instantiated graph + per-partition fetch offsets. At-least-once: produce →
 //! flush → commit.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::error::StreamsClientError;
@@ -28,6 +28,10 @@ pub(crate) struct StreamTask {
     /// The co-partitioned partition index for all source + changelog topics.
     pub(crate) partition: i32,
     positions: HashMap<(String, i32), i64>,
+    /// The source topics this task consumes. A store whose changelog topic is one
+    /// of these is a `REUSE_KTABLE_SOURCE_TOPICS` reuse-source store, whose
+    /// changelog write-back is suppressed (it would loop back onto the source).
+    source_topics: HashSet<String>,
     pending: HashMap<(String, i32), i64>,
     producer: Arc<dyn RecordProducer>,
     pub(crate) store: Arc<dyn OffsetStore>,
@@ -49,6 +53,7 @@ impl StreamTask {
         guarantee: ProcessingGuarantee,
     ) -> Self {
         let partition = sources.first().map_or(0, |tp| tp.partition);
+        let source_topics: HashSet<String> = sources.iter().map(|tp| tp.topic.clone()).collect();
         let positions = sources
             .into_iter()
             .map(|tp| ((tp.topic, tp.partition), 0))
@@ -58,6 +63,7 @@ impl StreamTask {
             graph,
             partition,
             positions,
+            source_topics,
             pending: HashMap::new(),
             producer,
             store,
@@ -291,7 +297,7 @@ impl StreamTask {
             // but BEFORE the flush/commit barrier (at-least-once).
             // Changelog sends are pinned to self.partition so restore() can
             // read them back by fetching only the task partition.
-            for (cl_topic, key, value) in self.graph.drain_changelogs() {
+            for (cl_topic, key, value) in self.graph.drain_changelogs(&self.source_topics) {
                 self.producer
                     .send(&cl_topic, Some(self.partition), Some(key), value)
                     .await?;
@@ -338,7 +344,7 @@ impl StreamTask {
                 .send(&out.topic, None, out.key, out.value)
                 .await?;
         }
-        for (cl_topic, key, value) in self.graph.drain_changelogs() {
+        for (cl_topic, key, value) in self.graph.drain_changelogs(&self.source_topics) {
             self.producer
                 .send(&cl_topic, Some(self.partition), Some(key), value)
                 .await?;

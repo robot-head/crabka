@@ -88,8 +88,10 @@ public final class Capture {
         write(outDir, "global_table_join", globalTableJoin());
         write(outDir, "process", processTopology());
         write(outDir, "process_values", processValuesTopology());
+        write(outDir, "fk_join_inner", fkJoinInner());
+        write(outDir, "fk_join_left", fkJoinLeft());
 
-        System.out.println("Capture complete. Wrote 17 fixtures to " + outDir.toAbsolutePath());
+        System.out.println("Capture complete. Wrote 19 fixtures to " + outDir.toAbsolutePath());
     }
 
     // ---- the 5 DSL topologies (all with optimization=all) -------------------
@@ -269,6 +271,111 @@ public final class Capture {
             Consumed.with(Serdes.String(), Serdes.String()),
             Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sb"));
         a.join(bt, (va, vb) -> va + vb)
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * 18. fk_join_inner: KIP-213 many-to-one foreign-key KTable↔KTable INNER join.
+     * {@code a = table("a", "sa"); bt = table("b", "sb");
+     *  a.join(bt, fkExtractor=(va)->va, joiner=(va,vb)->va+vb, Materialized.with(...))
+     *   .toStream().to("out")}.
+     *
+     * <p>Unlike the equi-join (#8), the FK-join is NOT copartitioned: it inserts two
+     * internal repartition topics (subscription-registration + subscription-response)
+     * and a subscription state store with its own changelog, splitting the pipeline
+     * across TWO subtopologies. This fixture is the wire ground truth for those topic
+     * names + the subscription store changelog config. The result is materialized
+     * (Materialized.with) so the FK overload is well-formed, but the result store's
+     * changelog reuses no source topic — captured as-is.
+     */
+    static Topology fkJoinInner() {
+        StreamsBuilder b = new StreamsBuilder();
+        org.apache.kafka.streams.kstream.KTable<String, String> a = b.table(
+            "a",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sa"));
+        org.apache.kafka.streams.kstream.KTable<String, String> bt = b.table(
+            "b",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sb"));
+        a.join(
+                bt,
+                (java.util.function.Function<String, String>) (String va) -> va,
+                (va, vb) -> va + vb,
+                Materialized.with(Serdes.String(), Serdes.String()))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build(optimizedProps());
+    }
+
+    /**
+     * Unoptimized ({@code b.build()}) inner FK-join, for the behavioral oracle
+     * ({@link ForeignKeyJoinBehavior}) which drives a TopologyTestDriver. Same builder
+     * shape as {@link #fkJoinInner()} but built WITHOUT optimization.
+     */
+    static Topology fkJoinInnerUnoptimized() {
+        StreamsBuilder b = new StreamsBuilder();
+        org.apache.kafka.streams.kstream.KTable<String, String> a = b.table(
+            "a",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sa"));
+        org.apache.kafka.streams.kstream.KTable<String, String> bt = b.table(
+            "b",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sb"));
+        a.join(
+                bt,
+                (java.util.function.Function<String, String>) (String va) -> va,
+                (va, vb) -> va + vb,
+                Materialized.with(Serdes.String(), Serdes.String()))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build();
+    }
+
+    /** Unoptimized ({@code b.build()}) left FK-join, for the behavioral oracle. */
+    static Topology fkJoinLeftUnoptimized() {
+        StreamsBuilder b = new StreamsBuilder();
+        org.apache.kafka.streams.kstream.KTable<String, String> a = b.table(
+            "a",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sa"));
+        org.apache.kafka.streams.kstream.KTable<String, String> bt = b.table(
+            "b",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sb"));
+        a.leftJoin(
+                bt,
+                (java.util.function.Function<String, String>) (String va) -> va,
+                (va, vb) -> va + (vb == null ? "_" : vb),
+                Materialized.with(Serdes.String(), Serdes.String()))
+            .toStream()
+            .to("out", Produced.with(Serdes.String(), Serdes.String()));
+        return b.build();
+    }
+
+    /**
+     * 19. fk_join_left: identical to {@link #fkJoinInner()} but the LEFT FK-join, so a
+     * primary-table record with no matching foreign value still emits {@code va + "_"}.
+     * Pins whether left vs inner perturbs the wire topology (node indices / topic names).
+     */
+    static Topology fkJoinLeft() {
+        StreamsBuilder b = new StreamsBuilder();
+        org.apache.kafka.streams.kstream.KTable<String, String> a = b.table(
+            "a",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sa"));
+        org.apache.kafka.streams.kstream.KTable<String, String> bt = b.table(
+            "b",
+            Consumed.with(Serdes.String(), Serdes.String()),
+            Materialized.<String, String, org.apache.kafka.streams.state.KeyValueStore<org.apache.kafka.common.utils.Bytes, byte[]>>as("sb"));
+        a.leftJoin(
+                bt,
+                (java.util.function.Function<String, String>) (String va) -> va,
+                (va, vb) -> va + (vb == null ? "_" : vb),
+                Materialized.with(Serdes.String(), Serdes.String()))
             .toStream()
             .to("out", Produced.with(Serdes.String(), Serdes.String()));
         return b.build(optimizedProps());
