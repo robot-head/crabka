@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "Cruise-Control-equivalent partition rebalancer for Crabka clusters"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-rebalancer"
+readme = "README.md"
+keywords = ["kafka", "rebalancer", "partitions", "crabka"]
+categories = ["algorithms", "database-implementations"]
 
 [lints]
 workspace = true
@@ -15,11 +21,11 @@ name = "crabka-rebalancer"
 path = "src/bin/rebalancer.rs"
 
 [dependencies]
-crabka-client-core = { version = "0.3", path = "../client-core" }
-crabka-client-admin = { version = "0.3", path = "../client-admin" }
+crabka-client-core = { version = "0.3.1", path = "../client-core" }
+crabka-client-admin = { version = "0.3.1", path = "../client-admin" }
 bytes.workspace = true
-crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
-crabka-metadata = { version = "0.3", path = "../metadata" }
+crabka-protocol = { version = "0.3.1", path = "../protocol", default-features = false }
+crabka-metadata = { version = "0.3.1", path = "../metadata" }
 connectrpc-axum.workspace = true
 prost.workspace = true
 pbjson.workspace = true
@@ -47,6 +53,6 @@ connectrpc-axum-build = { workspace = true, features = ["fetch-protoc"] }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
+crabka-broker = { version = "0.3.1", path = "../broker", features = ["test-helpers"] }
 tempfile.workspace = true
 tower.workspace = true

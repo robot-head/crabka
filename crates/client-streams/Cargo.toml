@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version = "1.95.0"
 description = "KIP-1071 Kafka Streams rebalance-protocol client for Apache Kafka in Rust"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-client-streams"
+readme = "README.md"
+keywords = ["kafka", "streams", "client", "crabka"]
+categories = ["api-bindings", "network-programming"]
 
 [lints]
 workspace = true
@@ -14,10 +20,10 @@ workspace = true
 default = []
 
 [dependencies]
-crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3", path = "../client-core" }
-crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
-crabka-client-producer = { version = "0.3", path = "../client-producer" }
+crabka-protocol = { version = "0.3.1", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3.1", path = "../client-core" }
+crabka-client-consumer = { version = "0.3.1", path = "../client-consumer" }
+crabka-client-producer = { version = "0.3.1", path = "../client-producer" }
 async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }
@@ -32,7 +38,7 @@ pollster = "0.4"
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
+crabka-broker = { version = "0.3.1", path = "../broker", features = ["test-helpers"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
