@@ -1,3 +1,5 @@
+#![cfg(feature = "sspi-keytab")]
+
 //! `sspi`-rs-backed implementations of [`GssAcceptor`] and [`GssInitiator`].
 //!
 //! Both the acceptor and the initiator authenticate from a keytab: the
@@ -6,6 +8,8 @@
 //! `sspi::Credentials::Keytab` extension) to drive the AS/TGS exchange with no
 //! password. The fork is pulled in via `[patch.crates-io]` in the workspace
 //! `Cargo.toml` (Devolutions/sspi-rs#681).
+
+extern crate sspi_vendored as sspi;
 
 use std::sync::Mutex;
 
@@ -19,6 +23,7 @@ use sspi::{
 
 use super::keytab::{ENCTYPE_AES256_CTS_HMAC_SHA1_96, load_service_key, load_service_keys};
 use super::{AcceptStep, GssAcceptor, GssError, GssInitiator, InitStep};
+
 
 /// Default KDC URL used when `SSPI_KDC_URL` is unset. The accept path does not
 /// hit the network, but `KerberosConfig::new` requires a URL string.
