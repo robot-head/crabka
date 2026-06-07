@@ -1,12 +1,18 @@
 use bytes::Bytes;
-use crabka_grpc_gateway::codec::{RawCodec, RecordCodec};
+use crabka_grpc_gateway::codec::{EncodeBody, RawCodec, RecordCodec};
 
-#[test]
-fn raw_codec_is_identity() {
+#[tokio::test]
+async fn raw_codec_is_identity() {
     let codec = RawCodec;
     let v = Bytes::from_static(b"hello");
-    assert_eq!(codec.encode_value("t", v.clone()), v);
-    assert_eq!(codec.decode_value("t", v.clone()), v);
+    // Raw passthrough: encode returns the bytes verbatim.
+    let encoded = codec.encode("t", EncodeBody::Raw(v.clone())).await.unwrap();
+    assert_eq!(encoded, v);
+    // Decode returns the bytes verbatim with no schema/structured view.
+    let decoded = codec.decode("t", v.clone()).await.unwrap();
+    assert_eq!(decoded.value, v);
+    assert!(decoded.schema.is_none());
+    assert!(decoded.json.is_none());
 }
 
 #[test]
@@ -61,6 +67,7 @@ async fn dedup_produce_before_ownership_is_unavailable() {
         topic: "t".into(),
         key: None,
         value: Bytes::from_static(b"x"),
+        body_structured: None,
         headers: vec![],
         partition: None,
         timestamp_ms: None,

@@ -135,10 +135,12 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
         ))),
+        codec: Arc::new(RawCodec),
     });
 
     // Serve Connect + forward routes (health omitted — not needed here).
@@ -251,6 +253,7 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
         topic: USER_TOPIC.into(),
         key: None,
         value: Bytes::from(key.clone().into_bytes()),
+        body_structured: None,
         headers: vec![],
         partition: None,
         timestamp_ms: None,
@@ -310,6 +313,7 @@ async fn no_known_owner_is_unavailable() {
         topic: USER_TOPIC.into(),
         key: None,
         value: Bytes::from_static(b"v"),
+        body_structured: None,
         headers: vec![],
         partition: None,
         timestamp_ms: None,

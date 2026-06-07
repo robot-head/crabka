@@ -208,10 +208,12 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
         ))),
+        codec: Arc::new(RawCodec),
     });
 
     // Serve Connect + health + forward routes over TLS.
@@ -463,6 +465,7 @@ async fn tls_forward_between_two_gateways() {
         topic: USER_TOPIC.into(),
         key: None,
         value: Bytes::from(key.clone().into_bytes()),
+        body_structured: None,
         headers: vec![],
         partition: None,
         timestamp_ms: None,

@@ -18,6 +18,8 @@ pub enum GatewayError {
     Forward(String),
     #[error("dedup claim could not be (de)serialized: {0}")]
     Claim(#[from] serde_json::Error),
+    #[error("codec error: {0}")]
+    Codec(#[from] crate::codec::CodecError),
     #[error("not authorized: {0}")]
     Unauthorized(String),
     #[error("{0}")]

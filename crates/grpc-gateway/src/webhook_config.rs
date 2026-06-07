@@ -13,6 +13,8 @@ use serde::Deserialize;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
+use crate::codec::SchemaFormat;
+
 /// Raw TOML form (one entry in `[[endpoints]]` per named endpoint).
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebhooksFile {
@@ -45,6 +47,13 @@ pub struct WebhookEndpoint {
     pub key_source: Option<String>,
     /// Maximum accepted body size in bytes (default 1 MiB).
     pub max_body_bytes: Option<usize>,
+    /// Optional Schema Registry subject. When set, the request body is produced
+    /// as a STRUCTURED record validated+serialized against this subject's schema
+    /// (via the injected codec); a validation failure returns `400`.
+    pub schema_subject: Option<String>,
+    /// Payload format of the schema: `"avro"`, `"json"` (default), or
+    /// `"protobuf"`. Only meaningful when `schema_subject` is set.
+    pub schema_format: Option<String>,
 }
 
 /// A value source: an HTTP header or a compiled `JSONPath` into the JSON body.
@@ -93,6 +102,12 @@ pub struct CompiledWebhook {
     pub idempotency_source: Option<Source>,
     pub key_source: Option<Source>,
     pub max_body_bytes: usize,
+    /// Schema Registry subject to validate+serialize the request body against.
+    /// `None` ⇒ the body is produced raw (no schema validation).
+    pub schema_subject: Option<String>,
+    /// The schema's payload format (defaults to [`SchemaFormat::Json`]). Only
+    /// consulted when `schema_subject` is `Some`.
+    pub schema_format: SchemaFormat,
 }
 
 impl WebhooksFile {
@@ -140,6 +155,11 @@ impl WebhooksFile {
                 .map(|s| Source::parse(s, &format!("{ctx}.key_source")))
                 .transpose()?;
 
+            // Validate the schema format string (defaults to JSON). This is
+            // checked even when `schema_subject` is absent so a stray
+            // `schema_format` typo still surfaces at load time.
+            let schema_format = parse_schema_format(e.schema_format.as_deref(), &ctx)?;
+
             out.insert(
                 e.name.clone(),
                 CompiledWebhook {
@@ -157,10 +177,26 @@ impl WebhooksFile {
                     idempotency_source,
                     key_source,
                     max_body_bytes: e.max_body_bytes.unwrap_or(1024 * 1024),
+                    schema_subject: e.schema_subject.clone(),
+                    schema_format,
                 },
             );
         }
         Ok(out)
+    }
+}
+
+/// Parse a schema-format string into a [`SchemaFormat`]. `None` and `"json"`
+/// both map to JSON (the default for webhook bodies, which are JSON on the
+/// wire). Returns a human-readable error for an unrecognized value.
+fn parse_schema_format(spec: Option<&str>, ctx: &str) -> Result<SchemaFormat, String> {
+    match spec {
+        None | Some("json") => Ok(SchemaFormat::Json),
+        Some("avro") => Ok(SchemaFormat::Avro),
+        Some("protobuf") => Ok(SchemaFormat::Protobuf),
+        Some(o) => Err(format!(
+            "{ctx}: schema_format must be 'avro', 'json', or 'protobuf', got {o:?}"
+        )),
     }
 }
 

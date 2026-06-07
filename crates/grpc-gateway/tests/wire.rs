@@ -138,10 +138,12 @@ async fn send_handler_ok_and_error_arms() {
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
         ))),
+        codec: Arc::new(RawCodec),
     });
 
     // Constructing the Connect router covers `lib::router`.
@@ -152,20 +154,22 @@ async fn send_handler_ok_and_error_arms() {
             pb::Record {
                 topic: "wire-topic".into(),
                 key: None,
-                value: b"ok".to_vec(),
+                body: Some(pb::record::Body::Raw(b"ok".to_vec())),
                 headers: BTreeMap::new().into_iter().collect(),
                 partition: None,
                 timestamp_ms: None,
                 idempotency_key: None,
+                schema: None,
             },
             pb::Record {
                 topic: "wire-topic".into(),
                 key: None,
-                value: b"dup".to_vec(),
+                body: Some(pb::record::Body::Raw(b"dup".to_vec())),
                 headers: BTreeMap::new().into_iter().collect(),
                 partition: None,
                 timestamp_ms: None,
                 idempotency_key: Some("k1".into()),
+                schema: None,
             },
         ],
         acks: pb::Acks::All as i32,

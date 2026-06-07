@@ -72,12 +72,20 @@ pub(crate) fn authorize_resource(
 /// retriable (the caller should re-route to another replica); `Unauthorized`
 /// is a non-retriable `PERMISSION_DENIED`; everything else is reported
 /// non-retriable with a generic code.
+///
+/// Codec errors split by cause: a `Registry` transport/availability failure is
+/// retriable (the registry may recover), while `Serialize`/`Validate`/`Framing`
+/// faults are non-retriable (the same bytes will fail identically).
 pub(crate) fn error_result(e: &crate::error::GatewayError) -> crate::pb::RecordResult {
+    use crate::codec::CodecError;
     use crate::error::GatewayError;
-    let retriable = matches!(e, GatewayError::Unavailable);
+    let retriable = matches!(e, GatewayError::Unavailable)
+        || matches!(e, GatewayError::Codec(CodecError::Registry(_)));
     let code = match e {
-        GatewayError::Unavailable => 14,    // gRPC UNAVAILABLE
+        // gRPC UNAVAILABLE: re-route (Unavailable) or registry transport retry.
+        GatewayError::Unavailable | GatewayError::Codec(CodecError::Registry(_)) => 14,
         GatewayError::Unauthorized(_) => 7, // gRPC PERMISSION_DENIED
+        GatewayError::Codec(_) => 3,        // gRPC INVALID_ARGUMENT (payload fault)
         _ => 1,
     };
     crate::pb::RecordResult {
@@ -92,12 +100,60 @@ pub(crate) fn error_result(e: &crate::error::GatewayError) -> crate::pb::RecordR
     }
 }
 
+/// Map a wire [`pb::SchemaFormat`] (an i32) to the codec [`SchemaFormat`].
+/// `SCHEMA_FORMAT_UNSPECIFIED` (and any unknown value) defaults to Avro — the
+/// Confluent default `schemaType`.
+fn schema_format_from_pb(format: i32) -> crate::codec::SchemaFormat {
+    use crate::codec::SchemaFormat;
+    match crate::pb::SchemaFormat::try_from(format) {
+        Ok(crate::pb::SchemaFormat::Json) => SchemaFormat::Json,
+        Ok(crate::pb::SchemaFormat::Protobuf) => SchemaFormat::Protobuf,
+        // AVRO, UNSPECIFIED, or an unknown enum value ⇒ Avro (Confluent default).
+        Ok(crate::pb::SchemaFormat::Avro | crate::pb::SchemaFormat::Unspecified) | Err(_) => {
+            SchemaFormat::Avro
+        }
+    }
+}
+
+/// Map a wire [`pb::SchemaSelector`] to the codec [`SchemaSelector`]. An empty
+/// `subject` ⇒ `None` (`TopicNameStrategy`); a zero `id` ⇒ `None` (resolve latest).
+fn schema_selector_from_pb(sel: crate::pb::SchemaSelector) -> crate::codec::SchemaSelector {
+    crate::codec::SchemaSelector {
+        subject: (!sel.subject.is_empty()).then_some(sel.subject),
+        id: (sel.id != 0).then_some(sel.id),
+        format: schema_format_from_pb(sel.format),
+    }
+}
+
 /// Convert a wire [`pb::Record`] into the transport-agnostic [`GatewayRecord`].
+///
+/// The `body` oneof splits raw vs structured: `raw` (or an absent oneof) keeps
+/// `value` with no structured body; `structured` carries the JSON + the
+/// record's `schema` selector (the codec serializes it on the produce path),
+/// leaving `value` empty.
 pub(crate) fn to_gateway_record(r: crate::pb::Record) -> crate::types::GatewayRecord {
+    use crate::pb::record::Body;
+    let selector = r.schema.map(schema_selector_from_pb);
+    let (value, body_structured) = match r.body {
+        Some(Body::Structured(sv)) => {
+            let json = bytes::Bytes::from(sv.json);
+            // A structured body without a schema selector defaults to Avro via
+            // TopicNameStrategy (subject/id resolved by the codec).
+            let schema = selector.unwrap_or(crate::codec::SchemaSelector {
+                subject: None,
+                id: None,
+                format: crate::codec::SchemaFormat::Avro,
+            });
+            (bytes::Bytes::new(), Some((json, schema)))
+        }
+        Some(Body::Raw(raw)) => (bytes::Bytes::from(raw), None),
+        None => (bytes::Bytes::new(), None),
+    };
     crate::types::GatewayRecord {
         topic: r.topic,
         key: r.key.map(bytes::Bytes::from),
-        value: bytes::Bytes::from(r.value),
+        value,
+        body_structured,
         headers: r
             .headers
             .into_iter()

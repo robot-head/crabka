@@ -36,6 +36,7 @@ use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_grpc_gateway::codec::RawCodec;
 use crabka_grpc_gateway::outbound;
 use crabka_grpc_gateway::outbound_config::{CompiledSubscription, OutboundFile};
 use crabka_protocol::owned::fetch_request::{FetchPartition, FetchRequest, FetchTopic};
@@ -175,6 +176,7 @@ fn sub(
         request_timeout_ms: 2_000,
         filter,
         headers: vec![],
+        decode_to_json: false,
     }
 }
 
@@ -339,6 +341,7 @@ async fn delivers_2xx() {
         dlq_producer,
         token.clone(),
         None,
+        Arc::new(RawCodec),
     ));
 
     assert!(
@@ -432,6 +435,7 @@ async fn retries_then_succeeds() {
         dlq_producer,
         token.clone(),
         None,
+        Arc::new(RawCodec),
     ));
 
     // Wait until the event has been received ≥ 3 times (2 failures + 1 success).
@@ -499,6 +503,7 @@ async fn dead_letters_on_exhaustion() {
         dlq_producer,
         token.clone(),
         None,
+        Arc::new(RawCodec),
     ));
 
     let client = Client::builder()
@@ -572,6 +577,7 @@ async fn ordering_within_partition() {
         dlq_producer,
         token.clone(),
         None,
+        Arc::new(RawCodec),
     ));
 
     assert!(
@@ -626,6 +632,7 @@ async fn filter_skips_nonmatching() {
         dlq_producer,
         token.clone(),
         None,
+        Arc::new(RawCodec),
     ));
 
     // Exactly one record (the truthy one) is delivered.

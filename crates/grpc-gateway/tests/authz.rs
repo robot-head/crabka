@@ -123,8 +123,10 @@ async fn app_state(bootstrap: &str, client: &str, authz: Arc<GatewayAuthz>) -> A
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz,
+        codec: Arc::new(RawCodec),
     })
 }
 
@@ -154,11 +156,12 @@ fn send_one(topic: &str, value: &[u8]) -> pb::SendRequest {
         records: vec![pb::Record {
             topic: topic.into(),
             key: None,
-            value: value.to_vec(),
+            body: Some(pb::record::Body::Raw(value.to_vec())),
             headers: BTreeMap::new().into_iter().collect(),
             partition: None,
             timestamp_ms: None,
             idempotency_key: None,
+            schema: None,
         }],
         acks: pb::Acks::All as i32,
     }
@@ -461,6 +464,7 @@ async fn forwarding_owner_reauthorizes_caller() {
         topic: "t".into(),
         key: None,
         value: Bytes::from(val.to_string().into_bytes()),
+        body_structured: None,
         headers: vec![],
         partition: None,
         timestamp_ms: None,
@@ -763,8 +767,10 @@ async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz,
+        codec: Arc::new(RawCodec),
     });
 
     {

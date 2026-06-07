@@ -49,10 +49,12 @@ async fn state_for(bootstrap: &str) -> Arc<AppState> {
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
         ))),
+        codec: Arc::new(RawCodec),
     })
 }
 
@@ -74,11 +76,12 @@ fn rec(topic: &str, value: &'static [u8]) -> pb::Record {
     pb::Record {
         topic: topic.into(),
         key: None,
-        value: value.to_vec(),
+        body: Some(pb::record::Body::Raw(value.to_vec())),
         headers: std::collections::HashMap::default(),
         partition: None,
         timestamp_ms: None,
         idempotency_key: None,
+        schema: None,
     }
 }
 
@@ -185,6 +188,7 @@ async fn subscribe_streams_records_then_commits() {
             topic: "sub-topic".into(),
             key: None,
             value: Bytes::from_static(b"hello"),
+            body_structured: None,
             headers: vec![],
             partition: None,
             timestamp_ms: None,

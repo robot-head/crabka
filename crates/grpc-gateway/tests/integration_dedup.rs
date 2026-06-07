@@ -97,17 +97,16 @@ async fn duplicate_idempotency_key_produces_once() {
         topic: "dedup-user".into(),
         key: None,
         value: Bytes::from_static(b"once"),
+        body_structured: None,
         headers: vec![],
         partition: None,
         timestamp_ms: None,
         idempotency_key: Some("idem-1".into()),
     };
-
     let anon = anon();
     let first = core.produce(mk(), &anon).await.unwrap();
     let second = core.produce(mk(), &anon).await.unwrap();
-    assert!(!first.deduplicated);
-    assert!(second.deduplicated);
+    assert!(!first.deduplicated && second.deduplicated);
     assert_eq!(first.partition, second.partition);
     assert_eq!(first.offset, second.offset);
 
@@ -277,6 +276,7 @@ async fn concurrent_duplicates_produce_once() {
                     topic: "dedup-conc".into(),
                     key: None,
                     value: Bytes::from_static(b"x"),
+                    body_structured: None,
                     headers: vec![],
                     partition: None,
                     timestamp_ms: None,
