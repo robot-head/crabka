@@ -8,8 +8,6 @@ use tokio::sync::oneshot;
 use crate::store::iq::{IqQueryable, StoreKind};
 
 /// A byte-level query op. No `K`/`V` — the typed view (de)serializes.
-// Variants beyond `Validate`/`KvGet` are wired into the supervisor in IQ-T3.
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum IqOp {
     Validate,
@@ -37,8 +35,6 @@ pub(crate) enum IqOp {
 }
 
 /// A byte-level query result.
-// Variants beyond those asserted in tests are wired into the supervisor in IQ-T3.
-#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum IqPayload {
     Validated,
@@ -67,8 +63,6 @@ pub enum IqError {
 }
 
 /// One query addressed to the supervisor.
-// Constructed by the `KafkaStreams` handle and consumed by the supervisor in IQ-T3.
-#[allow(dead_code)]
 pub(crate) struct IqRequest {
     pub store: String,
     pub kind: StoreKind,
@@ -80,8 +74,6 @@ pub(crate) struct IqRequest {
 /// partitions). `matching` is the set of `IqQueryable` views for that name on
 /// this instance; `any_tasks` distinguishes "rebalancing" (no tasks at all)
 /// from "store genuinely not assigned" (have tasks, none host this store).
-// Called by the supervisor's IQ select arm in IQ-T3 (exercised here by tests).
-#[allow(dead_code)]
 pub(crate) async fn answer_iq(
     matching: Vec<&dyn IqQueryable>,
     kind: StoreKind,

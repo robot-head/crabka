@@ -431,6 +431,37 @@
 //! from the changelog (clean-slate replay), and a missing/corrupt local store is
 //! recovered by replay rather than data loss. Select it on the builder:
 //! `KafkaStreams::builder().store_backend(StoreBackend::Turso { state_dir })`.
+//!
+//! ## Interactive Queries
+//!
+//! Read a running instance's local state stores from outside the topology with
+//! [`KafkaStreams::key_value_store`], [`KafkaStreams::window_store`], and
+//! [`KafkaStreams::session_store`]. Each returns a typed, read-only view —
+//! [`ReadOnlyKeyValueStore`] / [`ReadOnlyWindowStore`] / [`ReadOnlySessionStore`]
+//! — whose accessors round-trip through the running supervisor:
+//!
+//! ```no_run
+//! # use crabka_client_streams::{KafkaStreams, StringSerde, I64Serde};
+//! # async fn example(streams: KafkaStreams) -> Result<(), Box<dyn std::error::Error>> {
+//! let counts = streams.key_value_store("counts", StringSerde, I64Serde).await?;
+//! let n: Option<i64> = counts.get(&"alice".to_string()).await?;
+//! let top = counts.range(&"a".to_string(), &"m".to_string()).await?;
+//! let total = counts.approximate_num_entries().await?;
+//! # let _ = (n, top, total);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Queries reach only the **local active** stores (a composite read across every
+//! partition this instance owns), matching the JVM default `StoreQueryParameters`.
+//! [`ReadOnlyKeyValueStore`] exposes `get` / `range` (inclusive) / `all` /
+//! `approximate_num_entries`; [`ReadOnlyWindowStore`] exposes `fetch_single` /
+//! `fetch`; [`ReadOnlySessionStore`] exposes `fetch`. Failures surface as
+//! [`StreamsClientError::InteractiveQuery`] wrapping an [`IqError`]:
+//! [`IqError::StoreNotFound`] (no such store assigned here),
+//! [`IqError::WrongStoreKind`] (queried the wrong store kind),
+//! [`IqError::NotRunning`] (instance closed), or
+//! [`IqError::RebalanceInProgress`] (no tasks assigned yet — retry).
 #![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.0.0")]
 
 pub mod dsl;
