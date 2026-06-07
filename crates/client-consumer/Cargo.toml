@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Subscribe-style consumer client for Apache Kafka in Rust"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-client-consumer"
+readme = "README.md"
+keywords = ["kafka", "consumer", "client", "streaming", "crabka"]
+categories = ["api-bindings", "network-programming"]
 
 [lints]
 workspace = true
@@ -15,8 +21,8 @@ default = []
 
 [dependencies]
 bon = { workspace = true }
-crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3", path = "../client-core" }
+crabka-protocol = { version = "0.3.1", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3.1", path = "../client-core" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
@@ -26,7 +32,7 @@ futures-util = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-security = { version = "0.3", path = "../security" }
+crabka-security = { version = "0.3.1", path = "../security" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 proptest = { workspace = true }

@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Byte-compatible reader/writer for Apache Kafka's on-disk log format"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-log"
+readme = "README.md"
+keywords = ["kafka", "log", "storage", "records", "crabka"]
+categories = ["database-implementations", "encoding"]
 
 [lints]
 workspace = true
@@ -19,8 +25,8 @@ default = []
 test-helpers = []
 
 [dependencies]
-crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
-crabka-compression = { version = "0.3", path = "../compression", default-features = false }
+crabka-protocol = { version = "0.3.1", path = "../protocol", default-features = false }
+crabka-compression = { version = "0.3.1", path = "../compression", default-features = false }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

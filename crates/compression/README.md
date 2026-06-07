@@ -24,7 +24,7 @@ assert_eq!(back.as_ref(), b"hello kafka");
 Default features enable all four codecs. Disable individually:
 
 ```toml
-crabka-compression = { version = "0.1", default-features = false, features = ["gzip", "zstd"] }
+crabka-compression = { version = "0.3.1", default-features = false, features = ["gzip", "zstd"] }
 ```
 
 Calling a codec whose feature is off returns

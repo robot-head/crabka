@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Load driver + report aggregator for the Crabka vs Strimzi benchmark harness"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-bench-driver"
+readme = "README.md"
+keywords = ["kafka", "benchmark", "load-test", "crabka"]
+categories = ["development-tools::profiling"]
 
 [[bin]]
 name = "crabka-bench-driver"
@@ -23,10 +29,10 @@ anyhow = { workspace = true }
 bytes = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
-crabka-client-admin = { version = "0.3", path = "../client-admin" }
-crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
-crabka-client-core = { version = "0.3", path = "../client-core" }
-crabka-client-producer = { version = "0.3", path = "../client-producer" }
+crabka-client-admin = { version = "0.3.1", path = "../client-admin" }
+crabka-client-consumer = { version = "0.3.1", path = "../client-consumer" }
+crabka-client-core = { version = "0.3.1", path = "../client-core" }
+crabka-client-producer = { version = "0.3.1", path = "../client-producer" }
 hdrhistogram = { version = "7.5", default-features = false }
 k8s-openapi = { workspace = true }
 kube = { workspace = true }

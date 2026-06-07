@@ -5,7 +5,7 @@
 [![CI](https://github.com/robot-head/crabka/actions/workflows/ci.yml/badge.svg)](https://github.com/robot-head/crabka/actions/workflows/ci.yml)
 
 Apache Kafka wire-protocol codec for Rust. Implements every message
-type Apache Kafka 4.2.0 defines (189 messages, 604 `(api_key, version)`
+type Apache Kafka 4.3.0 defines (189 messages, 604 `(api_key, version)`
 pairs), with byte-level wire compatibility verified against the JVM
 `kafka-clients` implementation.
 
@@ -31,7 +31,7 @@ assert_eq!(decoded, req);
   borrowed (`crate::borrowed::*`).
 - **Typed `RecordBatch` v2** via `crate::records::*`, with eager
   decompression through `crabka-compression`.
-- **Central `ApiKey` enum** listing every Kafka 4.2 API.
+- **Central `ApiKey` enum** listing every Kafka 4.3 API.
 
 ## Cargo features
 
@@ -39,7 +39,7 @@ Default features enable all four compression codecs. Disable per-codec
 via `--no-default-features` + selective `--features`:
 
 ```toml
-crabka-protocol = { version = "0.1", default-features = false, features = ["snappy", "zstd"] }
+crabka-protocol = { version = "0.3.1", default-features = false, features = ["snappy", "zstd"] }
 ```
 
 ## MSRV

@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Kubernetes operator for Crabka clusters"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-operator"
+readme = "README.md"
+keywords = ["kafka", "kubernetes", "operator", "crabka"]
+categories = ["config", "network-programming"]
 
 [[bin]]
 name = "crabka-operator"
@@ -20,8 +26,8 @@ async-trait = { workspace = true }
 axum = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { workspace = true, features = ["env"] }
-crabka-client-admin = { version = "0.3", path = "../client-admin" }
-crabka-metadata = { version = "0.3", path = "../metadata" }
+crabka-client-admin = { version = "0.3.1", path = "../client-admin" }
+crabka-metadata = { version = "0.3.1", path = "../metadata" }
 crabka-security = { workspace = true }
 base64 = { workspace = true }
 futures = { workspace = true }
@@ -49,9 +55,9 @@ x509-parser = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.3", path = "../broker" }
-crabka-client-core = { version = "0.3", path = "../client-core" }
-crabka-rebalancer = { version = "0.3", path = "../rebalancer" }
+crabka-broker = { version = "0.3.1", path = "../broker" }
+crabka-client-core = { version = "0.3.1", path = "../client-core" }
+crabka-rebalancer = { version = "0.3.1", path = "../rebalancer" }
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }

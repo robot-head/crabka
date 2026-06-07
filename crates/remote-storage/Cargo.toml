@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "KIP-405 tiered-storage SPI (RemoteStorageManager / RemoteLogMetadataManager) and reference implementations for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-remote-storage"
+readme = "README.md"
+keywords = ["kafka", "tiered-storage", "object-store", "crabka"]
+categories = ["database-implementations", "filesystem"]
 
 [lints]
 workspace = true

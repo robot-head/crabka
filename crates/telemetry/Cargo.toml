@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "Generic OTLP distributed-tracing pipeline for Crabka services"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-telemetry"
+readme = "README.md"
+keywords = ["kafka", "otlp", "tracing", "telemetry", "crabka"]
+categories = ["development-tools::debugging"]
 
 [lints]
 workspace = true

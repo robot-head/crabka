@@ -6,6 +6,12 @@ license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
 description = "TLS, SASL, SCRAM, OAuth, and Kerberos security utilities for Crabka"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-security"
+readme = "README.md"
+keywords = ["kafka", "tls", "sasl", "scram", "crabka"]
+categories = ["authentication", "cryptography", "network-programming"]
 
 [lints]
 workspace = true
