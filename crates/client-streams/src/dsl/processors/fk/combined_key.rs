@@ -1,7 +1,8 @@
 //! `CombinedKey<KO,K>` byte codec (JVM `CombinedKeySchema`).
 //! Layout: `[ foreignKeyLen : 4 bytes BE ] [ foreignKeyBytes ] [ primaryKeyBytes ]`.
-// Codec consumed by the FK-join subscription store (Task 4+); unused at this
-// task's boundary in a non-test build.
+//! Consumed by the FK-join subscription store (`store::fk_subscription`), which is
+//! itself only wired into a reachable processor/lowering in T5/T6 — so this whole
+//! chain is dead-code until then in a non-test build.
 #![allow(dead_code)]
 use bytes::{BufMut, Bytes, BytesMut};
 

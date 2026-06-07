@@ -4,7 +4,9 @@
 //! `SubscriptionWrapper`  : `version1 | (isHashNull<<7)` ‖ `instruction(1)` ‖ `[hash:16]` ‖ `pk…` ‖ `primaryPartition:4BE`
 //! `SubscriptionResponse` : `version0 | (isHashNull<<7)` ‖ `[hash:16]` ‖ `[foreignValue…]`
 //! Byte-exact vs the `--fkjoin` capture.
-// consumed by FK-join store + processors (T4/T5)
+//! Consumed by the FK-join subscription store + processors, which are only wired
+//! into a reachable path in T5 — so this whole module is dead-code until then in
+//! a non-test build.
 #![allow(dead_code)]
 use bytes::{BufMut, Bytes, BytesMut};
 
