@@ -170,6 +170,58 @@
 //! unmaterialized `KTable` (no result store/changelog — materialize a downstream op
 //! to persist it).
 //!
+//! ## Foreign-key joins
+//!
+//! [`KTable::join_on_foreign_key`] and [`KTable::left_join_on_foreign_key`]
+//! (KIP-213) join two `KTable`s on a **foreign key** rather than the primary key:
+//! for each left row, an `fk_extractor(&leftValue)` selects the foreign key, which
+//! looks up a row in the right table. The relationship is **many-to-one** — many
+//! left rows can reference the same right row, and a change on *either* side
+//! re-evaluates every affected pair: a left-value change re-selects the foreign
+//! key, and a right-row change re-emits for every left row currently subscribed to
+//! that foreign key. **Inner** emits `joiner(&left, &right)` only when the foreign
+//! row exists (a foreign key with no match retracts with a tombstone); **left**
+//! emits for every left row, passing `None` for the foreign value on a miss.
+//!
+//! Both input tables must be **materialized source tables** — built with
+//! [`StreamsBuilder::table`] (the join reads each side's store and serdes). The
+//! result is an **unmaterialized** `KTable` (no result store/changelog; materialize
+//! a downstream op to persist it). Because the foreign key differs from the primary
+//! key, the join cannot be copartitioned directly; it lowers to the KIP-213
+//! two-subtopology graph — a *subscription registration* repartition topic (keyed
+//! by foreign key), a *subscription response* repartition topic (keyed back by
+//! primary key), and a subscription state store that tracks which primary keys
+//! subscribe to each foreign key — all created and copartitioned automatically.
+//!
+//! ```no_run
+//! use crabka_client_streams::{Consumed, Materialized, Produced, StreamsBuilder, StringSerde};
+//!
+//! let builder = StreamsBuilder::new();
+//! // `a`: primaryKey -> foreignKey ("A"); `b`: foreignKey -> value ("X").
+//! let a = builder.table::<String, String, _, _>(
+//!     "a",
+//!     Consumed::with(StringSerde, StringSerde),
+//!     Materialized::with(StringSerde, StringSerde).as_store("sa"),
+//! );
+//! let b = builder.table::<String, String, _, _>(
+//!     "b",
+//!     Consumed::with(StringSerde, StringSerde),
+//!     Materialized::with(StringSerde, StringSerde).as_store("sb"),
+//! );
+//! a.join_on_foreign_key(
+//!     &b,
+//!     |left: &String| left.clone(),                       // foreign-key extractor
+//!     |left: &String, right: &String| format!("{left}{right}"), // joiner -> "AX"
+//!     StringSerde,                                         // foreign-key serde
+//! )
+//! .to_stream()
+//! .to("out", Produced::with(StringSerde, StringSerde));
+//! drop(a);
+//! drop(b);
+//! let topology = builder.build("fk-app").unwrap();
+//! # let _ = topology;
+//! ```
+//!
 //! [`KGroupedStream::windowed_by`] turns a grouped stream into time-windowed
 //! aggregations: `windowed_by(TimeWindows::of_size(..))` then `count`/`reduce`/
 //! `aggregate` yields a [`KTable`]`<`[`Windowed`]`<K>, V>`. [`TimeWindows`] are
