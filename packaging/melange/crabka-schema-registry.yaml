@@ -1,0 +1,33 @@
+package:
+  name: crabka-schema-registry
+  version: 0.1.1
+  epoch: 0
+  description: Confluent Schema Registry-compatible service for Crabka
+  copyright:
+    - license: Apache-2.0
+
+environment:
+  contents:
+    repositories:
+      - https://packages.wolfi.dev/os
+    keyring:
+      - https://packages.wolfi.dev/os/wolfi-signing.rsa.pub
+    packages:
+      - ca-certificates-bundle
+      - build-base
+      - busybox
+      - git
+      - rustup
+
+pipeline:
+  - name: Install pinned Rust toolchain
+    runs: |
+      rustup-init -y --default-toolchain none --no-modify-path
+      export PATH="$HOME/.cargo/bin:$PATH"
+      rustup toolchain install 1.95.0 --component cargo --profile minimal
+      rustup default 1.95.0
+  - name: Build crabka-schema-registry
+    runs: |
+      export PATH="$HOME/.cargo/bin:$PATH"
+      cargo build --release --bin crabka-schema-registry -p crabka-schema-registry
+      install -D -m 0755 target/release/crabka-schema-registry "${{targets.contextdir}}/usr/bin/crabka-schema-registry"

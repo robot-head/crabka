@@ -371,7 +371,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Kafka Streams equivalent | ❌ |
 | Kafka Connect equivalent | ❌ |
 | MirrorMaker equivalent | ❌ |
-| Schema Registry | ❌ |
+| Schema Registry | ✅ |
 
 ## KIP implementation status
 

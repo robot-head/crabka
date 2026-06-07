@@ -1,0 +1,50 @@
+image:
+  repository: ghcr.io/robot-head/crabka-schema-registry
+  tag: "0.1.1"
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# REQUIRED for the standalone chart: bootstrap address of the Crabka broker.
+bootstrapServers: ""
+schemasTopic: "_schemas"
+schemasTopicReplicationFactor: 3
+groupId: "schema-registry"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1000m"
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+podLabels: {}
+
+serviceAccount:
+  create: true
+  name: ""
+
+service:
+  type: ClusterIP
+  port: 8081
+
+logFilter: "info"
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: [ALL]
