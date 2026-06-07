@@ -3,6 +3,7 @@
 //! CRD YAML manifest (see `gen_crds`).
 
 pub mod ca;
+pub mod grpc_gateway;
 pub mod kafka;
 pub mod kafka_node_pool;
 pub mod listener;
@@ -15,6 +16,7 @@ pub mod topic;
 pub mod user;
 
 pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
+pub use grpc_gateway::{KafkaGrpcGateway, KafkaGrpcGatewaySpec, KafkaGrpcGatewayStatus};
 pub use kafka::{
     Authorization, InterBrokerKerberos, Kafka, KafkaCondition, KafkaSpec, KafkaStatus,
     Krb5ConfSecretRef, OpaAuthorization, SimpleAuthorization,

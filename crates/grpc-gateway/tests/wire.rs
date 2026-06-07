@@ -115,8 +115,9 @@ async fn send_handler_ok_and_error_arms() {
         "__crabka_grpc_dedup".to_string(),
         4,
         store,
+        None,
     ));
-    let produce = ProduceCore::new(&bootstrap, "wire", Arc::new(RawCodec))
+    let produce = ProduceCore::new(&bootstrap, "wire", Arc::new(RawCodec), None)
         .await
         .unwrap()
         .with_dedup(engine);
@@ -133,6 +134,7 @@ async fn send_handler_ok_and_error_arms() {
             advertised_addr: "127.0.0.1:0".into(),
             membership_topic: "__crabka_grpc_gateway_membership".into(),
             tls: None,
+            broker_security: None,
             authz: None,
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),

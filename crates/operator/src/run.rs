@@ -69,6 +69,10 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
         let ctx = ctx.clone();
         async move { controller::rebalance::run(ctx).await }
     });
+    let grpc_gateway_handle = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { controller::grpc_gateway::run(ctx).await }
+    });
     let schema_registry_handle = tokio::spawn({
         let ctx = ctx.clone();
         async move { controller::schema_registry::run(ctx).await }
@@ -104,6 +108,11 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
             Ok(Ok(())) => {}
             Ok(Err(e)) => tracing::error!(error = %e, "KafkaRebalance controller exited with error"),
             Err(e) => tracing::error!(error = %e, "KafkaRebalance controller task panicked"),
+        },
+        res = grpc_gateway_handle => match res {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "KafkaGrpcGateway controller exited with error"),
+            Err(e) => tracing::error!(error = %e, "KafkaGrpcGateway controller task panicked"),
         },
         res = schema_registry_handle => match res {
             Ok(Ok(())) => {}

@@ -390,6 +390,7 @@ mod tests {
                 advertised_addr: "127.0.0.1:0".into(),
                 membership_topic: "__wh_membership".into(),
                 tls: None,
+                broker_security: None,
                 authz: None,
                 webhooks,
                 outbound: Vec::new(),

@@ -126,6 +126,9 @@ pub struct GatewayConfig {
     pub membership_topic: String,
     /// TLS/mTLS settings; `None` ⇒ plaintext (all current tests).
     pub tls: Option<TlsSettings>,
+    /// Client security for connections FROM the gateway TO the broker.
+    /// `None` ⇒ plaintext (default; all current tests).
+    pub broker_security: Option<crabka_client_core::security::ClientSecurity>,
     /// Authorization settings; `None` ⇒ `AllowAll` (no enforcement; default).
     pub authz: Option<AuthzSettings>,
     /// Named webhook endpoints; compiled from a TOML config file at startup.

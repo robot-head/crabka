@@ -358,11 +358,31 @@ pub fn fake_parent_kafka_body(name: &str, namespace: &str) -> serde_json::Value 
     // `status.metadataVersion`. The pool reconciler gates pod creation on
     // this (see `kafka_node_pool::version_gate`), so the fixture must look
     // like a validated cluster for the happy-path STS-apply tests to fire.
+    //
+    // It also exposes a realistic dual-listener topology: a plaintext `PLAIN`
+    // listener on 9092 plus a TLS + `authentication: tls` (mTLS) internal
+    // listener `tls-internal` on 9093. The gateway reconciler resolves its
+    // broker mTLS bootstrap + SNI from the SECURED listener (not the
+    // plaintext :9092). Both `spec.listeners` (for the tls/auth predicate)
+    // and `status.listeners` (for the resolved bootstrap host:port) carry it.
+    let tls_bootstrap = format!("{name}-broker-headless.{namespace}.svc.cluster.local:9093");
     serde_json::json!({
         "apiVersion": "crabka.io/v1alpha1",
         "kind": "Kafka",
         "metadata": { "name": name, "namespace": namespace, "uid": "kafka-uid" },
-        "spec": { "kafkaVersion": "0.1.1" },
+        "spec": {
+            "kafkaVersion": "0.1.1",
+            "listeners": [
+                { "name": "PLAIN", "port": 9092, "type": "internal", "tls": false },
+                {
+                    "name": "tls-internal",
+                    "port": 9093,
+                    "type": "internal",
+                    "tls": true,
+                    "authentication": { "type": "tls" }
+                }
+            ]
+        },
         "status": {
             "conditions": [{
                 "type": "KafkaVersionValid",
@@ -371,7 +391,19 @@ pub fn fake_parent_kafka_body(name: &str, namespace: &str) -> serde_json::Value 
                 "message": "kafkaVersion 0.1.1 metadata.version 0.1",
                 "lastTransitionTime": "2026-05-22T00:00:00Z"
             }],
-            "metadataVersion": "0.1"
+            "metadataVersion": "0.1",
+            "listeners": [
+                {
+                    "name": "PLAIN",
+                    "type": "internal",
+                    "bootstrapServers": format!("{name}-broker-headless.{namespace}.svc.cluster.local:9092")
+                },
+                {
+                    "name": "tls-internal",
+                    "type": "internal",
+                    "bootstrapServers": tls_bootstrap
+                }
+            ]
         }
     })
 }
@@ -386,6 +418,7 @@ pub fn op_config(namespace: &str) -> OperatorConfig {
         health_addr: "0.0.0.0:0".parse().unwrap(),
         log_filter: "info".into(),
         default_broker_image: None,
+        default_gateway_image: None,
         default_schema_registry_image: None,
     }
 }
@@ -782,4 +815,175 @@ pub fn pool_reconcile_rules(
             response: json_response(200, &fake_pool_body(pool, namespace, parent)),
         },
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Gateway reconcile helpers
+// ---------------------------------------------------------------------------
+
+/// JSON body shaped like an `apps/v1/Deployment`.
+/// `ready_replicas = None` → no `readyReplicas` in status (= 0 ready).
+pub fn fake_deployment_body(
+    name: &str,
+    namespace: &str,
+    ready_replicas: Option<i32>,
+) -> serde_json::Value {
+    let mut status = serde_json::json!({ "replicas": 1 });
+    if let Some(rr) = ready_replicas {
+        status["readyReplicas"] = serde_json::Value::from(rr);
+    }
+    serde_json::json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": { "name": name, "namespace": namespace, "uid": "dep-uid" },
+        "spec": {
+            "replicas": 1,
+            "selector": { "matchLabels": {} },
+            "template": {
+                "metadata": { "labels": {} },
+                "spec": { "containers": [] }
+            }
+        },
+        "status": status
+    })
+}
+
+/// JSON body shaped like a `KafkaGrpcGateway` CR.
+/// Carries `metadata.labels["crabka.io/cluster"] = kafka_name` and a `uid`.
+pub fn fake_gateway_body(name: &str, namespace: &str, kafka_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaGrpcGateway",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "uid": "gw-uid",
+            "generation": 1,
+            "labels": { "crabka.io/cluster": kafka_name }
+        },
+        "spec": {
+            "webhooks": [],
+            "outboundSubscriptions": [],
+            "allowedTargets": []
+        },
+        "status": { "conditions": [] }
+    })
+}
+
+/// Build a cluster-CA key Secret (`<kafka>-cluster-ca`, key `ca.key`)
+/// containing a real ECDSA CA private key PEM.
+pub fn fake_cluster_ca_key_secret(
+    kafka_name: &str,
+    namespace: &str,
+    key_pem: &str,
+) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(key_pem.as_bytes());
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": format!("{kafka_name}-cluster-ca"),
+            "namespace": namespace,
+            "uid": "cluster-ca-key-uid"
+        },
+        "type": "Opaque",
+        "data": { "ca.key": b64 }
+    })
+}
+
+/// Build a cluster-CA cert Secret (`<kafka>-cluster-ca-cert`, key `ca.crt`)
+/// containing a real X.509 CA cert PEM.
+pub fn fake_cluster_ca_cert_secret(
+    kafka_name: &str,
+    namespace: &str,
+    cert_pem: &str,
+) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(cert_pem.as_bytes());
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": format!("{kafka_name}-cluster-ca-cert"),
+            "namespace": namespace,
+            "uid": "cluster-ca-cert-uid"
+        },
+        "type": "Opaque",
+        "data": { "ca.crt": b64 }
+    })
+}
+
+/// Build a `<gw>-broker` `KafkaUser` Secret (keys `user.crt` / `user.key` /
+/// `ca.crt`) with placeholder PEM bytes. Returned on the post-SSA GET that
+/// the gateway reconciler uses to check that the cert has been issued.
+pub fn fake_broker_user_secret(gw_name: &str, namespace: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let placeholder = b64.encode(b"placeholder");
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": format!("{gw_name}-broker"),
+            "namespace": namespace,
+            "uid": "broker-secret-uid"
+        },
+        "type": "Opaque",
+        "data": {
+            "user.crt": placeholder,
+            "user.key": placeholder,
+            "ca.crt": placeholder
+        }
+    })
+}
+
+/// Build a minimal `<gw>-serving` Secret body (keys `tls.crt` / `tls.key`).
+/// Returned by the PATCH apply call for the serving-cert Secret.
+pub fn fake_serving_secret(gw_name: &str, namespace: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let placeholder = b64.encode(b"placeholder");
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": format!("{gw_name}-serving"),
+            "namespace": namespace,
+            "uid": "serving-secret-uid"
+        },
+        "type": "Opaque",
+        "data": { "tls.crt": placeholder, "tls.key": placeholder }
+    })
+}
+
+/// Build a minimal `<gw>-config` Secret body (keys `webhooks.toml` /
+/// `outbound.toml`). Returned by the PATCH apply for the config Secret.
+pub fn fake_config_secret(gw_name: &str, namespace: &str) -> serde_json::Value {
+    use base64::Engine as _;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let webhooks = b64.encode(b"[endpoints]\n");
+    let outbound = b64.encode(b"[subscriptions]\n");
+    serde_json::json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": format!("{gw_name}-config"),
+            "namespace": namespace,
+            "uid": "config-secret-uid"
+        },
+        "type": "Opaque",
+        "data": { "webhooks.toml": webhooks, "outbound.toml": outbound }
+    })
+}
+
+/// Build a `KafkaUser` minimal body.
+pub fn fake_kafkauser_body(name: &str, namespace: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaUser",
+        "metadata": { "name": name, "namespace": namespace, "uid": "user-uid", "generation": 1 },
+        "spec": { "authentication": { "type": "tls" } },
+        "status": { "conditions": [] }
+    })
 }

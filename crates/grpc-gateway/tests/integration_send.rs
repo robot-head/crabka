@@ -45,7 +45,7 @@ async fn produce_plain_then_read_back() {
     let (broker, bootstrap, _dir) = boot().await;
     create_topic(&bootstrap, "send-itest", 1).await;
 
-    let core = ProduceCore::new(&bootstrap, "gw-itest", Arc::new(RawCodec))
+    let core = ProduceCore::new(&bootstrap, "gw-itest", Arc::new(RawCodec), None)
         .await
         .expect("core");
 

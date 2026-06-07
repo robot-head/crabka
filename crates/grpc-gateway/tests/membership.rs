@@ -40,7 +40,9 @@ async fn publish(producer: &Producer, node_id: &str, info: &NodeInfo) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_membership_builds_routing_with_offset_tiebreak() {
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_membership_topic(&bootstrap, TOPIC, 1).await.unwrap();
+    ensure_membership_topic(&bootstrap, TOPIC, 1, None)
+        .await
+        .unwrap();
 
     let producer = Producer::builder()
         .bootstrap(bootstrap.clone())
@@ -93,6 +95,7 @@ async fn run_membership_builds_routing_with_offset_tiebreak() {
         TOPIC.into(),
         "memb-reader-unique-1".into(),
         token.clone(),
+        None,
     ));
 
     let mut ok = false;
@@ -127,7 +130,9 @@ async fn run_membership_tombstone_and_malformed_skip() {
     use tokio_util::sync::CancellationToken;
 
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_membership_topic(&bootstrap, TOPIC, 1).await.unwrap();
+    ensure_membership_topic(&bootstrap, TOPIC, 1, None)
+        .await
+        .unwrap();
 
     let producer = Producer::builder()
         .bootstrap(bootstrap.clone())
@@ -180,6 +185,7 @@ async fn run_membership_tombstone_and_malformed_skip() {
         TOPIC.into(),
         "memb-tombstone-unique-1".into(),
         token.clone(),
+        None,
     ));
 
     // Poll until owner_of(0) is None: node-a tombstoned AND malformed didn't crash loop.

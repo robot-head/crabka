@@ -45,6 +45,7 @@ pub struct DedupEngine {
     partitions: u32,
     slots: Vec<TxnSlot>,
     store: Arc<DedupStore>,
+    security: Option<crabka_client_core::security::ClientSecurity>,
 }
 
 impl DedupEngine {
@@ -56,6 +57,7 @@ impl DedupEngine {
         dedup_topic: String,
         partitions: u32,
         store: Arc<DedupStore>,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Self {
         let slots = (0..partitions.max(1)).map(|_| Mutex::new(None)).collect();
         Self {
@@ -66,6 +68,7 @@ impl DedupEngine {
             partitions: partitions.max(1),
             slots,
             store,
+            security,
         }
     }
 
@@ -162,6 +165,7 @@ impl DedupEngine {
                 .enable_idempotence(true)
                 .acks(Acks::All)
                 .transactional_id(txn_id)
+                .maybe_security(self.security.clone())
                 .build()
                 .await?;
             producer.init_transactions().await?;

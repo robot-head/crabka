@@ -188,6 +188,8 @@ fn build_client_security(input: &SecurityCliInput) -> anyhow::Result<Option<Clie
                 .kafka_tls_server_name
                 .clone()
                 .unwrap_or_else(|| "localhost".to_string()),
+            // One-way TLS to the broker (no client cert / mTLS).
+            client_identity: None,
         })
     } else {
         None

@@ -47,7 +47,7 @@ async fn jvm_consumer_reads_gateway_output() {
         .await
         .expect("create");
 
-    let core = ProduceCore::new(BOOTSTRAP, "gw-jvm", Arc::new(RawCodec))
+    let core = ProduceCore::new(BOOTSTRAP, "gw-jvm", Arc::new(RawCodec), None)
         .await
         .expect("core");
     let anon = crabka_security::Principal {

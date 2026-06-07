@@ -24,6 +24,7 @@ impl ConsumeSession {
         group_id: &str,
         client_id: &str,
         topics: Vec<String>,
+        security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, GatewayError> {
         let consumer = Consumer::builder()
             .bootstrap(bootstrap.to_string())
@@ -32,6 +33,7 @@ impl ConsumeSession {
             .subscribe(topics)
             .isolation_level(IsolationLevel::ReadCommitted)
             .auto_offset_reset(AutoOffsetReset::Earliest)
+            .maybe_security(security)
             .build()
             .await?;
         Ok(Self {

@@ -4,6 +4,7 @@
 
 pub mod cluster_ca;
 pub mod common;
+pub mod grpc_gateway;
 pub mod kafka;
 pub mod kafka_node_pool;
 pub(crate) mod listeners;

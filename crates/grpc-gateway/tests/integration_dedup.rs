@@ -41,7 +41,7 @@ async fn duplicate_idempotency_key_produces_once() {
 
     let (broker, bootstrap, _dir) = boot().await;
     let dedup_topic = "__crabka_grpc_dedup";
-    ensure_dedup_topic(&bootstrap, dedup_topic, 4, 3_600_000, 1)
+    ensure_dedup_topic(&bootstrap, dedup_topic, 4, 3_600_000, 1, None)
         .await
         .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
@@ -68,6 +68,7 @@ async fn duplicate_idempotency_key_produces_once() {
         dedup_topic.to_string(),
         "__crabka_grpc_gateway_dedup_owners".into(),
         token.clone(),
+        None,
     ));
     let mut warmed = false;
     for _ in 0..80 {
@@ -85,8 +86,9 @@ async fn duplicate_idempotency_key_produces_once() {
         dedup_topic.to_string(),
         4,
         store.clone(),
+        None,
     ));
-    let core = ProduceCore::new(&bootstrap, "gw-prod", Arc::new(RawCodec))
+    let core = ProduceCore::new(&bootstrap, "gw-prod", Arc::new(RawCodec), None)
         .await
         .unwrap()
         .with_dedup(engine);
@@ -142,7 +144,7 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
 
     let (broker, bootstrap, _dir) = boot().await;
     let topic = "__crabka_grpc_dedup";
-    ensure_dedup_topic(&bootstrap, topic, 4, 3_600_000, 1)
+    ensure_dedup_topic(&bootstrap, topic, 4, 3_600_000, 1, None)
         .await
         .unwrap();
 
@@ -158,6 +160,7 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
                 partition: 0,
                 offset: 9,
             },
+            None,
         )
         .await
         .unwrap();
@@ -170,6 +173,7 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
         topic.to_string(),
         "__crabka_grpc_gateway_dedup_owners".into(),
         token.clone(),
+        None,
     ));
 
     let mut warm = false;
@@ -210,7 +214,7 @@ async fn concurrent_duplicates_produce_once() {
 
     let (broker, bootstrap, _dir) = boot().await;
     let dedup_topic = "__crabka_grpc_dedup";
-    ensure_dedup_topic(&bootstrap, dedup_topic, 4, 3_600_000, 1)
+    ensure_dedup_topic(&bootstrap, dedup_topic, 4, 3_600_000, 1, None)
         .await
         .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
@@ -237,6 +241,7 @@ async fn concurrent_duplicates_produce_once() {
         dedup_topic.to_string(),
         "__crabka_grpc_gateway_dedup_owners".into(),
         token.clone(),
+        None,
     ));
     let mut warmed = false;
     for _ in 0..80 {
@@ -254,9 +259,10 @@ async fn concurrent_duplicates_produce_once() {
         dedup_topic.to_string(),
         4,
         store.clone(),
+        None,
     ));
     let core = Arc::new(
-        ProduceCore::new(&bootstrap, "gw-prod2", Arc::new(RawCodec))
+        ProduceCore::new(&bootstrap, "gw-prod2", Arc::new(RawCodec), None)
             .await
             .unwrap()
             .with_dedup(engine),

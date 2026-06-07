@@ -4,7 +4,10 @@ on:
   push:
     branches: [main]
 
-# Cancel superseded runs on the same ref.
+permissions:
+  contents: read
+
+# Cancel superseded PR runs; let pushes to main run to completion.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -615,6 +618,60 @@ jobs:
           flags: broker-integration
           fail_ci_if_error: false
 
+  # Operator mock-harness reconcile tests (no Docker, no real K8s cluster).
+  # Each tests/<name>.rs file must be listed with `--test <name>` so that
+  # the codecov/patch check sees coverage for newly added test files.
+  operator-integration:
+    needs: changes
+    if: ${{ needs.changes.outputs.helm_lint == 'true' }}
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: operator-integration
+      - uses: arduino/setup-protoc@v3
+        with:
+          version: "31.x"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Operator reconcile integration coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov -p crabka-operator \
+            --test ca_renewal_cronjob \
+            --test rebalance_e2e \
+            --test reconcile_ca \
+            --test reconcile_ca_rotation \
+            --test reconcile_gateway \
+            --test reconcile_inter_broker_mtls \
+            --test reconcile_kafka \
+            --test reconcile_kafka_authorization \
+            --test reconcile_kafkauser_delegation_token \
+            --test reconcile_listener_auth \
+            --test reconcile_listener_gssapi \
+            --test reconcile_listener_ingress \
+            --test reconcile_listener_oauth \
+            --test reconcile_oauth_introspection \
+            --test reconcile_oauth_trust \
+            --test reconcile_pool \
+            --test reconcile_rebalance \
+            --test reconcile_topic \
+            --test reconcile_user \
+            --test reconcile_user_tls_external \
+            --lcov --output-path coverage/operator-integration.lcov -- --nocapture
+      - uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/operator-integration.lcov
+          disable_search: true
+          flags: operator-integration
+          fail_ci_if_error: false
+
   gatekeeper-ci:
     needs:
       - changes
@@ -630,6 +687,7 @@ jobs:
       - schema-registry-integration
       - broker-jvm-acceptance
       - broker-integration
+      - operator-integration
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 1
