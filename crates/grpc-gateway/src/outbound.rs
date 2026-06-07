@@ -23,6 +23,7 @@ use jsonpath_rust::query::js_path_process;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use crate::codec::RecordCodec;
 use crate::error::GatewayError;
 use crate::metrics::metrics;
 use crate::outbound_config::CompiledSubscription;
@@ -60,6 +61,7 @@ pub async fn run_subscription(
     producer: Arc<Producer>,
     shutdown: CancellationToken,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    codec: Arc<dyn RecordCodec>,
 ) -> Result<(), GatewayError> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(sub.request_timeout_ms))
@@ -98,7 +100,7 @@ pub async fn run_subscription(
             continue;
         }
 
-        deliver_batch(&http, &sub, &producer, batch).await;
+        deliver_batch(&http, &sub, &producer, codec.as_ref(), batch).await;
 
         // The whole batch is delivered or dead-lettered ⇒ advance the committed
         // position. On failure we log and continue: the uncommitted position
@@ -126,6 +128,7 @@ async fn deliver_batch(
     http: &reqwest::Client,
     sub: &CompiledSubscription,
     producer: &Producer,
+    codec: &dyn RecordCodec,
     batch: Vec<ConsumerRecord>,
 ) {
     let mut by_part: std::collections::BTreeMap<(String, i32), Vec<ConsumerRecord>> =
@@ -146,9 +149,10 @@ async fn deliver_batch(
     let http = &http;
     let sub = &sub;
     let producer = &producer;
+    let codec = &codec;
     let futures = by_part.into_values().map(|recs| async move {
         for rec in recs {
-            deliver_one(http, sub, producer, &rec).await;
+            deliver_one(http, sub, producer, *codec, &rec).await;
         }
     });
     futures_util::future::join_all(futures).await;
@@ -163,6 +167,7 @@ async fn deliver_one(
     http: &reqwest::Client,
     sub: &CompiledSubscription,
     producer: &Producer,
+    codec: &dyn RecordCodec,
     rec: &ConsumerRecord,
 ) {
     // 1. Filter: a non-matching record is skipped (counts as delivered so the
@@ -173,10 +178,16 @@ async fn deliver_one(
         return;
     }
 
-    // 2. Render the signed JSON envelope. event_id = topic-partition-offset is
-    //    the receiver's dedup key (X-Crabka-Event-Id).
+    // 2. Build the delivery body. event_id = topic-partition-offset is the
+    //    receiver's dedup key (X-Crabka-Event-Id). When `decode_to_json` is set,
+    //    the (Confluent-framed) record value is decoded and its JSON view is
+    //    delivered verbatim; otherwise — and whenever decode yields no JSON or
+    //    errors — the standard signed JSON envelope is delivered (raw path,
+    //    inert under `RawCodec`).
     let event_id = format!("{}-{}-{}", rec.topic, rec.partition, rec.offset);
-    let body = render_envelope(&event_id, rec);
+    let body = decoded_body(codec, sub, rec)
+        .await
+        .unwrap_or_else(|| render_envelope(&event_id, rec));
     let ts = now_unix_ms();
     let sig = sub
         .signing_secret
@@ -232,6 +243,38 @@ async fn deliver_one(
             sub.max_backoff_ms,
         ))
         .await;
+    }
+}
+
+/// The decoded-to-JSON delivery body, or `None` to fall back to the envelope.
+///
+/// Returns `None` (envelope path) when `decode_to_json` is off, the record
+/// value is empty, the codec yields no JSON view (e.g. `RawCodec`, or a record
+/// that wasn't Confluent-framed), or decode errors. A decode error is logged
+/// and treated as non-fatal — the record is still delivered (as the envelope),
+/// preserving at-least-once.
+async fn decoded_body(
+    codec: &dyn RecordCodec,
+    sub: &CompiledSubscription,
+    rec: &ConsumerRecord,
+) -> Option<Vec<u8>> {
+    if !sub.decode_to_json {
+        return None;
+    }
+    let value = rec.value.clone()?;
+    match codec.decode(&rec.topic, value).await {
+        Ok(decoded) => decoded.json.map(|j| j.to_vec()),
+        Err(e) => {
+            tracing::debug!(
+                subscription = %sub.name,
+                topic = %rec.topic,
+                partition = rec.partition,
+                offset = rec.offset,
+                error = %e,
+                "outbound decode_to_json failed; delivering raw envelope",
+            );
+            None
+        }
     }
 }
 
@@ -394,6 +437,53 @@ mod tests {
     use jsonpath_rust::parser::parse_json_path;
 
     use super::*;
+    use crate::codec::{CodecError, Decoded, EncodeBody, RawCodec};
+
+    /// A codec stub whose `decode` returns a fixed [`Decoded`], or a
+    /// `CodecError::Registry` when constructed with `None` — exercising the
+    /// `decode_to_json` delivery path (and its decode-error fallback) without a
+    /// registry. `encode` is unused on the outbound path. (`CodecError` is not
+    /// `Clone`, so the error case is represented as `None` and synthesized.)
+    struct StubCodec(Option<Decoded>);
+
+    #[async_trait::async_trait]
+    impl RecordCodec for StubCodec {
+        async fn encode(&self, _topic: &str, _body: EncodeBody) -> Result<Bytes, CodecError> {
+            unreachable!("outbound path never encodes")
+        }
+        async fn decode(&self, _topic: &str, _value: Bytes) -> Result<Decoded, CodecError> {
+            match &self.0 {
+                Some(d) => Ok(d.clone()),
+                None => Err(CodecError::Registry("stub decode error".into())),
+            }
+        }
+    }
+
+    /// A `Decoded` carrying a JSON view (the de-framed structured payload).
+    fn decoded_with_json(json: &[u8]) -> Decoded {
+        Decoded {
+            value: Bytes::from(json.to_vec()),
+            schema: None,
+            json: Some(Bytes::from(json.to_vec())),
+        }
+    }
+
+    fn sub_with_decode(decode_to_json: bool) -> CompiledSubscription {
+        CompiledSubscription {
+            name: "dec".into(),
+            source_topics: vec!["events".into()],
+            target_url: "https://hooks.example.com/x".into(),
+            signing_secret: None,
+            dead_letter_topic: None,
+            max_attempts: 1,
+            base_backoff_ms: 1,
+            max_backoff_ms: 1,
+            request_timeout_ms: 1,
+            filter: None,
+            headers: vec![],
+            decode_to_json,
+        }
+    }
 
     fn rec_with_value(value: Option<&[u8]>) -> ConsumerRecord {
         ConsumerRecord {
@@ -491,5 +581,75 @@ mod tests {
         // 2^(u32::MAX - 1) overflows a u64 shift; saturating_pow must clamp.
         let d = backoff_with_jitter(u32::MAX, 500, 30_000);
         assert!(d.as_millis() >= 15_000 && d.as_millis() <= 30_000, "{d:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // decoded_body: decode_to_json delivery path
+    // -----------------------------------------------------------------------
+
+    /// `decode_to_json = true` + a codec yielding `json: Some(..)` ⇒ the
+    /// delivered body IS that JSON (not the wrapping envelope).
+    #[tokio::test]
+    async fn decode_to_json_delivers_decoded_json() {
+        let json = br#"{"decoded":true,"n":7}"#;
+        let codec = StubCodec(Some(decoded_with_json(json)));
+        let sub = sub_with_decode(true);
+        let rec = rec_with_value(Some(b"\x00\x00\x00\x00\x01raw-framed-bytes"));
+        let body = decoded_body(&codec, &sub, &rec)
+            .await
+            .expect("decode_to_json + Some(json) ⇒ decoded body");
+        assert_eq!(body, json, "delivered body is the decoded JSON verbatim");
+    }
+
+    /// `decode_to_json = false` ⇒ `decoded_body` is `None` (envelope path), so
+    /// the codec is never consulted (default behavior unchanged).
+    #[tokio::test]
+    async fn decode_to_json_false_falls_back_to_envelope() {
+        // A stub that would panic if `decode` were called proves it isn't.
+        let codec = StubCodec(Some(decoded_with_json(b"{}")));
+        let sub = sub_with_decode(false);
+        let rec = rec_with_value(Some(br#"{"n":1}"#));
+        assert!(
+            decoded_body(&codec, &sub, &rec).await.is_none(),
+            "decode_to_json=false must skip decode and use the envelope",
+        );
+    }
+
+    /// `decode_to_json = true` but the codec yields no JSON view (as `RawCodec`
+    /// does) ⇒ `None` (envelope path) — inert without a registry.
+    #[tokio::test]
+    async fn decode_to_json_raw_codec_is_inert() {
+        let sub = sub_with_decode(true);
+        let rec = rec_with_value(Some(br#"{"n":1}"#));
+        assert!(
+            decoded_body(&RawCodec, &sub, &rec).await.is_none(),
+            "RawCodec yields json: None ⇒ envelope delivery (inert)",
+        );
+    }
+
+    /// A decode error is non-fatal: `decoded_body` returns `None` so the record
+    /// is still delivered as the envelope (at-least-once preserved).
+    #[tokio::test]
+    async fn decode_to_json_error_falls_back_to_envelope() {
+        let codec = StubCodec(None); // decode → Err(Registry)
+        let sub = sub_with_decode(true);
+        let rec = rec_with_value(Some(br#"{"n":1}"#));
+        assert!(
+            decoded_body(&codec, &sub, &rec).await.is_none(),
+            "decode error must fall back to the envelope (non-fatal)",
+        );
+    }
+
+    /// An empty (None) record value ⇒ `None` (envelope path) even with
+    /// `decode_to_json` on; there's nothing to decode.
+    #[tokio::test]
+    async fn decode_to_json_empty_value_falls_back() {
+        let codec = StubCodec(Some(decoded_with_json(b"{}")));
+        let sub = sub_with_decode(true);
+        let rec = rec_with_value(None);
+        assert!(
+            decoded_body(&codec, &sub, &rec).await.is_none(),
+            "empty value ⇒ envelope path",
+        );
     }
 }

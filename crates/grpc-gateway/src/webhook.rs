@@ -338,7 +338,7 @@ mod tests {
 
     use super::*;
     use crate::authz::GatewayAuthz;
-    use crate::codec::{Decoded, EncodeBody, RawCodec, RecordCodec};
+    use crate::codec::{Decoded, EncodeBody, RawCodec, RecordCodec, SchemaFormat};
     use crate::config::GatewayConfig;
     use crate::produce::ProduceCore;
     use crate::webhook_config::{CompiledWebhook, SigEncoding};

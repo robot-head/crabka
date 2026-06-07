@@ -425,8 +425,6 @@ async fn run(
     spawn_ownership_consumer(&config, &store, &shutdown);
     spawn_readiness_watcher(store.clone(), readiness.clone());
 
-    spawn_outbound_subscriptions(&config, &shutdown).await?;
-
     let engine = Arc::new(DedupEngine::new(
         &config.bootstrap,
         &config.client_id,
@@ -462,6 +460,10 @@ async fn run(
         }
         None => Arc::new(RawCodec),
     };
+
+    // Spawn outbound delivery tasks with the shared codec (so `decode_to_json`
+    // subscriptions can de-frame Confluent-framed values to JSON).
+    spawn_outbound_subscriptions(&config, &shutdown, codec.clone()).await?;
 
     let produce = ProduceCore::new(
         &config.bootstrap,
@@ -617,6 +619,7 @@ fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness) {
 async fn spawn_outbound_subscriptions(
     config: &GatewayConfig,
     shutdown: &CancellationToken,
+    codec: Arc<dyn RecordCodec>,
 ) -> anyhow::Result<()> {
     if config.outbound.is_empty() {
         return Ok(());
@@ -633,7 +636,7 @@ async fn spawn_outbound_subscriptions(
             .map_err(|e| anyhow::anyhow!("build outbound dlq producer: {e}"))?,
     );
     for sub in &config.outbound {
-        spawn_outbound_delivery(sub, config, dlq_producer.clone(), shutdown);
+        spawn_outbound_delivery(sub, config, dlq_producer.clone(), shutdown, codec.clone());
     }
     Ok(())
 }
@@ -643,6 +646,7 @@ fn spawn_outbound_delivery(
     config: &GatewayConfig,
     dlq_producer: Arc<crabka_client_producer::Producer>,
     shutdown: &CancellationToken,
+    codec: Arc<dyn RecordCodec>,
 ) {
     let sub = sub.clone();
     let bootstrap = config.bootstrap.clone();
@@ -657,6 +661,7 @@ fn spawn_outbound_delivery(
             dlq_producer,
             shutdown,
             security,
+            codec,
         )
         .await
         {
