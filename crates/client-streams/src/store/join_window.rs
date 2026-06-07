@@ -103,6 +103,11 @@ impl<K: 'static, V: 'static> StateStore for JoinWindowBytesStore<K, V> {
     fn set_logging(&mut self, on: bool) {
         self.logging = on;
     }
+    async fn clear(&mut self) {
+        self.backend.clear().await;
+        self.changelog.clear();
+        self.seqnum = 0;
+    }
 }
 
 #[async_trait]

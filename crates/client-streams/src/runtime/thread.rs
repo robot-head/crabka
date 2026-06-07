@@ -4,7 +4,8 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::error::StreamsClientError;
 use crate::membership::StreamsAssignment;
-use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
+use crate::runtime::eos::{ProcessingGuarantee, StreamsGroupMeta, TransactionalProducer};
+use crate::runtime::io::{BeginTxnGate, OffsetStore, RecordFetcher, RecordProducer};
 use crate::runtime::iq::{IqRequest, answer_iq};
 use crate::runtime::task::{StreamTask, TaskRole};
 use crate::topology::BuiltTopology;
@@ -34,6 +35,17 @@ pub(crate) struct StreamThread {
     /// Wall-clock source driving wall-clock punctuation between polls. Defaults to
     /// `SystemClock`; tests inject a `ManualClock` via `with_clock` for determinism.
     clock: Arc<dyn crate::runtime::clock::Clock>,
+    /// Delivery guarantee for this thread. Set by `apply_assignment`; defaults to
+    /// at-least-once until the first assignment arrives.
+    guarantee: ProcessingGuarantee,
+    /// The EOS-v2 transactional producer (the same object the tasks `send`
+    /// through, viewed as a `TransactionalProducer`). `None` under at-least-once.
+    txn: Option<Arc<dyn TransactionalProducer>>,
+    /// Whether `init_transactions` has run (one-time, on the first EOS assignment).
+    initialized: bool,
+    /// Whether a transaction is currently open (`begin_transaction` called, not yet
+    /// committed/aborted). Drives the begin-on-first-poll / commit barrier.
+    in_txn: bool,
 }
 
 impl StreamThread {
@@ -51,6 +63,10 @@ impl StreamThread {
             globals_ready: false,
             global_offsets: std::collections::HashMap::new(),
             clock: Arc::new(crate::runtime::clock::SystemClock),
+            guarantee: ProcessingGuarantee::AtLeastOnce,
+            txn: None,
+            initialized: false,
+            in_txn: false,
         }
     }
 
@@ -69,14 +85,54 @@ impl StreamThread {
         self.tasks.len()
     }
 
+    /// Test-only: typed read from a named KV store on the task at `key`.
+    #[cfg(test)]
+    async fn task_store_get_i64(
+        &mut self,
+        task: &(String, i32),
+        store: &str,
+        k: &String,
+    ) -> Option<i64> {
+        self.tasks.get_mut(task)?.store_get_i64(store, k).await
+    }
+
+    /// Test-only: whether the task at `key` has pending (uncommitted) offsets.
+    #[cfg(test)]
+    fn task_has_pending(&self, task: &(String, i32)) -> bool {
+        self.tasks
+            .get(task)
+            .is_some_and(|t| !t.pending_offsets().is_empty())
+    }
+
     /// Reconcile tasks to `assignment`. Reconciles active, standby, and warmup tasks.
+    ///
+    /// `guarantee` + `txn` configure the EOS commit path: under
+    /// [`ProcessingGuarantee::ExactlyOnceV2`] the same producer object is also
+    /// passed as `txn` (a [`TransactionalProducer`] view), and the first EOS
+    /// assignment runs `init_transactions` once (fencing any zombie).
+    #[allow(clippy::too_many_lines)]
     pub async fn apply_assignment(
         &mut self,
         assignment: &StreamsAssignment,
         topology: &BuiltTopology,
         producer: &Arc<dyn RecordProducer>,
         store: &Arc<dyn OffsetStore>,
+        guarantee: ProcessingGuarantee,
+        txn: Option<Arc<dyn TransactionalProducer>>,
     ) -> Result<(), StreamsClientError> {
+        self.guarantee = guarantee;
+        self.txn = txn;
+        // One-time `init_transactions` on the first EOS assignment (bumps the
+        // producer epoch, fencing a zombie of the same transactional id).
+        if self.guarantee == ProcessingGuarantee::ExactlyOnceV2 && !self.initialized {
+            let txn = self
+                .txn
+                .as_ref()
+                .expect("EOS requires a transactional producer");
+            txn.init_transactions().await?;
+            self.initialized = true;
+        }
+
         // Lazily build + bootstrap the shared global store(s) exactly once, before
         // any task processes. Kafka blocks task start until the global store is
         // ready, so we drain every partition of each global source topic here.
@@ -174,6 +230,7 @@ impl StreamThread {
                 Arc::clone(producer),
                 Arc::clone(store),
                 desired_role,
+                self.guarantee,
             );
             if desired_role == TaskRole::Active {
                 // Seek positions to committed offsets (or earliest) BEFORE restore so
@@ -184,6 +241,25 @@ impl StreamThread {
                 task.init().await?;
             }
             self.tasks.insert(key.clone(), task);
+        }
+        Ok(())
+    }
+
+    /// Abort the in-flight txn and roll back every task to the last committed
+    /// state (rewind source offsets, wipe stores, re-restore from the committed
+    /// changelog). Called on any error during an EOS process/commit cycle.
+    //
+    // All EOS-cycle errors are treated as retryable abort+rollback here; the
+    // fenced-fatal distinction (a `ProducerFenced` must shut the thread down, not
+    // retry) is a follow-up.
+    async fn abort_and_rollback(&mut self) -> Result<(), StreamsClientError> {
+        if let Some(txn) = self.txn.as_ref() {
+            let _ = txn.abort_transaction().await;
+        }
+        self.in_txn = false;
+        let fetcher = Arc::clone(&self.fetcher);
+        for task in self.tasks.values_mut() {
+            task.rollback(&*fetcher).await?;
         }
         Ok(())
     }
@@ -201,16 +277,33 @@ impl StreamThread {
                 .poll_once(fetcher, &mut self.global_offsets)
                 .await?;
         }
-        for task in self.tasks.values_mut() {
-            if task.role == TaskRole::Active {
-                task.process_once(fetcher).await?;
-            } else {
-                task.restore_step(fetcher).await?;
+        match self.guarantee {
+            ProcessingGuarantee::AtLeastOnce => {
+                for task in self.tasks.values_mut() {
+                    task.process_once(fetcher, None).await?;
+                }
+            }
+            ProcessingGuarantee::ExactlyOnceV2 => {
+                // EOS: the transaction is opened lazily, on the FIRST produced
+                // record of the interval (via the begin-gate handed to each
+                // task). An interval that fetches no records opens no
+                // transaction, so `commit_all` is a no-op (no empty-txn churn on
+                // an idle app). Idempotent across polls within a commit interval
+                // — `in_txn` stays set until `commit_all`. Any error mid-begin or
+                // mid-process aborts the txn and rolls every task back to the last
+                // commit; the cycle is then re-begun on the next poll (so
+                // `poll_all` returns Ok).
+                let res = self.eos_begin_and_process(fetcher).await;
+                if res.is_err() {
+                    self.abort_and_rollback().await?;
+                    return Ok(());
+                }
             }
         }
-        // Wall-clock punctuation tick: read the clock once, then fire every task's
-        // due WALL_CLOCK_TIME punctuators. Forwarded records are produced through
-        // each task's own producer (same plumbing as `process_once`).
+        // Wall-clock punctuation tick (independent of the delivery guarantee): read
+        // the clock once, then fire every task's due WALL_CLOCK_TIME punctuators.
+        // Forwarded records go through each task's producer — under EOS they join
+        // the interval's open transaction (committed by the next `commit_all`).
         let now = self.clock.now_ms();
         for task in self.tasks.values_mut() {
             if task.role == TaskRole::Active {
@@ -235,9 +328,96 @@ impl StreamThread {
         Ok(())
     }
 
-    pub async fn commit_all(&mut self) -> Result<(), StreamsClientError> {
-        for task in self.tasks.values_mut() {
-            task.commit().await?;
+    /// EOS begin-on-first-record + per-task process, captured so `poll_all` can
+    /// turn any `Err` into an abort + rollback.
+    ///
+    /// The transaction is NOT begun up front. Instead each task is handed an
+    /// [`EosBeginGate`] that begins the transaction lazily, right before the
+    /// task's first produced record of the interval. If no task fetches any
+    /// records the gate is never tripped, so the interval opens no transaction
+    /// (and `commit_all` becomes a no-op) — matching the JVM's "gate on records
+    /// processed since last commit" behaviour.
+    async fn eos_begin_and_process(
+        &mut self,
+        fetcher: &dyn RecordFetcher,
+    ) -> Result<(), StreamsClientError> {
+        let txn = Arc::clone(self.txn.as_ref().expect("EOS txn producer"));
+        let mut gate = EosBeginGate {
+            txn,
+            begun: self.in_txn,
+        };
+        let res: Result<(), StreamsClientError> = async {
+            for task in self.tasks.values_mut() {
+                if task.role == TaskRole::Active {
+                    task.process_once(fetcher, Some(&mut gate)).await?;
+                } else {
+                    task.restore_step(fetcher).await?;
+                }
+            }
+            Ok(())
+        }
+        .await;
+        // Reflect any lazily-opened transaction back onto the thread so
+        // `commit_all` / `abort_and_rollback` see it, even on the error path.
+        self.in_txn = gate.begun;
+        res
+    }
+
+    /// EOS commit barrier: fold every task's pending source offsets into a single
+    /// `send_offsets_to_transaction`, then `commit_transaction`. Captured so
+    /// `commit_all` can turn any `Err` into an abort + rollback. Does NOT clear
+    /// pending (the caller does that only on success).
+    async fn eos_send_offsets_and_commit(
+        &mut self,
+        meta: Option<&StreamsGroupMeta>,
+    ) -> Result<(), StreamsClientError> {
+        let txn = self.txn.as_ref().expect("EOS txn producer");
+        let mut offsets = Vec::new();
+        for task in self.tasks.values() {
+            offsets.extend(task.pending_offsets());
+        }
+        let meta = meta.expect("EOS commit requires group metadata");
+        txn.send_offsets_to_transaction(&offsets, meta).await?;
+        txn.commit_transaction().await?;
+        Ok(())
+    }
+
+    /// Commit advanced offsets.
+    ///
+    /// At-least-once: per-task `flush` + offset commit (`meta` ignored).
+    /// Exactly-once-v2: fold every task's pending source offsets into a single
+    /// `send_offsets_to_transaction`, then `commit_transaction` atomically, and
+    /// clear the tasks' pending offsets. Requires `meta` (the streams group
+    /// metadata). A no-op when no transaction is open (nothing produced since the
+    /// last commit).
+    pub async fn commit_all(
+        &mut self,
+        meta: Option<&StreamsGroupMeta>,
+    ) -> Result<(), StreamsClientError> {
+        match self.guarantee {
+            ProcessingGuarantee::AtLeastOnce => {
+                for task in self.tasks.values_mut() {
+                    task.commit().await?;
+                }
+            }
+            ProcessingGuarantee::ExactlyOnceV2 => {
+                if !self.in_txn {
+                    return Ok(()); // nothing produced since last commit
+                }
+                // Capture the txn-commit sequence so any error (e.g. a failed
+                // `commit_transaction`) aborts the txn and rolls every task back to
+                // the last committed state. The cycle is then retried on the next
+                // interval (so `commit_all` returns Ok after a clean rollback).
+                let res = self.eos_send_offsets_and_commit(meta).await;
+                if res.is_err() {
+                    self.abort_and_rollback().await?;
+                    return Ok(());
+                }
+                for task in self.tasks.values_mut() {
+                    task.clear_pending();
+                }
+                self.in_txn = false;
+            }
         }
         Ok(())
     }
@@ -269,9 +449,53 @@ impl StreamThread {
     }
 
     /// Commit + drop all tasks (on Fenced / shutdown).
-    pub async fn close_all(&mut self) -> Result<(), StreamsClientError> {
-        self.commit_all().await?;
+    ///
+    /// Under EOS, an open transaction is aborted (best-effort) rather than
+    /// committed — a fence/shutdown mid-cycle must not leak a half-written txn.
+    pub async fn close_all(
+        &mut self,
+        meta: Option<&StreamsGroupMeta>,
+    ) -> Result<(), StreamsClientError> {
+        match self.guarantee {
+            ProcessingGuarantee::AtLeastOnce => {
+                self.commit_all(meta).await?;
+            }
+            ProcessingGuarantee::ExactlyOnceV2 => {
+                // Abort any in-flight txn (best-effort) — a fence/shutdown mid-cycle
+                // must not leak a half-written transaction. (Clean rollback = T4.)
+                if self.in_txn {
+                    if let Some(t) = &self.txn {
+                        let _ = t.abort_transaction().await;
+                    }
+                    self.in_txn = false;
+                }
+            }
+        }
         self.tasks.clear();
+        Ok(())
+    }
+}
+
+/// Lazy begin-transaction gate handed to each task's `process_once` under
+/// EOS-v2. The first task to produce a record this interval calls
+/// [`BeginTxnGate::ensure_begun`], which begins the transaction exactly once;
+/// subsequent calls (further records / partitions / tasks) are no-ops. When no
+/// task produces anything the gate is never tripped and no transaction opens.
+struct EosBeginGate {
+    txn: Arc<dyn TransactionalProducer>,
+    /// Whether a transaction is currently open. Seeded from the thread's
+    /// `in_txn` (so a re-poll within an already-open interval doesn't re-begin)
+    /// and read back into it after processing.
+    begun: bool,
+}
+
+#[async_trait::async_trait]
+impl BeginTxnGate for EosBeginGate {
+    async fn ensure_begun(&mut self) -> Result<(), StreamsClientError> {
+        if !self.begun {
+            self.txn.begin_transaction().await?;
+            self.begun = true;
+        }
         Ok(())
     }
 }
@@ -283,7 +507,9 @@ mod tests {
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
     use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
-    use crate::runtime::io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
+    use crate::runtime::io::{
+        FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+    };
     use crate::topology::Topology;
     use assert2::check;
     use std::collections::HashMap;
@@ -406,6 +632,7 @@ mod tests {
             t: &str,
             p: i32,
             o: i64,
+            _isolation: IsolationLevel,
         ) -> Result<FetchBatch, crate::StreamsClientError> {
             Ok(self
                 .scripts
@@ -427,6 +654,7 @@ mod tests {
             _t: &str,
             _p: i32,
             _o: i64,
+            _isolation: IsolationLevel,
         ) -> Result<FetchBatch, crate::StreamsClientError> {
             Ok(self.batch.lock().unwrap().take().unwrap_or_default())
         }
@@ -558,7 +786,14 @@ mod tests {
         )
         .with_clock(clock);
         thread
-            .apply_assignment(&assignment(), &built, &producer, &store)
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                crate::runtime::eos::ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -604,7 +839,14 @@ mod tests {
             "app".into(),
         );
         thread
-            .apply_assignment(&assignment(), &built, &producer, &store)
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -621,7 +863,7 @@ mod tests {
             })),
         };
         thread.poll_all(&fetcher, &tracker).await.unwrap();
-        thread.commit_all().await.unwrap();
+        thread.commit_all(None).await.unwrap();
         check!(
             producer_c
                 .sent
@@ -641,7 +883,14 @@ mod tests {
 
         // empty assignment → task removed (close_processors + committed on the way out)
         thread
-            .apply_assignment(&StreamsAssignment::default(), &built, &producer, &store)
+            .apply_assignment(
+                &StreamsAssignment::default(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 0);
@@ -679,7 +928,14 @@ mod tests {
             "app".into(),
         );
         thread
-            .apply_assignment(&assignment(), &built, &producer, &store)
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -698,7 +954,7 @@ mod tests {
             },
         )]);
         thread.poll_all(&process_fetcher, &tracker).await.unwrap();
-        thread.commit_all().await.unwrap();
+        thread.commit_all(None).await.unwrap();
 
         let sent = producer_c.sent.lock().unwrap();
         check!(
@@ -749,7 +1005,14 @@ mod tests {
             "app".into(),
         );
         thread
-            .apply_assignment(&assignment(), &built, &producer, &store)
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                crate::runtime::eos::ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -867,7 +1130,14 @@ mod tests {
             warmup: vec![],
         };
         thread
-            .apply_assignment(&assignment, &built, &producer, &store)
+            .apply_assignment(
+                &assignment,
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -888,7 +1158,7 @@ mod tests {
             },
         )]);
         thread.poll_all(&process_fetcher, &tracker).await.unwrap();
-        thread.commit_all().await.unwrap();
+        thread.commit_all(None).await.unwrap();
 
         let sent = producer_c.sent.lock().unwrap();
         check!(
@@ -945,7 +1215,14 @@ mod tests {
         };
 
         thread
-            .apply_assignment(&assignment1, &built, &producer, &store)
+            .apply_assignment(
+                &assignment1,
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 3);
@@ -987,7 +1264,14 @@ mod tests {
         };
 
         thread
-            .apply_assignment(&assignment2, &built, &producer, &store)
+            .apply_assignment(
+                &assignment2,
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 3);
@@ -996,5 +1280,275 @@ mod tests {
         check!(!thread.tasks.contains_key(&("0".to_string(), 1)));
         check!(thread.tasks.get(&("0".to_string(), 2)).map(|t| t.role) == Some(TaskRole::Active));
         check!(thread.tasks.get(&("0".to_string(), 3)).map(|t| t.role) == Some(TaskRole::Warmup));
+    }
+
+    /// EOS-v2 happy path: the thread runs the full transactional commit lifecycle
+    /// over a stateless `source → up → sink` topology. The single
+    /// `MockTransactionalProducer` is shared as BOTH the task `RecordProducer`
+    /// (for the sink `send`) AND the thread's `TransactionalProducer`, so the
+    /// recorded call sequence is the cross-product of both views.
+    ///
+    /// Expected sequence: `Init` (`apply_assignment`), `Begin` (first `poll_all`),
+    /// `Send` (the sink emit during process), then `SendOffsets` + `Commit`
+    /// (`commit_all`). The sink record must also be logged in `.sent`.
+    #[tokio::test]
+    async fn eos_happy_path_runs_begin_send_offsets_commit() {
+        use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
+
+        // One mock object, two trait-object views (same Arc).
+        let mock = Arc::new(MockTransactionalProducer::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&mock) as _;
+        let txn: Arc<dyn TransactionalProducer> = Arc::clone(&mock) as _;
+        let store: Arc<dyn OffsetStore> = Arc::new(MemStore::default());
+
+        let built = built();
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+        // EOS assignment: passes the txn producer and ExactlyOnceV2.
+        thread
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::ExactlyOnceV2,
+                Some(Arc::clone(&txn)),
+            )
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        // One input batch → the sink emits one uppercased record.
+        let fetcher = OneShot {
+            batch: StdMutex::new(Some(FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: Some("k".into()),
+                    value: Some("hi".into()),
+                    timestamp: -1,
+                }],
+            })),
+        };
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
+        thread.poll_all(&fetcher, &tracker).await.unwrap();
+
+        let meta = crate::runtime::eos::StreamsGroupMeta {
+            group_id: "app".into(),
+            generation_id: 3,
+            member_id: "m".into(),
+            group_instance_id: None,
+        };
+        thread.commit_all(Some(&meta)).await.unwrap();
+
+        // The full transactional lifecycle, in order.
+        check!(
+            *mock.calls.lock().unwrap()
+                == vec![
+                    Step::Init,
+                    Step::Begin,
+                    Step::Send,
+                    Step::SendOffsets,
+                    Step::Commit,
+                ]
+        );
+        // The sink record was produced through the transactional producer.
+        check!(
+            mock.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(t, _p, _k, v)| t == "out" && v.as_deref() == Some(b"HI".as_ref()))
+        );
+    }
+
+    /// EOS-v2 idle interval: when a `poll_all` fetches NO records, the runtime
+    /// must NOT begin a transaction, and the following `commit_all` must be a
+    /// no-op — no `Begin`, no `Send`, no `SendOffsets`, no `Commit`. (Regression
+    /// guard for the empty-transaction churn the begin-on-first-record gate
+    /// fixes: the old eager begin opened + committed an empty txn every interval
+    /// on an idle app.) Only `Init` (from `apply_assignment`) is recorded.
+    #[tokio::test]
+    async fn eos_idle_interval_opens_no_transaction() {
+        use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
+
+        let mock = Arc::new(MockTransactionalProducer::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&mock) as _;
+        let txn: Arc<dyn TransactionalProducer> = Arc::clone(&mock) as _;
+        let store: Arc<dyn OffsetStore> = Arc::new(MemStore::default());
+
+        let built = built();
+        let mut thread = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+        thread
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::ExactlyOnceV2,
+                Some(Arc::clone(&txn)),
+            )
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        // Idle interval: the fetcher returns empty for every fetch.
+        let idle_fetcher = empty_fetcher();
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
+        thread.poll_all(&*idle_fetcher, &tracker).await.unwrap();
+
+        let meta = crate::runtime::eos::StreamsGroupMeta {
+            group_id: "app".into(),
+            generation_id: 3,
+            member_id: "m".into(),
+            group_instance_id: None,
+        };
+        thread.commit_all(Some(&meta)).await.unwrap();
+
+        // Only the one-time Init ran — no transaction was opened or committed.
+        check!(
+            *mock.calls.lock().unwrap() == vec![Step::Init],
+            "idle interval must open no transaction; got {:?}",
+            *mock.calls.lock().unwrap()
+        );
+        check!(mock.sent.lock().unwrap().is_empty());
+    }
+
+    /// EOS-v2 abort + rollback: a `commit_transaction` failure mid-cycle must
+    /// abort the txn and roll every task back to its last committed state —
+    /// rewinding source offsets, wiping the stores, and re-restoring from the
+    /// (here empty) changelog. A subsequent successful cycle then reprocesses the
+    /// re-fetched batch without double-counting.
+    ///
+    /// Topology: stateful `source → counter (counts store) → sink`. The fetcher
+    /// returns the SAME "a" record for `("in", 0, 0)` on every fetch (so the
+    /// rewound cycle re-reads it) and an empty changelog (so re-restore yields an
+    /// empty store).
+    #[tokio::test]
+    async fn eos_commit_failure_aborts_and_rolls_back() {
+        use crate::runtime::eos::mock::{MockTransactionalProducer, Step};
+
+        /// A fetcher that ALWAYS returns the "a" record at `("in", 0, 0)`
+        /// regardless of how many times it's fetched (it never consumes the
+        /// script), and an empty changelog. Re-fetching after a rewind re-reads
+        /// the same input — proving the rollback rewound the source offset.
+        struct ReplayFetcher;
+        #[async_trait::async_trait]
+        impl RecordFetcher for ReplayFetcher {
+            async fn fetch(
+                &self,
+                t: &str,
+                p: i32,
+                o: i64,
+                _isolation: IsolationLevel,
+            ) -> Result<FetchBatch, crate::StreamsClientError> {
+                if t == "in" && p == 0 && o == 0 {
+                    Ok(FetchBatch {
+                        records: vec![FetchedRec {
+                            offset: 0,
+                            key: None,
+                            value: Some("a".into()),
+                            timestamp: -1,
+                        }],
+                    })
+                } else {
+                    Ok(FetchBatch::default())
+                }
+            }
+        }
+
+        // One mock object, two trait-object views (same Arc). Fail the FIRST commit.
+        let mock = Arc::new(MockTransactionalProducer {
+            fail_at: StdMutex::new(Some(Step::Commit)),
+            ..Default::default()
+        });
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&mock) as _;
+        let txn: Arc<dyn TransactionalProducer> = Arc::clone(&mock) as _;
+        let store: Arc<dyn OffsetStore> = Arc::new(MemStore::default());
+
+        let built = stateful_built();
+        let replay: Arc<dyn RecordFetcher> = Arc::new(ReplayFetcher);
+        let mut thread = StreamThread::new(
+            Arc::clone(&replay),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+        thread
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                ProcessingGuarantee::ExactlyOnceV2,
+                Some(Arc::clone(&txn)),
+            )
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        let meta = crate::runtime::eos::StreamsGroupMeta {
+            group_id: "app".into(),
+            generation_id: 3,
+            member_id: "m".into(),
+            group_instance_id: None,
+        };
+        let key = ("0".to_string(), 0);
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
+
+        // ── Cycle 1: begin + process (count "a" → 1, store dirty), then commit
+        //    FAILS → abort + rollback. ──────────────────────────────────────────
+        thread.poll_all(&*replay, &tracker).await.unwrap();
+        // The dirty count is in the store before commit.
+        check!(
+            thread
+                .task_store_get_i64(&key, "counts", &"a".to_string())
+                .await
+                == Some(1)
+        );
+        // Commit fails internally → abort + rollback, but commit_all returns Ok
+        // (the cycle is rolled back; the next interval re-begins).
+        thread.commit_all(Some(&meta)).await.unwrap();
+
+        // The mock recorded the abort.
+        check!(mock.calls.lock().unwrap().contains(&Step::Abort));
+        // Pending offsets were cleared by the rollback.
+        check!(!thread.task_has_pending(&key));
+        // The store was rolled back: re-restored from the empty changelog, so the
+        // dirty count is gone.
+        check!(
+            thread
+                .task_store_get_i64(&key, "counts", &"a".to_string())
+                .await
+                == None,
+            "store must be rolled back to the (empty) committed changelog state"
+        );
+
+        // ── Cycle 2: fail_at is now None → the re-fetched "a" batch reprocesses
+        //    and yields count = 1 (NOT double-counted to 2). ────────────────────
+        thread.poll_all(&*replay, &tracker).await.unwrap();
+        thread.commit_all(Some(&meta)).await.unwrap();
+        check!(
+            thread
+                .task_store_get_i64(&key, "counts", &"a".to_string())
+                .await
+                == Some(1),
+            "after rollback + reprocess the count must be 1, not double-counted"
+        );
+        // The second commit succeeded.
+        check!(
+            mock.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|s| **s == Step::Commit)
+                .count()
+                == 2
+        );
     }
 }

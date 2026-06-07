@@ -129,6 +129,13 @@ impl ByteKeyValueStore for TursoBytes {
         // `COUNT(*)` is non-negative; the fallback never triggers.
         u64::try_from(integer(row.get_value(0).expect("count"))).unwrap_or(0)
     }
+
+    async fn clear(&mut self) {
+        self.conn
+            .execute("DELETE FROM kv", ())
+            .await
+            .expect("turso clear");
+    }
 }
 
 #[cfg(test)]

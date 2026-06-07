@@ -30,15 +30,29 @@ impl FetchBatch {
     }
 }
 
+/// Fetch isolation level (Kafka `Fetch.isolation_level`).
+///
+/// Under EOS-v2, changelog restore must read `ReadCommitted` so that aborted
+/// writes (records that were produced inside a transaction that later aborted)
+/// are excluded — the restored store reflects only committed state. Normal
+/// source processing and global-store bootstrap use `ReadUncommitted`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IsolationLevel {
+    #[default]
+    ReadUncommitted,
+    ReadCommitted,
+}
+
 #[async_trait::async_trait]
 pub trait RecordFetcher: Send + Sync + 'static {
-    /// Fetch records for `(topic, partition)` starting at `offset`. An empty
-    /// batch means nothing new yet.
+    /// Fetch records for `(topic, partition)` starting at `offset`, at the given
+    /// `isolation` level. An empty batch means nothing new yet.
     async fn fetch(
         &self,
         topic: &str,
         partition: i32,
         offset: i64,
+        isolation: IsolationLevel,
     ) -> Result<FetchBatch, StreamsClientError>;
 
     /// The partition indices of `topic`. The global consumer reads all of them to
@@ -67,6 +81,19 @@ pub trait RecordProducer: Send + Sync + 'static {
     ) -> Result<(), StreamsClientError>;
     /// Block until all enqueued records are acknowledged (durability barrier).
     async fn flush(&self) -> Result<(), StreamsClientError>;
+}
+
+/// Lazy "begin the transaction" gate handed to [`StreamTask::process_once`]
+/// under EOS-v2. The task invokes [`BeginTxnGate::ensure_begun`] exactly before
+/// its first produced record in a commit interval, so an interval that fetches
+/// no records opens no transaction (no empty-txn churn on an idle app). Under
+/// at-least-once no gate is passed.
+#[async_trait::async_trait]
+pub trait BeginTxnGate: Send {
+    /// Ensure a transaction is open, beginning one on the first call within the
+    /// interval and a no-op on subsequent calls. Called by the task right before
+    /// the first sink/changelog `send`.
+    async fn ensure_begun(&mut self) -> Result<(), StreamsClientError>;
 }
 
 #[async_trait::async_trait]

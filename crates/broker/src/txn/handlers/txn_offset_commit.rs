@@ -38,7 +38,10 @@ use crate::codes;
 use crate::coordinator::bootstrap::{OFFSETS_PARTITION, OFFSETS_TOPIC};
 use crate::coordinator::persistence::OffsetCommitValue;
 use crate::coordinator::unified::actor::{GroupKindTag, validate_group_commit};
+use crate::coordinator::unified::classic_state::OffsetEntry;
+use crate::coordinator::unified::streams::actor::validate_streams_group_commit;
 use crate::error::BrokerError;
+use crate::txn::coordinator::OffsetKey;
 use crate::txn::util::now_millis;
 
 pub(crate) async fn handle(
@@ -130,16 +133,26 @@ pub(crate) async fn handle(
     //    simple-consumer defaults and no-op. `validate_group_commit` dispatches
     //    on the actor's LIVE `group.kind`, so a KIP-848-flipped group is fenced
     //    against its current protocol, not the stale spawn-time `handle.kind`.
-    if version >= 3
-        && let Some(code) = validate_group_commit(
-            &handle,
-            &req.member_id,
-            req.generation_id,
-            req.group_instance_id.as_deref(),
-        )
-        .await
-    {
-        return encode_err_all(version, &req, code);
+    // KIP-1071: a streams-group consumer's membership lives in the STREAMS
+    // group actor, not the classic one. Route its fencing there (member_epoch
+    // check) — `validate_group_commit` only knows the classic/consumer actor,
+    // so validating a streams member against the freshly-created empty classic
+    // actor would wrongly reject every EOS offset commit with UNKNOWN_MEMBER_ID.
+    if version >= 3 {
+        let code = if let Some(streams) = broker.group_coordinator.find_streams(&req.group_id) {
+            validate_streams_group_commit(&streams, &req.member_id, req.generation_id).await
+        } else {
+            validate_group_commit(
+                &handle,
+                &req.member_id,
+                req.generation_id,
+                req.group_instance_id.as_deref(),
+            )
+            .await
+        };
+        if let Some(code) = code {
+            return encode_err_all(version, &req, code);
+        }
     }
 
     // 3. Append a transactional RecordBatch to __consumer_offsets.
@@ -149,9 +162,24 @@ pub(crate) async fn handle(
     //    Topics denied by the per-topic Read ACL are skipped from the
     //    batch and surfaced as TOPIC_AUTHORIZATION_FAILED in the response.
     let now_ms = now_millis();
-    if let Err(code) = append_txn_batch(&req, &partitions, now_ms, &denied_topics).await {
-        return encode_resp(version, &build_response(&req, code, &denied_topics));
-    }
+    let buffered = match append_txn_batch(&req, &partitions, now_ms, &denied_topics).await {
+        Ok(entries) => entries,
+        Err(code) => {
+            return encode_resp(version, &build_response(&req, code, &denied_topics));
+        }
+    };
+
+    // 3b. Buffer the committed offsets on the txn coordinator, keyed by the
+    //     producer_id, pending the transaction's COMMIT/ABORT marker. They are
+    //     NOT yet visible to OffsetFetch (Kafka: a transactional offset becomes
+    //     visible only after the commit marker). `EndTxn` materializes the
+    //     buffer into the group's `committed_offsets` on COMMIT, or drops it on
+    //     ABORT. The records are already in `__consumer_offsets` (held under the
+    //     LSO) from the append above; this buffer is the in-memory bridge to the
+    //     group coordinator that the commit marker has no other way to drive.
+    broker
+        .txn_coordinator
+        .buffer_txn_offsets(req.producer_id, &req.group_id, buffered);
 
     // 4. Success — per-(topic, partition) error_code = NONE for allowed,
     //    TOPIC_AUTHORIZATION_FAILED for denied.
@@ -160,12 +188,17 @@ pub(crate) async fn handle(
 
 // ── batch construction ────────────────────────────────────────────────────────
 
+/// Append the transactional offset records to `__consumer_offsets` and return
+/// the same `(topic, partition) → OffsetEntry` rows so the caller can buffer
+/// them on the txn coordinator (to be materialized into the group's committed
+/// offsets when the COMMIT marker arrives). The returned vec is empty when
+/// every topic was denied (nothing was appended).
 async fn append_txn_batch(
     req: &TxnOffsetCommitRequest,
     partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,
     now_ms: i64,
     denied_topics: &std::collections::HashSet<String>,
-) -> Result<(), i16> {
+) -> Result<Vec<(OffsetKey, OffsetEntry)>, i16> {
     let mut batch = RecordBatch {
         attributes: Attributes::default().with_transactional(true),
         max_timestamp: now_ms,
@@ -173,6 +206,7 @@ async fn append_txn_batch(
         producer_epoch: req.producer_epoch,
         ..RecordBatch::default()
     };
+    let mut entries: Vec<(OffsetKey, OffsetEntry)> = Vec::new();
     let mut delta: i32 = 0;
     for topic in &req.topics {
         if denied_topics.contains(&topic.name) {
@@ -196,13 +230,22 @@ async fn append_txn_batch(
                 value: Some(value.encode_value()),
                 ..Default::default()
             });
+            entries.push((
+                (topic.name.clone(), part.partition_index),
+                OffsetEntry {
+                    offset: value.offset,
+                    leader_epoch: value.leader_epoch,
+                    metadata: value.metadata.clone(),
+                    commit_timestamp_ms: value.commit_timestamp_ms,
+                },
+            ));
             delta += 1;
         }
     }
 
     // If every topic was denied, there's nothing to append; succeed silently.
     if batch.records.is_empty() {
-        return Ok(());
+        return Ok(entries);
     }
 
     batch.last_offset_delta = (delta - 1).max(0);
@@ -216,7 +259,7 @@ async fn append_txn_batch(
     part_handle
         .produce_batch(batch)
         .await
-        .map(|_| ())
+        .map(|_| entries)
         .map_err(|e| {
             tracing::error!(
                 group = %req.group_id,

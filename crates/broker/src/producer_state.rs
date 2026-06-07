@@ -90,6 +90,30 @@ impl ProducerState {
                 if producer_epoch < entry.epoch {
                     return Decision::Fenced;
                 }
+                if producer_epoch > entry.epoch {
+                    // A bumped producer epoch establishes a FRESH sequence
+                    // baseline: the new epoch's `base_sequence` is authoritative
+                    // and must NOT be dedup-checked against the prior epoch's
+                    // `last_sequence`. Two distinct paths reach here, both legal:
+                    //
+                    //   * Restart with `InitProducerId` (same producer_id, bumped
+                    //     epoch) — the client resets its sequence to 0.
+                    //   * KIP-890 (TV_2) per-EndTxn epoch bump within the SAME
+                    //     producer session — the broker bumps the epoch on every
+                    //     commit/abort to fence zombies, and the client continues
+                    //     its sequence counter (so `base_sequence > 0`).
+                    //
+                    // Dedup-ing the new epoch against the old `last_sequence`
+                    // silently swallowed the first record on each partition (and,
+                    // under EOS, lost output while the offset commit still landed
+                    // → cross-restart data loss). Accept the first higher-epoch
+                    // batch as the new baseline; subsequent same-epoch checks
+                    // enforce ordering under it. `commit` records the new epoch +
+                    // sequence, so the next batch is validated against it.
+                    let _ = last_offset_delta;
+                    return Decision::Append;
+                }
+                // Same epoch: ordinary idempotent dedup / ordering checks.
                 if base_sequence <= entry.last_sequence {
                     // Anywhere within (or before) the committed range counts
                     // as duplicate. We echo the previously-committed base offset.
@@ -287,6 +311,46 @@ mod tests {
         s.commit("t", 0, 1000, 5, 0, 4, 0, 1).await;
         let d = s.check("t", 0, 1000, 4, 5, 2).await;
         assert!(d == Decision::Fenced);
+    }
+
+    /// A bumped producer epoch (same `producer_id`, higher epoch) establishes a
+    /// FRESH sequence baseline: `base_sequence == 0` at the new epoch must be a
+    /// fresh `Append`, NOT a `Duplicate` against the prior epoch's high-water.
+    /// This is the EOS-restart path (the client resets its sequence to 0).
+    ///
+    /// Regression test for the cross-restart EOS data-loss bug: pre-fix, a
+    /// restarted EOS producer's first record on each partition was silently
+    /// deduped (echoing the old `base_offset`) while the txn's offset commit
+    /// still landed, so the source offset advanced but the output record vanished.
+    #[tokio::test]
+    async fn higher_epoch_at_seq_zero_appends() {
+        let s = ProducerState::new();
+        // Epoch 5 committed sequences 0..=2 (last_sequence = 2).
+        s.commit("t", 0, 1000, 5, 0, 2, /* base_offset */ 0, 1)
+            .await;
+        // Same pid, epoch 6, base_sequence 0 — a fresh write, NOT a duplicate.
+        let d = s.check("t", 0, 1000, 6, 0, 0).await;
+        assert!(d == Decision::Append);
+    }
+
+    /// A bumped epoch that CONTINUES the sequence (`base_sequence > 0`) also
+    /// appends: this is the KIP-890 (`TV_2`) per-`EndTxn` epoch-bump path, where
+    /// broker bumps the epoch on every commit/abort within the SAME producer
+    /// session and the client keeps its sequence counter going. The first batch
+    /// at the new epoch is the baseline regardless of its `base_sequence`;
+    /// same-epoch ordering resumes once it commits.
+    #[tokio::test]
+    async fn higher_epoch_continuing_sequence_appends() {
+        let s = ProducerState::new();
+        s.commit("t", 0, 1000, 5, 0, 2, 0, 1).await;
+        // Epoch 6 (KIP-890 bump), sequence continues at 3 — still a fresh append.
+        let d = s.check("t", 0, 1000, 6, 3, 0).await;
+        assert!(d == Decision::Append);
+        // After committing the new epoch's batch, same-epoch dedup resumes.
+        s.commit("t", 0, 1000, 6, 3, 0, /* base_offset */ 10, 2)
+            .await;
+        let dup = s.check("t", 0, 1000, 6, 3, 0).await;
+        assert!(dup == Decision::Duplicate { base_offset: 10 });
     }
 
     #[tokio::test]

@@ -21,7 +21,7 @@ use bytes::Bytes;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
-use crabka_client_core::{Client, Connection, ConnectionOptions, fetch_partition};
+use crabka_client_core::{Client, Connection, ConnectionOptions, fetch_partition_with_isolation};
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
 
@@ -37,7 +37,10 @@ use crabka_protocol::owned::offset_fetch_request::{
 };
 
 use crate::error::StreamsClientError;
-use crate::runtime::io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
+use crate::runtime::eos::{StreamsGroupMeta, TransactionalProducer};
+use crate::runtime::io::{
+    FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
+};
 
 // ─── BrokerFetcher ────────────────────────────────────────────────────────────
 
@@ -65,10 +68,18 @@ impl RecordFetcher for BrokerFetcher {
         topic: &str,
         partition: i32,
         offset: i64,
+        isolation: IsolationLevel,
     ) -> Result<FetchBatch, StreamsClientError> {
         let topic_id = self.resolve_topic_id(topic).await?;
 
-        let fetched = fetch_partition(
+        // Map the runtime isolation level to the Kafka `Fetch.isolation_level`
+        // wire value (READ_UNCOMMITTED = 0, READ_COMMITTED = 1).
+        let isolation_level: i8 = match isolation {
+            IsolationLevel::ReadUncommitted => 0,
+            IsolationLevel::ReadCommitted => 1,
+        };
+
+        let fetched = fetch_partition_with_isolation(
             &self.conn,
             topic,
             topic_id,
@@ -76,6 +87,7 @@ impl RecordFetcher for BrokerFetcher {
             offset,
             self.max_wait_ms,
             self.partition_max_bytes,
+            isolation_level,
         )
         .await?;
 
@@ -211,6 +223,112 @@ impl RecordProducer for BrokerProducer {
             }
         }
         Ok(())
+    }
+}
+
+// ─── BrokerTransactionalProducer ────────────────────────────────────────────────
+
+/// A transactional (EOS-v2 / KIP-447) [`RecordProducer`] backed by a real Kafka
+/// `Producer` built with a `transactional_id`. It implements
+/// [`crate::runtime::eos::TransactionalProducer`] so the runtime can wrap each
+/// process-then-commit cycle in a transaction.
+///
+/// Unlike [`BrokerProducer`], this wrapper does NOT accumulate per-record ack
+/// receivers: the EOS commit path never calls `flush` — it goes
+/// `send` → `send_offsets_to_transaction` → `commit_transaction`, and the inner
+/// `Producer::commit_transaction` already flushes the batch buffer and blocks on
+/// every in-flight ack before sending the COMMIT marker. The dropped receiver
+/// does NOT cancel the send: the record's ack sender lives in the accumulator
+/// batch (see `Producer::send` / `Accumulator::try_append`), so the record is
+/// produced and durably committed regardless of whether the receiver is awaited.
+/// Accumulating receivers here would leak unboundedly for the app's lifetime.
+pub(crate) struct BrokerTransactionalProducer {
+    inner: Producer,
+}
+
+#[async_trait::async_trait]
+impl RecordProducer for BrokerTransactionalProducer {
+    async fn send(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        key: Option<Bytes>,
+        value: Option<Bytes>,
+    ) -> Result<(), StreamsClientError> {
+        // Drop the returned ack receiver: under EOS the commit barrier is
+        // `commit_transaction` (which flushes + awaits all in-flight records),
+        // so per-record acks need not be tracked here. Dropping the receiver
+        // does not cancel the queued send. Explicit `drop` (not `let _ =`)
+        // because the receiver is itself a `Future`; we intentionally never
+        // await it.
+        drop(
+            self.inner
+                .send(ProducerRecord {
+                    topic: topic.to_string(),
+                    partition,
+                    key,
+                    value,
+                    ..Default::default()
+                })
+                .await,
+        );
+        Ok(())
+    }
+
+    /// No-op: the EOS path never calls `flush`. `commit_transaction` is the
+    /// durability barrier (it flushes the inner producer and awaits in-flight
+    /// acks before the COMMIT marker), so there is nothing to drain here.
+    async fn flush(&self) -> Result<(), StreamsClientError> {
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl TransactionalProducer for BrokerTransactionalProducer {
+    async fn init_transactions(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .init_transactions()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+    }
+
+    async fn begin_transaction(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .begin_transaction()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+    }
+
+    async fn send_offsets_to_transaction(
+        &self,
+        offsets: &[(String, i32, i64)],
+        m: &StreamsGroupMeta,
+    ) -> Result<(), StreamsClientError> {
+        let meta = crabka_client_consumer::ConsumerGroupMetadata {
+            group_id: m.group_id.clone(),
+            generation_id: m.generation_id,
+            member_id: m.member_id.clone(),
+            group_instance_id: m.group_instance_id.clone(),
+        };
+        let off = offsets.iter().map(|(t, p, o)| ((t.clone(), *p), *o));
+        self.inner
+            .send_offsets_to_transaction(off, &meta)
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+    }
+
+    async fn commit_transaction(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .commit_transaction()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
+    }
+
+    async fn abort_transaction(&self) -> Result<(), StreamsClientError> {
+        self.inner
+            .abort_transaction()
+            .await
+            .map_err(|e| StreamsClientError::Runtime(e.to_string()))
     }
 }
 
@@ -568,6 +686,87 @@ pub(crate) async fn build(
     let offset_store = Arc::new(BrokerOffsetStore::new(offset_client, group_id));
 
     Ok((fetcher, broker_producer, offset_store))
+}
+
+// ─── build_eos ──────────────────────────────────────────────────────────────────
+
+/// Build broker I/O for EOS: a transactional producer (with `transactional_id`),
+/// plus the fetcher + offset store (for committed-offset reads / seek).
+///
+/// Mirrors [`build`] exactly, except the producer is constructed with a
+/// `transactional_id` (and `enable_idempotence` is implied by transactions) and
+/// wrapped in a [`BrokerTransactionalProducer`].
+pub(crate) async fn build_eos(
+    bootstrap: &str,
+    group_id: &str,
+    client_id: &str,
+    transactional_id: &str,
+) -> Result<
+    (
+        BrokerFetcher,
+        Arc<BrokerTransactionalProducer>,
+        Arc<BrokerOffsetStore>,
+    ),
+    StreamsClientError,
+> {
+    // 1. Client for metadata + offset RPCs.
+    let metadata_client = Client::builder()
+        .bootstrap(bootstrap)
+        .client_id(client_id)
+        .build()
+        .await?;
+
+    // 2. Dedicated fetch connection (single bootstrap broker).
+    // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
+    let addr = tokio::net::lookup_host(bootstrap)
+        .await
+        .map_err(|e| {
+            StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
+        })?
+        .next()
+        .ok_or_else(|| {
+            StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
+        })?;
+    let fetch_conn = Connection::connect_with_options(
+        addr,
+        ConnectionOptions {
+            client_id: client_id.to_string(),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    // 3. Transactional producer (idempotence is implied by transactions).
+    let producer = Producer::builder()
+        .bootstrap(bootstrap)
+        .client_id(format!("{client_id}-producer"))
+        .enable_idempotence(true)
+        .acks(Acks::All)
+        .transactional_id(transactional_id.to_string())
+        .build()
+        .await
+        .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
+
+    // 4. Offset client — re-use a second Client for offset RPCs so the
+    //    metadata client's connection isn't head-of-line-blocked by slow
+    //    OffsetFetch or OffsetCommit calls.
+    let offset_client = Client::builder()
+        .bootstrap(bootstrap)
+        .client_id(format!("{client_id}-offsets"))
+        .build()
+        .await?;
+
+    let fetcher = BrokerFetcher {
+        conn: fetch_conn,
+        client: metadata_client,
+        topic_ids: Mutex::new(HashMap::new()),
+        max_wait_ms: 500,
+        partition_max_bytes: 1 << 20,
+    };
+    let txn_producer = Arc::new(BrokerTransactionalProducer { inner: producer });
+    let offset_store = Arc::new(BrokerOffsetStore::new(offset_client, group_id));
+
+    Ok((fetcher, txn_producer, offset_store))
 }
 
 // ─── tests ────────────────────────────────────────────────────────────────────
