@@ -57,7 +57,7 @@ x509-parser = { workspace = true }
 assert2 = { workspace = true }
 crabka-broker = { version = "0.3.1", path = "../broker" }
 crabka-client-core = { version = "0.3.1", path = "../client-core" }
-crabka-rebalancer = { version = "0.3.1", path = "../rebalancer" }
+crabka-rebalancer = { path = "../rebalancer" }
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
