@@ -246,7 +246,7 @@ async fn concurrent_sends_get_correct_responses() {
 #[tokio::test]
 async fn client_refresh_metadata_populates_pool() {
     use crabka_protocol::owned::metadata_response::{
-        MetadataResponse, MetadataResponseBroker, FLEXIBLE_MIN,
+        FLEXIBLE_MIN, MetadataResponse, MetadataResponseBroker,
     };
 
     let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
