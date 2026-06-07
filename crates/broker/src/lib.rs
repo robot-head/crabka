@@ -2,7 +2,7 @@
 //!
 //! `crabka-broker` ships a library + binary that unmodified JVM Kafka clients
 //! can produce to and consume from. It is the runtime that ties together the
-//! wire protocol, KRaft metadata controller, log storage, replication, security,
+//! wire protocol, `KRaft` metadata controller, log storage, replication, security,
 //! quotas, compaction, tiered storage, transactions, and observability.
 //!
 //! # Capability areas
@@ -11,7 +11,7 @@
 //! - Handles topic metadata and administration, `Produce`, `Fetch`,
 //!   `ListOffsets`, configs, group coordination, offset commits, share groups,
 //!   transactions, producer-state inspection, quotas, and client telemetry.
-//! - Runs an embedded [`crabka_raft`] KRaft metadata quorum, registers brokers,
+//! - Runs an embedded [`crabka_raft`] `KRaft` metadata quorum, registers brokers,
 //!   tracks broker liveness, and drives partition leadership / reassignment.
 //! - Persists partition data via [`crabka_log`], including leader-epoch
 //!   checkpoints, transaction indexes, retention, and log compaction.

@@ -39,7 +39,7 @@
 //!
 //! ## Capabilities and boundaries
 //!
-//! The controller persists and recovers KRaft metadata records, serves and
+//! The controller persists and recovers `KRaft` metadata records, serves and
 //! installs KIP-630 snapshots through `FetchSnapshot`, publishes the current
 //! metadata image to broker tasks, and exposes Crabka-private submit/fetch RPCs
 //! for broker and observer integration. KIP-853-style observer bootstrap and

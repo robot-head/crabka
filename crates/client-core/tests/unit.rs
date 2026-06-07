@@ -245,7 +245,9 @@ async fn concurrent_sends_get_correct_responses() {
 /// listening on), but the registry population is exercised.
 #[tokio::test]
 async fn client_refresh_metadata_populates_pool() {
-    use crabka_protocol::owned::metadata_response::{MetadataResponse, MetadataResponseBroker};
+    use crabka_protocol::owned::metadata_response::{
+        MetadataResponse, MetadataResponseBroker, FLEXIBLE_MIN,
+    };
 
     let mock = MockBroker::start(move |api_key, version, _corr_id, _body| {
         if api_key == api_versions_request::API_KEY {
@@ -270,7 +272,6 @@ async fn client_refresh_metadata_populates_pool() {
                 ..Default::default()
             };
             // Encode the response with the correct ResponseHeader prefix.
-            use crabka_protocol::owned::metadata_response::FLEXIBLE_MIN;
             let mut buf = BytesMut::new();
             if version >= FLEXIBLE_MIN {
                 buf.extend_from_slice(&[0x00u8]);
