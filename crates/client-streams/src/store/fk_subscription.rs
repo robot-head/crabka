@@ -130,6 +130,10 @@ impl StateStore for SubscriptionBytesStore {
     fn set_logging(&mut self, on: bool) {
         self.logging = on;
     }
+    async fn clear(&mut self) {
+        self.backend.clear().await;
+        self.changelog.clear();
+    }
     // No `as_iq` override: the subscription store is internal (not user-queryable),
     // so it keeps the trait default `None`.
 }
