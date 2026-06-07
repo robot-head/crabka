@@ -58,3 +58,11 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # Our sspi fork (SASL/GSSAPI Kerberos work) until it lands upstream;
 # see Devolutions/sspi-rs#681 and `[patch.crates-io]` in Cargo.toml.
 allow-git = ["https://github.com/robot-head/sspi-rs"]
+
+[[licenses.clarify]]
+name = "cfg_block"
+version = "0.1.1"
+expression = "Apache-2.0"
+license-files = [
+    { path = "LICENSE", hash = 0x0fb72a18 }
+]
