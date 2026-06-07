@@ -1,0 +1,17 @@
+apiVersion: v2
+name: crabka-schema-registry
+description: Confluent Schema Registry-compatible service for Crabka
+type: application
+version: 0.1.0
+appVersion: "0.1.1"
+kubeVersion: ">= 1.28.0-0"
+home: https://github.com/robot-head/crabka
+sources:
+  - https://github.com/robot-head/crabka
+keywords:
+  - kafka
+  - crabka
+  - schema-registry
+maintainers:
+  - name: The Crabka Authors
+icon: https://raw.githubusercontent.com/robot-head/crabka/main/docs/crabka-square.png

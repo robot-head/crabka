@@ -1,0 +1,7 @@
+crabka-schema-registry is installed.
+
+REST endpoint (in-cluster):
+  http://{{ include "crabka-schema-registry.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+This chart requires `--set bootstrapServers=<broker-host:9092>`.
+For an operator-managed deployment, apply a SchemaRegistry CR instead.

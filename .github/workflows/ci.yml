@@ -473,6 +473,29 @@ jobs:
           flags: schema-registry-integration
           fail_ci_if_error: false
 
+  operator-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: operator-integration
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - name: Operator integration coverage
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov -p crabka-operator --test reconcile_schema_registry --lcov --output-path coverage/operator-integration.lcov -- --nocapture
+      - uses: codecov/codecov-action@v6
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/operator-integration.lcov
+          disable_search: true
+          flags: operator-integration
+          fail_ci_if_error: false
+
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
   # reach back via the Docker bridge gateway (typically 172.17.0.1). See

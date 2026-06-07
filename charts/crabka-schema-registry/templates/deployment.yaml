@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "crabka-schema-registry.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "crabka-schema-registry.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "crabka-schema-registry.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "crabka-schema-registry.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}{{ toYaml . | nindent 8 }}{{- end }}
+      annotations:
+        {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{- end }}
+    spec:
+      serviceAccountName: {{ include "crabka-schema-registry.serviceAccountName" . }}
+      securityContext: {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: schema-registry
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --bootstrap-servers={{ required "bootstrapServers is required" .Values.bootstrapServers }}
+            - --listen-addr=0.0.0.0:8081
+            - --schemas-topic={{ .Values.schemasTopic }}
+            - --schemas-topic-rf={{ .Values.schemasTopicReplicationFactor }}
+            - --group-id={{ .Values.groupId }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: SCHEMA_REGISTRY_ADVERTISED_URL
+              value: "http://$(POD_NAME).{{ include "crabka-schema-registry.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local:8081"
+            - name: RUST_LOG
+              value: {{ .Values.logFilter | quote }}
+          ports:
+            - name: rest
+              containerPort: 8081
+              protocol: TCP
+          readinessProbe:
+            tcpSocket: { port: rest }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket: { port: rest }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

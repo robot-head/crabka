@@ -10,6 +10,7 @@ pub mod logging;
 pub mod metrics;
 pub mod network_policy;
 pub mod rebalance;
+pub mod schema_registry;
 pub mod topic;
 pub mod user;
 
@@ -27,6 +28,10 @@ pub use logging::{ConfigMapKeyRef, ExternalLoggingSource, Logging, LoggingType};
 pub use metrics::{MetricsConfig, MetricsType, PodMonitorSpec, ServiceMonitorSpec};
 pub use network_policy::{NetworkPolicyPeer, NetworkPolicySpec};
 pub use rebalance::{KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus, OptimizationResult};
+pub use schema_registry::{
+    BasicAuthn, BearerAuthn, BearerMode, SchemaRegistry, SchemaRegistryAuthn, SchemaRegistryAuthz,
+    SchemaRegistrySpec, SchemaRegistryStatus, SchemaRegistryTls, TlsClientAuth,
+};
 pub use topic::{KafkaTopic, KafkaTopicSpec, KafkaTopicStatus};
 // The cluster-level `Authorization` / `SimpleAuthorization` on
 // `KafkaSpec` (above) take the unqualified re-export names. The per-user

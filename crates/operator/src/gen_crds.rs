@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use crate::crd::{Kafka, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser};
+use crate::crd::{Kafka, KafkaNodePool, KafkaRebalance, KafkaTopic, KafkaUser, SchemaRegistry};
 
 /// Write every CRD this operator owns into `out_dir` as
 /// `<group>_<plural>.yaml`. Existing files are overwritten.
@@ -12,6 +12,7 @@ pub fn write_all(out_dir: &Path) -> anyhow::Result<()> {
     write_one::<KafkaTopic>(out_dir)?;
     write_one::<KafkaUser>(out_dir)?;
     write_one::<KafkaRebalance>(out_dir)?;
+    write_one::<SchemaRegistry>(out_dir)?;
     Ok(())
 }
 
@@ -63,5 +64,10 @@ mod tests {
         let rebalance = std::fs::read_to_string(&rf).unwrap();
         assert!(rebalance.contains("plural: kafkarebalances"));
         assert!(rebalance.contains("- kr"));
+        let sf = dir.path().join("crabka.io_schemaregistries.yaml");
+        assert!(sf.exists());
+        let sr = std::fs::read_to_string(&sf).unwrap();
+        assert!(sr.contains("plural: schemaregistries"));
+        assert!(sr.contains("- sr"));
     }
 }
