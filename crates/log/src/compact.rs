@@ -215,7 +215,7 @@ pub fn rewrite_segments(
 
     // Truncate (or create) all three swap files. We rewrite the .log
     // file proper here; for the index sidecars we write empty files
-    // and let Segment::open populate them via tail-scan in T3's
+    // and let Segment::open populate them via tail-scan in the recovery
     // promotion path. (Sparse indexes are derivable from the .log; an
     // empty index is correct and small.)
     let mut log_file = OpenOptions::new()

@@ -37,7 +37,7 @@ struct OnDisk {
 pub struct ProposalStore {
     inner: Mutex<VecDeque<Proposal>>,
     capacity: usize,
-    /// Where to persist. `None` = in-memory only (tests / 43a-compat).
+    /// Where to persist. `None` = in-memory only (tests or ephemeral runs).
     path: Option<PathBuf>,
 }
 

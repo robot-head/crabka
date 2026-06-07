@@ -671,8 +671,8 @@ spec:
                   metadataManager:
                     description: |-
                       KIP-405: pick the
-                      [`RemoteLogMetadataManager`](crabka_remote_storage::RemoteLogMetadataManager)
-                      the broker pods run. When absent (or set to `type: Topic`),
+                      `RemoteLogMetadataManager` the broker pods run. When absent (or set
+                      to `type: Topic`),
                       the broker activates the durable
                       `crabka_remote_storage_topic::TopicBasedRemoteLogMetadataManager`
                       against the internal `__remote_log_metadata` topic, so
@@ -867,7 +867,7 @@ spec:
                   Distributed-tracing wiring for the broker pods. When
                   `Some`, the operator renders the matching `CRABKA_OTLP_*` env
                   vars onto every broker pod — the broker's telemetry
-                  pipeline reads them via [`TelemetryConfig::from_env`] and
+                  pipeline reads them via `TelemetryConfig::from_env` and
                   installs the OTLP tracer at startup. When `None`, no OTLP env
                   vars are emitted and the broker leaves tracing off (the
                   default).

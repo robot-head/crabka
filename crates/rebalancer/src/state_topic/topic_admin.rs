@@ -22,7 +22,7 @@ const INVALID_REPLICATION_FACTOR: i16 = 38;
 ///
 /// Idempotent: if the topic already exists with any config, this is a
 /// no-op (the existing topic's configs are NOT updated; that's a
-/// separate operator slice).
+/// separate operator reconciliation path).
 pub async fn ensure_topic(
     admin: &mut AdminClient,
     name: &str,

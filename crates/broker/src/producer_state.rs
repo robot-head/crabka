@@ -12,11 +12,11 @@ use tokio::sync::Mutex;
 pub struct ProducerEntry {
     pub epoch: i16,
     pub last_sequence: i32,
-    /// Retained for future slice work (log metrics / WAL replay).
+    /// Assigned base offset of the last accepted batch for this producer.
     #[allow(dead_code)]
     pub last_offset: i64,
     pub base_offset: i64,
-    /// Retained for future slice work (metrics / compaction).
+    /// Timestamp of the last accepted batch for this producer.
     #[allow(dead_code)]
     pub last_timestamp: i64,
     /// Wall-clock millis of the last `commit` that touched this entry.

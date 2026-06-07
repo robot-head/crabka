@@ -86,7 +86,7 @@ use crate::model::ClusterState;
 
 /// Where the scraper finds its targets each tick.
 ///
-/// `Static` matches the pre-43h behavior (explicit `id:host:port` list
+/// `Static` uses an explicit `id:host:port` list
 /// from `--metrics-scrape-targets`). `Discovered` reads from the
 /// ingester's `ClusterState` snapshot and synthesizes targets at
 /// `host:metrics_port` for every broker in the snapshot.

@@ -12,7 +12,7 @@ use crabka_protocol::primitives::uuid::Uuid;
 use super::persistence_next_gen::MemberAssignmentState;
 
 /// Classic-protocol state for a member hosted inside an *upgraded* consumer
-/// group (KIP-848 64d-D). `None` on a native consumer-protocol member; `Some`
+/// group during KIP-848 upgrade. `None` on a native consumer-protocol member; `Some`
 /// once a classic member's group has been upgraded (or a classic member joins
 /// an already-upgraded group). The member keeps speaking the classic
 /// `JoinGroup`/`SyncGroup`/`Heartbeat` protocol; the coordinator serves it by
@@ -23,8 +23,7 @@ pub struct ClassicMemberFacade {
     /// Classic generation echoed to the member; advances with the group epoch.
     pub generation_id: i32,
     /// `(protocol_name, metadata)` pairs the member proposed in `JoinGroup`.
-    /// Preserved so a later downgrade (Slice 64d-E) can losslessly restore the
-    /// classic member.
+    /// Preserved so downgrade can losslessly restore the classic member.
     pub supported_protocols: Vec<(String, Bytes)>,
     /// The member's classic `session.timeout.ms`.
     pub session_timeout: Duration,
@@ -75,7 +74,7 @@ pub struct MemberState {
     pub assigned_partitions: HashMap<Uuid, Vec<i32>>,
     pub partitions_pending_revocation: HashMap<Uuid, Vec<i32>>,
     pub last_seen: Instant,
-    /// Set iff this is a classic member hosted in an upgraded group (64d-D).
+    /// Set iff this is a classic member hosted in an upgraded group.
     pub classic: Option<ClassicMemberFacade>,
 }
 

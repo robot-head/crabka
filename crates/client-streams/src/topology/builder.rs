@@ -98,9 +98,8 @@ pub struct Topology {
     /// `store_factories` so per-task `instantiate` does NOT build them (a global
     /// store is fully replicated, not task-partitioned) and NO changelog topic is
     /// emitted. The override is always `None` here (global stores have no
-    /// changelog) but the tuple mirrors the regular-store shape for the
-    /// global-store builder/restorer (a later task) to consume. Populated by
-    /// [`Topology::add_global_store`].
+    /// changelog) but the tuple mirrors the regular-store shape consumed by the
+    /// global-store manager. Populated by [`Topology::add_global_store`].
     global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
     /// `global store name -> source topic` for each `GlobalKTable`. The shared
     /// global consumer reads each source topic (all partitions) to fully
@@ -162,8 +161,8 @@ impl<K, V> NodeHandle<K, V> {
 
     /// Reconstruct a typed handle from a node name recorded during DSL lowering.
     ///
-    /// The DSL (sub-project #4) lowers a type-erased logical graph: each lowering
-    /// thunk knows its own concrete `K`/`V` statically and looks up its parent's
+    /// The DSL lowers a type-erased logical graph: each lowering thunk knows its
+    /// own concrete `K`/`V` statically and looks up its parent's
     /// Processor-API node name from `LowerState`, rebuilding a typed handle to
     /// pass to [`Topology::add_processor`] / [`Topology::add_sink`].
     pub(crate) fn from_name(name: String) -> Self {
@@ -653,7 +652,7 @@ impl Topology {
     /// (a plain `cleanup.policy=compact` changelog — the JVM suppress buffer is a
     /// compacted KV store) and the store logs/restores; when `false` the store
     /// stays in memory and NO changelog topic appears (so a logging-off suppress
-    /// is byte-identical to the slice-A wire output).
+    /// has the same wire shape as an unsuppressed topology.
     ///
     /// [`SuppressBytesStore`]: crate::store::suppress_store::SuppressBytesStore
     pub fn add_suppress_store<K, V, KS, VS>(
@@ -757,18 +756,17 @@ impl Topology {
     ///
     /// 1. registers a source node reading `topic` and a processor node fed by it
     ///    (the source→processor edge unites them into one node group);
-    /// 2. marks `topic` global ([`NodeRegistry::add_global_source`]) so the
-    ///    grouping pass skips it in the source-bucketing pass — the resulting
+    /// 2. marks `topic` global so the grouping pass skips it in the
+    ///    source-bucketing pass — the resulting
     ///    source-less group is dropped by the final filter but already consumed
     ///    its index;
     /// 3. stores the global KV factory in a SEPARATE map (`global_store_factories`,
     ///    NOT `store_factories`) so per-task `instantiate` does not build it and NO
     ///    changelog topic is emitted. The factory builds a
-    ///    [`KeyValueBytesStore`] with an empty changelog (like
-    ///    [`Topology::add_state_store_no_changelog`]).
+    ///    [`KeyValueBytesStore`] with an empty changelog.
     ///
-    /// The global store is *not* built by `instantiate` in this slice — the
-    /// fully-replicated global-store runtime (a later task) reads the factory.
+    /// The global store is not built by per-task `instantiate`; the
+    /// fully-replicated global-store manager reads the factory.
     ///
     /// [`KeyValueBytesStore`]: crate::store::kv::KeyValueBytesStore
     pub fn add_global_store<K, V, KS, VS>(
@@ -909,8 +907,8 @@ impl Topology {
         // ── Identify the GlobalKTable source + update-processor nodes ─────────
         // A `GlobalKTable` source/processor is invisible in the wire AND has no
         // per-task runtime factory (the fully-replicated global store is built by
-        // the shared global manager — a later task — or populated directly by the
-        // TestDriver, NOT by per-task `instantiate`). Excluding them from
+        // the shared global manager or populated directly by the TestDriver, NOT
+        // by per-task `instantiate`). Excluding them from
         // `node_specs` keeps `instantiate` from trying to build a node it has no
         // factory for. A node is global if it reads a global source topic, or if
         // any predecessor is global (nodes are in topological insertion order, so
@@ -1031,7 +1029,7 @@ pub struct BuiltTopology {
     global_store_factories: HashMap<String, (Option<String>, StoreFactory)>,
     /// `global store name -> source topic` for each `GlobalKTable`. Read by the
     /// shared global manager so the consumer knows which topic feeds each store.
-    // Consumed by the global consumer / dispatch wiring in T7/T8 (via the accessor).
+    // Consumed by global-store wiring via the accessor.
     #[allow(dead_code)]
     global_store_topics: HashMap<String, String>,
 }
@@ -1072,10 +1070,8 @@ impl BuiltTopology {
     }
 
     /// The `global store name -> source topic` map for each `GlobalKTable`.
-    /// The shared [`GlobalStateManager`] reads this so the global consumer knows
+    /// The shared global-store manager reads this so the global consumer knows
     /// which topic feeds each store. Invisible in the wire output.
-    ///
-    /// [`GlobalStateManager`]: crate::runtime::global::GlobalStateManager
     pub(crate) fn global_store_topics(&self) -> HashMap<String, String> {
         self.global_store_topics.clone()
     }
@@ -1222,7 +1218,7 @@ impl BuiltTopology {
             sources,
             output: Vec::new(),
             stores: store_registry,
-            // Default-empty here; the app wiring (T8b) / TopologyTestDriver builds
+            // Default-empty here; app wiring / TopologyTestDriver builds
             // and assigns the shared GlobalStateManager. `instantiate` produces a
             // per-task graph and never owns the fully-replicated global stores.
             globals: crate::runtime::global::GlobalStateManager::default(),

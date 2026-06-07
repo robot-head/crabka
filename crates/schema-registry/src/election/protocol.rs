@@ -1,11 +1,9 @@
 //! cp's `SchemaRegistryProtocol` wire types (the `"sr"` group), serialized
 //! byte-exactly to cp-schema-registry 7.4.0 (JSON).
 //!
-//! Calibrated in Task 5 against a real two-node cp election captured through a
-//! Crabka broker (`tests/capture_election_fixtures.rs` →
-//! `tests/fixtures/election/{members,group}.json`) and cross-checked against
-//! cp's `io.confluent.kafka.schemaregistry.{storage.SchemaRegistryIdentity,
-//! leaderelector.kafka.SchemaRegistryProtocol$Assignment}` constant pools. cp
+//! Matches Confluent Schema Registry's
+//! `io.confluent.kafka.schemaregistry.{storage.SchemaRegistryIdentity,
+//! leaderelector.kafka.SchemaRegistryProtocol$Assignment}` wire contracts. cp
 //! wins every divergence:
 //!
 //!   * `SchemaRegistryIdentity` JSON key order is `host, port,

@@ -14,6 +14,22 @@
 //! (`CRABKA_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`,
 //! `OTEL_EXPORTER_OTLP_ENDPOINT`) or `CRABKA_OTLP_ENABLED=true`, and is
 //! force-disabled by `OTEL_SDK_DISABLED=true`.
+//!
+//! ## Resolve OTLP settings without touching the environment
+//!
+//! ```rust
+//! use crabka_telemetry::{OtlpConfig, OtlpProtocol};
+//!
+//! let cfg = OtlpConfig::from_env(
+//!     |key| (key == "CRABKA_OTLP_ENABLED").then(|| "true".to_string()),
+//!     "broker-1",
+//!     "0.1.0",
+//!     "crabka-broker",
+//! ).unwrap();
+//!
+//! assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
+//! assert_eq!(cfg.endpoint, "http://localhost:4317");
+//! ```
 
 #![forbid(unsafe_code)]
 

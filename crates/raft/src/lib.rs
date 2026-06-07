@@ -37,11 +37,13 @@
 //! # }
 //! ```
 //!
-//! ## Out of scope (deferred slices)
+//! ## Current boundaries
 //!
-//! - Cross-node snapshot transfer / `FetchSnapshot` catch-up (Slice 4).
-//! - Dynamic voter membership changes — static voters only (Slice 5).
-//! - Mixed JVM+Crabka quorum (Slice 6).
+//! - Cross-node snapshot transfer / `FetchSnapshot` catch-up is limited to
+//!   the broker-facing checkpoint read path.
+//! - Dynamic voter membership changes return [`RaftError::Unsupported`];
+//!   voter membership is static for a controller process.
+//! - Mixed JVM+Crabka controller quorums are not supported.
 
 #![doc(html_root_url = "https://docs.rs/crabka-raft/0.0.0")]
 

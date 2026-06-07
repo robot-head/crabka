@@ -5,8 +5,6 @@
 //! the High Watermark = min LEO over the ISR. ISR-lag
 //! tracking via `FollowerStats` (`last_fetch`, `last_caught_up`) lets
 //! the `isr_maintenance` task can shrink/expand the ISR.
-//!
-//! See `docs/superpowers/specs/2026-05-12-crabka-bulletproof-eos-10a-design.md`.
 
 #![allow(dead_code)] // wired in by the ISR-maintenance path
 

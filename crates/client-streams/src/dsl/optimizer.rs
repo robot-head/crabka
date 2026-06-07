@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn two_repartitions_off_one_source_alias_to_the_lower_id() {
         let mut g = LogicalGraph::default();
-        // node 0: the shared key-changing source (a placeholder processor).
+        // node 0: the shared key-changing source processor.
         g.nodes.push(GraphNode {
             id: 0,
             name: "select-key".into(),

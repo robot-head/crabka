@@ -1,6 +1,6 @@
 //! Byte-compatible reader/writer for Apache Kafka's on-disk log format.
 //!
-//! This crate provides the storage layer beneath a future Crabka broker.
+//! This crate provides the append-only storage layer used by the Crabka broker.
 //! It reads and writes Kafka 4.x's on-disk log format byte-for-byte:
 //! 20-digit zero-padded segment filenames, sparse `.index` and
 //! `.timeindex` files, append-only `.log` files containing
@@ -16,7 +16,7 @@
 //!
 //! ## What this crate doesn't do
 //!
-//! - Log compaction (separate subsystem; deferred).
+//! - Log compaction (handled by the broker cleaner subsystem).
 //! - Transactional marker interpretation (broker concern).
 //! - Tiered storage (broker concern).
 //! - Concurrent writes (single-writer; broker enforces above).
@@ -35,9 +35,23 @@
 //! let out = log.read(0, 1024 * 1024).unwrap();
 //! # let _ = (assigned_offset, out);
 //! ```
+//! ## Exporting a segment
 //!
-//! See the design at
-//! `docs/superpowers/specs/2026-05-11-crabka-log-design.md`.
+//! ```no_run
+//! use crabka_log::{Log, LogConfig};
+//!
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut log = Log::open("/var/kafka/my-topic-0", LogConfig::default())?;
+//! for segment in log.tierable_segments() {
+//!     println!(
+//!         "segment {} starts at offset {}",
+//!         segment.log_path.display(),
+//!         segment.base_offset
+//!     );
+//! }
+//! # Ok(())
+//! # }
+//! ```
 
 #![doc(html_root_url = "https://docs.rs/crabka-log/0.0.0")]
 

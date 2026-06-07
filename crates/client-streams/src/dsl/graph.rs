@@ -4,9 +4,9 @@ use std::any::Any;
 
 pub(crate) type NodeId = usize;
 
-/// A boxed lowering thunk attached at op-call time; the lowering (Task 5) calls
-/// it to attach the typed processor to the Processor-API builder. Erased here
-/// because each op has different K/V types.
+/// A boxed lowering thunk attached at op-call time. Lowering calls it to attach
+/// the typed processor to the Processor-API builder. Erased here because each op
+/// has different K/V types.
 #[allow(dead_code)]
 pub(crate) type LowerFn = Box<dyn FnOnce(&mut LowerState) + Send>;
 

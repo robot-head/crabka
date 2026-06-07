@@ -86,7 +86,7 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
     // the forward via `FORWARD_HEADER` (both `auth_layer` and `authz_layer` skip
     // for it). Forwarding the credential would leak it over the inter-node hop and
     // could not work for mTLS anyway (a client cert can't be carried on this
-    // server-to-server `reqwest` call). See the slice-6 security spec.
+    // server-to-server `reqwest` call).
     rb = rb.header(FORWARD_HEADER, &fwd.node_id);
     match rb.send().await {
         Ok(resp) => {

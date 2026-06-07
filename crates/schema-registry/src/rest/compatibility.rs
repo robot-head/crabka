@@ -1,5 +1,5 @@
-//! Compatibility check endpoint. Slice 2: real verdict via the compat engine,
-//! using the subject's effective level against the named version.
+//! Compatibility check endpoint using the subject's effective level against
+//! the named version.
 
 use axum::extract::{Path, Query, State};
 use axum::response::Response;

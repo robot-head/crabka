@@ -419,10 +419,9 @@ fn general_assign(
             .collect();
         if candidates.is_empty() {
             // Can't fix this imbalance with these two endpoints; we'd need
-            // multi-hop, which JVM also doesn't do — stop.
-            // FIXME: differs from JVM only in that JVM scans the full pair
-            // matrix per iteration; for the cases we care about (assignor
-            // tests + steady state) the result is identical.
+            // multi-hop, which JVM also doesn't do. The JVM scans the full pair
+            // matrix per iteration; the cases covered here (assignor tests +
+            // steady state) produce the same result.
             break;
         }
         // Sort candidates: partitions lid didn't previously own first

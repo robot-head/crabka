@@ -14,9 +14,8 @@
 //!     (`correlation_id` + 1-byte tagged-fields).
 //!   - `ApiVersions (18)` response header is *always* v0 by Kafka spec.
 
-// Exercised via the runtime path (T6) and integration tests (T9). Unit
-// coverage in this file is deliberately narrow — see the `tests` module
-// docstring.
+// Exercised via the runtime path and integration tests. Unit coverage in this
+// file is deliberately narrow — see the `tests` module docstring.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -52,8 +51,8 @@ const API_KEY_SASL_HANDSHAKE: i16 = 17;
 const API_KEY_SASL_AUTHENTICATE: i16 = 36;
 const API_KEY_API_VERSIONS: i16 = 18;
 
-/// Per-broker handshake adapter. Constructed in `Broker::start` (T6) and
-/// passed into `ControllerConfig::handshake`.
+/// Per-broker handshake adapter. Constructed in `Broker::start` and passed
+/// into `ControllerConfig::handshake`.
 pub struct BrokerRaftHandshake {
     pub tls_acceptor: Option<TlsAcceptor>,
     pub plain_credentials: HashMap<String, String>,
@@ -64,7 +63,7 @@ pub struct BrokerRaftHandshake {
     /// (H-1). Authentication proves *who* the peer is; this enforces that
     /// the authenticated principal is allowed to drive controller/raft
     /// RPCs (`CLUSTER_ACTION` on `Cluster("kafka-cluster")`). With the
-    /// default [`AllowAllAuthorizer`], every principal is allowed, so
+    /// default `AllowAllAuthorizer`, every principal is allowed, so
     /// dev/single-node is unaffected; `SimpleAclAuthorizer` grants
     /// super-users.
     pub authorizer: Arc<dyn crate::authorizer::Authorizer>,
@@ -445,7 +444,7 @@ fn build_api_versions_response(corr_id: i32) -> Vec<u8> {
 mod tests {
     //! Narrow unit coverage. The richer behavioural tests (PLAIN happy
     //! path, SCRAM two-round dance, bad-creds rejection, TLS termination)
-    //! live in `tests/raft_sasl.rs` (T9) where a real two-broker raft
+    //! live in `tests/raft_sasl.rs` where a real two-broker raft
     //! cluster is spun up. Here we just verify trait wiring + the
     //! Plaintext short-circuit predicate so a regression that flips
     //! `requires_*` would be caught at this layer.
@@ -465,7 +464,7 @@ mod tests {
         };
         // `upgrade(TcpStream)` requires a real TCP socket, so we
         // exercise the short-circuit predicates directly here. The full
-        // upgrade-path is exercised end-to-end in T9.
+        // upgrade-path is exercised end-to-end in integration tests.
         assert!(!cfg.protocol.requires_tls());
         assert!(!cfg.protocol.requires_sasl());
     }

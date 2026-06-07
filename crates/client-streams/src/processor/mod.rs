@@ -1,4 +1,4 @@
-//! Typed Processor API + the `dyn Any`-erased execution graph (sub-project #2).
+//! Typed Processor API and the type-erased execution graph used by the runtime.
 
 pub mod api;
 pub mod erased;

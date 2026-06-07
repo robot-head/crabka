@@ -66,7 +66,7 @@ pub struct GoalContext {
     /// Per-partition usage data (counters + gauges) from the metric
     /// scraper. Empty default = usage-driven goals see no data and
     /// return empty `Vec<Movement>` (same self-limiting pattern as
-    /// the capacity stubs in 43d).
+    /// the capacity stubs).
     pub broker_usages: Arc<UsageStore>,
 }
 
@@ -108,7 +108,7 @@ pub mod tests {
     /// Minimal goal that returns a fixed movement list. Used by
     /// `optimizer::tests` to exercise the optimizer without depending
     /// on any concrete goal implementation.
-    #[allow(dead_code)] // Consumed by optimizer tests in T9.
+    #[allow(dead_code)] // Consumed by optimizer tests.
     pub struct FixedGoal {
         pub name: &'static str,
         pub priority: GoalPriority,

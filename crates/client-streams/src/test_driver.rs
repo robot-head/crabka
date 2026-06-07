@@ -13,7 +13,7 @@ use crate::topology::BuiltTopology;
 /// A pending record entry in the repartition loop-back queue.
 type PendingRecord = (String, Option<Vec<u8>>, Vec<u8>, i64);
 
-/// Synchronous test driver: builds a runnable [`Graph`] from a [`BuiltTopology`]
+/// Synchronous test driver: builds a runnable processor graph from a [`BuiltTopology`]
 /// and exposes `pipe_input` / `read_output` for exercising processing logic
 /// without a real broker.
 pub struct TopologyTestDriver {
@@ -164,8 +164,7 @@ impl TopologyTestDriver {
     /// Populate a GLOBAL store directly (test-only). In a real app the global
     /// consumer reads all partitions of the source topic and applies them to the
     /// fully-replicated global store; the test driver injects values straight into
-    /// the shared [`GlobalStateManager`](crate::runtime::global::GlobalStateManager)
-    /// so a stream-globaltable join can look them up.
+    /// the shared global store manager so a stream-globaltable join can look them up.
     #[allow(clippy::needless_pass_by_value)] // owned K/V is the natural API
     pub fn pipe_global<K, V>(&mut self, store_name: &str, key: K, value: V)
     where

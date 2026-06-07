@@ -1,8 +1,23 @@
 //! `crabka-grpc-gateway` — gRPC / Connect-RPC + HTTP gateway into Crabka topics.
 //!
 //! Built on the native client crates. The broker's Kafka wire stays byte-exact;
-//! P5 factored the shared `crabka-authz` ACL evaluator out of the broker (a
-//! behavior-preserving refactor), which the gateway reuses for authorization.
+//! the gateway translates Connect-RPC calls into producer, consumer, schema,
+//! deduplication, and authorization operations.
+//!
+//! ## Serving the gateway
+//!
+//! ```no_run
+//! use std::sync::Arc;
+//! use axum::Router;
+//! use crabka_grpc_gateway::{router, state::AppState};
+//!
+//! # async fn run(state: Arc<AppState>) -> Result<(), Box<dyn std::error::Error>> {
+//! let app: Router = router(state);
+//! let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+//! axum::serve(listener, app).await?;
+//! # Ok(())
+//! # }
+//! ```
 
 pub mod authz;
 pub mod codec;

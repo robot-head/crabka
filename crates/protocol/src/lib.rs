@@ -23,6 +23,20 @@
 //! `crabka-protocol` is pre-1.0. Breaking API changes per minor version are
 //! allowed; see CHANGELOG.md. The wire-protocol pin is recorded in
 //! `crates/protocol/schemas/VERSION`.
+//!
+//! ## Encoding a generated request
+//!
+//! ```rust
+//! use bytes::BytesMut;
+//! use crabka_protocol::Encode;
+//! use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
+//!
+//! let req = ApiVersionsRequest::default();
+//! let version = 4;
+//! let mut buf = BytesMut::with_capacity(req.encoded_len(version));
+//! req.encode(&mut buf, version).unwrap();
+//! assert_eq!(buf.len(), req.encoded_len(version));
+//! ```
 
 pub mod api_key;
 pub use api_key::ApiKey;

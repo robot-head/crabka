@@ -55,7 +55,7 @@ struct Args {
     )]
     client_id: String,
 
-    /// Internal dedup topic name (used by Task 12).
+    /// Internal dedup topic name.
     #[arg(
         long,
         env = "CRABKA_GATEWAY_DEDUP_TOPIC",
@@ -75,7 +75,7 @@ struct Args {
     )]
     dedup_window_ms: i64,
 
-    /// Transactional id prefix for the dedup path (Task 12).
+    /// Transactional id prefix for the dedup path.
     #[arg(
         long,
         env = "CRABKA_GATEWAY_DEDUP_TXN_PREFIX",

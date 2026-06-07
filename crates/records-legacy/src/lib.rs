@@ -31,6 +31,30 @@
 //! - [`v2_to_legacy`] / [`legacy_to_v2`]: bridge to/from
 //!   `crabka_protocol::records::RecordBatch`. Use these from the Fetch
 //!   (down-conversion) and Produce (up-conversion) handlers.
+//!
+//! ## Encode and decode a v1 MessageSet
+//!
+//! ```rust
+//! use bytes::{Bytes, BytesMut};
+//! use crabka_records_legacy::{
+//!     Magic, ParsedRecord, decode_message_set, encode_flat_message_set,
+//! };
+//!
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let records = vec![ParsedRecord {
+//!     offset: 42,
+//!     timestamp: Some(1_713_000_000_000),
+//!     key: Some(Bytes::from_static(b"order-42")),
+//!     value: Some(Bytes::from_static(b"created")),
+//! }];
+//!
+//! let mut buf = BytesMut::new();
+//! encode_flat_message_set(records, Magic::V1, &mut buf);
+//! let decoded = decode_message_set(&mut &buf[..], buf.len())?;
+//! assert_eq!(decoded[0].offset, 42);
+//! # Ok(())
+//! # }
+//! ```
 
 mod bridge;
 mod error;

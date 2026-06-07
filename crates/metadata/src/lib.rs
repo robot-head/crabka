@@ -8,8 +8,39 @@
 //! the Raft state machine in `crabka-raft`. Everywhere else it's read
 //! via shared references and Arc clones.
 //!
-//! See the design spec at
-//! `docs/superpowers/specs/2026-05-12-crabka-metadata-quorum-design.md`.
+//! ## Applying controller records
+//!
+//! ```rust
+//! use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
+//! use uuid::Uuid;
+//!
+//! let mut image = MetadataImage::new(Uuid::new_v4());
+//! let topic_id = Uuid::new_v4();
+//!
+//! image.apply(&MetadataRecord::V1Topic(TopicRecord {
+//!     name: "orders".into(),
+//!     topic_id,
+//!     partitions: 0,
+//!     replication_factor: 3,
+//! }));
+//!
+//! let topic = image.topic("orders").expect("topic exists");
+//! assert_eq!(topic.topic_id, topic_id);
+//! ```
+//!
+//! ## Canonical quota entity keys
+//!
+//! ```rust
+//! use crabka_metadata::canonicalize_entity;
+//!
+//! let key = canonicalize_entity(vec![
+//!     ("user".to_string(), Some("alice".to_string())),
+//!     ("client-id".to_string(), Some("analytics".to_string())),
+//! ]);
+//!
+//! assert_eq!(key[0].0, "client-id");
+//! assert_eq!(key[1].0, "user");
+//! ```
 
 #![doc(html_root_url = "https://docs.rs/crabka-metadata/0.0.0")]
 

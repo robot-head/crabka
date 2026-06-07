@@ -1,11 +1,11 @@
 //! The async `KraftController` consensus engine: a single owning tokio task
-//! holds all consensus state (the 3a [`QuorumStateMachine`] core, the 3b
+//! holds all consensus state (the [`QuorumStateMachine`] core, the
 //! [`KraftLog`], and the published [`MetadataImage`]) and turns inbound
 //! commands/RPCs into core [`Event`]s whose [`Action`]s it executes.
 //!
-//! Ownership model: one task owns the [`Engine`]; everything else talks to it
+//! Ownership model: one task owns the `Engine`; everything else talks to it
 //! over an mpsc of [`Command`]. The public [`KraftController`] handle is a
-//! cheap clone holding the command sender plus the `watch` receivers. This
+//! cheap clone holding the command sender plus the `watch` receivers. This is
 //! a single-owner actor pattern; the engine is entirely ours.
 //!
 //! ## Concurrency / no-inline-await invariant
@@ -18,14 +18,14 @@
 //! in-process multi-node sim, where engines RPC each other reciprocally — a
 //! loop that awaited a send inline would deadlock.
 //!
-//! ## Timers & liveness (Task 3)
+//! ## Timers & liveness
 //!
 //! The loop drives a real monotonic clock and `select!`s over the mpsc plus an
 //! election timer, a fetch timer, and a leader heartbeat interval:
 //! - on a role transition the now-irrelevant timer is cancelled (a follower has
 //!   no election timer; a leader has no fetch timer and runs the heartbeat);
 //! - a fetch-timer expiry while the leader is still reachable RE-POLLS
-//!   (`SendFetch`), it does not elect; only [`FETCH_MISS_LIMIT`] consecutive
+//!   (`SendFetch`), it does not elect; only `FETCH_MISS_LIMIT` consecutive
 //!   misses feed `Event::FetchTimeout` to start an election;
 //! - the leader re-broadcasts `BeginQuorumEpoch` to voters each heartbeat tick.
 
@@ -69,7 +69,7 @@ const HEARTBEAT_DIVISOR: u64 = 3;
 const QUORUM_STATE_FILE: &str = "quorum-state";
 
 /// Crabka-internal "snapshot not available" signal in a `FetchSnapshot`
-/// response (voter↔voter, Slice 4); exact JVM error mapping is Slice 6.
+/// response (voter↔voter).
 const SNAPSHOT_NOT_FOUND: i16 = 1;
 
 /// Subdirectory under the data dir holding KIP-630 `.checkpoint` artifacts for
@@ -303,7 +303,7 @@ impl KraftController {
 
     /// Open the engine over `data_dir`: recover the [`MetadataImage`] from the
     /// latest checkpoint + replay committed log batches, and seed the durable
-    /// [`QuorumState`] from the node-local quorum-state file (Task 5). The
+    /// [`QuorumState`] from the node-local quorum-state file. The
     /// `bootstrap` voter set/cluster id is used only when no quorum-state file
     /// exists yet.
     ///
@@ -324,7 +324,7 @@ impl KraftController {
         // Recover the image: latest checkpoint, then replay committed batches
         // past it. The committed prefix is the whole log on a clean restart
         // (the HWM is not persisted separately; the log only holds committed
-        // metadata in this slice, so we apply the full log end).
+        // metadata here, so we apply the full log end).
         let mut image = MetadataImage::new(cluster_id);
         let mut last_snapshot_end_offset = 0;
         if let Some(bytes) = load_latest_checkpoint(&checkpoint_dir(&data_dir))? {
@@ -333,10 +333,10 @@ impl KraftController {
             if let Some((off, _ep)) = latest_checkpoint_id(&checkpoint_dir(&data_dir)) {
                 last_snapshot_end_offset = off;
             }
-            // Checkpoints in this slice cover the in-memory image, not a log
+            // Checkpoints cover the in-memory image, not a log
             // prefix offset, so replay the full log on top (idempotent:
             // duplicate records fail validate and are skipped). A precise
-            // checkpoint-offset cursor lands with FetchSnapshot (Slice 3d).
+            // checkpoint-offset cursor.
         }
         replay_committed(&log, &mut image, 0);
         log.advance_hwm(log.log_end_offset());
@@ -397,8 +397,8 @@ impl KraftController {
     /// Submit a metadata change. On the leader, appends the batch at the current
     /// leader epoch and returns once it is committed (HWM ≥ the appended end
     /// offset) AND applied, surfacing the first per-record rejection. On a
-    /// follower, returns [`RaftError::NotLeader`] with the leader hint (the
-    /// handle layer forwards via `forward_submit_to` — Task 8).
+    /// follower, returns [`RaftError::NotLeader`] with the leader hint; the
+    /// handle layer forwards via `forward_submit_to`.
     ///
     /// # Errors
     /// - [`RaftError::Metadata`] if a record fails `validate`.
@@ -604,7 +604,7 @@ impl Engine {
         self.publish_leader();
     }
 
-    /// Map a timer tick to liveness behavior (Task 3).
+    /// Map a timer tick to liveness behavior.
     fn on_timer(&mut self, tick: TimerTick) {
         match tick {
             TimerTick::Election => {
@@ -655,9 +655,8 @@ impl Engine {
 
     #[allow(clippy::too_many_lines)]
     fn on_inbound(&mut self, inbound: Inbound) {
-        // Decode the node-local request body, run it through the core, and
-        // encode the produced reply back onto the oneshot. Task 7 swaps the
-        // codec for the generated KIP-595 types; the loop logic is unchanged.
+        // Decode the request body, run it through the core, and encode the
+        // produced reply back onto the oneshot.
         match inbound {
             Inbound::Vote { req, reply } => {
                 if let Some(wire::PeerRequest::Vote {
@@ -1274,7 +1273,7 @@ impl Engine {
         write_checkpoint(&checkpoint_dir(&self.data_dir), end_offset, epoch, &bytes)
     }
 
-    /// Persist the durable quorum state atomically (Task 5).
+    /// Persist the durable quorum state atomically.
     fn persist_quorum_state(&self) -> Result<(), RaftError> {
         save_quorum_state(&self.data_dir, self.core.quorum_state())
     }
@@ -1818,14 +1817,14 @@ fn replay_committed(log: &KraftLog, image: &mut MetadataImage, from: i64) {
     }
 }
 
-// ---- quorum-state file (Task 5) ----------------------------------------------
+// ---- quorum-state file --------------------------------------------------------
 
 /// Write `state` to the node-local `quorum-state` file atomically (temp +
 /// rename). The format is node-local (not wire), so a compact deterministic
 /// little-endian layout of: cluster id (16 bytes), leader epoch (u32), leader id
 /// (tag u8 then u64), voted key (tag u8 then u64 then a 16-byte directory id).
 /// The voter set is NOT persisted here — it is reconstructed from the bootstrap
-/// config / metadata image (static voters this slice).
+/// config / metadata image (static voters).
 fn save_quorum_state(dir: &std::path::Path, state: &QuorumState) -> Result<(), RaftError> {
     let mut buf = Vec::with_capacity(64);
     buf.extend_from_slice(state.cluster_id.as_bytes());
@@ -1905,9 +1904,8 @@ fn load_quorum_state(
     }))
 }
 
-/// Write a KIP-630 `.checkpoint` artifact (bytes only — the `.meta`
-/// sidecar that `snapshot::persist` writes is being removed in Task 9, so the
-/// engine writes the checkpoint directly with the same temp+rename atomicity).
+/// Write a KIP-630 `.checkpoint` artifact (bytes only) directly with
+/// temp+rename atomicity.
 fn write_checkpoint(
     dir: &std::path::Path,
     end_offset: i64,
@@ -2160,7 +2158,7 @@ mod tests {
         ctrl.shutdown().await;
     }
 
-    // ---- Task 3: timers + liveness ----
+    // ---- timers + liveness ----
 
     /// A single-voter engine started with the REAL clock auto-elects after the
     /// election timeout — no injected event.
@@ -2210,7 +2208,7 @@ mod tests {
         ctrl.shutdown().await;
     }
 
-    // ---- Task 4: handle ops ----
+    // ---- handle ops ----
 
     #[tokio::test]
     async fn submit_change_commits_on_single_voter_leader() {
@@ -2382,7 +2380,7 @@ mod tests {
         ctrl.shutdown().await;
     }
 
-    // ---- Task 5: recovery + quorum-state file ----
+    // ---- recovery + quorum-state file ----
 
     #[tokio::test]
     async fn snapshot_then_restart_recovers_image() {
@@ -2455,7 +2453,7 @@ mod tests {
         assert!(loaded.cluster_id == cid);
     }
 
-    // ---- Slice 4 Task 6: snapshot trigger + prune ----
+    // ---- snapshot trigger + prune ----
 
     /// A single-voter leader with `snapshot_interval_records = 3` snapshots and
     /// prunes once the committed offset has advanced past the threshold. After

@@ -9,8 +9,8 @@
 //!
 //! # Decisions
 //!
-//! [`decide`] is a pure function over `(spec, existing token, now)` and
-//! returns one of four [`ReconcileDecision`] arms. The reconcile loop
+//! `decide` is a pure function over `(spec, existing token, now)` and
+//! returns one of four `ReconcileDecision` arms. The reconcile loop
 //! dispatches per arm:
 //!
 //! - `Create` — no matching token; call `CreateDelegationToken` (act-as).
@@ -22,8 +22,8 @@
 //!
 //! # I/O isolation
 //!
-//! The admin client surface is the [`DelegationTokenAdmin`] trait. The
-//! Kubernetes I/O surface is the [`SecretWriter`] + [`KafkaUserStatusWriter`]
+//! The admin client surface is the `DelegationTokenAdmin` trait. The
+//! Kubernetes I/O surface is the `SecretWriter` + `KafkaUserStatusWriter`
 //! trait pair. Unit tests substitute trivial in-memory mocks; production
 //! wires `kube::Api<Secret>` / `kube::Api<KafkaUser>` adapters.
 

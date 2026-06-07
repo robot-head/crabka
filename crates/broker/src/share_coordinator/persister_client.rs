@@ -1,6 +1,6 @@
 //! `SharePersister` — the group-coordinator's client onto the share-state
-//! persister (KIP-932 Slice B Task 11). It bridges the share-group membership
-//! coordinator (Slice A) to the durable [`ShareCoordinator`] (Slice B):
+//! persister (KIP-932). It bridges the share-group membership coordinator to
+//! the durable [`ShareCoordinator`]:
 //!
 //! - When a share group joins a topic, the coordinator calls
 //!   [`SharePersister::initialize`] for each newly-assigned `(topic, partition)`.

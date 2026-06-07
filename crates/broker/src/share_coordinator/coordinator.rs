@@ -7,14 +7,14 @@
 //!
 //! Mirrors [`crate::txn::coordinator::TxnCoordinator`].
 //!
-//! Leadership: the wire handlers (Task 8) check [`ShareCoordinator::is_leader`]
+//! Leadership: the wire handlers check [`ShareCoordinator::is_leader`]
 //! before dispatching, so the state-machine methods here (`initialize`,
 //! `write`, `read`, `delete`) assume this broker leads the relevant
 //! `__share_group_state` partition. `persist_record` still defends against a
 //! missing local partition log and returns [`BrokerError::Share`] in that case.
 
-// The state-machine methods are consumed by the persister RPC handlers
-// (Task 8) and the lifecycle hook (Task 11), which land in later slices.
+// The state-machine methods are consumed by the persister RPC handlers and
+// the group-lifecycle hook.
 
 use std::collections::HashSet;
 use std::sync::Arc;

@@ -16,7 +16,7 @@ use crabka_security::{AuthMethod, OAuthBearerValidator, Principal};
 
 use basic::BasicAuthStore;
 
-/// An mTLS-authenticated principal inserted by the TLS accept loop (Task 4);
+/// An mTLS-authenticated principal inserted by the TLS accept loop;
 /// `auth_layer` consumes it as the highest-precedence source.
 #[derive(Clone)]
 pub struct MtlsPrincipal(pub Principal);
@@ -123,7 +123,7 @@ pub async fn auth_layer(
     // ingress node already authenticated AND authorized it. Mirror authz_layer's
     // FORWARD_HEADER skip so auth and authz agree on the same trust boundary
     // (operators MUST isolate the inter-node forwarding link; a client that forges
-    // `X-Forwarded-For-Registry` bypasses both — see the slice-6 security spec).
+    // `X-Forwarded-For-Registry` bypasses both).
     // This is required for ALL auth methods: an mTLS client's credential (its TLS
     // client cert) cannot be carried over the secondary→primary proxy hop, so the
     // primary must trust the forward rather than re-authenticate.
@@ -431,7 +431,7 @@ mod tests {
     ///     content-type.
     ///
     /// This runs WITHOUT Docker — the durable regression proof that our `401`
-    /// reproduces cp's wire bytes (mirrors the slice-3/4/5 cp pins).
+    /// reproduces cp's wire bytes.
     #[tokio::test]
     async fn auth_layer_401_matches_cp_byte_exact() {
         use axum::Router;

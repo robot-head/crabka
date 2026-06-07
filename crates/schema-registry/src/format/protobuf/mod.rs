@@ -1,6 +1,7 @@
 //! Protobuf: parse a single `.proto` source into a `FileDescriptorProto`; dedup
 //! key = deterministic prost encoding of the descriptor (source-info cleared so
-//! formatting doesn't change the bytes). Confluent-exact canonical form is slice 2+.
+//! formatting doesn't change the bytes). The implementation does not attempt
+//! Confluent's full canonicalization rules.
 //!
 //! `normalized_form()` reproduces the pretty-printed text that
 //! cp-schema-registry normalises to (verified against the golden fixtures):
@@ -54,7 +55,7 @@ pub fn normalize(fdp: &FileDescriptorProto) -> String {
     let mut out = String::new();
 
     // Emit syntax line; cp-schema-registry always emits `syntax = "proto3";\n`
-    // even if the proto2 syntax is used.  For slice-1 we only support proto3.
+    // even if the proto2 syntax is used. This implementation accepts proto3.
     let syntax = fdp.syntax.as_deref().unwrap_or("proto3");
     let _ = writeln!(out, "syntax = \"{syntax}\";");
 
@@ -199,9 +200,9 @@ impl ParsedSchema for ProtobufSchema {
         // and the file name so neither whitespace nor the synthetic filename
         // affects the dedup key. Then prost-encode to bytes and hex-encode.
         // NOTE: this is a descriptor-bytes key, not Confluent canonical form
-        // (which is slice 2+).
+        // which this implementation intentionally does not attempt.
         tracing::debug!(
-            "protobuf canonical_form: using descriptor-bytes key (not Confluent canonical form; slice 2+)"
+            "protobuf canonical_form: using descriptor-bytes key (not Confluent canonical form)"
         );
         let mut d = self.descriptor.clone();
         d.source_code_info = None;
@@ -273,8 +274,7 @@ mod tests {
     #[test]
     fn label_change_singular_to_repeated_is_compatible() {
         // cp is authority: singular ↔ repeated of the same type is compatible
-        // (calibrated in Task 6 against the golden matrix — previously seeded
-        // as incompatible, which cp contradicts).
+        // (matching the golden matrix; this is compatible in cp).
         assert!(check(&p("repeated int32 id = 1;"), &p("int32 id = 1;"), &[], &[]).is_ok());
     }
 
@@ -285,11 +285,11 @@ mod tests {
         assert!(check(r, w, &[], &[]).is_err());
     }
 
-    // ── Task 2: oneof rules ───────────────────────────────────────────────────
+    // ── oneof rules ───────────────────────────────────────────────────────────
 
     #[test]
     fn moving_field_into_oneof_is_incompatible_out_is_compatible() {
-        // cp is authority (calibrated in Task 6): a reader that moved fields INTO
+        // cp is authority: a reader that moved fields INTO
         // a oneof cannot read a writer that had them as plain fields → incompatible.
         // The reverse (oneof → plain) is compatible.
         let plain = "syntax = \"proto3\"; message U { int32 a = 1; int32 b = 2; }";
@@ -314,7 +314,7 @@ mod tests {
         );
     }
 
-    // ── Task 3: reserved + map ────────────────────────────────────────────────
+    // ── reserved + map ────────────────────────────────────────────────────────
 
     #[test]
     fn reserving_a_number_is_compatible() {
@@ -336,7 +336,7 @@ mod tests {
         assert!(check(s, s, &[], &[]).is_ok());
     }
 
-    // ── Task 4: enum + nested + package ──────────────────────────────────────
+    // ── enum + nested + package ──────────────────────────────────────────────
 
     #[test]
     fn enum_const_added_compatible() {
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn package_change_is_compatible() {
-        // cp is authority: a package rename is compatible (calibrated in Task 6).
+        // cp is authority: a package rename is compatible.
         let w = "syntax = \"proto3\"; package a; message U { int32 id = 1; }";
         let r = "syntax = \"proto3\"; package b; message U { int32 id = 1; }";
         assert!(check(r, w, &[], &[]).is_ok());
@@ -372,7 +372,7 @@ mod tests {
         assert!(check(r, w, &[], &[]).is_ok());
     }
 
-    // ── Task 5: reference resolution ─────────────────────────────────────────
+    // ── reference resolution ─────────────────────────────────────────────────
 
     #[test]
     fn protobuf_resolves_import_reference() {

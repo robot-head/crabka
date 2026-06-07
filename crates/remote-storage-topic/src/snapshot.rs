@@ -1,11 +1,11 @@
-//! On-disk RLMM snapshot (slice 48p): a versioned envelope wrapping a
+//! On-disk RLMM snapshot: a versioned envelope wrapping a
 //! [`RlmmCacheDump`] plus the per-metadata-partition committed
 //! offsets, so a restarting broker resumes the metadata consumer from
 //! `committed + 1` instead of replaying `__remote_log_metadata` from
 //! offset 0.
 //!
 //! The per-segment / per-partition-delete encoding reuses the
-//! [`MetadataEvent`](crate::serde::MetadataEvent) codec; the envelope
+//! [`MetadataEvent`] codec; the envelope
 //! adds a format version, the committed-offsets vector, and
 //! length-prefixed entries. Writes are atomic (temp file + rename) so
 //! a crash mid-write never yields a torn snapshot; a corrupt or

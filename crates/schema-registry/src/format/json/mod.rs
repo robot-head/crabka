@@ -1,5 +1,6 @@
 //! JSON Schema: parse as JSON + well-formedness; canonical form = recursively
-//! key-sorted compact JSON (the dedup key). Compatibility is slice 2.
+//! key-sorted compact JSON (the dedup key). Compatibility uses the in-tree
+//! structural diff.
 
 mod compat;
 mod diff;
@@ -186,7 +187,7 @@ mod tests {
         assert!(check(r, w, &[], &[]).is_err());
     }
 
-    // --- Task 2: enum / numeric / string / array / object-size constraints ---
+    // --- enum / numeric / string / array / object-size constraints ---
 
     #[test]
     fn enum_changes_do_not_panic() {
@@ -245,7 +246,7 @@ mod tests {
         );
     }
 
-    // --- Task 3: combinators ---
+    // --- combinators ---
 
     #[test]
     fn anyof_subschema_added_does_not_panic() {
@@ -267,7 +268,7 @@ mod tests {
         );
     }
 
-    // --- Task 4: $ref / dependencies / conditionals ---
+    // --- $ref / dependencies / conditionals ---
 
     #[test]
     fn ref_resolves_and_diffs_target() {

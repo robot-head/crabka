@@ -1,6 +1,6 @@
 //! KIP-932 share-group membership state machine.
 //!
-//! Mirrors the consumer next-gen [`consumer_state::GroupState`] minus all
+//! Mirrors the consumer next-gen `consumer_state::GroupState` minus all
 //! offset and revocation machinery. Share-group assignment is non-exclusive,
 //! so members carry no assignment-ack state beyond a member epoch.
 
@@ -60,7 +60,7 @@ pub struct ShareGroupState {
     /// Set whenever membership/subscription changes so the actor knows a
     /// reconcile is pending; cleared once the reconcile installs a target.
     pub dirty: bool,
-    /// KIP-932 (Slice B Task 11): `(topic_id, partition)` share-states this
+    /// KIP-932: `(topic_id, partition)` share-states this
     /// group has already Initialized in the share-state persister. Seeded from
     /// the replayed `ShareGroupStatePartitionMetadata` (key v14) so a
     /// post-restart heartbeat does not re-Initialize. The lifecycle hook adds

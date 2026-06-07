@@ -21,20 +21,20 @@ pub enum Kind {
     FieldLabelChanged,
     MessageRemoved,
     MessageAdded,
-    // Oneof rules (Task 2)
+    // Oneof rules
     OneofFieldMovedIn,
     OneofFieldMovedOut,
     OneofAdded,
     OneofRemoved,
-    // Reserved rules (Task 3)
+    // Reserved rules
     ReservedNumberAdded,
     ReservedNameAdded,
-    // Enum rules (Task 4)
+    // Enum rules
     EnumConstAdded,
     EnumConstRemoved,
     EnumAdded,
     EnumRemoved,
-    // Package rule (Task 4)
+    // Package rule
     PackageChanged,
 }
 
@@ -72,7 +72,7 @@ impl Resolver<'_> {
         match f.type_name.as_deref() {
             // A named-type reference (message or enum). protox gives the short
             // leaf name; classify by membership in the file's enum-name set.
-            // KNOWN EDGE (slice 2+): an enum and a message sharing a leaf name in
+            // Known edge: an enum and a message sharing a leaf name in
             // different scopes could be misclassified here; not exercised by the
             // cp matrix. A fully-qualified-name resolver is the proper fix when
             // full Confluent canonical form lands.
@@ -128,7 +128,7 @@ pub fn compare(original: &FileDescriptorProto, update: &FileDescriptorProto) -> 
         orig_enums: collect_enum_names(original),
         upd_enums: collect_enum_names(update),
     };
-    // Package change (Task 4)
+    // Package change
     if original.package != update.package {
         out.push(Difference {
             kind: Kind::PackageChanged,
@@ -229,10 +229,10 @@ fn compare_message(
         .cloned()
         .collect();
     compare_oneofs(path, &orig_real, &upd_real, out);
-    // Reserved ranges and names (Task 3)
+    // Reserved ranges and names
     compare_reserved(path, &orig.reserved_range, &upd.reserved_range, out);
     compare_reserved_names(path, &orig.reserved_name, &upd.reserved_name, out);
-    // Recurse into non-map nested messages (Task 4a)
+    // Recurse into non-map nested messages
     // Keep ordinary nested messages; synthetic `map<>` entry messages are
     // compared via the map path (`compare_map_entries`), not as nested types.
     let keep_nested =
@@ -242,7 +242,7 @@ fn compare_message(
     let orig_nested_owned: Vec<DescriptorProto> = orig_nested.into_iter().cloned().collect();
     let upd_nested_owned: Vec<DescriptorProto> = upd_nested.into_iter().cloned().collect();
     compare_messages(path, &orig_nested_owned, &upd_nested_owned, r, out);
-    // Compare nested enums (Task 4b)
+    // Compare nested enums
     compare_enums(path, &orig.enum_type, &upd.enum_type, out);
 }
 

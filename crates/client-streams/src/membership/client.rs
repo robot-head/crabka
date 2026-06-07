@@ -215,11 +215,9 @@ fn map_error(
     StreamsClientError,
 > {
     // Kafka error codes for the STREAMS_INVALID_TOPOLOGY family (KIP-1071).
-    // These are not yet in crates/broker/src/codes.rs (the broker coordinator
-    // surfaces topology problems via the response Status list, not a top-level
-    // error code), but they are valid response codes per the
-    // StreamsGroupHeartbeatResponse schema. Values verified against the Apache
-    // Kafka `Errors` enum (clients/.../protocol/Errors.java, trunk/4.x).
+    // The broker coordinator surfaces topology problems via the response Status
+    // list, but these are still valid top-level response codes per the
+    // StreamsGroupHeartbeatResponse schema.
     const STREAMS_INVALID_TOPOLOGY: i16 = 130;
     const STREAMS_INVALID_TOPOLOGY_EPOCH: i16 = 131;
     const STREAMS_TOPOLOGY_FENCED: i16 = 132;

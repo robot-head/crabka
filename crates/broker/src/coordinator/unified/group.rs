@@ -1,4 +1,4 @@
-//! Unified `Group` container (KIP-848 64d-B).
+//! Unified `Group` container for KIP-848 migration.
 //!
 //! One in-memory model for a consumer group regardless of which protocol its
 //! members speak. A `Group` is a discriminated container over the two existing,
@@ -6,11 +6,9 @@
 //! the next-gen epoch machine ([`ConsumerState`]) — so the unified coordinator
 //! and persistence path can hold either behind one type.
 //!
-//! In this slice (64d-B) a group is single-type for its lifetime: the `kind`
-//! is chosen when the actor is spawned and never flipped. Slices 64d-C..E
-//! replace `GroupKind` with a single member list that holds classic *and*
-//! consumer members simultaneously (live migration); this container is the seam
-//! that localizes that change.
+//! A group is single-type for its lifetime: the `kind` is chosen when the actor
+//! is spawned and never flipped. The container keeps the protocol-specific
+//! state machines behind one surface for coordinator and persistence code.
 
 // The state machines are reused verbatim, relocated under `unified/`. These
 // aliases give the unified surface its types without renaming the moved code

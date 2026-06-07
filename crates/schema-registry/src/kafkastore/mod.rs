@@ -43,7 +43,7 @@ impl KafkaStore {
     /// primary's last records could briefly mis-assign ids/versions until it
     /// catches up — catch-up-before-write on promotion (and fencing the brief
     /// rebalance multi-writer window) is a documented deferred limitation of the
-    /// HA slice. Tests start from a fresh (empty) `_schemas`, so there is nothing
+    /// HA support. Tests start from a fresh (empty) `_schemas`, so there is nothing
     /// to replay.
     pub async fn start(
         cfg: &RegistryConfig,
@@ -82,8 +82,8 @@ impl KafkaStore {
 
     /// Register a schema. In `IMPORT` mode, persists at the explicit
     /// `import_id`/`import_version` (no id-assignment, no compat check). In
-    /// `READONLY` mode, rejected. Otherwise the slice-1/2 path (dedup → compat →
-    /// assign → persist → read-your-writes).
+    /// `READONLY` mode, rejected. Otherwise the path is dedup → compat →
+    /// assign → persist → read-your-writes.
     pub async fn register(
         &self,
         subject: &str,
@@ -128,10 +128,10 @@ impl KafkaStore {
         {
             return Ok(existing);
         }
-        // Slice 2: enforce compatibility against existing versions per the
-        // subject's effective level. First version / NONE => no-op. Incompatible
-        // => SrError::Incompatible (409); nothing is persisted. Ref-aware: both
-        // the candidate's and each existing version's references are resolved.
+        // Enforce compatibility against existing versions per the subject's
+        // effective level. First version / NONE => no-op. Incompatible =>
+        // SrError::Incompatible (409); nothing is persisted. Ref-aware: both the
+        // candidate's and each existing version's references are resolved.
         crate::compat::check_registration(&self.store.read(), subject, ty, schema, &resolved)?;
         // Genuinely new under this subject: decide id/version on a throwaway
         // clone (the reader is the sole mutator of the live store).
@@ -151,7 +151,7 @@ impl KafkaStore {
     }
 
     /// Persist + apply a global compatibility level (stored, not enforced in
-    /// slice 1).
+    /// current API surface).
     pub async fn set_global_compat(&self, level: String) -> Result<(), SrError> {
         self.set_compat(None, level).await
     }

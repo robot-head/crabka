@@ -22,8 +22,11 @@ pub struct Windowed<K> {
 }
 
 /// Tumbling / hopping time windows (epoch-aligned). `advance_ms == size_ms` is
-/// tumbling; `advance_ms < size_ms` is hopping. `grace_ms` is recorded for the
-/// changelog retention computation (window closing itself is deferred to a later slice).
+/// tumbling; `advance_ms < size_ms` is hopping. `grace_ms` contributes to
+/// changelog retention and to [`Suppressed::until_window_closes`] timing when the
+/// resulting table is suppressed.
+///
+/// [`Suppressed::until_window_closes`]: crate::dsl::Suppressed::until_window_closes
 #[derive(Debug, Clone, Copy)]
 pub struct TimeWindows {
     pub size_ms: i64,
@@ -121,8 +124,11 @@ impl JoinWindows {
 
 /// Session windows: records for a key form one session while they stay within
 /// `gap_ms` of each other (inactivity gap). A session window `[start, end]` is
-/// defined by data, not epoch-aligned. `grace_ms` only affects changelog
-/// retention here (window closing is deferred, as in the other windowing slices).
+/// defined by data, not epoch-aligned. `grace_ms` contributes to changelog
+/// retention and to [`Suppressed::until_window_closes`] timing when the resulting
+/// table is suppressed.
+///
+/// [`Suppressed::until_window_closes`]: crate::dsl::Suppressed::until_window_closes
 #[derive(Debug, Clone, Copy)]
 pub struct SessionWindows {
     pub gap_ms: i64,

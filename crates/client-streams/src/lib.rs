@@ -1,14 +1,20 @@
-//! KIP-1071 Kafka Streams rebalance-protocol client.
+//! Kafka Streams-compatible client runtime for Crabka.
 //!
-//! Sub-project #1 of the Crabka Streams runtime: a [`StreamsMembership`] joins a
-//! *streams group* via `StreamsGroupHeartbeat` (API key 88), maintains
-//! membership with a background heartbeat, and surfaces assigned active/standby/
-//! warmup tasks. The [`topology`] module builds a Processor-API topology and
-//! serializes it byte-for-byte to the JVM 4.x wire shape.
+//! `crabka-client-streams` provides three layers that can be used independently:
 //!
-//! Processors are *structural placeholders* here — record processing arrives in
-//! a later sub-project. See
-//! `docs/superpowers/specs/2026-06-03-kip-1071-streams-client-membership-design.md`.
+//! - [`StreamsBuilder`] builds JVM-compatible KStream/KTable topologies for
+//!   common application code: map/filter chains, aggregations, joins, windows,
+//!   suppression, global tables, and custom Processor-API nodes.
+//! - [`Topology`] is the typed Processor API for applications that want explicit
+//!   source, processor, sink, and state-store wiring.
+//! - [`KafkaStreams`] runs a built topology against a Kafka-compatible broker by
+//!   joining a KIP-1071 streams group, processing assigned input partitions,
+//!   producing sink records, restoring changelog-backed stores, and serving local
+//!   interactive queries.
+//!
+//! For broker-free tests, [`TopologyTestDriver`] executes the same built topology
+//! in process. The driver is the fastest way to exercise business logic and state
+//! stores before running with [`KafkaStreams`].
 //!
 //! ## Quick start
 //!
@@ -42,7 +48,7 @@
 //! }
 //! # }
 //! ```
-//! ## Processor API (sub-project #2)
+//! ## Processor API
 //!
 //! Define a typed topology, then test it with the broker-free [`TopologyTestDriver`]:
 //!
@@ -85,7 +91,7 @@
 //! topo.add_sink("out", "out", [&src], Produced::with(StringSerde, I64Serde));
 //! ```
 //!
-//! ## State stores (sub-project #3)
+//! ## State stores
 //!
 //! Processors can persist and restore keyed state via a named [`KeyValueStore`].
 //! The store is attached to the topology with `add_state_store`, and accessed
@@ -146,9 +152,8 @@
 //! `Change { old_value, new_value }` and `filter` emits tombstones (a row whose
 //! key stops matching is deleted downstream with `new_value = None`).
 //! [`KStream::to_table`] materializes a stream into a [`KTable`] backed by a
-//! named [`Materialized`] store. Note: [`KTable::to_stream`] forwards update
-//! records and drops tombstones from the output stream (full null-value output
-//! is deferred to a future slice).
+//! named [`Materialized`] store. [`KTable::to_stream`] forwards update records
+//! and drops tombstones from the output stream.
 //!
 //! [`KStream::join_table`] and [`KStream::left_join_table`] join a stream against
 //! a **materialized** `KTable`: the stream side drives, and for each record the
@@ -226,8 +231,9 @@
 //! aggregations: `windowed_by(TimeWindows::of_size(..))` then `count`/`reduce`/
 //! `aggregate` yields a [`KTable`]`<`[`Windowed`]`<K>, V>`. [`TimeWindows`] are
 //! tumbling (`of_size`) or hopping (`.advance_by(..)`); each record is aggregated
-//! into every window it falls into, and a result is emitted on **every update**
-//! (window closing / grace / `suppress` are deferred). The windowed store is a
+//! into every window it falls into, and a result is emitted on **every update**.
+//! Add [`KTable::suppress`] with [`Suppressed::until_window_closes`] when the
+//! application wants one final result after the window closes. The windowed store is a
 //! [`Window`]-keyed store over the same pluggable backend, with a `compact,delete`
 //! changelog (`retention.ms = size + grace + 1 day`). Read the windowed output
 //! with [`TimeWindowedSerde`] (the key carries the window start).
@@ -317,7 +323,69 @@
 //! [`FixedKeyRecord::with_value`]; the context's only `forward` re-attaches that key,
 //! so the processor cannot emit a different one. (An `add_state_store` store that no
 //! `process`/`process_values` connects is simply never instantiated — no changelog,
-//! no runtime store; an explicit unconnected-store build error is deferred.)
+//! no runtime store.)
+//!
+//! ### Enriching a stream with a fully replicated table
+//!
+//! `GlobalKTable` is useful for reference data such as customer profiles,
+//! product catalogs, or fraud watchlists where every app instance should be able
+//! to look up any key without repartitioning the stream:
+//!
+//! ```
+//! use crabka_client_streams::{
+//!     Consumed, Materialized, Produced, StreamsBuilder, StringSerde,
+//! };
+//!
+//! let b = StreamsBuilder::new();
+//! let customers = b.global_table::<String, String, _, _>(
+//!     "customers",
+//!     Consumed::with(StringSerde, StringSerde),
+//!     Materialized::with(StringSerde, StringSerde).as_store("customers-by-id"),
+//! );
+//!
+//! b.stream::<String, String, _, _>(
+//!     ["orders"],
+//!     Consumed::with(StringSerde, StringSerde),
+//! )
+//! .left_join_global(
+//!     &customers,
+//!     |_order_id, order| order.split(':').next().unwrap_or("").to_string(),
+//!     |order, customer| format!("{order}|customer={}", customer.map_or("unknown", |v| v)),
+//! )
+//! .to("enriched-orders", Produced::with(StringSerde, StringSerde));
+//!
+//! drop(customers);
+//! let built = b.build("orders-enricher").unwrap();
+//! assert_eq!(built.list_source_topics(), vec!["orders".to_string()]);
+//! ```
+//!
+//! ### Final windowed counts
+//!
+//! Windowed aggregations emit on every update by default. Add `suppress` when
+//! downstream systems should receive only the final value after the window grace
+//! has elapsed:
+//!
+//! ```
+//! use crabka_client_streams::{
+//!     BufferConfig, Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder,
+//!     StringSerde, Suppressed, TimeWindowedSerde, TimeWindows,
+//! };
+//!
+//! let b = StreamsBuilder::new();
+//! b.stream::<String, String, _, _>(["clicks"], Consumed::with(StringSerde, StringSerde))
+//!     .group_by_key(Grouped::with(StringSerde, StringSerde))
+//!     .windowed_by(TimeWindows::of_size(60_000).grace(10_000))
+//!     .count(Materialized::with(StringSerde, I64Serde).as_store("click-counts"))
+//!     .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
+//!     .to_stream()
+//!     .to(
+//!         "click-counts-final",
+//!         Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+//!     );
+//!
+//! let built = b.build("click-analytics").unwrap();
+//! assert_eq!(built.list_sink_topics(), vec!["click-counts-final".to_string()]);
+//! ```
 //!
 //! ```
 //! use crabka_client_streams::{
@@ -462,7 +530,7 @@
 //!     .topology(built)
 //!     .build()
 //!     .await?;
-//! // ... app runs in the background; later:
+//! // The app runs in the background until it is closed.
 //! streams.close().await?;
 //! # Ok(())
 //! # }
@@ -574,9 +642,10 @@ pub mod test_driver;
 pub mod topology;
 
 pub use dsl::{
-    BranchedStream, BufferConfig, GlobalKTable, Grouped, JoinWindows, KGroupedStream, KTable,
-    Materialized, Repartitioned, SessionWindowedSerde, SessionWindows, StreamJoined,
-    StreamsBuilder, Suppressed, TimeWindowedSerde, TimeWindows, Window, Windowed,
+    BranchedStream, BufferConfig, GlobalKTable, Grouped, JoinWindows, KGroupedStream, KStream,
+    KTable, Materialized, Repartitioned, SessionWindowedKGroupedStream, SessionWindowedSerde,
+    SessionWindows, StreamJoined, StreamsBuilder, Suppressed, TimeWindowedKGroupedStream,
+    TimeWindowedSerde, TimeWindows, Window, Windowed,
 };
 pub use error::StreamsClientError;
 pub use membership::{

@@ -85,7 +85,7 @@ pub enum Kind {
     ProductTypeNarrowed,
     SumTypeExtended,
     SumTypeNarrowed,
-    #[allow(dead_code)] // emitted by Task 6 calibration when not-schema is widened
+    #[allow(dead_code)] // retained for wider not-schema diagnostics
     NotTypeExtended,
     NotTypeNarrowed,
     CombinedTypeSubschemasChanged,
@@ -289,7 +289,8 @@ fn compare_required(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Differe
 }
 
 fn compare_additional_properties(path: &str, orig: &Value, upd: &Value, out: &mut Vec<Difference>) {
-    // NOTE: only the boolean open/closed transition is classified; a schema-valued additionalProperties narrowing is treated permissively (no cp matrix case pins it). Slice 2c+.
+    // NOTE: only the boolean open/closed transition is classified; a
+    // schema-valued additionalProperties narrowing is treated permissively.
     let oa = orig.get("additionalProperties");
     let ua = upd.get("additionalProperties");
     let o_false = matches!(oa, Some(Value::Bool(false)));
