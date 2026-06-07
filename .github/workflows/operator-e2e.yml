@@ -2835,10 +2835,12 @@ jobs:
       # pulls them once on the runner (with retry) and `kind load`s them
       # into the node, so kubelet serves them locally (chart default
       # pullPolicy is IfNotPresent) and never touches docker.io. `--wait`
-      # keeps 1500s of headroom for first-boot on the CPU-contended node —
-      # 900s wasn't enough when Postgres+Keycloak first-start under load
-      # (observed: helm `context deadline exceeded` while both pods were
-      # still in early-startup probes).
+      # keeps 1500s of headroom for first-boot on the CPU-contended node.
+      # The chart's default liveness probe starts after 120s and kills after
+      # three 1s failures, while startupProbe is disabled. On slower shared
+      # runners Keycloak can still be in the first Quarkus configuration pass
+      # at that point, so enable a generous startupProbe to gate liveness until
+      # the HTTPS port is actually accepting connections.
       # ─────────────────────────────────────────────────────────────────────
       - name: Install Bitnami Keycloak chart
         run: |
@@ -2857,6 +2859,11 @@ jobs:
             --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
+            --set startupProbe.enabled=true \
+            --set startupProbe.initialDelaySeconds=30 \
+            --set startupProbe.periodSeconds=10 \
+            --set startupProbe.timeoutSeconds=5 \
+            --set startupProbe.failureThreshold=120 \
             --wait --timeout=1500s
           kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
@@ -3418,8 +3425,14 @@ jobs:
             kubectl get kafkatopic e2e -n default -o yaml || true
             echo "### events (default ns)"
             kubectl get events -n default --sort-by=.lastTimestamp || true
+            echo "### events (keycloak ns)"
+            kubectl get events -n keycloak --sort-by=.lastTimestamp || true
+            echo "### keycloak pod describe"
+            kubectl describe pod -n keycloak kc-keycloak-0 || true
             echo "### keycloak pod logs"
             kubectl logs -n keycloak kc-keycloak-0 -c keycloak --tail=300 || true
+            echo "### keycloak previous pod logs"
+            kubectl logs -n keycloak kc-keycloak-0 -c keycloak --previous --tail=300 || true
             echo "### keycloak postgresql logs"
             kubectl logs -n keycloak -l app.kubernetes.io/name=postgresql --tail=100 || true
             echo "### keycloak auto-generated TLS Secret (keycloak ns)"
@@ -3518,7 +3531,9 @@ jobs:
       # ─────────────────────────────────────────────────────────────────────
       # Install Bitnami Keycloak chart with TLS enabled.
       #
-      # Same pin/config as kind-oauth — see that job's comment for context.
+      # Same pin/config as kind-oauth — see that job's comment for context,
+      # including the startupProbe override that prevents liveness from killing
+      # slow first-boot Keycloak containers during Quarkus configuration.
       # Introspection-mode validation still requires HTTPS to the
       # introspection + userinfo endpoints, so the CA bundle is still wired
       # via `tlsTrustedCertificates`.
@@ -3540,6 +3555,11 @@ jobs:
             --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
+            --set startupProbe.enabled=true \
+            --set startupProbe.initialDelaySeconds=30 \
+            --set startupProbe.periodSeconds=10 \
+            --set startupProbe.timeoutSeconds=5 \
+            --set startupProbe.failureThreshold=120 \
             --wait --timeout=1500s
           kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
@@ -4070,8 +4090,14 @@ jobs:
             kubectl get kafkatopic e2e -n default -o yaml || true
             echo "### events (default ns)"
             kubectl get events -n default --sort-by=.lastTimestamp || true
+            echo "### events (keycloak ns)"
+            kubectl get events -n keycloak --sort-by=.lastTimestamp || true
+            echo "### keycloak pod describe"
+            kubectl describe pod -n keycloak kc-keycloak-0 || true
             echo "### keycloak pod logs"
             kubectl logs -n keycloak kc-keycloak-0 -c keycloak --tail=300 || true
+            echo "### keycloak previous pod logs"
+            kubectl logs -n keycloak kc-keycloak-0 -c keycloak --previous --tail=300 || true
             echo "### keycloak postgresql logs"
             kubectl logs -n keycloak -l app.kubernetes.io/name=postgresql --tail=100 || true
             echo "### keycloak auto-generated TLS Secret (keycloak ns)"
