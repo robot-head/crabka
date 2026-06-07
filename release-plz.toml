@@ -3,6 +3,7 @@ changelog_update = true
 git_release_enable = true
 git_tag_enable = true
 publish = true
+publish_no_verify = true
 release = true
 changelog_config = "release-plz-changelog.toml"
 git_release_type = "auto"
