@@ -51,7 +51,7 @@ def parse_crates(root_dir, ws_version):
         deps = []
         # Look for dependencies defined as: name = { path = "..." } or similar
         # We can extract all keys under dependencies sections
-        dep_sections = re.findall(r'\[(?:build-|target\..*?\.)?dependencies\](.*?)(?=\n\[|$)', content, re.DOTALL)
+        dep_sections = re.findall(r'\[(?:build-|target\..*?\.|dev-)?dependencies\](.*?)(?=\n\[|$)', content, re.DOTALL)
         for section in dep_sections:
             # Find all path-based dependencies in this section
             for line in section.splitlines():
@@ -94,6 +94,8 @@ def topological_sort(packages):
         pkg = packages.get(name)
         if pkg:
             for dep in pkg["dependencies"]:
+                if dep == name:
+                    continue
                 if dep in packages: # only care about dependencies within our unpublished set
                     dfs(dep)
         visited[name] = 2 # visited
@@ -154,7 +156,7 @@ def main():
             # We use --no-verify since semver-checks and tests are run in CI anyway,
             # but wait, standard publish verify is fine too. Let's do standard publish,
             # or allow --no-verify if they want. Let's run standard cargo publish first.
-            cmd = ["cargo", "publish", "--allow-dirty"]
+            cmd = ["cargo", "publish", "--allow-dirty", "--no-verify"]
             print(f"Running: {' '.join(cmd)} (Attempt {attempt})")
             
             # Run from the package directory
