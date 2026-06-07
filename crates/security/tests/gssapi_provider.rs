@@ -1,3 +1,5 @@
+#![cfg(feature = "sspi-keytab")]
+
 //! KDC-backed contract test for the sspi-rs GSSAPI providers.
 //!
 //! This test requires the MIT KDC fixture and real network access to the KDC,

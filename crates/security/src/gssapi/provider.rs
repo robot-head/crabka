@@ -1,3 +1,5 @@
+#![cfg(feature = "sspi-keytab")]
+
 //! `sspi`-rs-backed implementations of [`GssAcceptor`] and [`GssInitiator`].
 //!
 //! Both the acceptor and the initiator authenticate from a keytab: the
@@ -6,7 +8,6 @@
 //! `sspi::Credentials::Keytab` extension) to drive the AS/TGS exchange with no
 //! password. The fork is pulled in via `[patch.crates-io]` in the workspace
 //! `Cargo.toml` (Devolutions/sspi-rs#681).
-
 use std::sync::Mutex;
 
 use sspi::kerberos::ServerProperties;
