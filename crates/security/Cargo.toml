@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = []
-sspi-keytab = ["dep:sspi-vendored"]
+sspi-keytab = ["dep:sspi"]
 
 [dependencies]
 thiserror.workspace = true
@@ -53,8 +53,7 @@ tokio = { workspace = true, features = ["sync"] }
 # pbkdf2 =0.13.0-rc.10, which is why the workspace pbkdf2 pin was moved to that
 # RC. The version below is satisfied by our sspi fork, wired in via
 # `[patch.crates-io]` in the workspace Cargo.toml (Devolutions/sspi-rs#681).
-sspi = { version = "0.21", default-features = false, features = ["network_client", "ring"] }
-sspi-vendored = { package = "sspi-vendored", path = "../../third_party/sspi", default-features = false, features = ["network_client", "ring"], optional = true }
+sspi = { version = "0.21", default-features = false, features = ["network_client", "ring"], optional = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
@@ -63,6 +62,11 @@ tempfile.workspace = true
 criterion = { version = "4.6.0", package = "codspeed-criterion-compat" }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
 
+[[example]]
+name = "gssapi_spike"
+required-features = ["sspi-keytab"]
+
 [[bench]]
 name = "scram"
 harness = false
+

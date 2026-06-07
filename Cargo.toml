@@ -128,3 +128,11 @@ lru = "0.18"
 apache-avro = "0.21"
 prost-reflect = "0.16"
 
+# Fork of sspi 0.21.0 carrying our SASL/GSSAPI Kerberos work (keytab client
+# credentials, integrity-only Wrap tokens, multi-SPN acceptor keys). Branched
+# off the sspi-v0.21.0 tag; upstreaming tracked at
+# https://github.com/Devolutions/sspi-rs/pull/681.
+[patch.crates-io]
+sspi = { git = "https://github.com/robot-head/sspi-rs.git", branch = "crabka/sasl-gssapi" }
+
+

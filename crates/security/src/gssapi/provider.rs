@@ -8,9 +8,6 @@
 //! `sspi::Credentials::Keytab` extension) to drive the AS/TGS exchange with no
 //! password. The fork is pulled in via `[patch.crates-io]` in the workspace
 //! `Cargo.toml` (Devolutions/sspi-rs#681).
-
-extern crate sspi_vendored as sspi;
-
 use std::sync::Mutex;
 
 use sspi::kerberos::ServerProperties;
