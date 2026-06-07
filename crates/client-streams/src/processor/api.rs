@@ -199,6 +199,17 @@ where
         self.dispatch.stores.get_suppress::<K2, V2>(name)
     }
 
+    /// Access the connected FK subscription store. `None` if absent.
+    ///
+    /// `pub(crate)`: the subscription store is an internal KIP-213 FK-join
+    /// mechanism, not a user-facing store.
+    pub(crate) fn get_fk_subscription_store(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut crate::store::fk_subscription::SubscriptionBytesStore> {
+        self.dispatch.stores.get_fk_subscription(name)
+    }
+
     /// Metadata of the source record currently being processed.
     #[must_use]
     pub fn record_context(&self) -> &RecordContext {

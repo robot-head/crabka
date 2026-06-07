@@ -66,6 +66,27 @@ impl<KS, VS> Produced<KS, VS> {
     }
 }
 
+/// A clonable [`Serde<T>`] over a type-erased `Arc<dyn Serde<T>>`. Lets a serde
+/// captured behind an `Arc` (e.g. a `KTable`'s stored key/value serde) be passed
+/// to `add_source`/`add_sink` (which want a `Serde<T> + Clone` value) or boxed
+/// into a processor field, without naming the concrete serde type.
+pub(crate) struct SerdeArc<T>(pub(crate) std::sync::Arc<dyn Serde<T>>);
+
+impl<T> Clone for SerdeArc<T> {
+    fn clone(&self) -> Self {
+        SerdeArc(std::sync::Arc::clone(&self.0))
+    }
+}
+
+impl<T: Send + Sync + 'static> Serde<T> for SerdeArc<T> {
+    fn serialize(&self, value: &T) -> Bytes {
+        self.0.serialize(value)
+    }
+    fn deserialize(&self, bytes: &[u8]) -> Result<T, SerdeError> {
+        self.0.deserialize(bytes)
+    }
+}
+
 /// Identity serde for raw `Bytes`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BytesSerde;

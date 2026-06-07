@@ -87,6 +87,37 @@ pub(crate) const KTABLE_SUPPRESS: &str = "KTABLE-SUPPRESS-";
 pub(crate) const KTABLE_SUPPRESS_STORE: &str = "KTABLE-SUPPRESS-STATE-STORE-";
 #[allow(dead_code)]
 pub(crate) const REPARTITION_SUFFIX: &str = "-repartition";
+
+// ── KIP-213 foreign-key join node + store + topic prefixes ──────────────────
+// Ported verbatim from the JVM `KTableImpl.doJoinOnForeignKey` name constants;
+// pinned by the `fk_join_inner`/`fk_join_left` wire goldens.
+/// Subscription-registration node prefix. Used BOTH for the registration topic
+/// name (`<app>-KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-<idx>-topic`, counter
+/// index minted first) and the `SubscriptionSend` processor (next index).
+pub(crate) const FK_SUBSCRIPTION_REGISTRATION: &str = "KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-";
+/// The receive / subscription-join / foreign-table-join processor prefix (the
+/// JVM uses one `SUBSCRIPTION_PROCESSOR` prefix for all three).
+pub(crate) const FK_SUBSCRIPTION_PROCESSOR: &str = "KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-";
+/// The response-resolver processor prefix.
+pub(crate) const FK_RESPONSE_RESOLVER: &str =
+    "KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-RESOLVER-PROCESSOR-";
+/// The FK-join result (`OUTPUT`) processor prefix — the result `KTable` node.
+pub(crate) const FK_OUTPUT: &str = "KTABLE-FK-JOIN-OUTPUT-";
+/// The subscription state-store name prefix.
+pub(crate) const FK_SUBSCRIPTION_STATE_STORE: &str = "KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-";
+/// Subscription-response node prefix (used for the response topic name +
+/// response sink/source).
+pub(crate) const FK_SUBSCRIPTION_RESPONSE: &str = "KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-";
+/// The materialized-store name the JVM burns for the result table even when no
+/// result changelog is created (`MaterializedInternal(..., FK_JOIN_OUTPUT_NAME)`
+/// consumes a counter index). Its index lands at OUTPUT+1.
+pub(crate) const FK_OUTPUT_STATE_STORE: &str = "KTABLE-FK-JOIN-OUTPUT-STATE-STORE-";
+/// `KTABLE-SINK-` / `KTABLE-SOURCE-`: the registration/response repartition
+/// sink+source node prefixes (the JVM `KTableImpl` sink/source names).
+pub(crate) const KTABLE_SINK: &str = "KTABLE-SINK-";
+pub(crate) const KTABLE_SOURCE: &str = "KTABLE-SOURCE-";
+/// Suffix the JVM appends to an FK-join repartition topic's base name.
+pub(crate) const FK_TOPIC_SUFFIX: &str = "-topic";
 /// Global table source node prefix (JVM `KSTREAM-SOURCE-`). Not wire-visible.
 #[allow(dead_code)]
 pub(crate) const GLOBAL_SOURCE: &str = "KSTREAM-SOURCE-";
