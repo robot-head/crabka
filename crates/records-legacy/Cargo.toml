@@ -2,7 +2,7 @@
 name = "crabka-records-legacy"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.95.0"
+rust-version.workspace = true
 license = "Apache-2.0"
 authors = ["The Crabka Authors"]
 description = "Kafka v0/v1 MessageSet (legacy) codec and v2 RecordBatch bridge"

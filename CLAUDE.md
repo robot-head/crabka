@@ -25,3 +25,12 @@ When in doubt, match Kafka. When Kafka's behavior is undocumented or version-dep
 When executing implementation plans, always use **subagent-driven development in parallel batches** where the per-task file sets don't overlap. The plan groups tasks into batches; dispatch all tasks within a batch concurrently (single message, multiple Agent calls), wait for the batch to complete, review, then move to the next batch. Sequential dispatch one-task-at-a-time is wasted wall-clock — use it only when later tasks genuinely depend on earlier ones in the same batch.
 
 A "conflict" between parallel implementers requires the same file being edited by both. Tasks like "add wire codes" (codes.rs) and "add metadata fields" (records.rs) don't conflict and should run together. When in doubt, list the file set each task touches before deciding.
+
+## Release Process
+
+- Uses **release-plz** for automated semantic versioning
+- Conventional commits drive version bumps:
+  - `feat:` → Minor version
+  - `fix:` → Patch version
+  - `feat!:` → Major version
+- Auto-generates changelogs and publishes to crates.io

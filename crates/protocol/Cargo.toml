@@ -2,7 +2,7 @@
 name = "crabka-protocol"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.95.0"
+rust-version.workspace = true
 license = "Apache-2.0"
 authors = ["The Crabka Authors"]
 description = "Apache Kafka wire-protocol codec (4.3.0), with typed RecordBatch and zero-copy borrowed decode"

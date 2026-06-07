@@ -2,7 +2,7 @@
 name = "crabka-compression"
 version.workspace = true
 edition.workspace = true
-rust-version = "1.95.0"
+rust-version.workspace = true
 license = "Apache-2.0"
 authors = ["The Crabka Authors"]
 description = "Kafka wire-protocol compression codecs for Rust"
