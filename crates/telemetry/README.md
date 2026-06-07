@@ -16,6 +16,27 @@ crabka-telemetry = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Install stdout tracing plus optional OTLP export for a Crabka service process:
+
+```rust,no_run
+use crabka_telemetry::{init, OtlpConfig};
+
+# fn run() -> Result<(), Box<dyn std::error::Error>> {
+let otlp = OtlpConfig::from_env(
+    |key| std::env::var(key).ok(),
+    "broker-1",
+    env!("CARGO_PKG_VERSION"),
+    "crabka-broker",
+);
+let guard = init(otlp, "info", "info", "crabka-broker")?;
+tracing::info!("tracing is configured");
+guard.shutdown();
+# Ok(())
+# }
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-telemetry](https://docs.rs/crabka-telemetry). The repository README contains project-wide setup, development, and release notes.

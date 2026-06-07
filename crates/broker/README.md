@@ -16,6 +16,30 @@ crabka-broker = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Start a single-node broker with a local data directory:
+
+```rust,no_run
+use std::net::SocketAddr;
+use crabka_broker::{Broker, BrokerConfig};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let listen_addr: SocketAddr = "127.0.0.1:9092".parse()?;
+let config = BrokerConfig {
+    listen_addr,
+    advertised_listener: listen_addr.to_string(),
+    log_dir: "./target/crabka-data".into(),
+    ..BrokerConfig::default()
+};
+
+let broker = Broker::start(config).await?;
+tokio::signal::ctrl_c().await?;
+broker.shutdown().await;
+# Ok(())
+# }
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-broker](https://docs.rs/crabka-broker). The repository README contains project-wide setup, development, and release notes.

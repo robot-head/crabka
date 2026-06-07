@@ -1,7 +1,11 @@
-//! Pure-logic auth primitives used by the broker and CLI.
+//! Security primitives used by Crabka brokers, clients, and tooling.
 //!
-//! No I/O, no async, no networking. The broker plumbs streams in; this
-//! crate produces verifiers, hashes, and TLS configs.
+//! The crate owns the protocol-independent pieces of TLS, SASL, SCRAM,
+//! OAuth/OIDC, mTLS principal extraction, delegation-token HMACs, Kerberos
+//! exchange state, and principal modelling. Network I/O remains in the caller:
+//! OAuth introspection is represented by the async [`IntrospectionClient`] trait,
+//! and the broker/client crates provide concrete transports and wire the
+//! resulting validators into listener or connection handshakes.
 //!
 //! ## SASL/PLAIN verification
 //!

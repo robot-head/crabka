@@ -16,6 +16,29 @@ crabka-remote-storage-topic = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Start an in-process topic-backed metadata manager for tests and local tools:
+
+```rust,no_run
+use std::{path::PathBuf, time::Duration};
+use crabka_remote_storage_topic::{InProcessMetadataEventLog, TopicBasedRemoteLogMetadataManager};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let event_log = InProcessMetadataEventLog::new(16);
+let manager = TopicBasedRemoteLogMetadataManager::start(
+    event_log,
+    tokio::runtime::Handle::current(),
+    PathBuf::from("./target/rlmm-cache"),
+    Duration::from_secs(30),
+).await?;
+
+manager.reconcile_assignment(&[0, 1]).await;
+manager.shutdown_and_flush().await;
+# Ok(())
+# }
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-remote-storage-topic](https://docs.rs/crabka-remote-storage-topic). The repository README contains project-wide setup, development, and release notes.

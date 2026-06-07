@@ -8,7 +8,19 @@ Apache Kafka legacy (v0/v1) `MessageSet` codec, with bridges to and from the v2 
 
 See the [Kafka protocol docs](https://kafka.apache.org/protocol.html#messageset) for the wire layout this crate implements. v0 carries no per-message timestamp; v1 adds an `i64` timestamp per message (KIP-32). Compression in both is signalled in the low 3 bits of the per-message `attributes` byte, with the compressed payload appearing as a single outer message whose `value` is a nested (uncompressed) MessageSet.
 
-## Quick start
+This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust implementation of Kafka-compatible infrastructure and clients.
+
+## Install
+
+```toml
+crabka-records-legacy = "0.3.1"
+```
+
+For workspace development, use the path dependency from this repository instead.
+
+## Usage example
+
+Encode and decode a Kafka v1 MessageSet:
 
 ```rust
 use bytes::{Bytes, BytesMut};
@@ -43,6 +55,10 @@ All compression features are enabled by default.
 
 Rust 1.95.0.
 
+## Documentation
+
+API documentation is published on [docs.rs/crabka-records-legacy](https://docs.rs/crabka-records-legacy). The repository README contains project-wide setup, development, and release notes.
+
 ## License
 
-Apache-2.0.
+Apache-2.0. See the repository `LICENSE` and `NOTICE` files for details.

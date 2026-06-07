@@ -9,7 +9,7 @@ type Apache Kafka 4.3.0 defines (189 messages, 604 `(api_key, version)`
 pairs), with byte-level wire compatibility verified against the JVM
 `kafka-clients` implementation.
 
-## Quick start
+## Usage example
 
 ```rust
 use bytes::BytesMut;

@@ -37,15 +37,18 @@
 //! # }
 //! ```
 //!
-//! ## Current boundaries
+//! ## Capabilities and boundaries
 //!
-//! - Cross-node snapshot transfer / `FetchSnapshot` catch-up is limited to
-//!   the broker-facing checkpoint read path.
-//! - Dynamic voter membership changes return [`RaftError::Unsupported`];
-//!   voter membership is static for a controller process.
-//! - Mixed JVM+Crabka controller quorums are not supported.
+//! The controller persists and recovers `KRaft` metadata records, serves and
+//! installs KIP-630 snapshots through `FetchSnapshot`, publishes the current
+//! metadata image to broker tasks, and exposes Crabka-private submit/fetch RPCs
+//! for broker and observer integration. KIP-853-style observer bootstrap and
+//! auto-join are wired through the broker/controller configuration; the older
+//! handle-level `add_learner` / `change_membership` compatibility methods still
+//! return [`RaftError::Unsupported`]. Mixed JVM+Crabka controller quorums are
+//! outside this crate's compatibility target.
 
-#![doc(html_root_url = "https://docs.rs/crabka-raft/0.0.0")]
+#![doc(html_root_url = "https://docs.rs/crabka-raft/0.3.1")]
 
 mod config;
 mod controller;

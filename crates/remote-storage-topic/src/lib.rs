@@ -40,10 +40,14 @@
 //!
 //! ## Operational boundaries
 //!
-//! - **No log compaction or snapshot** of the metadata topic — every
-//!   restart re-reads from offset 0.
-//! - **No auth on the internal metadata client.** The manager connects
-//!   to its own broker over plaintext loopback.
+//! The metadata topic is an append-only event log created with delete cleanup
+//! and infinite retention. The manager maintains a local snapshot cache so
+//! restarts can resume from committed per-partition offsets instead of replaying
+//! the full topic every time. It does not use a Kafka consumer group or broker
+//! offset commits; the broker drives assignments explicitly with
+//! [`TopicBasedRemoteLogMetadataManager::reconcile_assignment`]. Internal Kafka
+//! clients use plaintext loopback by default, or the TLS/SASL settings supplied
+//! through [`KafkaMetadataLogConfig::security`].
 //!
 //! ## In-process manager for tests and local tools
 //!
@@ -67,7 +71,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/crabka-remote-storage-topic/0.1.1")]
+#![doc(html_root_url = "https://docs.rs/crabka-remote-storage-topic/0.3.1")]
 
 pub mod error;
 pub mod kafka_log;

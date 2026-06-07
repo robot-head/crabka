@@ -41,14 +41,17 @@
 //! # }
 //! ```
 //!
-//! ## Out of scope
+//! ## Capabilities and boundaries
 //!
-//! - Persisted producer-state snapshots (broker restart resets sequences).
-//! - Custom partitioner trait — sticky+hash only; `ProducerRecord::partition`
-//!   bypasses the partitioner per record.
-//! - Schema registry / serde glue — `key` and `value` are `Bytes`.
+//! This crate owns producer-facing semantics: batching, compression,
+//! idempotence, retries, per-record partition overrides, transactional RPCs,
+//! and `send_offsets_to_transaction` for consume-process-produce flows. The
+//! built-in partitioner is sticky/hash based; set `ProducerRecord::partition`
+//! to pin an individual record. Serialization is deliberately caller-owned —
+//! `key` and `value` are raw `Bytes`, so schema-registry or serde integration
+//! can be layered without constraining the producer API.
 
-#![doc(html_root_url = "https://docs.rs/crabka-client-producer/0.0.0")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-producer/0.3.1")]
 
 mod accumulator;
 mod builder;

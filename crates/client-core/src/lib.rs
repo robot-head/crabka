@@ -31,12 +31,14 @@
 //! # }
 //! ```
 //!
-//! ## Out of scope
+//! ## Scope and boundaries
 //!
-//! - Producer / consumer semantics.
-//! - Transactions.
-//! - Partition-aware routing.
-//! - Automatic mid-request retry.
+//! This crate is the shared transport and request-dispatch layer. It provides
+//! bootstrap resolution, API-version negotiation, broker-id connection pooling,
+//! typed request/response dispatch, low-level fetch helpers, and client-side
+//! TLS/SASL negotiation. Higher-level semantics — batching, idempotence,
+//! consumer-group heartbeats, commits, admin retries, and transactions — live in
+//! the producer, consumer, and admin crates built on top of this one.
 //!
 //! TLS / SASL: a client-side security surface lives in [`security`] and
 //! [`sasl`] — set [`ConnectionOptions::security`] (or the `Client`

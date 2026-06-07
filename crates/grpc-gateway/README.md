@@ -16,6 +16,18 @@ crabka-grpc-gateway = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Run the Connect-RPC gateway in front of a Crabka cluster:
+
+```bash
+CRABKA_BOOTSTRAP_SERVERS=127.0.0.1:9092 \
+CRABKA_GATEWAY_LISTEN_ADDR=127.0.0.1:9500 \
+crabka-grpc-gateway
+
+curl -f http://127.0.0.1:9500/healthz
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-grpc-gateway](https://docs.rs/crabka-grpc-gateway). The repository README contains project-wide setup, development, and release notes.

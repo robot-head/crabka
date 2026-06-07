@@ -16,6 +16,22 @@ crabka-security = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Build a SCRAM client exchange and produce the client-first message sent on the Kafka SASL channel:
+
+```rust
+use crabka_security::{SaslMechanism, ScramClientExchange};
+
+let mut exchange = ScramClientExchange::new(
+    "alice".to_string(),
+    b"correct horse battery staple".to_vec(),
+    SaslMechanism::ScramSha256,
+);
+let first = exchange.client_first().unwrap();
+println!("send SCRAM client-first-message: {}", String::from_utf8_lossy(&first));
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-security](https://docs.rs/crabka-security). The repository README contains project-wide setup, development, and release notes.

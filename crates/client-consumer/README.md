@@ -16,6 +16,33 @@ crabka-client-consumer = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Subscribe to a topic, poll records, then commit offsets:
+
+```rust,no_run
+use std::time::Duration;
+use crabka_client_consumer::{AutoOffsetReset, Consumer};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let mut consumer = Consumer::builder()
+    .bootstrap("127.0.0.1:9092")
+    .group_id("orders-worker")
+    .client_id("orders-worker-1")
+    .subscribe(["orders".to_string()])
+    .auto_offset_reset(AutoOffsetReset::Earliest)
+    .build()
+    .await?;
+
+for record in consumer.poll(Duration::from_secs(1)).await? {
+    println!("{}:{}@{}", record.topic, record.partition, record.offset);
+}
+consumer.commit_sync().await?;
+consumer.close().await?;
+# Ok(())
+# }
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-client-consumer](https://docs.rs/crabka-client-consumer). The repository README contains project-wide setup, development, and release notes.
