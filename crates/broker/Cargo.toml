@@ -16,6 +16,8 @@ default = []
 # `test_advance_log_start` for the replication integration tests.
 # Pulls in `crabka-log/test-helpers` to reach `Log::test_set_log_start_offset`.
 test-helpers = ["crabka-log/test-helpers"]
+sspi-keytab = ["crabka-security/sspi-keytab", "crabka-client-core/sspi-keytab"]
+
 
 [[bin]]
 name = "crabka-broker"

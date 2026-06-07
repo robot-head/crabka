@@ -14,7 +14,7 @@
 //! - `V1Voters` / `V1KRaftVersion` are KIP-853 raft *control* records,
 //!   not metadata records — they have no entry in the
 //!   [`KraftMetadataRecord`] dispatch and are never submitted through the
-//!   translation boundary in this slice (reconfiguration is Slice 5), so
+//!   translation boundary, so
 //!   [`to_kraft`] returns [`TranslateError::NoCounterpart`] for them.
 //!
 //! ## Fan-out / image-keyed mappings
@@ -32,8 +32,7 @@
 //!   the image to the matching entries and emits one `RemoveAccessControlEntry`
 //!   per match, keyed by a deterministic content-hash id (the same id the add
 //!   path stamps); [`from_kraft`] rescans the image by that hash to recover the
-//!   entry and emit a pinned filter. Self-consistent within Crabka; Slice 6
-//!   swaps in Kafka's real id scheme for cross-impl fidelity.
+//!   entry and emit a pinned filter. Self-consistent within Crabka.
 //!
 //! ## Lossy / awkward mappings (documented)
 //!
@@ -544,7 +543,7 @@ fn to_kraft_iter(
                 ..Default::default()
             })]
         }
-        // ----- Task 2: topic / partition / remove-topic / topic-config -----
+        // ----- topic / partition / remove-topic / topic-config -----
         MetadataRecord::V1Topic(t) => {
             vec![KraftMetadataRecord::Topic(KTopicRecord {
                 name: t.name.clone(),
@@ -1118,7 +1117,7 @@ mod tests {
         assert!(from_kraft(&k, image).unwrap() == *rec);
     }
 
-    // ---------- Task 1: aligned variants ----------
+    // ---------- aligned variants ----------
 
     #[test]
     fn feature_level_round_trips() {
@@ -1450,7 +1449,7 @@ mod tests {
         assert!(to_kraft(&k, &img()) == Err(TranslateError::NoCounterpart("V1KRaftVersion")));
     }
 
-    // ---------- Task 2: topic / partition / config with image context ----------
+    // ---------- topic / partition / config with image context ----------
 
     #[test]
     fn topic_partition_config_round_trip_with_image_context() {

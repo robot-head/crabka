@@ -35,7 +35,7 @@ const KAFKA_CLUSTER: &str = "kafka-cluster";
 ///
 /// Subject-scoped endpoints map to `ResourceType::Topic` named by the subject;
 /// cluster-global endpoints map to `ResourceType::Cluster` named
-/// [`KAFKA_CLUSTER`].
+/// `KAFKA_CLUSTER`.
 // One arm per REST endpoint keeps this a readable routing table; several
 // distinct paths/methods legitimately map to the same decision (e.g. multiple
 // reads -> (Cluster, Read); PUT and DELETE on /mode/{subject} both -> Alter), so
@@ -294,8 +294,7 @@ pub async fn authz_layer(
     // ingress node already authorized it. This trusts the inter-node link: a CLIENT
     // that sets `X-Forwarded-For-Registry` directly bypasses authz on this node.
     // Operators MUST isolate the inter-node forwarding link (network policy /
-    // inter-node mTLS) so external clients cannot reach it. (Approved design; see
-    // the slice-6 security spec "Interaction with slice-5 forwarding".)
+    // inter-node mTLS) so external clients cannot reach it.
     if req
         .headers()
         .contains_key(crate::rest::forward::FORWARD_HEADER)

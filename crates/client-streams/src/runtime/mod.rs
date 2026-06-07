@@ -1,4 +1,4 @@
-//! Broker-backed execution runtime (sub-project #2b).
+//! Broker-backed execution runtime for built streams topologies.
 
 mod app;
 pub(crate) mod clock;

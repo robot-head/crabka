@@ -445,7 +445,7 @@ impl Consumer {
     /// Stop the coordinator task so the broker evicts this member promptly.
     ///
     /// The coordinator itself sends a best-effort `LeaveGroup` as the last
-    /// thing it does on shutdown (see [`crate::coordinator::run`]), using its
+    /// thing it does on shutdown (see `crate::coordinator::run`), using its
     /// *live* `member_id`. That id can differ from the one captured at build
     /// time — a from-scratch rejoin (`UNKNOWN_MEMBER_ID`) replaces it — so the
     /// leave must come from the coordinator, which owns the current value;

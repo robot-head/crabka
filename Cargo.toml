@@ -134,3 +134,5 @@ prost-reflect = "0.16"
 # https://github.com/Devolutions/sspi-rs/pull/681.
 [patch.crates-io]
 sspi = { git = "https://github.com/robot-head/sspi-rs.git", branch = "crabka/sasl-gssapi" }
+
+

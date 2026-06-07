@@ -264,12 +264,12 @@ async fn process_one_txn(
         return per_topic_with_denied(topics, denied, codes::INVALID_PRODUCER_EPOCH);
     }
 
-    // 2a. KIP-890 TV_2 server-side verification: confirm each requested
-    //     partition is already part of the producer's ongoing txn; never add,
-    //     never touch state, never persist. Absent partitions get
-    //     TRANSACTION_ABORTABLE so the client aborts. Below TV_2, or with
-    //     verify_only=false, this is skipped and the classic add path runs
-    //     unchanged (verify_only is ignored, matching pre-KIP-890 behavior).
+    // KIP-890 TV_2 server-side verification: confirm each requested
+    // partition is already part of the producer's ongoing txn; never add,
+    // never touch state, never persist. Absent partitions get
+    // TRANSACTION_ABORTABLE so the client aborts. Below TV_2, or with
+    // verify_only=false, this is skipped and the classic add path runs
+    // unchanged (verify_only is ignored, matching pre-KIP-890 behavior).
     if txnv.verified() && verify_only {
         return verify_partitions(&entry, topics, denied);
     }

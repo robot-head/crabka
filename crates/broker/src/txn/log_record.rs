@@ -2,7 +2,7 @@
 //! `TransactionLogKey` (v0), matching the on-disk records the
 //! `__transaction_state` topic carries in Apache Kafka 4.0.
 //!
-//! This is pure codec; it is wired into the coordinator by subtask 3d.
+//! This is pure codec; the transaction coordinator owns the runtime wiring.
 //!
 //! Schema (from cp-kafka 4.0 `TransactionLogValue.json` /
 //! `TransactionLogKey.json`):

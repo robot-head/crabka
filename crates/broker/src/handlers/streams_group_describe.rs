@@ -5,8 +5,8 @@
 //! Mirrors the KIP-848 consumer-group describe handler
 //! ([`super::consumer_group_describe`]): a plain 4-arg handler (NOT inline
 //! intercepted) gated on the same `streams.version` feature + `streams_group`
-//! config as the heartbeat. Per-group DESCRIBE ACL is out of scope this slice
-//! (TODO: follow `share_group_describe`'s inline-intercept ACL approach later).
+//! config as the heartbeat. Per-group DESCRIBE ACL is not applied by this
+//! handler; topic-level and feature gates still run normally.
 
 use std::collections::BTreeMap;
 
@@ -61,8 +61,8 @@ pub(crate) fn handle(
                 });
                 continue;
             }
-            // TODO: per-group DESCRIBE ACL gate (Group resource) — out of scope
-            // this slice; follow `share_group_describe`'s inline-intercept path.
+            // Per-group DESCRIBE ACL gate (Group resource) is not applied by
+            // this plain 4-arg handler.
             let Some(handle) = ng.find_streams(gid) else {
                 groups.push(DescribedGroup {
                     group_id: gid.clone(),
@@ -124,15 +124,15 @@ fn render_group(
         // so render it whenever the group has one.
         topology: view.topology.map(render_topology),
         members: view.members.into_iter().map(render_member).collect(),
-        // Per-group authorized-operations bitfield: DESCRIBE ACL is out of scope
-        // this slice, so leave the wire default (INT32_MIN sentinel = "not set").
+        // Per-group authorized-operations bitfield is not computed here, so
+        // leave the wire default (INT32_MIN sentinel = "not set").
         ..Default::default()
     }
 }
 
 /// Map a describe-view member into a wire `Member`. The view carries current
 /// (in-flight) active/standby/warmup task ownership; `target_assignment` is not
-/// projected by the view so it renders empty (TODO).
+/// projected by the view so it renders empty.
 fn render_member(m: StreamsDescribeMember) -> Member {
     Member {
         member_id: m.member_id,
@@ -148,8 +148,7 @@ fn render_member(m: StreamsDescribeMember) -> Member {
             warmup_tasks: task_map_to_ids(&m.warmup),
             ..Default::default()
         },
-        // TODO: the view does not project the target (next) assignment; render
-        // empty until a later slice adds it to `StreamsDescribeMember`.
+        // The view does not project the target (next) assignment, so render empty.
         ..Default::default()
     }
 }

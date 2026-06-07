@@ -70,8 +70,8 @@ pub trait RecordProducer: Send + Sync + 'static {
     /// `partition`:
     /// - `None`  → use the producer's key-hash partitioner (correct for sink /
     ///   repartition topics).
-    /// - `Some(p)` → pin to partition `p` (required for changelog topics so that
-    ///   [`StreamTask::restore`] can read back the record from the task partition).
+    /// - `Some(p)` → pin to partition `p` (required for changelog topics so task
+    ///   restore can read back the record from the task partition).
     async fn send(
         &self,
         topic: &str,

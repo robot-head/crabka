@@ -34,7 +34,7 @@ pub struct DedupStore {
     /// Has been warm at least once (drives /readyz).
     warmed_once: AtomicBool,
     /// Optional membership publisher; set by the binary before `run_ownership`
-    /// starts. `None` in single-owner/unit contexts ⇒ no publishing (P3a behavior).
+    /// starts. `None` in single-owner/unit contexts means no publishing.
     membership: OnceLock<Arc<crate::dedup::membership::MembershipPublisher>>,
 }
 

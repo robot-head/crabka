@@ -7,7 +7,7 @@
 //! return the encoded bytes ready to ship after the response header is
 //! prepended in `network::dispatch`.
 
-#![allow(dead_code)] // handlers land per-API in Phase E.
+#![allow(dead_code)] // handler modules are registered as each API is enabled.
 
 use bytes::Bytes;
 
@@ -21,8 +21,8 @@ pub type HandlerFn = fn(
     req_bytes: &[u8],
 ) -> futures_util::future::BoxFuture<'static, Result<Bytes, BrokerError>>;
 
-/// API key → handler function. Built by `Broker::start` from the per-API
-/// modules that exist after Phase E.
+/// API key → handler function. Built by `Broker::start` from the enabled
+/// per-API modules.
 #[derive(Default)]
 pub struct HandlerTable {
     table: std::collections::HashMap<i16, HandlerFn>,
@@ -142,7 +142,7 @@ pub(crate) mod share_acknowledge;
 // for the per-topic Read ACL gate.
 pub(crate) mod share_fetch;
 // KIP-1071 StreamsGroupDescribe (api_key 89). Plain 4-arg handler mirroring
-// consumer_group_describe; per-group Describe ACL is a future slice.
+// consumer_group_describe; it does not apply a per-group Describe ACL gate.
 pub(crate) mod streams_group_describe;
 // KIP-1071 streams-group membership / rebalance protocol (api_key 88).
 pub(crate) mod streams_group_heartbeat;
@@ -155,8 +155,8 @@ pub(crate) mod unregister_broker;
 pub(crate) mod update_features;
 pub(crate) mod update_raft_voter;
 
-/// Build the dispatch table. Phase E registers concrete handlers; for
-/// now this is an empty table so the dispatch loop can still look up.
+/// Build the dispatch table for plain 4-arg handlers. Inline-intercepted
+/// handlers are documented below and registered in `network::dispatch`.
 #[must_use]
 pub(crate) fn build_table() -> HandlerTable {
     let mut t = HandlerTable::new();
@@ -269,8 +269,8 @@ pub(crate) fn build_table() -> HandlerTable {
     t.register(69, consumer_group_describe::handle);
     // 76 (ShareGroupHeartbeat, KIP-932) intercepted inline — Group Read ACL.
     // 88 (StreamsGroupHeartbeat, KIP-1071) intercepted inline — Group Read ACL.
-    // StreamsGroupDescribe (89) stays a plain 4-arg handler (per-group Describe
-    // ACL is a future slice).
+    // StreamsGroupDescribe (89) stays a plain 4-arg handler and does not apply
+    // a per-group Describe ACL gate.
     t.register(89, streams_group_describe::handle);
     // KIP-932 share-state persister RPCs (api keys 83–87). Inter-broker
     // handlers, gated per-partition on local share-state leadership.

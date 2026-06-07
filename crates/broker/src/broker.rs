@@ -134,7 +134,7 @@ pub struct Broker {
     /// and the assignment reporter (`AssignReplicasToDirs` handler).
     pub(crate) log_dir_ids: crate::log_dir_id::LogDirIds,
     /// KIP-714 client-metrics receiver: subscription manager + Prometheus
-    /// collector + OTLP forwarder. Shared so the push handler (Task 15)
+    /// collector + OTLP forwarder. Shared so the push handler
     /// and the scrape path both touch the same instance.
     pub(crate) client_metrics: Arc<crate::client_metrics::ClientMetrics>,
     /// Test-only counter of served `OffsetForLeaderEpoch` (`api_key` 23)
@@ -1184,8 +1184,7 @@ impl Broker {
             let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
 
             // KIP-595 static voters: the engine reconstructs its voter set from
-            // `ControllerConfig.initial_voters` every boot (static this slice;
-            // KIP-853 dynamic reconfig is Slice 5). When no `VotersRecord` was
+            // `ControllerConfig.initial_voters` every boot. When no `VotersRecord` was
             // loaded from `bootstrap.records.bin` (the in-process start path that
             // didn't run `crabka format`), build the static set from
             // `controller_quorum_voters`. Two shapes:
@@ -1216,8 +1215,8 @@ impl Broker {
                     // `kraft/core.rs`, which key on `NodeId` and use
                     // `Uuid::nil()` for vote keys). So `directory_id` only needs
                     // to be exact for self; peers get a deterministic
-                    // placeholder until KIP-853/JVM-interop (Slice 5/6) makes
-                    // peer directory ids load-bearing.
+                    // placeholder because peer directory ids are not load-bearing
+                    // for static-voter Crabka quorums.
                     let voters: Vec<crabka_metadata::Voter> = config
                         .controller_quorum_voters
                         .iter()
@@ -1265,7 +1264,7 @@ impl Broker {
                 // (config-derived) every boot under KIP-595 static voters, so the
                 // `V1Voters` / `V1KRaftVersion` raft-control records are NOT seeded
                 // onto the KIP-631-framed metadata log here (they have no KIP-631
-                // counterpart; dynamic reconfiguration is a later slice).
+                // counterpart; dynamic reconfiguration is not handled here).
                 initial_voters = voters;
 
                 // KIP-584/1022: a standalone self-bootstrap finalizes every
@@ -1407,7 +1406,7 @@ impl Broker {
             // Controller-only nodes never register — they host no data and
             // must not appear as brokers in Metadata/DescribeCluster.
             if config.is_broker() {
-                // Per-listener endpoints (Task 11): every configured listener's
+                // Per-listener endpoints: every configured listener's
                 // advertised `host:port` + protocol becomes a `BrokerEndpoint`
                 // on the broker's self-registration record. Clients on
                 // `Metadata` v9+ pick the right endpoint for their connection;
@@ -1467,7 +1466,7 @@ impl Broker {
             if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
                 // KIP-853 raft-control records (`V1Voters` / `V1KRaftVersion`)
                 // have no KIP-631 metadata-log counterpart and are never carried
-                // on the KIP-631-framed metadata log in this slice — the engine
+                // on the KIP-631-framed metadata log here — the engine
                 // reconstructs its voter set from `initial_voters` (config) every
                 // boot. Drop them from the metadata-log submit; only the genuine
                 // metadata records (ACLs, SCRAM, quotas, …) are seeded.
@@ -1617,7 +1616,7 @@ impl Broker {
         group_coordinator.set_share_persister(share_persister.clone());
         group_coordinator.set_metadata_source(controller.clone());
 
-        // 4a'''. Share-partition leader manager (KIP-932 Slice C): owns the
+        // Share-partition leader manager (KIP-932): owns the
         //        in-memory acquisition state machines for the (group, topic,
         //        partition) triples this broker leads, loading/persisting them
         //        through the same `SharePersister`. A background sweeper expires

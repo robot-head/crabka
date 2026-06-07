@@ -35,7 +35,7 @@ use crate::error::RemoteStorageError;
 use crate::metadata::{CustomMetadata, RemoteLogSegmentMetadata};
 use crate::storage_manager::{IndexType, LogSegmentData, RemoteStorageManager};
 
-/// Default threshold above which [`S3RemoteStorage::put_path`] switches
+/// Default threshold above which `S3RemoteStorage::put_path` switches
 /// from a single PUT to a streaming multipart upload. 100 MiB. AWS's hard
 /// cap on single-PUT objects is 5 GiB; defaulting well below that keeps
 /// us comfortably inside the single-PUT regime for the common segment

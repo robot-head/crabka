@@ -16,8 +16,8 @@ use crabka_compression::CompressionType;
 use crate::error::LegacyRecordsError;
 use crate::message::{Magic, Message, attrs_with_compression, compression_from_attrs};
 
-/// A single entry produced by [`MessageSet::iter`]: the offset-tagged
-/// payload of one logical record after compression unwrapping.
+/// A single decoded MessageSet entry: the offset-tagged payload of one
+/// logical record after compression unwrapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedRecord {
     pub offset: i64,

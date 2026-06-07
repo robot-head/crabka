@@ -1,6 +1,6 @@
 //! Liveness/readiness endpoints. `/healthz` is always 200 once serving;
-//! `/readyz` returns 503 until the dedup store has warmed up (Task 12 flips
-//! the flag), so load balancers don't route dedup'd traffic to a cold replica.
+//! `/readyz` returns 503 until the dedup store has warmed up, so load
+//! balancers don't route dedup'd traffic to a cold replica.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -20,7 +20,7 @@ use crate::broker::Broker;
 use crate::codes;
 
 // `async` for symmetry with the other ACL wire handlers (CreateAcls /
-// DeleteAcls in T8/T9 will `await` `controller.submit_change`); read-only
+// DeleteAcls awaits `controller.submit_change`; read-only
 // DescribeAcls itself never suspends.
 #[allow(clippy::unused_async)]
 pub(crate) async fn handle(

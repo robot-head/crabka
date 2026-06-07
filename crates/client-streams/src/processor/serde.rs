@@ -82,7 +82,6 @@ impl Serde<Bytes> for BytesSerde {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StringSerde;
 impl Serde<String> for StringSerde {
-    #[allow(clippy::ptr_arg)]
     fn serialize(&self, value: &String) -> Bytes {
         Bytes::copy_from_slice(value.as_bytes())
     }

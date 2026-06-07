@@ -1,6 +1,6 @@
-//! Pluggable record codec. v1 ships `RawCodec` (identity, opaque bytes).
-//! The deferred Schema Registry component adds a `SchemaRegistryCodec`
-//! that implements this same trait — front-ends/cores never change.
+//! Pluggable record codec. `RawCodec` is identity/opaque bytes; schema-aware
+//! codecs implement the same trait so front-ends and produce/consume cores do
+//! not need format-specific branches.
 //!
 //! The seam is **async + fallible**: a schema-bound codec talks to a remote
 //! registry (network) and can reject a payload (validation/serialization), so

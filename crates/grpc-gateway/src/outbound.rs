@@ -429,7 +429,7 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Unit tests (the engine is not wired into the binary until Task 3).
+// Unit tests for the outbound engine.
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]

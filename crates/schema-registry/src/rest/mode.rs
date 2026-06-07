@@ -12,7 +12,7 @@ struct PutMode {
     mode: String,
 }
 
-/// GET /mode -> {"mode": "<M>"}
+/// `GET /mode -> {"mode": "<M>"}`
 // axum requires async handlers even when the body is synchronous.
 #[allow(clippy::unused_async)]
 pub async fn get_global(State(st): State<AppState>) -> Response {
@@ -28,7 +28,7 @@ pub async fn put_global(State(st): State<AppState>, body: String) -> Result<Resp
     Ok(ok_json(&serde_json::json!({ "mode": req.mode })))
 }
 
-/// GET /mode/{subject} -> {"mode": "<M>"} | 404 if no override
+/// `GET /mode/{subject} -> {"mode": "<M>"} | 404 if no override`
 pub async fn get_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -57,7 +57,7 @@ pub async fn put_subject(
     Ok(ok_json(&serde_json::json!({ "mode": req.mode })))
 }
 
-/// DELETE /mode/{subject} -> {"mode": "<prior>"} (clears the override)
+/// `DELETE /mode/{subject} -> {"mode": "<prior>"}` clears the override.
 pub async fn delete_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,

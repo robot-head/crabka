@@ -1,5 +1,5 @@
-//! Outputs from the consensus state machine, executed by 3b/3c. In slice 3a
-//! they are only inspected by tests.
+//! Outputs from the consensus state machine. They are pure side-effect
+//! descriptions executed by the engine.
 
 use crate::kraft::types::{LeaderEpoch, LogOffsetMetadata, NodeId, SimInstant};
 
@@ -24,8 +24,8 @@ pub enum Action {
     /// New leader announces its epoch to all voters.
     SendBeginQuorumEpoch { epoch: LeaderEpoch },
     /// Resigning leader tells voters to elect.
-    // NOTE: emitted in a later sub-slice (alongside `Role::Resigned`); the 3a
-    // core only *receives* `EndQuorumEpoch`, so nothing produces this yet.
+    // Emitted by transport-facing paths alongside `Role::Resigned`; the core
+    // also receives `EndQuorumEpoch`.
     SendEndQuorumEpoch { epoch: LeaderEpoch },
     /// Follower/observer should fetch from this leader.
     SendFetch { leader_id: NodeId },

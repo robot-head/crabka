@@ -73,7 +73,7 @@ pub enum CodecError {
     Domain(String),
 }
 
-/// Errors from the on-disk RLMM snapshot (slice 48p).
+/// Errors from the on-disk RLMM snapshot.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
     /// The snapshot file could not be read or written.

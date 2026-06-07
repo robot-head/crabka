@@ -6,6 +6,38 @@
 //! [`AclCache`] over a `Vec<AclEntry>` fetched via `DescribeAcls`). The decision
 //! logic (super-user bypass, deny-wins, operation implication) lives here once
 //! so the two callers can never drift.
+//!
+//! ## Authorizing a request
+//!
+//! ```rust
+//! use std::net::SocketAddr;
+//! use crabka_authz::{
+//!     AllowAllAuthorizer, AuthorizationRequest, AuthorizationResult, Authorizer,
+//! };
+//! use crabka_metadata::{MetadataImage, AclOperation, ResourceType};
+//! use crabka_security::{AuthMethod, Principal};
+//! use uuid::Uuid;
+//!
+//! let image = MetadataImage::new(Uuid::nil());
+//! let principal = Principal {
+//!     name: "alice".into(),
+//!     auth_method: AuthMethod::SaslPlain,
+//!     groups: vec![],
+//! };
+//! let host: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+//! let req = AuthorizationRequest {
+//!     principal: &principal,
+//!     host: &host,
+//!     resource_type: ResourceType::Topic,
+//!     resource_name: "orders",
+//!     operation: AclOperation::Read,
+//! };
+//!
+//! assert_eq!(
+//!     AllowAllAuthorizer.authorize(&image, &req),
+//!     AuthorizationResult::Allow,
+//! );
+//! ```
 #![forbid(unsafe_code)]
 
 mod allow_all;

@@ -1,8 +1,8 @@
 //! Type-erased node adapters: `ProcessorNode`, `SinkNode`, `SourceNode`.
 //!
 //! Each adapter carries the `TypeId` of the `(K, V)` pairs it consumes and/or
-//! produces so the graph builder (Task 7) can validate wiring at build time
-//! without keeping the concrete type parameters in scope.
+//! produces so graph construction can validate wiring without keeping the
+//! concrete type parameters in scope.
 //!
 //! The three roles:
 //! - [`ProcessorNode`] — downcasts `ErasedRecord`, runs the user-supplied

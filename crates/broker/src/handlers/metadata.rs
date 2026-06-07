@@ -19,7 +19,7 @@ use crate::codes;
 use crate::error::BrokerError;
 use crate::handlers::authorized_operations::authorized_operations_bits;
 
-#[allow(clippy::too_many_lines)] // T12 ACL preamble + asymmetric loop
+#[allow(clippy::too_many_lines)] // ACL preamble + asymmetric loop
 #[allow(clippy::unused_async)] // Handler is wholly sync but we keep the
 // `async fn` shape so it mirrors the other inline-intercept handlers
 // (produce/fetch/etc) and lets future Metadata work (e.g. waiting on

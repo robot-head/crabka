@@ -207,7 +207,7 @@ fn parse_schema_format(spec: Option<&str>, ctx: &str) -> Result<SchemaFormat, St
 /// Compute HMAC-SHA256(`secret`, `body`) and return the digest as a lowercase
 /// hex string. Used by the outbound webhook delivery layer to sign every
 /// `X-Crabka-Signature` header.
-#[allow(dead_code)] // used by outbound.rs (Task 2)
+#[allow(dead_code)] // used by outbound.rs
 pub(crate) fn sign_hmac_hex(secret: &[u8], body: &[u8]) -> String {
     let mut mac = <Hmac<Sha256>>::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(body);
@@ -216,7 +216,7 @@ pub(crate) fn sign_hmac_hex(secret: &[u8], body: &[u8]) -> String {
 
 /// Compute HMAC-SHA256(`secret`, `body`) and return the digest as a
 /// standard base64 string (padding included).
-#[allow(dead_code)] // used by outbound.rs (Task 2)
+#[allow(dead_code)] // used by outbound.rs
 pub(crate) fn sign_hmac_base64(secret: &[u8], body: &[u8]) -> String {
     let mut mac = <Hmac<Sha256>>::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(body);
@@ -231,7 +231,7 @@ pub(crate) fn sign_hmac_base64(secret: &[u8], body: &[u8]) -> String {
 ///
 /// Returns `false` on any decoding failure so callers can treat it as
 /// an authentication failure without distinguishing error kinds.
-#[allow(dead_code)] // used by webhook.rs (Task 2)
+#[allow(dead_code)] // used by webhook.rs
 pub(crate) fn verify_signature(
     secret: &[u8],
     body: &[u8],
@@ -278,7 +278,7 @@ pub(crate) fn verify_signature(
 ///
 /// Returns `None` when the header is absent/non-UTF-8 or the `JSONPath` yields
 /// no string result.
-#[allow(dead_code)] // used by webhook.rs (Task 2)
+#[allow(dead_code)] // used by webhook.rs
 pub(crate) fn extract_source(
     src: &Source,
     headers: &axum::http::HeaderMap,

@@ -6,8 +6,8 @@ use crate::dsl::graph::{GraphNodeKind, LogicalGraph};
 use crate::processor::serde::{Consumed, Serde};
 
 /// A serde-carrying thunk that registers + connects a DSL-added state store to a
-/// processor by name during lowering. Looked up + invoked by `process` (and
-/// `process_values`, T5).
+/// processor by name during lowering. Looked up and invoked by `process` and
+/// `process_values`.
 pub(crate) type StoreConnectThunk =
     std::sync::Arc<dyn Fn(&mut crate::dsl::graph::LowerState, &str) + Send + Sync>;
 
@@ -84,10 +84,9 @@ impl StreamsBuilder {
             },
             vec![],
         );
-        // Attach the lowering thunk: when the lowering driver (Task 5) runs it,
-        // it performs the typed `Topology::add_source` call (capturing the source
-        // `Consumed` serdes + topics) and records the resulting node name so
-        // children can rebuild a typed parent handle.
+        // Attach the lowering thunk: it performs the typed `Topology::add_source`
+        // call (capturing the source `Consumed` serdes + topics) and records the
+        // resulting node name so children can rebuild a typed parent handle.
         g.graph.nodes[id].lower = Some(Box::new(
             move |state: &mut crate::dsl::graph::LowerState| {
                 let h = state
@@ -104,13 +103,11 @@ impl StreamsBuilder {
     /// Source a materialized `KTable` from a changelog-style topic.
     ///
     /// Records a single `TableSource` logical node whose thunk lowers a source
-    /// node + a [`KTableSourceProcessor`] + the materialized state store. The
+    /// node, the table-source processor, and the materialized state store. The
     /// store name is taken from `Materialized` (else a fresh
     /// `KTABLE-SOURCE-STATE-STORE` counter); the changelog topic is
     /// `<app>-<store>-changelog`, unless the `REUSE_KTABLE_SOURCE_TOPICS`
     /// optimizer pass (run by `build_optimized`) makes it reuse the source topic.
-    ///
-    /// [`KTableSourceProcessor`]: crate::dsl::processors::table::KTableSourceProcessor
     pub fn table<K, V, KS, VS>(
         &self,
         topic: impl Into<String>,
@@ -324,7 +321,7 @@ impl StreamsBuilder {
     }
 
     /// Build the topology with no optimizer (the JVM `NO_OPTIMIZATION` default):
-    /// lower the logical graph straight to the Processor-API [`Topology`], then
+    /// lower the logical graph straight to the Processor-API [`crate::topology::Topology`], then
     /// finalize it into a [`BuiltTopology`].
     ///
     /// Consumes the builder. This requires that no [`KStream`]/[`KTable`] handles
@@ -334,7 +331,7 @@ impl StreamsBuilder {
     /// before `build`, satisfying this.
     ///
     /// [`KStream`]: crate::dsl::kstream::KStream
-    /// [`KTable`]: crate::dsl::kstream::KStream
+    /// [`KTable`]: crate::dsl::ktable::KTable
     /// [`BuiltTopology`]: crate::topology::BuiltTopology
     pub fn build(
         self,
@@ -347,7 +344,7 @@ impl StreamsBuilder {
 
     /// Build the topology with DSL optimizations enabled (JVM `optimization=all`):
     /// run the optimizer passes over the logical graph, then lower to the
-    /// Processor-API [`Topology`] and finalize.
+    /// Processor-API [`crate::topology::Topology`] and finalize.
     ///
     /// The passes are `MERGE_REPARTITION_TOPICS` (two aggregations off one
     /// key-changing op share a single repartition topic) and

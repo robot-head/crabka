@@ -4,19 +4,18 @@
 //! channel; handle-facing requests arrive as [`Command`].
 //!
 //! This module is the wire-agnostic boundary: the event loop never touches
-//! sockets directly. Tasks 6/7 supply the in-memory and real-TCP `PeerSender`
-//! impls; Task 1/2 only need the trait + the command/inbound plumbing.
+//! sockets directly. In-memory tests and real TCP both implement `PeerSender`
+//! against the same command/inbound plumbing.
 //!
-//! ## Node-local peer codec (Tasks 3–6)
+//! ## Peer codec
 //!
-//! Until Task 7 wires the generated KIP-595 codecs, peer RPC request and
-//! response *bodies* are encoded with the deterministic node-local
-//! [`wire`] codec defined here. The engine encodes a [`PeerRequest`] into the
-//! body it hands [`PeerSender::send`]; the in-memory transport (Task 6) decodes
-//! it, drives the receiving engine, and encodes a [`PeerResponse`] back. The
-//! sending engine then decodes that [`PeerResponse`] into the matching core
-//! [`Event`] (`ReceiveVoteResponse` / `ReceiveFetchResponse`). This keeps the
-//! send path fire-and-forget: the engine never `.await`s a peer RPC inline.
+//! Peer RPC request and response bodies are encoded with the generated KIP-595
+//! message codecs in [`wire`]. The engine encodes a `PeerRequest` into the
+//! body it hands [`PeerSender::send`]; the receiving transport drives the peer
+//! engine and returns a `PeerResponse`. The sending engine then decodes that
+//! response into the matching core [`Event`] (`ReceiveVoteResponse` /
+//! `ReceiveFetchResponse`). This keeps the send path fire-and-forget: the
+//! engine never `.await`s a peer RPC inline.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::sync::oneshot;
@@ -137,9 +136,8 @@ pub enum TimerTick {
 }
 
 /// A structured, node-local snapshot of consensus state surfaced to the handle
-/// for the broker's `DescribeQuorum` admin view. (The handle-level
-/// `crate::controller::QuorumState` translation lands in Task 8; this is the
-/// engine's own view.)
+/// for the broker's `DescribeQuorum` admin view. This is the engine's own view;
+/// the handle maps it into the public `crate::controller::QuorumState`.
 #[derive(Debug, Clone)]
 pub struct QuorumStateSnapshot {
     pub leader_id: Option<NodeId>,
@@ -194,13 +192,13 @@ pub mod api_key {
     pub const FETCH_SNAPSHOT: i16 = 59;
 }
 
-/// Real KIP-595 peer-RPC body codec (Task 7). The engine's loop reasons in
-/// terms of the flat [`PeerRequest`]/[`PeerResponse`] enums (unchanged since
-/// Task 3); this module maps each variant to/from the genuine generated
+/// Real KIP-595 peer-RPC body codec. The engine's loop reasons in terms of
+/// the flat `PeerRequest`/`PeerResponse` enums; this module maps each
+/// variant to/from the genuine generated
 /// KIP-595 message **bodies** (header-less — the framing layer in `server.rs` /
 /// `network.rs` adds the request/response header). Captured wire versions:
 /// Vote v2, Begin/End `QuorumEpoch` v1, Fetch v17. Crabka-to-Crabka replication
-/// rides these exact bytes, so a JVM voter (Slice 6) can interoperate.
+/// rides these exact bytes.
 ///
 /// The metadata log is the single `KRaft` topic `__cluster_metadata`, partition
 /// 0; every RPC body therefore carries exactly one topic / one partition.
@@ -239,7 +237,7 @@ pub mod wire {
     /// the topic by this id, not by name.
     const METADATA_TOPIC_ID: MetaUuid = MetaUuid([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
 
-    /// Captured flexible wire versions (Slice-0 findings; byte-validated Slice-2).
+    /// Captured flexible wire versions, byte-validated against fixture frames.
     const VOTE_VERSION: i16 = 2;
     const QUORUM_EPOCH_VERSION: i16 = 1;
     const FETCH_VERSION: i16 = 17;

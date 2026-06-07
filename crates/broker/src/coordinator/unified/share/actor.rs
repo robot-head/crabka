@@ -367,7 +367,7 @@ async fn handle_heartbeat(
     Ok(build_assignment_resp(state, &req.member_id, config))
 }
 
-/// KIP-932 lifecycle hook (Slice B Task 11). Runs AFTER `reconcile`, off the
+/// KIP-932 lifecycle hook. Runs AFTER `reconcile`, off the
 /// sync state machine: gathers the group's full assigned `(topic_id,
 /// partition)` set and, for each not already Initialized, drives
 /// [`SharePersister::initialize`]. On success it records the partition in
@@ -912,9 +912,9 @@ fn snapshot_seed(state: &ShareGroupState) -> super::super::ShareGroupSeed {
         members,
         target_per_member,
         current_per_member,
-        // KIP-932 lifecycle (Slice B Task 11): project the live Initialized set
-        // back into the persisted record so the cache (and a respawned actor)
-        // stay consistent with what the lifecycle hook wrote to the log.
+        // KIP-932 lifecycle: project the live Initialized set back into the
+        // persisted record so the cache (and a respawned actor) stay consistent
+        // with what the lifecycle hook wrote to the log.
         state_partition_metadata: state_partition_metadata_from(state),
     }
 }

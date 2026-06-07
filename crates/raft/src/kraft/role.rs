@@ -43,9 +43,9 @@ pub enum Role {
         epoch_start_offset: i64,
     },
     /// Stepping down; emitting `EndQuorumEpoch`.
-    // NOTE: `Resigned` (and `Action::SendEndQuorumEpoch`) are produced in a
-    // later sub-slice; the 3a core only *receives* `EndQuorumEpoch`, so there is
-    // intentionally no transition into this variant yet.
+    // `Resigned` (and `Action::SendEndQuorumEpoch`) are produced by
+    // transport-facing paths; the core also receives `EndQuorumEpoch`, so there
+    // is intentionally no transition into this variant yet.
     Resigned,
     /// Not in the voter set; only ever fetches.
     Observer {

@@ -1,13 +1,16 @@
 //! `GlobalKTable<K,V>`: a fully-replicated lookup table — a join target only (no
-//! aggregations, no `to_stream`). Built by [`StreamsBuilder::global_table`];
-//! consumed by `KStream::join_global`/`left_join_global` (a later task).
+//! aggregations, no `to_stream`). Built by [`StreamsBuilder::global_table`] and
+//! consumed by [`KStream::join_global`] / [`KStream::left_join_global`].
 //!
 //! A `GlobalKTable` is invisible in the wire topology: it has no source topic, no
 //! changelog, and no subtopology of its own. Its source node only occupies a
-//! node-group index during grouping (so other subtopology ids shift). See
-//! [`crate::topology::grouping`] and [`crate::topology::Topology::add_global_store`].
+//! node-group index during grouping (so other subtopology ids shift). The store is
+//! registered with [`Topology::add_global_store`].
 //!
 //! [`StreamsBuilder::global_table`]: crate::dsl::builder::StreamsBuilder::global_table
+//! [`KStream::join_global`]: crate::dsl::kstream::KStream::join_global
+//! [`KStream::left_join_global`]: crate::dsl::kstream::KStream::left_join_global
+//! [`Topology::add_global_store`]: crate::topology::Topology::add_global_store
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::rc::Rc;
@@ -18,19 +21,17 @@ use crate::dsl::graph::NodeId;
 /// A handle to a fully-replicated `GlobalKTable`. Only usable as a join target.
 ///
 /// `store_name` is the materialized store `KStream::join_global` /
-/// `left_join_global` wire the join processor's lookup against. `builder`, `node`,
-/// and `source_topic` remain `dead_code` until the real shared global registry +
-/// global consumer are wired (a later task); the join itself reaches the store via
-/// the per-task registry for now.
+/// `left_join_global` wire the join processor's lookup against. `source_topic`
+/// is the broker topic used to fully replicate the global store.
 pub struct GlobalKTable<K, V> {
-    // Used by join_global in a later task.
+    // Keeps the shared builder alive while this handle is live.
     #[allow(dead_code)]
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
-    // Used by join_global in a later task.
+    // Logical graph node for the global source.
     #[allow(dead_code)]
     pub(crate) node: NodeId,
     pub(crate) store_name: String,
-    // Used by join_global in a later task.
+    // Source topic feeding the fully replicated store.
     #[allow(dead_code)]
     pub(crate) source_topic: String,
     _pd: PhantomData<fn() -> (K, V)>,

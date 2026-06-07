@@ -3,8 +3,8 @@
 //! aggregation (`count`/`reduce`/`aggregate`). The session analogue of
 //! [`crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream`]: same grouped
 //! lineage + the [`SessionWindows`] spec; terminal ops emit `Windowed<K>` keys and
-//! materialize a **session store** (`add_session_store`). Result is a
-//! `KTable<Windowed<K>, _>` (always logged in this slice).
+//! materialize a **session store** (`add_session_store`). The result is a
+//! `KTable<Windowed<K>, _>` with a changelog-backed session store.
 use std::any::Any;
 use std::cell::RefCell;
 use std::marker::PhantomData;

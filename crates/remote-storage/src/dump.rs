@@ -1,7 +1,7 @@
 //! [`RlmmCacheDump`] — a flat, owned snapshot of an
 //! [`InmemoryRemoteLogMetadataManager`](crate::InmemoryRemoteLogMetadataManager)'s
-//! cache, used by the topic-backed manager's on-disk snapshot
-//! (slice 48p). Unlike the live mutation path, importing a dump
+//! cache, used by the topic-backed manager's on-disk snapshot. Unlike the
+//! live mutation path, importing a dump
 //! bypasses lifecycle-transition validation: the dumped states are
 //! already the product of valid transitions, so re-applying them
 //! through `add`/`update` would wrongly reject terminal states.
