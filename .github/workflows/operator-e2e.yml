@@ -36,6 +36,8 @@ jobs:
             operator:
               - 'crates/operator/**'
               - 'crates/broker/**'
+              - 'crates/schema-registry/**'
+              - 'charts/**'
               - 'deploy/**'
               - 'helm/**'
               - 'packaging/melange/**'
@@ -78,7 +80,7 @@ jobs:
         run: |
           mkdir -p packages
           melange keygen
-          for recipe in crabka-operator crabka-broker; do
+          for recipe in crabka-operator crabka-broker crabka-schema-registry; do
             melange build "packaging/melange/${recipe}.yaml" \
               --source-dir . \
               --signing-key melange.rsa \
@@ -99,6 +101,7 @@ jobs:
           path: |
             crabka-operator.tar
             crabka-broker.tar
+            crabka-schema-registry.tar
           retention-days: 1
           if-no-files-found: error
 
@@ -824,6 +827,113 @@ jobs:
           path: /tmp/operator-e2e-diag/
           retention-days: 14
           if-no-files-found: ignore
+
+  kind-schema-registry:
+    needs: [build-images, changes]
+    if: ${{ github.event_name == 'push' || needs.changes.outputs.operator == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
+        with:
+          version: v3.16.2
+      - name: Download prebuilt image tarballs
+        uses: actions/download-artifact@v8
+        with:
+          name: e2e-images
+      - name: Create kind cluster
+        uses: helm/kind-action@v1
+        with:
+          cluster_name: crabka-sr-e2e
+          version: v0.24.0
+          node_image: kindest/node:v1.30.0
+      - name: Load images into kind
+        run: |
+          for img in crabka-operator crabka-broker crabka-schema-registry; do
+            docker load -i "${img}.tar" 2>&1 | tee /tmp/load.log
+            loaded=$(sed -n 's/^Loaded image: //p' /tmp/load.log | head -1)
+            [ -n "$loaded" ] || { echo "::error::no image loaded for $img"; exit 1; }
+            [ "$loaded" = "${img}:e2e" ] || docker tag "$loaded" "${img}:e2e"
+            kind load docker-image "${img}:e2e" --name crabka-sr-e2e
+          done
+      - name: Install prometheus-operator CRDs
+        run: |
+          PROM_OP_TAG=v0.79.2
+          kubectl apply -f "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/${PROM_OP_TAG}/example/prometheus-operator-crd/monitoring.coreos.com_podmonitors.yaml"
+          kubectl apply -f "https://raw.githubusercontent.com/prometheus-operator/prometheus-operator/${PROM_OP_TAG}/example/prometheus-operator-crd/monitoring.coreos.com_servicemonitors.yaml"
+      - name: Install CRDs
+        run: |
+          kubectl apply -f deploy/crds/crabka.io_kafkas.yaml
+          kubectl apply -f deploy/crds/crabka.io_kafkanodepools.yaml
+          kubectl apply -f deploy/crds/crabka.io_schemaregistries.yaml
+      - name: Install operator chart
+        run: |
+          kubectl create namespace crabka-operator
+          helm install operator charts/crabka-operator \
+            --namespace crabka-operator \
+            --set image.repository=crabka-operator --set image.tag=e2e --set image.pullPolicy=IfNotPresent \
+            --set brokerImage.repository=crabka-broker --set brokerImage.tag=e2e --set brokerImage.pullPolicy=IfNotPresent
+          kubectl rollout status -n crabka-operator deploy/operator-crabka-operator --timeout=240s
+      - name: Apply Kafka + KafkaNodePool
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: Kafka
+          metadata: { name: demo, namespace: default }
+          spec: { kafkaVersion: "3.7.0" }
+          ---
+          apiVersion: crabka.io/v1alpha1
+          kind: KafkaNodePool
+          metadata:
+            name: brokers
+            namespace: default
+            labels: { crabka.io/cluster: demo }
+          spec:
+            roles: [Controller, Broker]
+            replicas: 1
+            nodeIdStart: 0
+            storage: { type: PersistentClaim, size: 1Gi, deleteClaim: true }
+          EOF
+          kubectl wait --for=condition=Ready kafka/demo -n default --timeout=300s
+      - name: Apply SchemaRegistry
+        run: |
+          cat <<EOF | kubectl apply -f -
+          apiVersion: crabka.io/v1alpha1
+          kind: SchemaRegistry
+          metadata:
+            name: sr
+            namespace: default
+            labels: { crabka.io/cluster: demo }
+          spec:
+            replicas: 1
+            image: crabka-schema-registry:e2e
+            schemasTopicReplicationFactor: 1
+          EOF
+          # Wait for the operator to roll the Deployment out.
+          for i in $(seq 1 60); do
+            kubectl get deploy sr-sr -n default >/dev/null 2>&1 && break || sleep 5
+          done
+          kubectl rollout status -n default deploy/sr-sr --timeout=300s
+      - name: Register + fetch a schema (round-trip) via an in-cluster curl pod
+        run: |
+          BASE=http://sr-sr.default.svc.cluster.local:8081
+          run_curl() { kubectl run sr-curl-$RANDOM -n default --image=curlimages/curl:8.10.1 --restart=Never --rm -i --quiet --command -- "$@"; }
+          # POST a subject version.
+          run_curl curl -sf -X POST "$BASE/subjects/orders-value/versions" \
+            -H 'Content-Type: application/vnd.schemaregistry.v1+json' \
+            -d '{"schemaType":"AVRO","schema":"{\"type\":\"record\",\"name\":\"O\",\"fields\":[{\"name\":\"id\",\"type\":\"long\"}]}"}' | tee /tmp/reg.json
+          grep -q '"id"' /tmp/reg.json
+          # GET it back by version.
+          run_curl curl -sf "$BASE/subjects/orders-value/versions/1" | tee /tmp/get.json
+          grep -q 'orders-value' /tmp/get.json
+      - name: Dump diagnostics on failure
+        if: failure()
+        run: |
+          kubectl get all -n default
+          kubectl describe schemaregistry sr -n default || true
+          kubectl logs -n default deploy/sr-sr --all-containers --tail=200 || true
+          kubectl logs -n crabka-operator deploy/operator-crabka-operator --tail=200 || true
 
   kind-network-policy:
     needs: [build-images, changes]
@@ -2835,10 +2945,12 @@ jobs:
       # pulls them once on the runner (with retry) and `kind load`s them
       # into the node, so kubelet serves them locally (chart default
       # pullPolicy is IfNotPresent) and never touches docker.io. `--wait`
-      # keeps 1500s of headroom for first-boot on the CPU-contended node —
-      # 900s wasn't enough when Postgres+Keycloak first-start under load
-      # (observed: helm `context deadline exceeded` while both pods were
-      # still in early-startup probes).
+      # keeps 1500s of headroom for first-boot on the CPU-contended node.
+      # The chart's default liveness probe starts after 120s and kills after
+      # three 1s failures, while startupProbe is disabled. On slower shared
+      # runners Keycloak can still be in the first Quarkus configuration pass
+      # at that point, so enable a generous startupProbe to gate liveness until
+      # the HTTPS port is actually accepting connections.
       # ─────────────────────────────────────────────────────────────────────
       - name: Install Bitnami Keycloak chart
         run: |
@@ -2857,6 +2969,11 @@ jobs:
             --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
+            --set startupProbe.enabled=true \
+            --set startupProbe.initialDelaySeconds=30 \
+            --set startupProbe.periodSeconds=10 \
+            --set startupProbe.timeoutSeconds=5 \
+            --set startupProbe.failureThreshold=120 \
             --wait --timeout=1500s
           kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
@@ -3418,8 +3535,14 @@ jobs:
             kubectl get kafkatopic e2e -n default -o yaml || true
             echo "### events (default ns)"
             kubectl get events -n default --sort-by=.lastTimestamp || true
+            echo "### events (keycloak ns)"
+            kubectl get events -n keycloak --sort-by=.lastTimestamp || true
+            echo "### keycloak pod describe"
+            kubectl describe pod -n keycloak kc-keycloak-0 || true
             echo "### keycloak pod logs"
             kubectl logs -n keycloak kc-keycloak-0 -c keycloak --tail=300 || true
+            echo "### keycloak previous pod logs"
+            kubectl logs -n keycloak kc-keycloak-0 -c keycloak --previous --tail=300 || true
             echo "### keycloak postgresql logs"
             kubectl logs -n keycloak -l app.kubernetes.io/name=postgresql --tail=100 || true
             echo "### keycloak auto-generated TLS Secret (keycloak ns)"
@@ -3518,7 +3641,9 @@ jobs:
       # ─────────────────────────────────────────────────────────────────────
       # Install Bitnami Keycloak chart with TLS enabled.
       #
-      # Same pin/config as kind-oauth — see that job's comment for context.
+      # Same pin/config as kind-oauth — see that job's comment for context,
+      # including the startupProbe override that prevents liveness from killing
+      # slow first-boot Keycloak containers during Quarkus configuration.
       # Introspection-mode validation still requires HTTPS to the
       # introspection + userinfo endpoints, so the CA bundle is still wired
       # via `tlsTrustedCertificates`.
@@ -3540,6 +3665,11 @@ jobs:
             --set postgresql.image.repository=bitnamilegacy/postgresql \
             --set production=false \
             --set proxy=edge \
+            --set startupProbe.enabled=true \
+            --set startupProbe.initialDelaySeconds=30 \
+            --set startupProbe.periodSeconds=10 \
+            --set startupProbe.timeoutSeconds=5 \
+            --set startupProbe.failureThreshold=120 \
             --wait --timeout=1500s
           kubectl rollout status -n keycloak statefulset/kc-keycloak --timeout=1500s
 
@@ -4070,8 +4200,14 @@ jobs:
             kubectl get kafkatopic e2e -n default -o yaml || true
             echo "### events (default ns)"
             kubectl get events -n default --sort-by=.lastTimestamp || true
+            echo "### events (keycloak ns)"
+            kubectl get events -n keycloak --sort-by=.lastTimestamp || true
+            echo "### keycloak pod describe"
+            kubectl describe pod -n keycloak kc-keycloak-0 || true
             echo "### keycloak pod logs"
             kubectl logs -n keycloak kc-keycloak-0 -c keycloak --tail=300 || true
+            echo "### keycloak previous pod logs"
+            kubectl logs -n keycloak kc-keycloak-0 -c keycloak --previous --tail=300 || true
             echo "### keycloak postgresql logs"
             kubectl logs -n keycloak -l app.kubernetes.io/name=postgresql --tail=100 || true
             echo "### keycloak auto-generated TLS Secret (keycloak ns)"

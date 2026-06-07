@@ -1012,23 +1012,49 @@ impl Broker {
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
     /// return the handle.
     pub async fn start(config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
-        Self::start_with_controller_listener(config, None).await
+        Self::start_with_listeners(config, None, None).await
     }
 
     /// Like [`Self::start`], but adopts a caller-supplied, already-bound
     /// controller listener instead of binding `controller_listen_addr`.
     ///
-    /// This threads the listener through to
-    /// [`crabka_raft::Controller::start_with_listener`] so test harnesses
-    /// can eliminate the bind-and-drop TOCTOU race on the controller port.
-    /// The listener's local address MUST equal
-    /// `config.controller_listen_addr`. The data-plane listeners still
-    /// bind from `config` — pass `127.0.0.1:0` there and read the bound
-    /// port back via [`BrokerHandle::listen_addr`] to avoid that race too.
-    #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
+    /// Thin wrapper over [`Self::start_with_listeners`] for callers that only
+    /// hand off the controller port; the data plane still binds from `config`.
+    /// See that method for the full handoff contract.
     pub async fn start_with_controller_listener(
+        config: BrokerConfig,
+        controller_listener: Option<tokio::net::TcpListener>,
+    ) -> Result<BrokerHandle, BrokerError> {
+        Self::start_with_listeners(config, controller_listener, None).await
+    }
+
+    /// Like [`Self::start`], but adopts caller-supplied, already-bound
+    /// listeners instead of binding their addresses itself:
+    ///
+    /// * `controller_listener` — threaded through to
+    ///   [`crabka_raft::Controller::start_with_listener`]. Its local address
+    ///   MUST equal `config.controller_listen_addr`.
+    /// * `data_plane_listener` — adopted for the data-plane [`ListenerSpec`]
+    ///   whose `bind_addr` equals the listener's local address (for the legacy
+    ///   single-listener path that is `config.listen_addr`). Any non-matching
+    ///   specs still bind from `config`.
+    ///
+    /// Handing over live sockets — rather than the bind-and-drop trick of
+    /// reading an ephemeral port then dropping the probe before re-binding —
+    /// closes the TOCTOU window in which another process can claim the
+    /// just-released port, the `AddrInUse` flake test harnesses hit under
+    /// parallel execution. The data-plane port must still be concrete in
+    /// `config` up front (the broker self-registers `listen_addr.port()`
+    /// before binding the data plane), so callers read it back from the live
+    /// listener's `local_addr()` and set `config.listen_addr` /
+    /// `advertised_listener` to it before calling.
+    ///
+    /// [`ListenerSpec`]: crate::config::ListenerSpec
+    #[allow(clippy::too_many_lines)] // sequential bring-up; splitting hurts readability more than it helps
+    pub async fn start_with_listeners(
         mut config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
+        mut data_plane_listener: Option<tokio::net::TcpListener>,
     ) -> Result<BrokerHandle, BrokerError> {
         // 0a. Install the rustls crypto provider exactly once per process.
         //     `rustls 0.23` with `default-features = false` does NOT auto-install
@@ -2383,7 +2409,15 @@ impl Broker {
         let mut bound: Vec<(crate::config::ListenerSpec, TcpListener, SocketAddr)> =
             Vec::with_capacity(listeners_spec.len());
         for spec in listeners_spec {
-            let listener = TcpListener::bind(spec.bind_addr).await?;
+            // Adopt a caller-supplied, already-bound data-plane listener whose
+            // local address matches this spec (test harnesses hand one over to
+            // dodge the bind-and-drop TOCTOU race); otherwise bind the spec.
+            let listener = match data_plane_listener
+                .take_if(|l| l.local_addr().is_ok_and(|a| a == spec.bind_addr))
+            {
+                Some(l) => l,
+                None => TcpListener::bind(spec.bind_addr).await?,
+            };
             let actual = listener.local_addr()?;
             bound.push((spec, listener, actual));
         }

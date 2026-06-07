@@ -92,6 +92,11 @@ impl StoreRegistry {
     pub fn get_mut(&mut self, name: &str) -> Option<&mut dyn StateStore> {
         self.stores.get_mut(name).map(std::convert::AsMut::as_mut)
     }
+
+    /// IQ read view for the named store, if present and queryable.
+    pub(crate) fn iq_get(&self, name: &str) -> Option<&dyn crate::store::iq::IqQueryable> {
+        self.stores.get(name).and_then(|s| s.as_iq())
+    }
 }
 
 #[cfg(test)]

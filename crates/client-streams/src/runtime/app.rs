@@ -8,14 +8,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::StreamsClientError;
 use crate::membership::{StreamsEvent, StreamsMembership};
+use crate::processor::serde::Serde;
 use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
 use crate::runtime::io_broker;
+use crate::runtime::iq::IqRequest;
+use crate::runtime::iq_view::ReadOnlyKeyValueStore;
 use crate::runtime::thread::StreamThread;
+use crate::store::iq::StoreKind;
 use crate::topology::BuiltTopology;
 
 /// Lifecycle state of a [`KafkaStreams`] runtime.
@@ -33,6 +38,9 @@ pub struct KafkaStreams {
     shutdown: CancellationToken,
     handle: Option<JoinHandle<()>>,
     state: KafkaStreamsState,
+    /// Channel to the supervisor for interactive queries. Read by the
+    /// `KafkaStreams` IQ accessors.
+    iq_tx: mpsc::Sender<IqRequest>,
 }
 
 #[bon::bon]
@@ -69,6 +77,7 @@ impl KafkaStreams {
         let sd = shutdown.clone();
         let topo_for_thread = Arc::clone(&built);
         let fetcher_for_thread = Arc::clone(&fetcher);
+        let (iq_tx, mut iq_rx) = mpsc::channel::<IqRequest>(64);
         let handle = tokio::spawn(async move {
             let mut thread = StreamThread::new(fetcher_for_thread, store_backend, application_id);
             let mut poll = tokio::time::interval(poll_interval);
@@ -100,6 +109,9 @@ impl KafkaStreams {
                             tracing::warn!(error = %e, "commit_all failed");
                         }
                     }
+                    Some(req) = iq_rx.recv() => {
+                        thread.serve_iq(req).await;
+                    }
                 }
             }
         });
@@ -109,6 +121,7 @@ impl KafkaStreams {
             shutdown,
             handle: Some(handle),
             state: KafkaStreamsState::Running,
+            iq_tx,
         })
     }
 }
@@ -124,6 +137,74 @@ impl KafkaStreams {
     #[must_use]
     pub fn state(&self) -> KafkaStreamsState {
         self.state
+    }
+
+    /// A read-only view of the local `KeyValue` state store `name` for
+    /// interactive queries. Errors if the instance is not running, the store is
+    /// not assigned here, or it is a different store kind.
+    pub async fn key_value_store<K, V>(
+        &self,
+        name: impl Into<String>,
+        key_serde: impl Serde<K> + 'static,
+        value_serde: impl Serde<V> + 'static,
+    ) -> Result<ReadOnlyKeyValueStore<K, V>, StreamsClientError> {
+        if self.state != KafkaStreamsState::Running {
+            return Err(StreamsClientError::InteractiveQuery(
+                crate::runtime::iq::IqError::NotRunning,
+            ));
+        }
+        let view = ReadOnlyKeyValueStore {
+            tx: self.iq_tx.clone(),
+            store: name.into(),
+            key_serde: Box::new(key_serde),
+            value_serde: Box::new(value_serde),
+        };
+        crate::runtime::iq_view::validate(&view.tx, &view.store, StoreKind::KeyValue).await?;
+        Ok(view)
+    }
+
+    /// A read-only view of the local `Window` state store `name`.
+    pub async fn window_store<K, V>(
+        &self,
+        name: impl Into<String>,
+        key_serde: impl Serde<K> + 'static,
+        value_serde: impl Serde<V> + 'static,
+    ) -> Result<crate::runtime::iq_view::ReadOnlyWindowStore<K, V>, StreamsClientError> {
+        if self.state != KafkaStreamsState::Running {
+            return Err(StreamsClientError::InteractiveQuery(
+                crate::runtime::iq::IqError::NotRunning,
+            ));
+        }
+        let view = crate::runtime::iq_view::ReadOnlyWindowStore {
+            tx: self.iq_tx.clone(),
+            store: name.into(),
+            key_serde: Box::new(key_serde),
+            value_serde: Box::new(value_serde),
+        };
+        crate::runtime::iq_view::validate(&view.tx, &view.store, StoreKind::Window).await?;
+        Ok(view)
+    }
+
+    /// A read-only view of the local `Session` state store `name`.
+    pub async fn session_store<K, V>(
+        &self,
+        name: impl Into<String>,
+        key_serde: impl Serde<K> + 'static,
+        value_serde: impl Serde<V> + 'static,
+    ) -> Result<crate::runtime::iq_view::ReadOnlySessionStore<K, V>, StreamsClientError> {
+        if self.state != KafkaStreamsState::Running {
+            return Err(StreamsClientError::InteractiveQuery(
+                crate::runtime::iq::IqError::NotRunning,
+            ));
+        }
+        let view = crate::runtime::iq_view::ReadOnlySessionStore {
+            tx: self.iq_tx.clone(),
+            store: name.into(),
+            key_serde: Box::new(key_serde),
+            value_serde: Box::new(value_serde),
+        };
+        crate::runtime::iq_view::validate(&view.tx, &view.store, StoreKind::Session).await?;
+        Ok(view)
     }
 
     /// Stop processing, commit, and leave the group.

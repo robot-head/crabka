@@ -108,6 +108,32 @@ case "$MODE" in
       '
     ;;
 
+  --iq)
+    # Pin the JVM TopologyTestDriver Interactive-Query read semantics (KV get/
+    # range/all/count, window point+range fetch, session fetch) into
+    # testdata/iq/behavior.json, for the Rust IQ golden-parity tests. Mirrors
+    # --punctuation; same jars (incl. streams-test-utils + rocksdb).
+    TESTS_DIR="$(cd "$HERE/.." && pwd)"
+    docker run --rm \
+      -v "$TESTS_DIR":/tests -w /tests/jvm-capture \
+      "$JDK_IMAGE" bash -c '
+        set -euo pipefail
+        M=https://repo1.maven.org/maven2
+        J=/tmp/j; mkdir -p "$J"
+        get() { f=$(basename "$2"); [ -f "$J/$f" ] || curl -sSfL "$M/$1/$2" -o "$J/$f"; }
+        get org/apache/kafka/kafka-streams/'"$KAFKA_VERSION"' kafka-streams-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-streams-test-utils/'"$KAFKA_VERSION"' kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar
+        get org/apache/kafka/kafka-clients/'"$KAFKA_VERSION"' kafka-clients-'"$KAFKA_VERSION"'.jar
+        get org/slf4j/slf4j-api/1.7.36 slf4j-api-1.7.36.jar
+        get org/rocksdb/rocksdbjni/'"$ROCKSDB_VERSION"' rocksdbjni-'"$ROCKSDB_VERSION"'.jar
+        CP="$J/kafka-streams-'"$KAFKA_VERSION"'.jar:$J/kafka-streams-test-utils-'"$KAFKA_VERSION"'.jar:$J/kafka-clients-'"$KAFKA_VERSION"'.jar:$J/rocksdbjni-'"$ROCKSDB_VERSION"'.jar"
+        RT="$CP:$J/slf4j-api-1.7.36.jar"
+        mkdir -p /tmp/build /tests/testdata/iq
+        javac -cp "$CP" -d /tmp/build src/main/java/crabka/capture/InteractiveQueryBehavior.java
+        java -cp "/tmp/build:$RT" crabka.capture.InteractiveQueryBehavior /tests/testdata/iq
+      '
+    ;;
+
   --verify-broker)
     # Mechanism B: stand up a real Kafka 4.1 broker (KRaft, streams groups enabled),
     # run the count topology with group.protocol=streams, dump the live rebalance data.
@@ -154,7 +180,7 @@ case "$MODE" in
     ;;
 
   *)
-    echo "usage: $0 [--gradle|--javac|--verify-broker]" >&2
+    echo "usage: $0 [--gradle|--javac|--bufval|--punctuation|--iq|--verify-broker]" >&2
     exit 2
     ;;
 esac

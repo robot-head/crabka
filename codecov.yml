@@ -45,6 +45,12 @@ ignore:
   # covered there; what remains in main() is arg-parsing + the serve/election
   # loop, exercised end-to-end by the in-process ha.rs / security.rs tests.
   - "crates/schema-registry/src/bin/**"
+  # The operator's run loop (kube client init, health server, controller spawns,
+  # tokio::select supervision, shutdown) is the lib-side entrypoint glue —
+  # arg-parsing's twin, 0% unit-coverable and exercised only by the kind e2e.
+  # Same rationale as the binary entrypoints above; the controllers' own
+  # reconcile logic stays measured (it's in controller/*.rs, not here).
+  - "crates/operator/src/run.rs"
 
 flags:
   unit:

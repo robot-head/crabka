@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::error::StreamsClientError;
 use crate::membership::StreamsAssignment;
 use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
+use crate::runtime::iq::{IqRequest, answer_iq};
 use crate::runtime::task::StreamTask;
 use crate::topology::BuiltTopology;
 
@@ -188,6 +189,32 @@ impl StreamThread {
             task.commit().await?;
         }
         Ok(())
+    }
+
+    /// Serve one interactive query against this thread's local tasks. Composite
+    /// across every task whose registry hosts the named store.
+    ///
+    /// Takes `&mut self` (not `&self`): the query borrows `&dyn IqQueryable`
+    /// views out of the task graphs and holds them across `answer_iq`'s awaits.
+    /// A `&self` body would capture `&StreamThread` across the await, requiring
+    /// `StreamThread: Sync` — but the graph holds `Box<dyn StateStore>` /
+    /// `Box<dyn ErasedNode>` which are `Send` but not `Sync`, so the supervisor's
+    /// spawned future would not be `Send`. `&mut self` only needs `Send`.
+    pub(crate) async fn serve_iq(&mut self, req: IqRequest) {
+        let matching: Vec<&dyn crate::store::iq::IqQueryable> = self
+            .tasks
+            .values()
+            .filter_map(|t| t.registry().iq_get(&req.store))
+            .collect();
+        let result = answer_iq(
+            matching,
+            req.kind,
+            &req.op,
+            &req.store,
+            !self.tasks.is_empty(),
+        )
+        .await;
+        let _ = req.reply.send(result);
     }
 
     /// Commit + drop all tasks (on Fenced / shutdown).
@@ -622,6 +649,91 @@ mod tests {
                     && v.as_deref() == Some(8i64.to_be_bytes().as_ref())),
             "after restore with N=7, processing 'a' must emit count = 8"
         );
+    }
+
+    /// `serve_iq` must resolve a `KvGet` against the live, restored task store:
+    /// after restoring `counts` with `a=7` from the changelog (same setup as
+    /// `stateful_apply_assignment_restores_store_from_changelog`), a `KvGet` for
+    /// "a" returns the i64-BE bytes for 7. A thread with no tasks (rebalancing)
+    /// returns `RebalanceInProgress`.
+    #[tokio::test]
+    async fn serve_iq_reads_restored_kv_store() {
+        use crate::processor::serde::{I64Serde, Serde, StringSerde};
+        use crate::runtime::iq::{IqError, IqOp, IqPayload, IqRequest};
+        use crate::store::iq::StoreKind;
+
+        // --- build a thread + restore `counts` with a=7 (copied from
+        //     stateful_apply_assignment_restores_store_from_changelog) ---
+        // Changelog: key="a", value=i64 BE 7 at offset 0 on "app-counts-changelog".
+        let cl_key = bytes::Bytes::copy_from_slice(b"a");
+        let cl_val = bytes::Bytes::copy_from_slice(&7i64.to_be_bytes());
+        let restore_fetcher: Arc<dyn RecordFetcher> = Arc::new(ScriptedFetcher::new(vec![(
+            ("app-counts-changelog".to_string(), 0, 0),
+            FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: Some(cl_key),
+                    value: Some(cl_val),
+                    timestamp: -1,
+                }],
+            },
+        )]));
+
+        let producer_c = Arc::new(CollectProducer::default());
+        let store_c = Arc::new(MemStore::default());
+        let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
+        let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
+        let built = stateful_built();
+
+        let mut thread = StreamThread::new(
+            Arc::clone(&restore_fetcher),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+        thread
+            .apply_assignment(&assignment(), &built, &producer, &store)
+            .await
+            .unwrap();
+        check!(thread.task_count() == 1);
+
+        // happy path: get "a" -> 7
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        thread
+            .serve_iq(IqRequest {
+                store: "counts".into(),
+                kind: StoreKind::KeyValue,
+                op: IqOp::KvGet {
+                    key: StringSerde.serialize(&"a".to_string()),
+                },
+                reply,
+            })
+            .await;
+        assert_eq!(
+            rx.await.unwrap().unwrap(),
+            IqPayload::Value(Some(I64Serde.serialize(&7_i64)))
+        );
+
+        // empty thread (no tasks) -> RebalanceInProgress
+        let mut empty = StreamThread::new(
+            empty_fetcher(),
+            crate::store::backend::StoreBackend::InMemory,
+            "app".into(),
+        );
+        let (reply2, rx2) = tokio::sync::oneshot::channel();
+        empty
+            .serve_iq(IqRequest {
+                store: "counts".into(),
+                kind: StoreKind::KeyValue,
+                op: IqOp::KvGet {
+                    key: StringSerde.serialize(&"a".to_string()),
+                },
+                reply: reply2,
+            })
+            .await;
+        assert!(matches!(
+            rx2.await.unwrap(),
+            Err(IqError::RebalanceInProgress)
+        ));
     }
 
     /// End-to-end of the real runtime global-store path: `StreamThread` builds +
