@@ -10,7 +10,7 @@ url2 = "/benchmarks/crabka-vs-kafka/"
 url2_button = "See the benchmarks"
 repo_url = "https://github.com/robot-head/crabka"
 repo_license = "Apache 2.0"
-repo_version = "v0.2.0"
+repo_version = "v0.3.0"
 
 # --- Headline numbers (rendered as the stat band under the hero). ---
 # Sourced from /benchmarks/crabka-vs-kafka/ — a single-box, like-for-like

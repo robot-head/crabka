@@ -11,10 +11,10 @@ description = "Metadata KRaft quorum (KIP-595 KraftController) for Crabka"
 workspace = true
 
 [dependencies]
-crabka-metadata = { version = "0.2", path = "../metadata" }
-crabka-log = { version = "0.2", path = "../log" }
-crabka-protocol = { version = "0.2", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.2", path = "../client-core" }
+crabka-metadata = { version = "0.3", path = "../metadata" }
+crabka-log = { version = "0.3", path = "../log" }
+crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3", path = "../client-core" }
 async-trait = { workspace = true }
 wincode = { workspace = true }
 serde-wincode = { workspace = true }
