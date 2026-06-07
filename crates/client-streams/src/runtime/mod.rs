@@ -13,3 +13,4 @@ mod thread;
 pub use app::{KafkaStreams, KafkaStreamsState};
 pub use io::{FetchBatch, FetchedRec, OffsetStore, RecordFetcher, RecordProducer};
 pub use iq_view::ReadOnlyKeyValueStore;
+pub use iq_view::ReadOnlyWindowStore;

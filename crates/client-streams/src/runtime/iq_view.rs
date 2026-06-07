@@ -133,6 +133,69 @@ impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
     }
 }
 
+/// Read-only composite window store view. `fetch` yields `(windowStart, V)`.
+pub struct ReadOnlyWindowStore<K, V> {
+    pub(crate) tx: mpsc::Sender<IqRequest>,
+    pub(crate) store: String,
+    pub(crate) key_serde: Box<dyn Serde<K>>,
+    pub(crate) value_serde: Box<dyn Serde<V>>,
+}
+
+impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
+    /// Value of the window for `key` starting exactly at `window_start`, else `None`.
+    pub async fn fetch_single(
+        &self,
+        key: &K,
+        window_start: i64,
+    ) -> Result<Option<V>, StreamsClientError> {
+        let kb = self.key_serde.serialize(key);
+        match query(
+            &self.tx,
+            &self.store,
+            StoreKind::Window,
+            IqOp::WindowFetchSingle {
+                key: kb,
+                window_start,
+            },
+        )
+        .await?
+        {
+            IqPayload::Value(Some(vb)) => Ok(Some(deser(&*self.value_serde, &vb)?)),
+            IqPayload::Value(None) => Ok(None),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    /// Windows for `key` with start in inclusive `[time_from, time_to]`,
+    /// ascending by start. Each item is `(windowStart, value)`.
+    pub async fn fetch(
+        &self,
+        key: &K,
+        time_from: i64,
+        time_to: i64,
+    ) -> Result<Vec<(i64, V)>, StreamsClientError> {
+        let kb = self.key_serde.serialize(key);
+        match query(
+            &self.tx,
+            &self.store,
+            StoreKind::Window,
+            IqOp::WindowFetch {
+                key: kb,
+                time_from,
+                time_to,
+            },
+        )
+        .await?
+        {
+            IqPayload::WindowEntries(rows) => rows
+                .into_iter()
+                .map(|(t, vb)| Ok((t, deser(&*self.value_serde, &vb)?)))
+                .collect(),
+            other => Err(unexpected(&other)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +251,38 @@ mod tests {
         assert_eq!(r, vec![("a".to_string(), 1), ("b".to_string(), 2)]);
         assert_eq!(view.all().await.unwrap().len(), 3);
         assert_eq!(view.approximate_num_entries().await.unwrap(), 3);
+    }
+
+    async fn window_registry() -> StoreRegistry {
+        use crate::store::window::{WindowBytesStore, WindowStore};
+        let mut s = WindowBytesStore::<String, i64>::in_memory(
+            "wc".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "wc-changelog".into(),
+        );
+        s.put("k".into(), 0, 10, 5).await;
+        s.put("k".into(), 1000, 20, 1005).await;
+        let mut reg = StoreRegistry::default();
+        reg.insert(Box::new(s));
+        reg
+    }
+
+    #[tokio::test]
+    async fn window_view_fetch() {
+        let tx = servicer(window_registry().await);
+        let view = ReadOnlyWindowStore::<String, i64> {
+            tx,
+            store: "wc".into(),
+            key_serde: Box::new(StringSerde),
+            value_serde: Box::new(I64Serde),
+        };
+        assert_eq!(
+            view.fetch_single(&"k".to_string(), 0).await.unwrap(),
+            Some(10)
+        );
+        assert_eq!(view.fetch_single(&"k".to_string(), 5).await.unwrap(), None);
+        let r = view.fetch(&"k".to_string(), 0, 1000).await.unwrap();
+        assert_eq!(r, vec![(0, 10), (1000, 20)]);
     }
 }

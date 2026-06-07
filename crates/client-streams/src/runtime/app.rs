@@ -163,6 +163,28 @@ impl KafkaStreams {
         Ok(view)
     }
 
+    /// A read-only view of the local `Window` state store `name`.
+    pub async fn window_store<K, V>(
+        &self,
+        name: impl Into<String>,
+        key_serde: impl Serde<K> + 'static,
+        value_serde: impl Serde<V> + 'static,
+    ) -> Result<crate::runtime::iq_view::ReadOnlyWindowStore<K, V>, StreamsClientError> {
+        if self.state != KafkaStreamsState::Running {
+            return Err(StreamsClientError::InteractiveQuery(
+                crate::runtime::iq::IqError::NotRunning,
+            ));
+        }
+        let view = crate::runtime::iq_view::ReadOnlyWindowStore {
+            tx: self.iq_tx.clone(),
+            store: name.into(),
+            key_serde: Box::new(key_serde),
+            value_serde: Box::new(value_serde),
+        };
+        crate::runtime::iq_view::validate(&view.tx, &view.store, StoreKind::Window).await?;
+        Ok(view)
+    }
+
     /// Stop processing, commit, and leave the group.
     pub async fn close(&mut self) -> Result<(), StreamsClientError> {
         self.shutdown.cancel();
