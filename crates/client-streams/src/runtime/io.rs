@@ -79,6 +79,8 @@ pub trait OffsetStore: Send + Sync + 'static {
     ) -> Result<Option<i64>, StreamsClientError>;
     /// The earliest available offset (auto.offset.reset = earliest).
     async fn earliest(&self, topic: &str, partition: i32) -> Result<i64, StreamsClientError>;
+    /// The latest available offset (log-end offset).
+    async fn latest(&self, topic: &str, partition: i32) -> Result<i64, StreamsClientError>;
     /// Commit `(topic, partition, offset)` triples for the streams group.
     async fn commit(&self, offsets: &[(String, i32, i64)]) -> Result<(), StreamsClientError>;
 }

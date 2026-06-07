@@ -481,7 +481,7 @@ pub use dsl::{
 pub use error::StreamsClientError;
 pub use membership::{
     StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus, TaskAssignment,
-    TopicPartition,
+    TaskOffsetTracker, TopicPartition,
 };
 pub use processor::{
     BytesSerde, Cancellable, Consumed, FixedKeyProcessor, FixedKeyProcessorContext,

@@ -7,4 +7,7 @@ mod status;
 mod types;
 
 pub use client::StreamsMembership;
-pub use types::{StreamsAssignment, StreamsEvent, StreamsStatus, TaskAssignment, TopicPartition};
+pub use types::{
+    StreamsAssignment, StreamsEvent, StreamsStatus, TaskAssignment, TaskOffsetTracker,
+    TopicPartition,
+};

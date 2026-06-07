@@ -10,17 +10,26 @@ use crate::membership::TopicPartition;
 use crate::processor::graph::Graph;
 use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskRole {
+    Active,
+    Standby,
+    Warmup,
+}
+
 pub(crate) struct StreamTask {
     // Stored for logging / debugging; no non-debug caller at present.
     #[allow(dead_code)]
-    subtopology_id: String,
-    graph: Graph,
+    pub(crate) subtopology_id: String,
+    pub(crate) graph: Graph,
     /// The co-partitioned partition index for all source + changelog topics.
-    partition: i32,
+    pub(crate) partition: i32,
     positions: HashMap<(String, i32), i64>,
     pending: HashMap<(String, i32), i64>,
     producer: Arc<dyn RecordProducer>,
-    store: Arc<dyn OffsetStore>,
+    pub(crate) store: Arc<dyn OffsetStore>,
+    pub(crate) role: TaskRole,
+    pub(crate) changelog_offsets: HashMap<String, i64>,
 }
 
 impl StreamTask {
@@ -30,6 +39,7 @@ impl StreamTask {
         sources: Vec<TopicPartition>,
         producer: Arc<dyn RecordProducer>,
         store: Arc<dyn OffsetStore>,
+        role: TaskRole,
     ) -> Self {
         let partition = sources.first().map_or(0, |tp| tp.partition);
         let positions = sources
@@ -44,6 +54,8 @@ impl StreamTask {
             pending: HashMap::new(),
             producer,
             store,
+            role,
+            changelog_offsets: HashMap::new(),
         }
     }
 
@@ -75,7 +87,10 @@ impl StreamTask {
                 let store = self.graph.stores.get_mut(&name).expect("store in registry");
                 store.changelog_topic().to_string()
             };
-            let mut offset: i64 = 0;
+            let mut offset = *self
+                .changelog_offsets
+                .entry(changelog_topic.clone())
+                .or_insert(0);
             loop {
                 let batch = fetcher
                     .fetch(&changelog_topic, self.partition, offset)
@@ -103,9 +118,74 @@ impl StreamTask {
                     break;
                 }
             }
+            self.changelog_offsets.insert(changelog_topic, offset);
         }
         self.graph.set_logging(true);
         Ok(())
+    }
+
+    /// Incrementally restore standby/warmup task by fetching a single batch
+    /// from each store's changelog topic.
+    pub async fn restore_step(
+        &mut self,
+        fetcher: &dyn RecordFetcher,
+    ) -> Result<(), StreamsClientError> {
+        self.graph.set_logging(false);
+        let names = self.graph.stores.names();
+        for name in names {
+            let changelog_topic = {
+                let store = self.graph.stores.get_mut(&name).expect("store in registry");
+                store.changelog_topic().to_string()
+            };
+            let offset = *self
+                .changelog_offsets
+                .entry(changelog_topic.clone())
+                .or_insert(0);
+            let batch = fetcher
+                .fetch(&changelog_topic, self.partition, offset)
+                .await?;
+            let mut next_offset = offset;
+            for rec in &batch.records {
+                self.graph
+                    .restore_apply(
+                        &name,
+                        rec.key.clone().unwrap_or_default(),
+                        rec.value.clone(),
+                    )
+                    .await;
+                if rec.offset + 1 > next_offset {
+                    next_offset = rec.offset + 1;
+                }
+            }
+            self.changelog_offsets.insert(changelog_topic, next_offset);
+        }
+        self.graph.set_logging(true);
+        Ok(())
+    }
+
+    /// Compute cumulative restored and end offsets across all stores' changelog partitions.
+    pub async fn compute_changelog_offsets(&mut self) -> Result<(i64, i64), StreamsClientError> {
+        let mut current_sum = 0;
+        let mut end_sum = 0;
+        let names = self.graph.stores.names();
+        for name in names {
+            let changelog_topic = {
+                let store = self.graph.stores.get_mut(&name).expect("store in registry");
+                store.changelog_topic().to_string()
+            };
+            let end_offset = self.store.latest(&changelog_topic, self.partition).await?;
+            let current_offset = if self.role == TaskRole::Active {
+                end_offset
+            } else {
+                *self
+                    .changelog_offsets
+                    .entry(changelog_topic.clone())
+                    .or_insert(0)
+            };
+            current_sum += current_offset;
+            end_sum += end_offset;
+        }
+        Ok((current_sum, end_sum))
     }
 
     /// Seek each assigned partition to its committed offset, or `earliest` if
@@ -391,6 +471,7 @@ mod tests {
     #[derive(Default)]
     struct MemStore {
         committed: StdMutex<HashMap<(String, i32), i64>>,
+        latest: StdMutex<HashMap<(String, i32), i64>>,
     }
 
     #[async_trait::async_trait]
@@ -410,6 +491,16 @@ mod tests {
 
         async fn earliest(&self, _t: &str, _p: i32) -> Result<i64, crate::StreamsClientError> {
             Ok(0)
+        }
+
+        async fn latest(&self, t: &str, p: i32) -> Result<i64, crate::StreamsClientError> {
+            Ok(self
+                .latest
+                .lock()
+                .unwrap()
+                .get(&(t.to_string(), p))
+                .copied()
+                .unwrap_or(0))
         }
 
         async fn commit(
@@ -450,6 +541,7 @@ mod tests {
             }],
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Active,
         );
         task.seek_to_start().await.unwrap(); // no committed → earliest (0)
         task.process_once(&fetcher).await.unwrap(); // fetch+pipe+produce
@@ -495,6 +587,7 @@ mod tests {
             }],
             std::sync::Arc::clone(&producer_a) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store_a) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Active,
         );
         task_a.init().await.unwrap();
         task_a.process_once(&fetcher_a).await.unwrap();
@@ -545,6 +638,7 @@ mod tests {
             }],
             std::sync::Arc::clone(&producer_b) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store_b) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Active,
         );
         task_b.restore(&fetcher_b).await.unwrap();
 
@@ -647,6 +741,7 @@ mod tests {
             }],
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Active,
         );
         task.init().await.unwrap(); // schedules the punctuator (base i64::MIN)
         task.process_once(&fetcher).await.unwrap(); // pipe ts=25 → stream-time=25 → fire
@@ -697,6 +792,7 @@ mod tests {
             }],
             std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
             std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Active,
         );
         task.init().await.unwrap();
         task.process_once(&fetcher).await.unwrap();
@@ -724,5 +820,100 @@ mod tests {
             "changelog send must be pinned to task partition {TASK_PARTITION}, got {:?}",
             cl_rec.1
         );
+    }
+
+    #[tokio::test]
+    async fn restore_step_replays_increments_and_advances_offsets() {
+        let producer = std::sync::Arc::new(CollectProducer::default());
+        let store = std::sync::Arc::new(MemStore::default());
+
+        let cl_key = bytes::Bytes::copy_from_slice(b"a");
+        let cl_val = bytes::Bytes::copy_from_slice(&12i64.to_be_bytes());
+        let fetcher = ScriptedFetcher::new(vec![(
+            ("app-counts-changelog".to_string(), 0, 0),
+            FetchBatch {
+                records: vec![FetchedRec {
+                    offset: 0,
+                    key: Some(cl_key),
+                    value: Some(cl_val),
+                    timestamp: -1,
+                }],
+            },
+        )]);
+
+        let mut task = StreamTask::new(
+            "0".into(),
+            stateful_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
+            vec![TopicPartition {
+                topic: "in".into(),
+                partition: 0,
+            }],
+            std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
+            std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Standby,
+        );
+
+        // Run a single restore step.
+        task.restore_step(&fetcher).await.unwrap();
+
+        // Check store state.
+        check!(
+            task.store_get_i64("counts", &"a".to_string()).await == Some(12),
+            "restore_step must replay changelog record to store"
+        );
+        // Check updated offset.
+        check!(
+            task.changelog_offsets.get("app-counts-changelog") == Some(&1),
+            "restore_step must advance tracked offset to 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn compute_changelog_offsets_calculates_correct_sums() {
+        let producer = std::sync::Arc::new(CollectProducer::default());
+        let store = std::sync::Arc::new(MemStore::default());
+
+        // Configure end offset as 15.
+        store
+            .latest
+            .lock()
+            .unwrap()
+            .insert(("app-counts-changelog".to_string(), 0), 15);
+
+        let mut task = StreamTask::new(
+            "0".into(),
+            stateful_built()
+                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app")
+                .await
+                .unwrap(),
+            vec![TopicPartition {
+                topic: "in".into(),
+                partition: 0,
+            }],
+            std::sync::Arc::clone(&producer) as std::sync::Arc<dyn RecordProducer>,
+            std::sync::Arc::clone(&store) as std::sync::Arc<dyn OffsetStore>,
+            TaskRole::Warmup,
+        );
+
+        // Warmup: current offset is tracked changelog offset (initially 0).
+        let (curr, end) = task.compute_changelog_offsets().await.unwrap();
+        check!(curr == 0);
+        check!(end == 15);
+
+        // Advance tracked offset to 10.
+        task.changelog_offsets
+            .insert("app-counts-changelog".to_string(), 10);
+        let (curr, end) = task.compute_changelog_offsets().await.unwrap();
+        check!(curr == 10);
+        check!(end == 15);
+
+        // Active: current offset equals end offset (lag is 0).
+        task.role = TaskRole::Active;
+        let (curr, end) = task.compute_changelog_offsets().await.unwrap();
+        check!(curr == 15);
+        check!(end == 15);
     }
 }
