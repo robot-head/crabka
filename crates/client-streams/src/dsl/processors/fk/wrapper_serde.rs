@@ -7,7 +7,7 @@
 use bytes::Bytes;
 
 use crate::dsl::processors::fk::subscription::{SubscriptionResponseWrapper, SubscriptionWrapper};
-use crate::processor::serde::{Serde, SerdeError};
+use crate::processor::serde::{Serde, SerdeAssociate, SerdeError};
 
 /// `Serde<SubscriptionWrapper>` for the registration repartition topic value.
 #[derive(Debug, Clone, Copy, Default)]
@@ -22,6 +22,10 @@ impl Serde<SubscriptionWrapper> for SubscriptionWrapperSerde {
     }
 }
 
+impl SerdeAssociate for SubscriptionWrapperSerde {
+    type Target = SubscriptionWrapper;
+}
+
 /// `Serde<SubscriptionResponseWrapper>` for the response repartition topic value.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct SubscriptionResponseWrapperSerde;
@@ -33,6 +37,10 @@ impl Serde<SubscriptionResponseWrapper> for SubscriptionResponseWrapperSerde {
     fn deserialize(&self, bytes: &[u8]) -> Result<SubscriptionResponseWrapper, SerdeError> {
         Ok(SubscriptionResponseWrapper::deserialize(bytes))
     }
+}
+
+impl SerdeAssociate for SubscriptionResponseWrapperSerde {
+    type Target = SubscriptionResponseWrapper;
 }
 
 #[cfg(test)]

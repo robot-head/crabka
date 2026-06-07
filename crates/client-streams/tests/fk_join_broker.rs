@@ -111,12 +111,12 @@ async fn produce(producer: &crabka_client_producer::Producer, topic: &str, key: 
 /// FK join requires; the foreign-key extractor is identity on `a`'s value.
 fn fk_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    let ta = b.table::<String, String, _, _>(
+    let ta = b.table(
         "fk-a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("fk-sa"),
     );
-    let tb = b.table::<String, String, _, _>(
+    let tb = b.table(
         "fk-b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("fk-sb"),

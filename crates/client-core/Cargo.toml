@@ -22,8 +22,8 @@ mock = []
 sspi-keytab = ["crabka-security/sspi-keytab"]
 
 [dependencies]
-crabka-protocol = { version = "0.3.1", path = "../protocol", default-features = false }
-crabka-security = { version = "0.3.1", path = "../security" }
+crabka-protocol = { version = "0.3.2", path = "../protocol", default-features = false }
+crabka-security = { version = "0.3.2", path = "../security" }
 bon = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }

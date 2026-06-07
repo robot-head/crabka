@@ -877,7 +877,7 @@ fn dsl_to_table_unnamed_store_executes() {
 #[test]
 fn dsl_stream_table_inner_join_executes() {
     let b = StreamsBuilder::new();
-    let table = b.table::<String, String, _, _>(
+    let table = b.table(
         "right",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("store"),
@@ -929,7 +929,7 @@ fn dsl_stream_table_inner_join_executes() {
 #[test]
 fn dsl_stream_table_left_join_executes() {
     let b = StreamsBuilder::new();
-    let table = b.table::<String, String, _, _>(
+    let table = b.table(
         "right",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("store"),
@@ -985,12 +985,12 @@ fn dsl_ktable_ktable_inner_join_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
     let b = StreamsBuilder::new();
-    let ta = b.table::<String, String, _, _>(
+    let ta = b.table(
         "a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sa"),
     );
-    let tb = b.table::<String, String, _, _>(
+    let tb = b.table(
         "b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sb"),
@@ -1036,12 +1036,12 @@ fn dsl_ktable_ktable_left_join_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
     let b = StreamsBuilder::new();
-    let ta = b.table::<String, String, _, _>(
+    let ta = b.table(
         "a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sa"),
     );
-    let tb = b.table::<String, String, _, _>(
+    let tb = b.table(
         "b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sb"),
@@ -1076,12 +1076,12 @@ fn dsl_ktable_ktable_outer_join_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
     let b = StreamsBuilder::new();
-    let ta = b.table::<String, String, _, _>(
+    let ta = b.table(
         "a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sa"),
     );
-    let tb = b.table::<String, String, _, _>(
+    let tb = b.table(
         "b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sb"),
@@ -2627,7 +2627,7 @@ fn dsl_process_stateful_counter_executes() {
         }
     }
     let b = StreamsBuilder::new();
-    b.add_state_store::<String, i64, _, _>("counts", StringSerde, I64Serde);
+    b.add_state_store("counts", StringSerde, I64Serde);
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .process(|| Counter, ["counts"])
         .to("out", Produced::with(StringSerde, I64Serde));
@@ -2683,7 +2683,7 @@ fn dsl_process_is_key_changing_forces_repartition() {
         }
     }
     let b = StreamsBuilder::new();
-    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.add_state_store("store", StringSerde, StringSerde);
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .process(|| Fwd, ["store"])
         .group_by_key(Grouped::with(StringSerde, StringSerde))
@@ -2734,7 +2734,7 @@ fn dsl_process_values_preserves_key_executes() {
         }
     }
     let b = StreamsBuilder::new();
-    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.add_state_store("store", StringSerde, StringSerde);
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .process_values(|| Upper, ["store"])
         .to("out", Produced::with(StringSerde, StringSerde));
@@ -2780,7 +2780,7 @@ fn dsl_process_values_is_not_key_changing_no_repartition() {
         }
     }
     let b = StreamsBuilder::new();
-    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.add_state_store("store", StringSerde, StringSerde);
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .process_values(|| Upper, ["store"])
         .group_by_key(Grouped::with(StringSerde, StringSerde))
@@ -2833,7 +2833,7 @@ fn dsl_process_values_reads_store_and_record_context() {
         }
     }
     let b = StreamsBuilder::new();
-    b.add_state_store::<String, i64, _, _>("seen", StringSerde, I64Serde);
+    b.add_state_store("seen", StringSerde, I64Serde);
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .process_values(|| Tagger, ["seen"])
         .to("out", Produced::with(StringSerde, StringSerde));

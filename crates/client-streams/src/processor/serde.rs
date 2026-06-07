@@ -9,9 +9,24 @@ pub struct SerdeError(pub String);
 
 /// Serialize a `T` to bytes and back. Used by source nodes (deserialize) and
 /// sink/repartition nodes (serialize).
+#[diagnostic::on_unimplemented(
+    message = "the type `{Self}` is not a valid serializer/deserializer for `{T}`",
+    label = "does not implement `Serde<{T}>`",
+    note = "implement `Serde<{T}>` for `{Self}` or verify that the type parameter `{T}` matches the deserialized type of this serde"
+)]
 pub trait Serde<T>: Send + Sync + 'static {
     fn serialize(&self, value: &T) -> Bytes;
     fn deserialize(&self, bytes: &[u8]) -> Result<T, SerdeError>;
+}
+
+/// Associate a concrete Serde type with its target deserialized type to enable automatic type inference.
+#[diagnostic::on_unimplemented(
+    message = "the serde type `{Self}` is not associated with any target model type",
+    label = "does not implement `SerdeAssociate`",
+    note = "implement `SerdeAssociate` for `{Self}` and define `type Target = ...;` to map this Serde to its model type"
+)]
+pub trait SerdeAssociate {
+    type Target: Send + Sync + 'static;
 }
 
 /// The key + value [`Serde`]s used to **read** a topic into the topology.
@@ -87,6 +102,10 @@ impl<T: Send + Sync + 'static> Serde<T> for SerdeArc<T> {
     }
 }
 
+impl<T: Send + Sync + 'static> SerdeAssociate for SerdeArc<T> {
+    type Target = T;
+}
+
 /// Identity serde for raw `Bytes`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BytesSerde;
@@ -97,6 +116,10 @@ impl Serde<Bytes> for BytesSerde {
     fn deserialize(&self, bytes: &[u8]) -> Result<Bytes, SerdeError> {
         Ok(Bytes::copy_from_slice(bytes))
     }
+}
+
+impl SerdeAssociate for BytesSerde {
+    type Target = Bytes;
 }
 
 /// UTF-8 `String` serde.
@@ -111,6 +134,10 @@ impl Serde<String> for StringSerde {
     }
 }
 
+impl SerdeAssociate for StringSerde {
+    type Target = String;
+}
+
 /// Big-endian 8-byte `i64` serde (matches the JVM `Serdes.Long()`).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct I64Serde;
@@ -123,6 +150,59 @@ impl Serde<i64> for I64Serde {
             .try_into()
             .map_err(|_| SerdeError(format!("expected 8 bytes, got {}", bytes.len())))?;
         Ok(i64::from_be_bytes(arr))
+    }
+}
+
+impl SerdeAssociate for I64Serde {
+    type Target = i64;
+}
+
+/// Mapping trait for types that have a default associated [`Serde`].
+///
+/// If a type does not implement this trait, using `.stream_default` or other default
+/// methods will trigger a compiler error indicating that the default serde is not found.
+///
+/// # Examples
+///
+/// ```compile_fail
+/// use crabka_client_streams::{StreamsBuilder, KStream};
+///
+/// struct CustomType;
+///
+/// let builder = StreamsBuilder::new();
+/// // Fails because CustomType does not implement DefaultSerde:
+/// let stream: KStream<CustomType, String> = builder.stream_default(["topic"]);
+/// ```
+#[diagnostic::on_unimplemented(
+    message = "the type `{Self}` does not have a default Serde implementation",
+    label = "no default Serde association found for this type",
+    note = "implement `DefaultSerde` for `{Self}` or specify/override the serde explicitly using `.with_key_serde()` or `.with_value_serde()`"
+)]
+pub trait DefaultSerde: Send + Sync + 'static + Sized {
+    type Serde: SerdeAssociate<Target = Self> + Serde<Self> + Clone + Default + 'static;
+}
+
+impl DefaultSerde for String {
+    type Serde = StringSerde;
+}
+
+impl DefaultSerde for i64 {
+    type Serde = I64Serde;
+}
+
+impl DefaultSerde for bytes::Bytes {
+    type Serde = BytesSerde;
+}
+
+impl<KS, VS> From<(KS, VS)> for Consumed<KS, VS> {
+    fn from((key_serde, value_serde): (KS, VS)) -> Self {
+        Self::with(key_serde, value_serde)
+    }
+}
+
+impl<KS, VS> From<(KS, VS)> for Produced<KS, VS> {
+    fn from((key_serde, value_serde): (KS, VS)) -> Self {
+        Self::with(key_serde, value_serde)
     }
 }
 

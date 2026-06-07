@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::processor::erased::{OutputRecord, ProcessorError};
 use crate::processor::graph::Graph;
-use crate::processor::serde::{Consumed, Produced, Serde};
+use crate::processor::serde::{Consumed, Produced, Serde, SerdeAssociate};
 use crate::topology::BuiltTopology;
 
 /// A pending record entry in the repartition loop-back queue.
@@ -60,14 +60,18 @@ impl TopologyTestDriver {
     /// `consumed` is the same `Consumed::with(key_serde, value_serde)` pair the
     /// source for `topic` reads with.
     #[allow(clippy::needless_pass_by_value)] // owned K/V is the natural API
-    pub fn pipe_input<K, V, KS: Serde<K>, VS: Serde<V>>(
+    pub fn pipe_input<KS, VS>(
         &mut self,
         topic: &str,
-        consumed: Consumed<KS, VS>,
-        key: Option<K>,
-        value: V,
+        consumed: impl Into<Consumed<KS, VS>>,
+        key: Option<KS::Target>,
+        value: VS::Target,
         timestamp: i64,
-    ) {
+    ) where
+        KS: SerdeAssociate + Serde<KS::Target>,
+        VS: SerdeAssociate + Serde<VS::Target>,
+    {
+        let consumed = consumed.into();
         let kb = key.as_ref().map(|k| consumed.key_serde.serialize(k));
         let vb = consumed.value_serde.serialize(&value);
         self.pipe_bytes(topic, kb.as_deref(), &vb, timestamp);
@@ -319,11 +323,16 @@ impl TopologyTestDriver {
     /// `produced` is the same `Produced::with(key_serde, value_serde)` pair the
     /// sink writing `topic` produced with.
     #[allow(clippy::needless_pass_by_value)] // Produced holds Copy serdes; by-value reads cleanly
-    pub fn read_output<K, V, KS: Serde<K>, VS: Serde<V>>(
+    pub fn read_output<KS, VS>(
         &mut self,
         topic: &str,
-        produced: Produced<KS, VS>,
-    ) -> Option<(Option<K>, V)> {
+        produced: impl Into<Produced<KS, VS>>,
+    ) -> Option<(Option<KS::Target>, VS::Target)>
+    where
+        KS: SerdeAssociate + Serde<KS::Target>,
+        VS: SerdeAssociate + Serde<VS::Target>,
+    {
+        let produced = produced.into();
         let out = self.output.get_mut(topic)?.pop_front()?;
         let key = out.key.map(|b| {
             produced

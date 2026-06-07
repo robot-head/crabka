@@ -13,7 +13,7 @@ This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust imp
 ## Install
 
 ```toml
-crabka-records-legacy = "0.3.1"
+crabka-records-legacy = "0.3.2"
 ```
 
 For workspace development, use the path dependency from this repository instead.

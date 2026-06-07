@@ -21,7 +21,7 @@ use crate::dsl::processors::session_aggregate::{
     KStreamSessionAggregateProcessor, KStreamSessionReduceProcessor,
 };
 use crate::dsl::windows::{SessionWindowedSerde, SessionWindows, Windowed};
-use crate::processor::serde::Serde;
+use crate::processor::serde::{DefaultSerde, Serde};
 use crate::topology::NodeHandle;
 
 /// Handle produced by [`KGroupedStream::windowed_by_session`].
@@ -63,11 +63,15 @@ where
     }
 
     /// `count`: count records per session → `KTable<Windowed<K>, i64>`.
-    pub fn count<KS, VS>(self, materialized: Materialized<KS, VS>) -> KTable<Windowed<K>, i64>
+    pub fn count<KS, VS>(
+        self,
+        materialized: impl Into<Materialized<KS, VS>>,
+    ) -> KTable<Windowed<K>, i64, SessionWindowedSerde<KS>, VS>
     where
         KS: Serde<K> + Clone + 'static,
         VS: Serde<i64> + Clone + 'static,
     {
+        let materialized = materialized.into();
         let store_name = mint_store_name(&self.builder, &materialized, names::AGGREGATE_STORE);
         // JVM `count` burns an extra store-name counter index when unnamed.
         if materialized.store_name.is_none() {
@@ -91,8 +95,8 @@ where
         init: I,
         agg: A,
         merger: M,
-        materialized: Materialized<KS, VS>,
-    ) -> KTable<Windowed<K>, VA>
+        materialized: impl Into<Materialized<KS, VS>>,
+    ) -> KTable<Windowed<K>, VA, SessionWindowedSerde<KS>, VS>
     where
         VA: Any + Send + Sync + Clone,
         KS: Serde<K> + Clone + 'static,
@@ -101,6 +105,7 @@ where
         A: Fn(&K, &V, VA) -> VA + Clone + Send + Sync + 'static,
         M: Fn(&K, VA, VA) -> VA + Clone + Send + Sync + 'static,
     {
+        let materialized = materialized.into();
         let store_name = mint_store_name(&self.builder, &materialized, names::AGGREGATE_STORE);
         self.lower_aggregate::<KS, VS, VA, I, A, M>(materialized, store_name, init, agg, merger)
     }
@@ -109,15 +114,98 @@ where
     pub fn reduce<KS, VS, R>(
         self,
         reducer: R,
-        materialized: Materialized<KS, VS>,
-    ) -> KTable<Windowed<K>, V>
+        materialized: impl Into<Materialized<KS, VS>>,
+    ) -> KTable<Windowed<K>, V, SessionWindowedSerde<KS>, VS>
     where
         KS: Serde<K> + Clone + 'static,
         VS: Serde<V> + Clone + 'static,
         R: Fn(&V, &V) -> V + Clone + Send + Sync + 'static,
     {
+        let materialized = materialized.into();
         let store_name = mint_store_name(&self.builder, &materialized, names::REDUCE_STORE);
         self.lower_reduce::<KS, VS, R>(materialized, store_name, reducer)
+    }
+
+    pub fn count_default(
+        self,
+        store_name: impl Into<String>,
+    ) -> KTable<
+        Windowed<K>,
+        i64,
+        SessionWindowedSerde<<K as DefaultSerde>::Serde>,
+        crate::processor::serde::I64Serde,
+    >
+    where
+        K: DefaultSerde,
+        <K as DefaultSerde>::Serde: Serde<K> + Clone,
+    {
+        self.count(
+            Materialized::with(
+                <K as DefaultSerde>::Serde::default(),
+                crate::processor::serde::I64Serde,
+            )
+            .as_store(store_name),
+        )
+    }
+
+    pub fn reduce_default<R>(
+        self,
+        reducer: R,
+        store_name: impl Into<String>,
+    ) -> KTable<
+        Windowed<K>,
+        V,
+        SessionWindowedSerde<<K as DefaultSerde>::Serde>,
+        <V as DefaultSerde>::Serde,
+    >
+    where
+        K: DefaultSerde,
+        V: DefaultSerde,
+        <K as DefaultSerde>::Serde: Serde<K> + Clone,
+        <V as DefaultSerde>::Serde: Serde<V> + Clone,
+        R: Fn(&V, &V) -> V + Clone + Send + Sync + 'static,
+    {
+        self.reduce(
+            reducer,
+            Materialized::with(
+                <K as DefaultSerde>::Serde::default(),
+                <V as DefaultSerde>::Serde::default(),
+            )
+            .as_store(store_name),
+        )
+    }
+
+    pub fn aggregate_default<VA, I, A, M>(
+        self,
+        init: I,
+        agg: A,
+        merger: M,
+        store_name: impl Into<String>,
+    ) -> KTable<
+        Windowed<K>,
+        VA,
+        SessionWindowedSerde<<K as DefaultSerde>::Serde>,
+        <VA as DefaultSerde>::Serde,
+    >
+    where
+        VA: DefaultSerde + Any + Send + Sync + Clone,
+        K: DefaultSerde,
+        <K as DefaultSerde>::Serde: Serde<K> + Clone,
+        <VA as DefaultSerde>::Serde: Serde<VA> + Clone,
+        I: Fn() -> VA + Clone + Send + Sync + 'static,
+        A: Fn(&K, &V, VA) -> VA + Clone + Send + Sync + 'static,
+        M: Fn(&K, VA, VA) -> VA + Clone + Send + Sync + 'static,
+    {
+        self.aggregate(
+            init,
+            agg,
+            merger,
+            Materialized::with(
+                <K as DefaultSerde>::Serde::default(),
+                <VA as DefaultSerde>::Serde::default(),
+            )
+            .as_store(store_name),
+        )
     }
 
     #[allow(clippy::too_many_lines)]
@@ -129,7 +217,7 @@ where
         init: I,
         agg: A,
         merger: M,
-    ) -> KTable<Windowed<K>, VA>
+    ) -> KTable<Windowed<K>, VA, SessionWindowedSerde<KS>, VS>
     where
         VA: Any + Send + Sync + Clone,
         KS: Serde<K> + Clone + 'static,
@@ -168,6 +256,8 @@ where
             vec![agg_parent],
         );
         let store_for_thunk = store_name.clone();
+        let key_serde_for_lower = key_serde.clone();
+        let value_serde_for_lower = value_serde.clone();
         g.graph.nodes[agg_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&agg_parent].clone());
             let store_for_proc = store_for_thunk.clone();
@@ -190,8 +280,8 @@ where
                 );
             state.topology.add_session_store::<K, VA, KS, VS>(
                 store_for_thunk.clone(),
-                key_serde.clone(),
-                value_serde.clone(),
+                key_serde_for_lower.clone(),
+                value_serde_for_lower.clone(),
                 windows.gap_ms,
                 windows.grace_ms,
                 [h.name().to_string()],
@@ -200,9 +290,16 @@ where
         }));
 
         drop(g);
-        KTable::new(Rc::clone(&self.builder), agg_id, Some(store_name), None)
-            .with_window_grace(Some(windows.grace_ms))
-            .with_suppress_factory(Some(suppress_factory))
+        KTable::new(
+            Rc::clone(&self.builder),
+            agg_id,
+            Some(store_name),
+            None,
+            SessionWindowedSerde::new(key_serde.clone()),
+            value_serde.clone(),
+        )
+        .with_window_grace(Some(windows.grace_ms))
+        .with_suppress_factory(Some(suppress_factory))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -211,7 +308,7 @@ where
         materialized: Materialized<KS, VS>,
         store_name: String,
         reducer: R,
-    ) -> KTable<Windowed<K>, V>
+    ) -> KTable<Windowed<K>, V, SessionWindowedSerde<KS>, VS>
     where
         KS: Serde<K> + Clone + 'static,
         VS: Serde<V> + Clone + 'static,
@@ -247,6 +344,8 @@ where
             vec![agg_parent],
         );
         let store_for_thunk = store_name.clone();
+        let key_serde_for_lower = key_serde.clone();
+        let value_serde_for_lower = value_serde.clone();
         g.graph.nodes[red_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&agg_parent].clone());
             let store_for_proc = store_for_thunk.clone();
@@ -265,8 +364,8 @@ where
                 );
             state.topology.add_session_store::<K, V, KS, VS>(
                 store_for_thunk.clone(),
-                key_serde.clone(),
-                value_serde.clone(),
+                key_serde_for_lower.clone(),
+                value_serde_for_lower.clone(),
                 windows.gap_ms,
                 windows.grace_ms,
                 [h.name().to_string()],
@@ -275,9 +374,16 @@ where
         }));
 
         drop(g);
-        KTable::new(Rc::clone(&self.builder), red_id, Some(store_name), None)
-            .with_window_grace(Some(windows.grace_ms))
-            .with_suppress_factory(Some(suppress_factory))
+        KTable::new(
+            Rc::clone(&self.builder),
+            red_id,
+            Some(store_name),
+            None,
+            SessionWindowedSerde::new(key_serde.clone()),
+            value_serde.clone(),
+        )
+        .with_window_grace(Some(windows.grace_ms))
+        .with_suppress_factory(Some(suppress_factory))
     }
 }
 

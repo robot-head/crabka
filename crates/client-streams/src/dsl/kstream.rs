@@ -31,7 +31,7 @@ use crate::dsl::processors::stateless;
 use crate::dsl::processors::stream_join::KStreamKStreamJoinProcessor;
 use crate::dsl::processors::table::KStreamToTableProcessor;
 use crate::dsl::windows::JoinWindows;
-use crate::processor::serde::{BytesSerde, Produced, Serde};
+use crate::processor::serde::{BytesSerde, DefaultSerde, Produced, Serde, SerdeAssociate};
 use crate::topology::NodeHandle;
 
 /// The shared outer-form joiner threaded into a windowed stream-stream join
@@ -39,7 +39,7 @@ use crate::topology::NodeHandle;
 /// Each per-side processor wraps it so a match passes the present sides.
 type SharedOuterJoiner<V, V2, VO> = Arc<dyn Fn(Option<&V>, Option<&V2>) -> VO + Send + Sync>;
 
-pub struct KStream<K, V> {
+pub struct KStream<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde>::Serde> {
     #[allow(dead_code)]
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     #[allow(dead_code)]
@@ -60,24 +60,35 @@ pub struct KStream<K, V> {
     /// member when the key is unchanged (otherwise it repartitions and uses the
     /// repartition topic as the member).
     pub(crate) source_topic: Option<String>,
+    pub(crate) key_serde: KS,
+    pub(crate) value_serde: VS,
     pub(crate) _pd: std::marker::PhantomData<fn() -> (K, V)>,
 }
 
-impl<K, V> KStream<K, V> {
-    pub(crate) fn new(builder: Rc<RefCell<InternalStreamsBuilder>>, node: NodeId) -> Self {
-        Self::new_with_key_changing(builder, node, false)
+impl<K, V, KS, VS> KStream<K, V, KS, VS> {
+    pub(crate) fn new(
+        builder: Rc<RefCell<InternalStreamsBuilder>>,
+        node: NodeId,
+        key_serde: KS,
+        value_serde: VS,
+    ) -> Self {
+        Self::new_with_key_changing(builder, node, false, key_serde, value_serde)
     }
 
     pub(crate) fn new_with_key_changing(
         builder: Rc<RefCell<InternalStreamsBuilder>>,
         node: NodeId,
         key_changing: bool,
+        key_serde: KS,
+        value_serde: VS,
     ) -> Self {
         Self {
             builder,
             node,
             key_changing,
             source_topic: None,
+            key_serde,
+            value_serde,
             _pd: std::marker::PhantomData,
         }
     }
@@ -88,17 +99,45 @@ impl<K, V> KStream<K, V> {
         self.source_topic = topic;
         self
     }
+
+    #[must_use]
+    pub fn with_key_serde<NewKS>(self, serde: NewKS) -> KStream<K, V, NewKS, VS> {
+        KStream {
+            builder: self.builder,
+            node: self.node,
+            key_changing: self.key_changing,
+            source_topic: self.source_topic,
+            key_serde: serde,
+            value_serde: self.value_serde,
+            _pd: std::marker::PhantomData,
+        }
+    }
+
+    #[must_use]
+    pub fn with_value_serde<NewVS>(self, serde: NewVS) -> KStream<K, V, KS, NewVS> {
+        KStream {
+            builder: self.builder,
+            node: self.node,
+            key_changing: self.key_changing,
+            source_topic: self.source_topic,
+            key_serde: self.key_serde,
+            value_serde: serde,
+            _pd: std::marker::PhantomData,
+        }
+    }
 }
 
-impl<K, V> KStream<K, V>
+impl<K, V, KS, VS> KStream<K, V, KS, VS>
 where
     K: Any + Send + Sync + Clone,
     V: Any + Send + Clone,
+    KS: Clone,
+    VS: Clone,
 {
     /// `mapValues`: transform each value, key unchanged. Not key-changing.
-    pub fn map_values<V2, F>(&self, f: F) -> KStream<K, V2>
+    pub fn map_values<V2, F>(&self, f: F) -> KStream<K, V2, KS, <V2 as DefaultSerde>::Serde>
     where
-        V2: Any + Send + Clone,
+        V2: DefaultSerde + Any + Send + Clone,
         F: Fn(&V) -> V2 + Clone + Send + Sync + 'static,
     {
         let parent_id = self.node;
@@ -126,13 +165,19 @@ where
         }));
         drop(g);
         // map_values is value-only → key + source-topic lineage unchanged.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
-            .with_source_topic(self.source_topic.clone())
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            self.key_changing,
+            self.key_serde.clone(),
+            <V2 as DefaultSerde>::Serde::default(),
+        )
+        .with_source_topic(self.source_topic.clone())
     }
 
     /// `filter`: keep records where `predicate(key, value)` is true.
     #[must_use]
-    pub fn filter<F>(&self, predicate: F) -> KStream<K, V>
+    pub fn filter<F>(&self, predicate: F) -> KStream<K, V, KS, VS>
     where
         K: Default,
         F: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,
@@ -142,7 +187,7 @@ where
 
     /// `filterNot`: keep records where `predicate(key, value)` is false.
     #[must_use]
-    pub fn filter_not<F>(&self, predicate: F) -> KStream<K, V>
+    pub fn filter_not<F>(&self, predicate: F) -> KStream<K, V, KS, VS>
     where
         K: Default,
         F: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,
@@ -150,7 +195,7 @@ where
         self.filter_inner(predicate, true)
     }
 
-    fn filter_inner<F>(&self, predicate: F, negate: bool) -> KStream<K, V>
+    fn filter_inner<F>(&self, predicate: F, negate: bool) -> KStream<K, V, KS, VS>
     where
         K: Default,
         F: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,
@@ -181,16 +226,25 @@ where
         }));
         drop(g);
         // filter is value-only → key + source-topic lineage unchanged.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
-            .with_source_topic(self.source_topic.clone())
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            self.key_changing,
+            self.key_serde.clone(),
+            self.value_serde.clone(),
+        )
+        .with_source_topic(self.source_topic.clone())
     }
 
     /// `map`: transform key and value. Key-changing.
-    pub fn map<K2, V2, F>(&self, f: F) -> KStream<K2, V2>
+    pub fn map<K2, V2, F>(
+        &self,
+        f: F,
+    ) -> KStream<K2, V2, <K2 as DefaultSerde>::Serde, <V2 as DefaultSerde>::Serde>
     where
         K: Default,
-        K2: Any + Send + Clone,
-        V2: Any + Send + Clone,
+        K2: DefaultSerde + Any + Send + Clone,
+        V2: DefaultSerde + Any + Send + Clone,
         F: Fn(&K, &V) -> (K2, V2) + Clone + Send + Sync + 'static,
     {
         let parent_id = self.node;
@@ -219,14 +273,31 @@ where
         }));
         drop(g);
         // map rewrites the key → key-changing lineage.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, true)
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            true,
+            <K2 as DefaultSerde>::Serde::default(),
+            <V2 as DefaultSerde>::Serde::default(),
+        )
     }
 
     /// `selectKey`: rewrite the key, value unchanged. Key-changing.
-    pub fn select_key<K2, F>(&self, f: F) -> KStream<K2, V>
+    pub fn select_key<K2, F>(&self, f: F) -> KStream<K2, V, <K2 as DefaultSerde>::Serde, VS>
+    where
+        K: Default,
+        K2: DefaultSerde + Any + Send + Clone,
+        F: Fn(&K, &V) -> K2 + Clone + Send + Sync + 'static,
+    {
+        self.select_key_with_serde(f, <K2 as DefaultSerde>::Serde::default())
+    }
+
+    /// `selectKey` with an explicit key serde. Key-changing.
+    pub fn select_key_with_serde<K2, GKS, F>(&self, f: F, key_serde: GKS) -> KStream<K2, V, GKS, VS>
     where
         K: Default,
         K2: Any + Send + Clone,
+        GKS: Serde<K2> + Clone + 'static,
         F: Fn(&K, &V) -> K2 + Clone + Send + Sync + 'static,
     {
         let parent_id = self.node;
@@ -255,15 +326,24 @@ where
         }));
         drop(g);
         // select_key rewrites the key → key-changing lineage.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, true)
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            true,
+            key_serde,
+            self.value_serde.clone(),
+        )
     }
 
     /// `flatMap`: one record → zero or more `(K2, V2)`. Key-changing.
-    pub fn flat_map<K2, V2, IT, F>(&self, f: F) -> KStream<K2, V2>
+    pub fn flat_map<K2, V2, IT, F>(
+        &self,
+        f: F,
+    ) -> KStream<K2, V2, <K2 as DefaultSerde>::Serde, <V2 as DefaultSerde>::Serde>
     where
         K: Default,
-        K2: Any + Send + Clone,
-        V2: Any + Send + Clone,
+        K2: DefaultSerde + Any + Send + Clone,
+        V2: DefaultSerde + Any + Send + Clone,
         IT: IntoIterator<Item = (K2, V2)> + 'static,
         F: Fn(&K, &V) -> IT + Clone + Send + Sync + 'static,
     {
@@ -293,13 +373,22 @@ where
         }));
         drop(g);
         // flat_map can rewrite the key → key-changing lineage.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, true)
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            true,
+            <K2 as DefaultSerde>::Serde::default(),
+            <V2 as DefaultSerde>::Serde::default(),
+        )
     }
 
     /// `flatMapValues`: one record → zero or more `V2`, key unchanged.
-    pub fn flat_map_values<V2, IT, F>(&self, f: F) -> KStream<K, V2>
+    pub fn flat_map_values<V2, IT, F>(
+        &self,
+        f: F,
+    ) -> KStream<K, V2, KS, <V2 as DefaultSerde>::Serde>
     where
-        V2: Any + Send + Clone,
+        V2: DefaultSerde + Any + Send + Clone,
         IT: IntoIterator<Item = V2> + 'static,
         F: Fn(&V) -> IT + Clone + Send + Sync + 'static,
     {
@@ -328,13 +417,19 @@ where
         }));
         drop(g);
         // flat_map_values is value-only → key + source-topic lineage unchanged.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
-            .with_source_topic(self.source_topic.clone())
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            self.key_changing,
+            self.key_serde.clone(),
+            <V2 as DefaultSerde>::Serde::default(),
+        )
+        .with_source_topic(self.source_topic.clone())
     }
 
     /// `peek`: observe each record, then forward it unchanged.
     #[must_use]
-    pub fn peek<F>(&self, f: F) -> KStream<K, V>
+    pub fn peek<F>(&self, f: F) -> KStream<K, V, KS, VS>
     where
         K: Default,
         F: Fn(&K, &V) + Clone + Send + Sync + 'static,
@@ -364,8 +459,14 @@ where
         }));
         drop(g);
         // peek is observe-only → key + source-topic lineage unchanged.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
-            .with_source_topic(self.source_topic.clone())
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            self.key_changing,
+            self.key_serde.clone(),
+            self.value_serde.clone(),
+        )
+        .with_source_topic(self.source_topic.clone())
     }
 
     /// `foreach`: terminal side-effect on each record (consumes the stream).
@@ -400,11 +501,12 @@ where
     }
 
     /// `to`: write the stream to a topic via a sink (consumes the stream).
-    pub fn to<KS, VS>(self, topic: impl Into<String>, produced: Produced<KS, VS>)
+    pub fn to<KS2, VS2>(self, topic: impl Into<String>, produced: impl Into<Produced<KS2, VS2>>)
     where
-        KS: Serde<K> + Clone,
-        VS: Serde<V> + Clone,
+        KS2: SerdeAssociate + Serde<K> + Clone,
+        VS2: SerdeAssociate + Serde<V> + Clone,
     {
+        let produced = produced.into();
         let topic: String = topic.into();
         let parent_id = self.node;
         let mut g = self.builder.borrow_mut();
@@ -418,17 +520,31 @@ where
         );
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
-            state
-                .topology
-                .add_sink::<K, V, KS, VS, _, _>(name.clone(), topic, [parent], produced);
+            state.topology.add_sink::<K, V, KS2, VS2, _, _>(
+                name.clone(),
+                topic,
+                [parent],
+                produced,
+            );
             // A sink is terminal; record its name so children (none) could find it.
             state.handle_name.insert(id, name.clone());
         }));
     }
 
+    /// Write the stream to a topic using the default/carried serdes of the stream.
+    pub fn to_default(self, topic: impl Into<String>)
+    where
+        KS: SerdeAssociate + Serde<K> + Clone,
+        VS: SerdeAssociate + Serde<V> + Clone,
+    {
+        let key_serde = self.key_serde.clone();
+        let value_serde = self.value_serde.clone();
+        self.to(topic, Produced::with(key_serde, value_serde));
+    }
+
     /// `merge`: union this stream with `other` (same K/V). Both feed one node.
     #[must_use]
-    pub fn merge(&self, other: &KStream<K, V>) -> KStream<K, V> {
+    pub fn merge(&self, other: &KStream<K, V, KS, VS>) -> KStream<K, V, KS, VS> {
         let left_id = self.node;
         let right_id = other.node;
         let mut g = self.builder.borrow_mut();
@@ -457,6 +573,8 @@ where
             Rc::clone(&self.builder),
             id,
             self.key_changing || other.key_changing,
+            self.key_serde.clone(),
+            self.value_serde.clone(),
         )
     }
 
@@ -485,16 +603,21 @@ where
     ///
     /// [`StreamsBuilder::table`]: crate::dsl::builder::StreamsBuilder::table
     #[must_use]
-    pub fn join_table<VT, VO, F>(&self, table: &KTable<K, VT>, joiner: F) -> KStream<K, VO>
+    pub fn join_table<VT, VO, F, VTS>(
+        &self,
+        table: &KTable<K, VT, KS, VTS>,
+        joiner: F,
+    ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         VT: Any + Send + Clone,
-        VO: Any + Send + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
+        VTS: Clone,
         F: Fn(&V, &VT) -> VO + Clone + Send + Sync + 'static,
     {
         // Wrap the inner joiner to the left form `Fn(&V, Option<&VT>) -> VO`; with
         // `emit_on_miss = false` the closure is only ever called with `Some`.
         let lf = move |v: &V, opt: Option<&VT>| joiner(v, opt.expect("inner join hit"));
-        self.join_table_impl::<VT, VO, _>(table, lf, false)
+        self.join_table_impl::<VT, VO, _, VTS>(table, lf, false)
     }
 
     /// `leftJoin` (left stream-table join): like [`join_table`](Self::join_table)
@@ -502,13 +625,18 @@ where
     /// `joiner` receives `None` for the table-side value. See
     /// [`join_table`](Self::join_table) for the naming-vs-JVM note.
     #[must_use]
-    pub fn left_join_table<VT, VO, F>(&self, table: &KTable<K, VT>, joiner: F) -> KStream<K, VO>
+    pub fn left_join_table<VT, VO, F, VTS>(
+        &self,
+        table: &KTable<K, VT, KS, VTS>,
+        joiner: F,
+    ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         VT: Any + Send + Clone,
-        VO: Any + Send + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
+        VTS: Clone,
         F: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
-        self.join_table_impl::<VT, VO, _>(table, joiner, true)
+        self.join_table_impl::<VT, VO, _, VTS>(table, joiner, true)
     }
 
     /// Shared lowering for inner/left stream-table join. `left_form` is the
@@ -521,15 +649,16 @@ where
     /// the join into the SAME subtopology as the table source, so both sources land
     /// together), and (3) declares the `(stream_member, table_source)` copartition
     /// group when both members are single source topics.
-    fn join_table_impl<VT, VO, LF>(
+    fn join_table_impl<VT, VO, LF, VTS>(
         &self,
-        table: &KTable<K, VT>,
+        table: &KTable<K, VT, KS, VTS>,
         left_form: LF,
         emit_on_miss: bool,
-    ) -> KStream<K, VO>
+    ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         VT: Any + Send + Clone,
-        VO: Any + Send + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
+        VTS: Clone,
         LF: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
         assert!(
@@ -595,7 +724,13 @@ where
         drop(g);
         // The joined stream keeps the key but no longer maps to a single source
         // topic (it is the join output), so its source-topic lineage is `None`.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), join_id, false)
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            join_id,
+            false,
+            self.key_serde.clone(),
+            <VO as DefaultSerde>::Serde::default(),
+        )
     }
 
     /// `join` (inner stream-globaltable join): for each record on this stream,
@@ -612,23 +747,25 @@ where
     ///
     /// [`GlobalKTable`]: crate::dsl::global_table::GlobalKTable
     #[must_use]
-    pub fn join_global<GK, VG, VR, KM, J>(
+    pub fn join_global<GK, VG, VR, KM, J, GKS, VGS>(
         &self,
-        global: &crate::dsl::global_table::GlobalKTable<GK, VG>,
+        global: &crate::dsl::global_table::GlobalKTable<GK, VG, GKS, VGS>,
         key_mapper: KM,
         joiner: J,
-    ) -> KStream<K, VR>
+    ) -> KStream<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
         GK: Any + Send + Sync + 'static,
         VG: Any + Send + Clone,
-        VR: Any + Send + Clone,
+        VR: DefaultSerde + Any + Send + Clone,
+        GKS: Clone,
+        VGS: Clone,
         KM: Fn(&K, &V) -> GK + Clone + Send + Sync + 'static,
         J: Fn(&V, &VG) -> VR + Clone + Send + Sync + 'static,
     {
         // Wrap the inner joiner to the left form `Fn(&V, Option<&VG>) -> VR`; with
         // `emit_on_miss = false` the closure is only ever called with `Some`.
         let jf = move |v: &V, opt: Option<&VG>| joiner(v, opt.expect("inner global join hit"));
-        self.join_global_impl::<GK, VG, VR, KM, _>(global, key_mapper, jf, false)
+        self.join_global_impl::<GK, VG, VR, KM, _, GKS, VGS>(global, key_mapper, jf, false)
     }
 
     /// `leftJoin` (left stream-globaltable join): like
@@ -636,20 +773,22 @@ where
     /// stream record. On a global-store miss the `joiner` receives `None` for the
     /// global-side value.
     #[must_use]
-    pub fn left_join_global<GK, VG, VR, KM, J>(
+    pub fn left_join_global<GK, VG, VR, KM, J, GKS, VGS>(
         &self,
-        global: &crate::dsl::global_table::GlobalKTable<GK, VG>,
+        global: &crate::dsl::global_table::GlobalKTable<GK, VG, GKS, VGS>,
         key_mapper: KM,
         joiner: J,
-    ) -> KStream<K, VR>
+    ) -> KStream<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
         GK: Any + Send + Sync + 'static,
         VG: Any + Send + Clone,
-        VR: Any + Send + Clone,
+        VR: DefaultSerde + Any + Send + Clone,
+        GKS: Clone,
+        VGS: Clone,
         KM: Fn(&K, &V) -> GK + Clone + Send + Sync + 'static,
         J: Fn(&V, Option<&VG>) -> VR + Clone + Send + Sync + 'static,
     {
-        self.join_global_impl::<GK, VG, VR, KM, _>(global, key_mapper, joiner, true)
+        self.join_global_impl::<GK, VG, VR, KM, _, GKS, VGS>(global, key_mapper, joiner, true)
     }
 
     /// Shared lowering for inner/left stream-globaltable join. `left_form` is the
@@ -663,17 +802,19 @@ where
     /// `connect_processor_store` (the global store is fully replicated and reached
     /// through the global registry, not a copartitioned subtopology), and **no**
     /// `key_changing` assertion (the lookup key is derived, not the stream key).
-    fn join_global_impl<GK, VG, VR, KM, LF>(
+    fn join_global_impl<GK, VG, VR, KM, LF, GKS, VGS>(
         &self,
-        global: &crate::dsl::global_table::GlobalKTable<GK, VG>,
+        global: &crate::dsl::global_table::GlobalKTable<GK, VG, GKS, VGS>,
         key_mapper: KM,
         left_form: LF,
         emit_on_miss: bool,
-    ) -> KStream<K, VR>
+    ) -> KStream<K, VR, KS, <VR as DefaultSerde>::Serde>
     where
         GK: Any + Send + Sync + 'static,
         VG: Any + Send + Clone,
-        VR: Any + Send + Clone,
+        VR: DefaultSerde + Any + Send + Clone,
+        GKS: Clone,
+        VGS: Clone,
         KM: Fn(&K, &V) -> GK + Clone + Send + Sync + 'static,
         LF: Fn(&V, Option<&VG>) -> VR + Clone + Send + Sync + 'static,
     {
@@ -713,7 +854,13 @@ where
         drop(g);
         // The joined stream keeps the stream key but is a join output, so it no
         // longer maps to a single source topic.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), join_id, false)
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            join_id,
+            false,
+            self.key_serde.clone(),
+            <VR as DefaultSerde>::Serde::default(),
+        )
     }
 
     /// `join` (windowed inner stream-stream join): for each record on either
@@ -744,19 +891,19 @@ where
     /// [`JoinWindowStore`]: crate::store::join_window::JoinWindowStore
     /// [`KTable::join`]: crate::dsl::ktable::KTable::join
     #[must_use]
-    pub fn join<V2, VO, F, KS, V1S, V2S>(
+    pub fn join<V2, VO, F, V2S>(
         &self,
-        other: &KStream<K, V2>,
+        other: &KStream<K, V2, KS, V2S>,
         joiner: F,
         windows: JoinWindows,
-        stream_joined: StreamJoined<KS, V1S, V2S>,
-    ) -> KStream<K, VO>
+        stream_joined: StreamJoined<KS, VS, V2S>,
+    ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         V2: Any + Send + Sync + Clone,
-        VO: Any + Send + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
         F: Fn(&V, &V2) -> VO + Clone + Send + Sync + 'static,
         KS: Serde<K> + Clone + 'static,
-        V1S: Serde<V> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
         V2S: Serde<V2> + Clone + 'static,
         V: Send + Sync,
     {
@@ -764,7 +911,7 @@ where
         // (a null result never occurs for an inner join, so `expect` is unreachable).
         let j =
             move |a: Option<&V>, b: Option<&V2>| joiner(a.expect("inner a"), b.expect("inner b"));
-        self.join_impl::<V2, VO, KS, V1S, V2S>(
+        self.join_impl::<V2, VO, V2S>(
             other,
             Arc::new(j),
             windows,
@@ -779,56 +926,50 @@ where
     /// stream-time-driven). Matched records emit `joiner(&this, Some(&other))` as in
     /// the inner join. The right side never emits a non-join.
     #[must_use]
-    pub fn left_join<V2, VO, F, KS, V1S, V2S>(
+    pub fn left_join<V2, VO, F, V2S>(
         &self,
-        other: &KStream<K, V2>,
+        other: &KStream<K, V2, KS, V2S>,
         joiner: F,
         windows: JoinWindows,
-        stream_joined: StreamJoined<KS, V1S, V2S>,
-    ) -> KStream<K, VO>
+        stream_joined: StreamJoined<KS, VS, V2S>,
+    ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         V2: Any + Send + Sync + Clone,
-        VO: Any + Send + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
         F: Fn(&V, Option<&V2>) -> VO + Clone + Send + Sync + 'static,
         KS: Serde<K> + Clone + 'static,
-        V1S: Serde<V> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
         V2S: Serde<V2> + Clone + 'static,
         V: Send + Sync,
     {
         // Left form: the left (A) side may receive `None` for B; the A side is always
         // present (the join never fires from a non-existent A).
         let j = move |a: Option<&V>, b: Option<&V2>| joiner(a.expect("left a"), b);
-        self.join_impl::<V2, VO, KS, V1S, V2S>(
-            other,
-            Arc::new(j),
-            windows,
-            stream_joined,
-            JoinKind::left(),
-        )
+        self.join_impl::<V2, VO, V2S>(other, Arc::new(j), windows, stream_joined, JoinKind::left())
     }
 
     /// `outerJoin` (windowed outer stream-stream join): every record on EITHER side
     /// that finds no match emits `joiner(Some, None)` / `joiner(None, Some)` once its
     /// window closes (KIP-633). Matched records emit `joiner(Some, Some)`.
     #[must_use]
-    pub fn outer_join<V2, VO, F, KS, V1S, V2S>(
+    pub fn outer_join<V2, VO, F, V2S>(
         &self,
-        other: &KStream<K, V2>,
+        other: &KStream<K, V2, KS, V2S>,
         joiner: F,
         windows: JoinWindows,
-        stream_joined: StreamJoined<KS, V1S, V2S>,
-    ) -> KStream<K, VO>
+        stream_joined: StreamJoined<KS, VS, V2S>,
+    ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         V2: Any + Send + Sync + Clone,
-        VO: Any + Send + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
         F: Fn(Option<&V>, Option<&V2>) -> VO + Clone + Send + Sync + 'static,
         KS: Serde<K> + Clone + 'static,
-        V1S: Serde<V> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
         V2S: Serde<V2> + Clone + 'static,
         V: Send + Sync,
     {
         // The user joiner is already in outer form.
-        self.join_impl::<V2, VO, KS, V1S, V2S>(
+        self.join_impl::<V2, VO, V2S>(
             other,
             Arc::new(joiner),
             windows,
@@ -858,119 +999,104 @@ where
     /// [`TimeTracker`]: crate::dsl::processors::outer_join_store::TimeTracker
     #[allow(clippy::too_many_lines)] // dual+merge lowering: 3 nodes + shared outer store, each a typed thunk
     #[allow(clippy::needless_pass_by_value)] // `outer_joiner` is consumed (cloned into both thunks)
-    fn join_impl<V2, VO, KS, V1S, V2S>(
+    fn join_impl<V2, VO, V2S>(
         &self,
-        other: &KStream<K, V2>,
+        other: &KStream<K, V2, KS, V2S>,
         outer_joiner: SharedOuterJoiner<V, V2, VO>,
         windows: JoinWindows,
-        stream_joined: StreamJoined<KS, V1S, V2S>,
+        stream_joined: StreamJoined<KS, VS, V2S>,
         kind: JoinKind,
-    ) -> KStream<K, VO>
+    ) -> KStream<K, VO, KS, <VO as DefaultSerde>::Serde>
     where
         V2: Any + Send + Sync + Clone,
-        VO: Any + Send + Clone,
+        VO: DefaultSerde + Any + Send + Clone,
         KS: Serde<K> + Clone + 'static,
-        V1S: Serde<V> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
         V2S: Serde<V2> + Clone + 'static,
         V: Send + Sync,
     {
-        assert!(
-            !self.key_changing && !other.key_changing,
-            "stream-stream join: a key-changing stream must `.repartition()` first"
-        );
-        let a_src = self.source_topic.clone();
-        let b_src = other.source_topic.clone();
-        let self_node = self.node;
-        let other_node = other.node;
-        let StreamJoined {
-            key_serde,
-            value1_serde,
-            value2_serde,
-        } = stream_joined;
+        let this_src = self.source_topic.clone();
+        let other_src = other.source_topic.clone();
+        // Symmetrically extract source topics when both sides are single source.
+        let a_src = this_src.clone();
+        let b_src = other_src.clone();
+
+        let parent_id = self.node;
+        let other_parent_id = other.node;
+
         let before = windows.before_ms;
         let after = windows.after_ms;
         let grace = windows.grace_ms;
 
-        // Which side emits non-joins: A emits when B is not required (left/outer);
-        // B emits when A is not required (outer). Inner: neither.
-        let this_emit = !kind.b_required;
-        let other_emit = !kind.a_required;
-        let has_outer = this_emit || other_emit;
-        // One shared stream-time tracker, cloned into both supplier closures (the
-        // supplier runs once per task, so both processors share the same instance).
-        let tracker: Arc<Mutex<TimeTracker>> = Arc::new(Mutex::new(TimeTracker::default()));
-
         let mut g = self.builder.borrow_mut();
-        // Mint names to match the JVM 4.1 `KStreamImplJoin` counter sequence
-        // (validated by the `stream_stream_join` golden, Task B4): the JVM first
-        // mints two `KSTREAM-WINDOWED-` windowed-stream processors (which put each
-        // side into its window store), then the two join processors, then merge.
-        // The two window-store names are `<joinProcessorName>-store`. We burn the
-        // two windowed indices (those nodes aren't wire-visible) so the join
-        // processors — and hence the store names — land at the JVM indices.
-        let _windowed_this = g.new_processor_name(names::KSTREAM_WINDOWED);
-        let _windowed_other = g.new_processor_name(names::KSTREAM_WINDOWED);
-        // Left/outer rename the join processors (and hence their `<name>-store`
-        // window stores): THIS → OUTERTHIS when the OTHER side is outer; OTHER →
-        // OUTEROTHER when THIS is outer. Inner keeps JOINTHIS/JOINOTHER, so inner
-        // topologies are byte-unchanged. (JVM `KStreamImplJoin`; pinned by the
-        // `stream_stream_outer_join` golden, Task C4.)
-        let join_this_prefix = if other_emit {
-            names::KSTREAM_OUTERTHIS
-        } else {
-            names::KSTREAM_JOINTHIS
-        };
-        let join_other_prefix = if this_emit {
-            names::KSTREAM_OUTEROTHER
-        } else {
-            names::KSTREAM_JOINOTHER
-        };
-        let join_this = g.new_processor_name(join_this_prefix);
-        let join_other = g.new_processor_name(join_other_prefix);
+        let join_this = g.new_processor_name(names::KSTREAM_JOINTHIS);
+        let join_other = g.new_processor_name(names::KSTREAM_JOINOTHER);
+        let merge = g.new_processor_name(names::MERGE);
+
+        // Store names at their JVM positions (minted before the processors).
         let this_store = format!("{join_this}-store");
         let other_store = format!("{join_other}-store");
-        let merge = g.new_processor_name(names::MERGE);
-        // The shared outer-join KV store (left/outer only). The JVM does NOT mint a
-        // fresh counter index for it — it reuses the THIS join processor's 10-digit
-        // index: `KSTREAM-OUTERSHARED-<thisIndex>-store`. (`new_processor_name`
-        // always formats the index as the trailing 10 chars.)
-        let outer_store = has_outer.then(|| {
-            let idx = &join_this[join_this.len() - 10..];
-            format!("{}{idx}-store", names::KSTREAM_OUTERSHARED)
-        });
 
-        // ── THIS side: fed by this stream; puts into `this_store`, reads `other_store`.
+        // The shared outer KV store is only needed for left/outer joins.
+        let outer_store =
+            (!kind.a_required || !kind.b_required).then(|| format!("{merge}-outer-store"));
+
         let this_id = g.graph.add(
             join_this.clone(),
             GraphNodeKind::StatelessProcessor {
                 repartition_required: false,
             },
-            vec![self_node],
+            vec![parent_id],
         );
+        let other_id = g.graph.add(
+            join_other.clone(),
+            GraphNodeKind::StatelessProcessor {
+                repartition_required: false,
+            },
+            vec![other_parent_id],
+        );
+
+        let stream_joined_clone = stream_joined.clone();
+        let this_store_clone = this_store.clone();
+        let other_store_clone = other_store.clone();
+        let outer_store_clone = outer_store.clone();
+
+        // One shared TimeTracker tracks the maximum observed stream time across both
+        // partition driving threads (synchronizing the window close).
+        let tracker = Arc::new(Mutex::new(TimeTracker::default()));
+
+        // We capture both serdes by cloning the stream_joined fields; since they are
+        // cloneable wrappers, this moves them into the lowering closures safely.
+        let ks = stream_joined_clone.key_serde.clone();
+        let vs1 = stream_joined_clone.value1_serde.clone();
+        let vs2 = stream_joined_clone.value2_serde.clone();
+
+        // ── THIS side: fed by `self`; puts into `this_store`, reads `other_store`.
         {
-            let join_this_name = join_this.clone();
-            let own = this_store.clone();
-            let other_s = other_store.clone();
-            let ks = key_serde.clone();
-            let vs = value1_serde.clone();
-            let outer_joiner_this = Arc::clone(&outer_joiner);
-            let outer_store_this = outer_store.clone();
+            let own = this_store_clone.clone();
+            let other_s = other_store_clone.clone();
+            let outer_store_this = outer_store_clone.clone();
             let tracker_this = Arc::clone(&tracker);
-            let ks_proc = key_serde.clone();
-            let vs_proc = value1_serde.clone();
+            let ks_for_proc = ks.clone();
+            let vs_for_proc = vs1.clone();
+            let oj = Arc::clone(&outer_joiner);
+            let this_emit = !kind.b_required; // this side emits non-joins (left & outer)
+
             g.graph.nodes[this_id].lower = Some(Box::new(move |state: &mut LowerState| {
-                let parent = NodeHandle::<K, V>::from_name(state.handle_name[&self_node].clone());
+                let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
                 let own_for_proc = own.clone();
                 let other_for_proc = other_s.clone();
-                // THIS joiner: drains V (left); a match passes `Some(a)`, a null passes
-                // `None` for the OTHER (right) side.
-                let oj = Arc::clone(&outer_joiner_this);
                 let outer_store_proc = outer_store_this.clone();
                 let tracker_proc = Arc::clone(&tracker_this);
-                let ks_for_proc = ks_proc.clone();
-                let vs_for_proc = vs_proc.clone();
+                let ks = ks_for_proc.clone();
+                let vs = vs_for_proc.clone();
+                let oj = Arc::clone(&oj);
+
+                let ks_for_proc_inner = ks.clone();
+                let vs_for_proc_inner = vs.clone();
+                let outer_store_for_proc = outer_store_proc.clone();
                 let h = state.topology.add_processor::<K, V, K, VO, _, _, _>(
-                    join_this_name.clone(),
+                    join_this.clone(),
                     move || KStreamKStreamJoinProcessor {
                         own_store: own_for_proc.clone(),
                         other_store: other_for_proc.clone(),
@@ -982,14 +1108,16 @@ where
                         },
                         side_left: true,
                         emit_unmatched: this_emit,
-                        outer_store: outer_store_proc.clone(),
-                        tracker: outer_store_proc.as_ref().map(|_| Arc::clone(&tracker_proc)),
-                        key_serde: outer_store_proc
+                        outer_store: outer_store_for_proc.clone(),
+                        tracker: outer_store_for_proc
                             .as_ref()
-                            .map(|_| Box::new(ks_for_proc.clone()) as Box<dyn Serde<K>>),
-                        value_serde: outer_store_proc
+                            .map(|_| Arc::clone(&tracker_proc)),
+                        key_serde: outer_store_for_proc
                             .as_ref()
-                            .map(|_| Box::new(vs_for_proc.clone()) as Box<dyn Serde<V>>),
+                            .map(|_| Box::new(ks_for_proc_inner.clone()) as Box<dyn Serde<K>>),
+                        value_serde: outer_store_for_proc
+                            .as_ref()
+                            .map(|_| Box::new(vs_for_proc_inner.clone()) as Box<dyn Serde<V>>),
                         before_ms: before,
                         after_ms: after,
                         grace_ms: grace,
@@ -998,7 +1126,7 @@ where
                     [parent],
                 );
                 // Register the THIS store (holds V) + connect to BOTH stores.
-                state.topology.add_join_window_store::<K, V, KS, V1S>(
+                state.topology.add_join_window_store::<K, V, KS, VS>(
                     own.clone(),
                     ks.clone(),
                     vs.clone(),
@@ -1011,7 +1139,7 @@ where
                 state.topology.connect_processor_store(h.name(), &other_s);
                 // For left/outer, register the shared outer KV store ONCE here and
                 // connect this processor to it. (The OTHER thunk only connects.)
-                if let Some(os) = &outer_store_this {
+                if let Some(os) = &outer_store_proc {
                     state
                         .topology
                         .add_state_store::<Bytes, Bytes, BytesSerde, BytesSerde>(
@@ -1026,38 +1154,32 @@ where
         }
 
         // ── OTHER side: fed by `other`; puts into `other_store`, reads `this_store`.
-        let other_id = g.graph.add(
-            join_other.clone(),
-            GraphNodeKind::StatelessProcessor {
-                repartition_required: false,
-            },
-            vec![other_node],
-        );
         {
-            let join_other_name = join_other.clone();
-            let own = other_store.clone();
-            let other_s = this_store.clone();
-            let ks = key_serde.clone();
-            let vs = value2_serde.clone();
-            let outer_joiner_other = Arc::clone(&outer_joiner);
-            let outer_store_other = outer_store.clone();
+            let own = other_store_clone.clone();
+            let other_s = this_store_clone.clone();
+            let outer_store_other = outer_store_clone.clone();
             let tracker_other = Arc::clone(&tracker);
-            let ks_proc = key_serde.clone();
-            let vs_proc = value2_serde.clone();
+            let ks_for_proc = ks.clone();
+            let vs_for_proc = vs2.clone();
+            let oj = Arc::clone(&outer_joiner);
+            let other_emit = !kind.a_required; // other side emits non-joins (outer only)
+
             g.graph.nodes[other_id].lower = Some(Box::new(move |state: &mut LowerState| {
-                let parent = NodeHandle::<K, V2>::from_name(state.handle_name[&other_node].clone());
+                let parent =
+                    NodeHandle::<K, V2>::from_name(state.handle_name[&other_parent_id].clone());
                 let own_for_proc = own.clone();
                 let other_for_proc = other_s.clone();
-                // OTHER joiner: drains V2 (right); a match passes `Some(b)`, a null
-                // passes `None` for the THIS (left) side — preserving the user
-                // `joiner(a, b)` arg order.
-                let oj = Arc::clone(&outer_joiner_other);
                 let outer_store_proc = outer_store_other.clone();
                 let tracker_proc = Arc::clone(&tracker_other);
-                let ks_for_proc = ks_proc.clone();
-                let vs_for_proc = vs_proc.clone();
+                let ks = ks_for_proc.clone();
+                let vs = vs_for_proc.clone();
+                let oj = Arc::clone(&oj);
+
+                let ks_for_proc_inner = ks.clone();
+                let vs_for_proc_inner = vs.clone();
+                let outer_store_for_proc = outer_store_proc.clone();
                 let h = state.topology.add_processor::<K, V2, K, VO, _, _, _>(
-                    join_other_name.clone(),
+                    join_other.clone(),
                     move || KStreamKStreamJoinProcessor {
                         own_store: own_for_proc.clone(),
                         other_store: other_for_proc.clone(),
@@ -1072,14 +1194,16 @@ where
                         },
                         side_left: false,
                         emit_unmatched: other_emit,
-                        outer_store: outer_store_proc.clone(),
-                        tracker: outer_store_proc.as_ref().map(|_| Arc::clone(&tracker_proc)),
-                        key_serde: outer_store_proc
+                        outer_store: outer_store_for_proc.clone(),
+                        tracker: outer_store_for_proc
                             .as_ref()
-                            .map(|_| Box::new(ks_for_proc.clone()) as Box<dyn Serde<K>>),
-                        value_serde: outer_store_proc
+                            .map(|_| Arc::clone(&tracker_proc)),
+                        key_serde: outer_store_for_proc
                             .as_ref()
-                            .map(|_| Box::new(vs_for_proc.clone()) as Box<dyn Serde<V2>>),
+                            .map(|_| Box::new(ks_for_proc_inner.clone()) as Box<dyn Serde<K>>),
+                        value_serde: outer_store_for_proc
+                            .as_ref()
+                            .map(|_| Box::new(vs_for_proc_inner.clone()) as Box<dyn Serde<V2>>),
                         before_ms: before,
                         after_ms: after,
                         grace_ms: grace,
@@ -1101,7 +1225,7 @@ where
                 state.topology.connect_processor_store(h.name(), &other_s);
                 // For left/outer, connect this processor to the shared outer store
                 // (registered by the THIS thunk).
-                if let Some(os) = &outer_store_other {
+                if let Some(os) = &outer_store_proc {
                     state.topology.connect_processor_store(h.name(), os);
                 }
                 state.handle_name.insert(other_id, h.name().to_string());
@@ -1135,7 +1259,13 @@ where
         }));
         drop(g);
         // The join output keeps the key but no longer maps to a single source topic.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), merge_id, false)
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            merge_id,
+            false,
+            self.key_serde.clone(),
+            <VO as DefaultSerde>::Serde::default(),
+        )
     }
 
     /// `repartition`: force a repartition through an internal topic.
@@ -1151,13 +1281,13 @@ where
     /// against a golden fixture — functional correctness (no panic,
     /// records flow through) is the bar here.
     #[must_use]
-    pub fn repartition<KS, VS>(
+    pub fn repartition<KS2, VS2>(
         &self,
-        repartitioned: crate::dsl::config::Repartitioned<KS, VS>,
-    ) -> KStream<K, V>
+        repartitioned: crate::dsl::config::Repartitioned<KS2, VS2>,
+    ) -> KStream<K, V, KS2, VS2>
     where
-        KS: Serde<K> + Clone + 'static,
-        VS: Serde<V> + Clone + 'static,
+        KS2: Serde<K> + Clone + 'static,
+        VS2: Serde<V> + Clone + 'static,
     {
         let crate::dsl::config::Repartitioned {
             name: explicit_name,
@@ -1182,31 +1312,39 @@ where
             },
             vec![parent_id],
         );
+        let key_serde_clone = key_serde.clone();
+        let value_serde_clone = value_serde.clone();
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent_name = state.handle_name[&parent_id].clone();
             let parent = NodeHandle::<K, V>::from_name(parent_name);
             let topic = format!("{}-{topic_base}{}", state.app_id, names::REPARTITION_SUFFIX);
             // sink: write to repartition topic
-            state.topology.add_sink::<K, V, KS, VS, _, _>(
+            state.topology.add_sink::<K, V, KS2, VS2, _, _>(
                 sink_name.clone(),
                 topic.clone(),
                 [parent],
-                crate::processor::serde::Produced::with(key_serde.clone(), value_serde.clone()),
+                crate::processor::serde::Produced::with(
+                    key_serde_clone.clone(),
+                    value_serde_clone.clone(),
+                ),
             );
             // mark the topic as internal repartition (loop-back)
             state.topology.add_repartition_topic(topic.clone());
             // source: read from repartition topic
-            state.topology.add_source::<K, V, KS, VS>(
+            state.topology.add_source::<K, V, KS2, VS2>(
                 source_name.clone(),
                 [topic],
-                crate::processor::serde::Consumed::with(key_serde, value_serde),
+                crate::processor::serde::Consumed::with(
+                    key_serde_clone.clone(),
+                    value_serde_clone.clone(),
+                ),
             );
             state.handle_name.insert(id, source_name.clone());
         }));
         drop(g);
         // An explicit repartition re-groups by key → downstream is no longer
         // key-changing relative to its (now repartitioned) partitioning.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, false)
+        KStream::new_with_key_changing(Rc::clone(&self.builder), id, false, key_serde, value_serde)
     }
 
     /// `split`: begin a branching fan-out. Returns a [`BranchedStream`] builder
@@ -1221,7 +1359,7 @@ where
     ///
     /// [`branch`]: BranchedStream::branch
     #[must_use]
-    pub fn split(&self) -> BranchedStream<K, V> {
+    pub fn split(&self) -> BranchedStream<K, V, KS, VS> {
         // The JVM mints a `KSTREAM-BRANCH-` node at split() time (counter-only:
         // the branch node itself is not wire-visible). Advance the counter here so
         // that downstream auto-names (e.g. from a subsequent aggregation) land at
@@ -1233,6 +1371,8 @@ where
             parent: self.node,
             key_changing: self.key_changing,
             source_topic: self.source_topic.clone(),
+            key_serde: self.key_serde.clone(),
+            value_serde: self.value_serde.clone(),
             _pd: std::marker::PhantomData,
         }
     }
@@ -1244,7 +1384,29 @@ where
     /// returned [`KGroupedStream`] carries whether the upstream key lineage is
     /// key-changing (→ the aggregation must insert a repartition) and a typed
     /// repartition-lowering thunk built from the `Grouped` serdes.
-    pub fn group_by_key<KS, VS>(&self, grouped: Grouped<KS, VS>) -> KGroupedStream<K, V>
+    pub fn group_by_key<GKS, GVS>(
+        &self,
+        grouped: impl Into<Grouped<GKS, GVS>>,
+    ) -> KGroupedStream<K, V>
+    where
+        GKS: Serde<K> + Clone + 'static,
+        GVS: Serde<V> + Clone + 'static,
+    {
+        let grouped = grouped.into();
+        KGroupedStream::new(
+            Rc::clone(&self.builder),
+            self.node,
+            self.key_changing,
+            grouped.name,
+            crate::dsl::kgrouped::repartition_lower::<K, V, GKS, GVS>(
+                grouped.key_serde,
+                grouped.value_serde,
+            ),
+        )
+    }
+
+    /// `groupByKey` using the stream's existing serdes.
+    pub fn group_by_key_default(&self) -> KGroupedStream<K, V>
     where
         KS: Serde<K> + Clone + 'static,
         VS: Serde<V> + Clone + 'static,
@@ -1253,10 +1415,10 @@ where
             Rc::clone(&self.builder),
             self.node,
             self.key_changing,
-            grouped.name,
+            None,
             crate::dsl::kgrouped::repartition_lower::<K, V, KS, VS>(
-                grouped.key_serde,
-                grouped.value_serde,
+                self.key_serde.clone(),
+                self.value_serde.clone(),
             ),
         )
     }
@@ -1265,15 +1427,21 @@ where
     ///
     /// Equivalent to `select_key(f).group_by_key(grouped)`; the key change forces
     /// a repartition before any subsequent aggregation.
-    pub fn group_by<K2, KS, VS, F>(&self, f: F, grouped: Grouped<KS, VS>) -> KGroupedStream<K2, V>
+    pub fn group_by<GKS, GVS, F>(
+        &self,
+        f: F,
+        grouped: impl Into<Grouped<GKS, GVS>>,
+    ) -> KGroupedStream<GKS::Target, V>
     where
         K: Default,
-        K2: Any + Send + Sync + Clone,
-        KS: Serde<K2> + Clone + 'static,
-        VS: Serde<V> + Clone + 'static,
-        F: Fn(&K, &V) -> K2 + Clone + Send + Sync + 'static,
+        GKS: SerdeAssociate + Serde<GKS::Target> + Clone + 'static,
+        GVS: SerdeAssociate + Serde<V> + Clone + 'static,
+        GKS::Target: Any + Send + Sync + Clone,
+        F: Fn(&K, &V) -> GKS::Target + Clone + Send + Sync + 'static,
     {
-        self.select_key(f).group_by_key(grouped)
+        let grouped = grouped.into();
+        self.select_key_with_serde(f, grouped.key_serde.clone())
+            .group_by_key(grouped)
     }
 
     /// `process`: attach a custom Processor-API node that may rewrite the key.
@@ -1301,10 +1469,10 @@ where
         &self,
         supplier: PS,
         store_names: impl IntoIterator<Item = impl Into<String>>,
-    ) -> KStream<KOut, VOut>
+    ) -> KStream<KOut, VOut, <KOut as DefaultSerde>::Serde, <VOut as DefaultSerde>::Serde>
     where
-        KOut: Any + Send + Sync + Clone,
-        VOut: Any + Send + Clone,
+        KOut: DefaultSerde + Any + Send + Sync + Clone,
+        VOut: DefaultSerde + Any + Send + Clone,
         PS: crate::processor::api::ProcessorSupplier<K, V, KOut, VOut> + Clone + 'static,
     {
         let stores: Vec<String> = store_names.into_iter().map(Into::into).collect();
@@ -1354,7 +1522,13 @@ where
         }));
         drop(g);
         // process MAY change the key → key-changing; source-topic lineage broken.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, true)
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            true,
+            <KOut as DefaultSerde>::Serde::default(),
+            <VOut as DefaultSerde>::Serde::default(),
+        )
     }
 
     /// `processValues`: attach a custom fixed-key Processor-API node (KIP-820) that
@@ -1384,9 +1558,9 @@ where
         &self,
         supplier: PS,
         store_names: impl IntoIterator<Item = impl Into<String>>,
-    ) -> KStream<K, VOut>
+    ) -> KStream<K, VOut, KS, <VOut as DefaultSerde>::Serde>
     where
-        VOut: Any + Send + Clone,
+        VOut: DefaultSerde + Any + Send + Clone,
         PS: crate::processor::fixed_key::FixedKeyProcessorSupplier<K, V, VOut> + Clone + 'static,
     {
         let stores: Vec<String> = store_names.into_iter().map(Into::into).collect();
@@ -1440,8 +1614,14 @@ where
         }));
         drop(g);
         // process_values keeps the key → NON-key-changing; carry source-topic lineage.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
-            .with_source_topic(self.source_topic.clone())
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            self.key_changing,
+            self.key_serde.clone(),
+            <VOut as DefaultSerde>::Serde::default(),
+        )
+        .with_source_topic(self.source_topic.clone())
     }
 
     /// `toTable`: materialize this stream into a [`KTable`] by writing each record
@@ -1456,11 +1636,15 @@ where
     /// [`Materialized::with_logging(false)`]).
     ///
     /// [`Materialized::with_logging(false)`]: crate::dsl::config::Materialized::with_logging
-    pub fn to_table<KS, VS>(&self, materialized: Materialized<KS, VS>) -> KTable<K, V>
+    pub fn to_table<NKS, NVS>(
+        &self,
+        materialized: impl Into<Materialized<NKS, NVS>>,
+    ) -> KTable<K, V, NKS, NVS>
     where
-        KS: Serde<K> + Clone + 'static,
-        VS: Serde<V> + Clone + 'static,
+        NKS: Serde<K> + Clone + 'static,
+        NVS: Serde<V> + Clone + 'static,
     {
+        let materialized = materialized.into();
         let parent_id = self.node;
         // Mint the store name at the JVM counter position (before the processor
         // name), matching the aggregate store-naming convention.
@@ -1488,6 +1672,8 @@ where
             vec![parent_id],
         );
         let store_for_thunk = store_name.clone();
+        let key_serde_for_lower = key_serde.clone();
+        let value_serde_for_lower = value_serde.clone();
         g.graph.nodes[id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&parent_id].clone());
             let store_for_proc = store_for_thunk.clone();
@@ -1504,23 +1690,44 @@ where
             // logging=true → changelog topic emitted; logging=false → store usable
             // at runtime but no state_changelog_topics entry in the wire topology.
             if logging {
-                state.topology.add_state_store::<K, V, KS, VS>(
+                state.topology.add_state_store::<K, V, NKS, NVS>(
                     store_for_thunk.clone(),
-                    key_serde.clone(),
-                    value_serde.clone(),
+                    key_serde_for_lower.clone(),
+                    value_serde_for_lower.clone(),
                     [h.name().to_string()],
                 );
             } else {
-                state.topology.add_state_store_no_changelog::<K, V, KS, VS>(
-                    store_for_thunk.clone(),
-                    key_serde.clone(),
-                    value_serde.clone(),
-                );
+                state
+                    .topology
+                    .add_state_store_no_changelog::<K, V, NKS, NVS>(
+                        store_for_thunk.clone(),
+                        key_serde_for_lower.clone(),
+                        value_serde_for_lower.clone(),
+                    );
             }
             state.handle_name.insert(id, h.name().to_string());
         }));
         drop(g);
-        KTable::new(Rc::clone(&self.builder), id, Some(store_name), None)
+        KTable::new(
+            Rc::clone(&self.builder),
+            id,
+            Some(store_name),
+            None,
+            key_serde,
+            value_serde,
+        )
+    }
+
+    /// Sourced `KTable` from this stream using the stream's carried serdes.
+    pub fn to_table_default(&self, store_name: impl Into<String>) -> KTable<K, V, KS, VS>
+    where
+        KS: Serde<K> + Clone + 'static,
+        VS: Serde<V> + Clone + 'static,
+    {
+        self.to_table(
+            Materialized::with(self.key_serde.clone(), self.value_serde.clone())
+                .as_store(store_name),
+        )
     }
 }
 
@@ -1542,23 +1749,27 @@ where
 /// `Rc::try_unwrap` inside `build` to fail.
 ///
 /// [`StreamsBuilder::build`]: crate::dsl::builder::StreamsBuilder::build
-pub struct BranchedStream<K, V> {
+pub struct BranchedStream<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde>::Serde> {
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     pub(crate) parent: NodeId,
     pub(crate) key_changing: bool,
     pub(crate) source_topic: Option<String>,
+    pub(crate) key_serde: KS,
+    pub(crate) value_serde: VS,
     pub(crate) _pd: std::marker::PhantomData<fn() -> (K, V)>,
 }
 
-impl<K, V> BranchedStream<K, V>
+impl<K, V, KS, VS> BranchedStream<K, V, KS, VS>
 where
     K: Any + Send + Clone + Default,
     V: Any + Send + Clone,
+    KS: Clone,
+    VS: Clone,
 {
     /// Add a branch: records for which `predicate(key, value)` returns `true`
     /// are forwarded to the returned [`KStream`]. Uses a `KSTREAM-BRANCHCHILD-`
     /// node backed by the same filter processor used by [`KStream::filter`].
-    pub fn branch<P>(&self, predicate: P) -> KStream<K, V>
+    pub fn branch<P>(&self, predicate: P) -> KStream<K, V, KS, VS>
     where
         P: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,
     {
@@ -1588,8 +1799,14 @@ where
         }));
         drop(g);
         // branch is filter-only → key + source-topic lineage unchanged.
-        KStream::new_with_key_changing(Rc::clone(&self.builder), id, self.key_changing)
-            .with_source_topic(self.source_topic.clone())
+        KStream::new_with_key_changing(
+            Rc::clone(&self.builder),
+            id,
+            self.key_changing,
+            self.key_serde.clone(),
+            self.value_serde.clone(),
+        )
+        .with_source_topic(self.source_topic.clone())
     }
 }
 

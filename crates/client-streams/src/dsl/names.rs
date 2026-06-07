@@ -68,16 +68,20 @@ pub(crate) const KSTREAM_JOINOTHER: &str = "KSTREAM-JOINOTHER-";
 /// *this* (left) side is outer (`leftOuter`). So inner → JOINTHIS/JOINOTHER, left
 /// → JOINTHIS/OUTEROTHER, outer → OUTERTHIS/OUTEROTHER. The window-store names are
 /// still `<joinProcessorName>-store`, so the prefix flows into the changelog name.
+#[allow(dead_code)]
 pub(crate) const KSTREAM_OUTERTHIS: &str = "KSTREAM-OUTERTHIS-";
+#[allow(dead_code)]
 pub(crate) const KSTREAM_OUTEROTHER: &str = "KSTREAM-OUTEROTHER-";
 /// The JVM's two windowed-stream processors (one per side) that put each record
 /// into its window store. Not wire-visible, but they consume counter indices, so
 /// the lowering burns two to land the join processors — and thus the
 /// `<joinProcessorName>-store` window-store names — at the JVM indices.
+#[allow(dead_code)]
 pub(crate) const KSTREAM_WINDOWED: &str = "KSTREAM-WINDOWED-";
 /// The shared outer-join KV store for KIP-633 left/outer window-close emission.
 /// Only minted for left/outer joins (inner topologies are byte-unchanged). The
 /// exact JVM index/naming is pinned by Task C4's golden capture.
+#[allow(dead_code)]
 pub(crate) const KSTREAM_OUTERSHARED: &str = "KSTREAM-OUTERSHARED-";
 /// The JVM `KTableImpl.suppress` processor node prefix.
 pub(crate) const KTABLE_SUPPRESS: &str = "KTABLE-SUPPRESS-";

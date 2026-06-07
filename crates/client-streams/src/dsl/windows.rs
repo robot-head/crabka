@@ -1,7 +1,7 @@
 //! Time windows + the `Windowed<K>` output key + a windowed output serde.
 use bytes::{BufMut, Bytes, BytesMut};
 
-use crate::processor::serde::{Serde, SerdeError};
+use crate::processor::serde::{Serde, SerdeAssociate, SerdeError};
 
 /// A time window (epoch millis). Time windows ([`TimeWindows`]) are half-open
 /// `[start, end)`; session windows ([`SessionWindows`]) are inclusive `[start,
@@ -199,6 +199,9 @@ where
         })
     }
 }
+impl<KS: SerdeAssociate> SerdeAssociate for SessionWindowedSerde<KS> {
+    type Target = Windowed<KS::Target>;
+}
 
 /// `Serde<Windowed<K>>` producing the JVM **output-topic** format:
 /// `inner_key_bytes ‖ windowStart : 8-byte BE` (no end, no seqnum). Carries the
@@ -246,6 +249,10 @@ where
             },
         })
     }
+}
+
+impl<KS: SerdeAssociate> SerdeAssociate for TimeWindowedSerde<KS> {
+    type Target = Windowed<KS::Target>;
 }
 
 #[cfg(test)]

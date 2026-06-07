@@ -294,7 +294,7 @@ fn process_matches_jvm() {
         }
     }
     let b = StreamsBuilder::new();
-    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.add_state_store("store", StringSerde, StringSerde);
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .process(|| Fwd, ["store"])
         .to("out", Produced::with(StringSerde, StringSerde));
@@ -326,7 +326,7 @@ fn process_values_matches_jvm() {
         }
     }
     let b = StreamsBuilder::new();
-    b.add_state_store::<String, String, _, _>("store", StringSerde, StringSerde);
+    b.add_state_store("store", StringSerde, StringSerde);
     b.stream(["in"], Consumed::with(StringSerde, StringSerde))
         .process_values(|| FixedFwd, ["store"])
         .to("out", Produced::with(StringSerde, StringSerde));
@@ -347,7 +347,7 @@ fn stream_table_join_matches_jvm() {
     // (`build_optimized`) REUSE_KTABLE_SOURCE_TOPICS makes the "store" changelog
     // the source topic "right" — matching the JVM ground truth.
     let b = StreamsBuilder::new();
-    let table = b.table::<String, String, _, _>(
+    let table = b.table(
         "right",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("store"),
@@ -376,12 +376,12 @@ fn ktable_ktable_join_matches_jvm() {
     // own source topic ("a"/"b"). The join result is unmaterialized — no result
     // changelog.
     let b = StreamsBuilder::new();
-    let ta = b.table::<String, String, _, _>(
+    let ta = b.table(
         "a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sa"),
     );
-    let tb = b.table::<String, String, _, _>(
+    let tb = b.table(
         "b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sb"),
@@ -455,12 +455,12 @@ fn fk_join_inner_matches_jvm() {
     // an inner foreign-key join with fk extractor = identity on the left value,
     // joiner va+vb, fk serde = String. Result `.toStream().to("out")`.
     let b = StreamsBuilder::new();
-    let ta = b.table::<String, String, _, _>(
+    let ta = b.table(
         "a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sa"),
     );
-    let tb = b.table::<String, String, _, _>(
+    let tb = b.table(
         "b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sb"),
@@ -486,12 +486,12 @@ fn fk_join_left_matches_jvm() {
     // byte-identical to the inner golden (the left/inner difference is runtime
     // instruction/joiner only, not graph shape).
     let b = StreamsBuilder::new();
-    let ta = b.table::<String, String, _, _>(
+    let ta = b.table(
         "a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sa"),
     );
-    let tb = b.table::<String, String, _, _>(
+    let tb = b.table(
         "b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sb"),
