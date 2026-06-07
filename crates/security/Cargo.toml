@@ -9,7 +9,7 @@ description = "TLS, SASL, SCRAM, OAuth, and Kerberos security utilities for Crab
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-security"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["kafka", "tls", "sasl", "scram", "crabka"]
 categories = ["authentication", "cryptography", "network-programming"]
 

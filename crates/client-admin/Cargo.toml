@@ -9,7 +9,7 @@ description = "Operator-side admin client for Crabka clusters"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-client-admin"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["kafka", "admin", "client", "crabka"]
 categories = ["api-bindings", "network-programming"]
 
@@ -17,10 +17,10 @@ categories = ["api-bindings", "network-programming"]
 workspace = true
 
 [dependencies]
-crabka-client-core = { version = "0.3", path = "../client-core" }
-crabka-metadata    = { version = "0.3", path = "../metadata" }
-crabka-protocol    = { version = "0.3", path = "../protocol", default-features = false }
-crabka-security    = { version = "0.3", path = "../security" }
+crabka-client-core = { version = "0.3.1", path = "../client-core" }
+crabka-metadata    = { version = "0.3.1", path = "../metadata" }
+crabka-protocol    = { version = "0.3.1", path = "../protocol", default-features = false }
+crabka-security    = { version = "0.3.1", path = "../security" }
 async-trait        = { workspace = true }
 bytes              = { workspace = true }
 ring               = { workspace = true }

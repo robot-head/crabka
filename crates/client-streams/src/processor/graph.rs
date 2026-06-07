@@ -275,12 +275,28 @@ impl Graph {
     }
 
     /// Drain every store's changelog buffer → `(changelog_topic, key, value)`.
-    pub fn drain_changelogs(&mut self) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>)> {
+    ///
+    /// A store whose changelog topic is one of `reuse_source_topics` is a
+    /// **reuse-source** store: the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a
+    /// `builder.table(topic, …)` store's changelog at its own source `topic`
+    /// instead of a derived `<app>-<store>-changelog`. Its buffer is still drained
+    /// (so it can't grow unbounded), but the entries are **not** re-produced — the
+    /// source topic already IS the changelog, and re-producing onto it would feed
+    /// the source node an endless re-emit loop. This mirrors the JVM, which marks
+    /// such source-table stores `loggingDisabled`.
+    pub fn drain_changelogs(
+        &mut self,
+        reuse_source_topics: &std::collections::HashSet<String>,
+    ) -> Vec<(String, bytes::Bytes, Option<bytes::Bytes>)> {
         let mut out = Vec::new();
         for name in self.stores.names() {
             if let Some(store) = self.stores.get_mut(&name) {
                 let topic = store.changelog_topic().to_string();
-                for (k, v) in store.take_changelog() {
+                let entries = store.take_changelog();
+                if reuse_source_topics.contains(&topic) {
+                    continue; // reuse-source store: drained, but never re-produced
+                }
+                for (k, v) in entries {
                     out.push((topic.clone(), k, v));
                 }
             }

@@ -9,7 +9,7 @@ description = "Shared Kafka-ACL authorization evaluator for the Crabka broker an
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-authz"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["kafka", "authorization", "acl", "security", "crabka"]
 categories = ["authentication", "network-programming"]
 
@@ -17,8 +17,8 @@ categories = ["authentication", "network-programming"]
 workspace = true
 
 [dependencies]
-crabka-metadata = { version = "0.3", path = "../metadata" }
-crabka-security = { version = "0.3", path = "../security" }
+crabka-metadata = { version = "0.3.1", path = "../metadata" }
+crabka-security = { version = "0.3.1", path = "../security" }
 
 [dev-dependencies]
 assert2 = { workspace = true }

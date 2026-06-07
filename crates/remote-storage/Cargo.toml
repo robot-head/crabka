@@ -9,7 +9,7 @@ description = "KIP-405 tiered-storage SPI (RemoteStorageManager / RemoteLogMetad
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-remote-storage"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["kafka", "tiered-storage", "object-store", "crabka"]
 categories = ["database-implementations", "filesystem"]
 

@@ -9,7 +9,7 @@ description = "Operator CLI for Crabka (binary: `crabka`)"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-cli"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["kafka", "cli", "operator", "crabka"]
 categories = ["command-line-utilities"]
 
@@ -23,7 +23,7 @@ workspace = true
 [dependencies]
 clap = { workspace = true }
 crabka-security = { workspace = true }
-crabka-metadata = { version = "0.3", path = "../metadata" }
+crabka-metadata = { version = "0.3.1", path = "../metadata" }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
 serde-wincode = { workspace = true }

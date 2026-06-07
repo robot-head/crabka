@@ -9,7 +9,7 @@ description = "Metadata KRaft quorum (KIP-595 KraftController) for Crabka"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-raft"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["kafka", "raft", "kraft", "consensus", "crabka"]
 categories = ["algorithms", "database-implementations"]
 
@@ -17,10 +17,10 @@ categories = ["algorithms", "database-implementations"]
 workspace = true
 
 [dependencies]
-crabka-metadata = { version = "0.3", path = "../metadata" }
-crabka-log = { version = "0.3", path = "../log" }
-crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
-crabka-client-core = { version = "0.3", path = "../client-core" }
+crabka-metadata = { version = "0.3.1", path = "../metadata" }
+crabka-log = { version = "0.3.1", path = "../log" }
+crabka-protocol = { version = "0.3.1", path = "../protocol", default-features = false }
+crabka-client-core = { version = "0.3.1", path = "../client-core" }
 async-trait = { workspace = true }
 wincode = { workspace = true }
 serde-wincode = { workspace = true }

@@ -86,6 +86,17 @@ impl StoreRegistry {
         Some(concrete as &mut dyn crate::store::suppress_store::SuppressStore<K, V>)
     }
 
+    /// Mutable access to the FK subscription store. `None` if absent / wrong type.
+    pub(crate) fn get_fk_subscription(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut crate::store::fk_subscription::SubscriptionBytesStore> {
+        let store = self.stores.get_mut(name)?;
+        store
+            .as_any_mut()
+            .downcast_mut::<crate::store::fk_subscription::SubscriptionBytesStore>()
+    }
+
     /// Mutable erased access by name — the `StateStore` trait surface
     /// (`changelog_topic` / `take_changelog` / `apply_changelog` / `set_logging`) is
     /// available on the returned `&mut dyn StateStore`.

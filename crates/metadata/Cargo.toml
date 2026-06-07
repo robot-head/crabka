@@ -9,7 +9,7 @@ description = "Versioned metadata record types + immutable image for Crabka"
 repository = "https://github.com/robot-head/crabka"
 homepage = "https://github.com/robot-head/crabka"
 documentation = "https://docs.rs/crabka-metadata"
-readme = "../../README.md"
+readme = "README.md"
 keywords = ["kafka", "metadata", "kraft", "crabka"]
 categories = ["data-structures", "encoding"]
 
@@ -21,7 +21,7 @@ wincode = { workspace = true }
 serde-wincode = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
-crabka-protocol = { version = "0.3", path = "../protocol", default-features = false }
+crabka-protocol = { version = "0.3.1", path = "../protocol", default-features = false }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 crabka-security = { workspace = true }
