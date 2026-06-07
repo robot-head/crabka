@@ -20,8 +20,6 @@ jobs:
         with:
           fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Strip dev-dependencies to prevent crates.io validation errors
-        run: python3 tools/strip-dev-deps.py
       - uses: MarcoIeni/release-plz-action@v0.5
         with:
           # Publish + tag/release only. The release-pr step errors while no

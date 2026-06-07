@@ -1406,7 +1406,6 @@ dependencies = [
  "assert2",
  "async-trait",
  "bytes",
- "crabka-broker",
  "crabka-client-core",
  "crabka-metadata",
  "crabka-protocol",
@@ -1427,9 +1426,7 @@ dependencies = [
  "assert2",
  "bon",
  "bytes",
- "crabka-broker",
  "crabka-client-core",
- "crabka-log",
  "crabka-protocol",
  "crabka-security",
  "futures-util",
@@ -1476,11 +1473,9 @@ dependencies = [
  "assert2",
  "bon",
  "bytes",
- "crabka-broker",
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-compression",
- "crabka-log",
  "crabka-protocol",
  "crabka-security",
  "dashmap",
@@ -1607,6 +1602,31 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "crabka-integration-tests"
+version = "0.2.0"
+dependencies = [
+ "assert2",
+ "bon",
+ "bytes",
+ "crabka-broker",
+ "crabka-client-admin",
+ "crabka-client-consumer",
+ "crabka-client-core",
+ "crabka-client-producer",
+ "crabka-log",
+ "crabka-protocol",
+ "crabka-security",
+ "futures-util",
+ "proptest",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 

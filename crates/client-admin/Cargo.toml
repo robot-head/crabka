@@ -25,7 +25,6 @@ uuid               = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.2", path = "../broker", features = ["test-helpers"] }
 tempfile      = { workspace = true }
 tokio         = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }

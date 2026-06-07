@@ -1,0 +1,28 @@
+[package]
+name = "crabka-integration-tests"
+version = "0.2.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+assert2 = { workspace = true }
+bon = { workspace = true }
+bytes = { workspace = true }
+crabka-broker = { path = "../broker", version = "0.2.0", features = ["test-helpers"] }
+crabka-client-admin = { path = "../client-admin", version = "0.2.0" }
+crabka-client-consumer = { path = "../client-consumer", version = "0.2.0" }
+crabka-client-producer = { path = "../client-producer", version = "0.2.0" }
+crabka-client-core = { path = "../client-core", version = "0.2.0" }
+crabka-protocol = { path = "../protocol", version = "0.2.0", default-features = false }
+crabka-security = { path = "../security", version = "0.2.0" }
+crabka-log = { path = "../log", version = "0.2.0" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros", "test-util"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+tokio-util = { workspace = true, features = ["rt"] }
+futures-util = { workspace = true }
+proptest = { workspace = true }
+uuid = { workspace = true }
