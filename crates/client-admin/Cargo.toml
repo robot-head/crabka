@@ -11,10 +11,10 @@ description = "Operator-side admin client for Crabka clusters"
 workspace = true
 
 [dependencies]
-crabka-client-core = { version = "0.2", path = "../client-core" }
-crabka-metadata    = { version = "0.2", path = "../metadata" }
-crabka-protocol    = { version = "0.2", path = "../protocol", default-features = false }
-crabka-security    = { version = "0.2", path = "../security" }
+crabka-client-core = { version = "0.3", path = "../client-core" }
+crabka-metadata    = { version = "0.3", path = "../metadata" }
+crabka-protocol    = { version = "0.3", path = "../protocol", default-features = false }
+crabka-security    = { version = "0.3", path = "../security" }
 async-trait        = { workspace = true }
 bytes              = { workspace = true }
 ring               = { workspace = true }
@@ -25,7 +25,6 @@ uuid               = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }
-crabka-broker = { version = "0.2", path = "../broker", features = ["test-helpers"] }
 tempfile      = { workspace = true }
 tokio         = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-subscriber = { workspace = true }

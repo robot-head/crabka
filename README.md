@@ -62,7 +62,7 @@ Reproduce locally with [`bench/local/run-local-bench.sh`](bench/local).
 
 ## Project status
 
-Crabka is in **beta** (`v0.2.0`). The Kafka-parity surface — wire protocol,
+Crabka is in **beta** (`v0.3.0`). The Kafka-parity surface — wire protocol,
 storage, replication, KRaft metadata, security, authorization, quotas, the
 Kubernetes operator, and the rebalancer — is now broad enough, and validated
 hard enough against the JVM, that the project has matured out of its alpha phase.
