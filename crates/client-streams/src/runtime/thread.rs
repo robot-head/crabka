@@ -1004,7 +1004,14 @@ mod tests {
             "app".into(),
         );
         thread
-            .apply_assignment(&assignment(), &built, &producer, &store)
+            .apply_assignment(
+                &assignment(),
+                &built,
+                &producer,
+                &store,
+                crate::runtime::eos::ProcessingGuarantee::AtLeastOnce,
+                None,
+            )
             .await
             .unwrap();
         check!(thread.task_count() == 1);
@@ -1392,7 +1399,8 @@ mod tests {
 
         // Idle interval: the fetcher returns empty for every fetch.
         let idle_fetcher = empty_fetcher();
-        thread.poll_all(&*idle_fetcher).await.unwrap();
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
+        thread.poll_all(&*idle_fetcher, &tracker).await.unwrap();
 
         let meta = crate::runtime::eos::StreamsGroupMeta {
             group_id: "app".into(),
@@ -1490,10 +1498,11 @@ mod tests {
             group_instance_id: None,
         };
         let key = ("0".to_string(), 0);
+        let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
 
         // ── Cycle 1: begin + process (count "a" → 1, store dirty), then commit
         //    FAILS → abort + rollback. ──────────────────────────────────────────
-        thread.poll_all(&*replay).await.unwrap();
+        thread.poll_all(&*replay, &tracker).await.unwrap();
         // The dirty count is in the store before commit.
         check!(
             thread
@@ -1521,7 +1530,7 @@ mod tests {
 
         // ── Cycle 2: fail_at is now None → the re-fetched "a" batch reprocesses
         //    and yields count = 1 (NOT double-counted to 2). ────────────────────
-        thread.poll_all(&*replay).await.unwrap();
+        thread.poll_all(&*replay, &tracker).await.unwrap();
         thread.commit_all(Some(&meta)).await.unwrap();
         check!(
             thread

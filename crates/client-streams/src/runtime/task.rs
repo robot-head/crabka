@@ -620,7 +620,6 @@ mod tests {
             TaskRole::Active,
             ProcessingGuarantee::AtLeastOnce,
         );
-        );
         task.seek_to_start().await.unwrap(); // no committed → earliest (0)
         task.process_once(&fetcher, None).await.unwrap(); // fetch+pipe+produce
         task.commit().await.unwrap(); // flush + commit
@@ -667,7 +666,6 @@ mod tests {
             std::sync::Arc::clone(&store_a) as std::sync::Arc<dyn OffsetStore>,
             TaskRole::Active,
             ProcessingGuarantee::AtLeastOnce,
-        );
         );
         task_a.init().await.unwrap();
         task_a.process_once(&fetcher_a, None).await.unwrap();
@@ -720,7 +718,6 @@ mod tests {
             std::sync::Arc::clone(&store_b) as std::sync::Arc<dyn OffsetStore>,
             TaskRole::Active,
             ProcessingGuarantee::AtLeastOnce,
-        );
         );
         task_b.restore(&fetcher_b).await.unwrap();
 
