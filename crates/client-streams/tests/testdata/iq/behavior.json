@@ -1,0 +1,5 @@
+{
+  "kv": { "records": [["a",0],["a",0],["b",0]], "get_a": 2, "get_z": null, "range_a_b": [["a",2],["b",1]], "all": [["a",2],["b",1]], "count": 3 },
+  "window": { "records": [["k",0],["k",1000]], "size_ms": 1000, "fetch_single_k_0": 1, "fetch_k_0_1000": [[0,1],[1000,1]] },
+  "session": { "records": [["k",0],["k",10],["k",500]], "gap_ms": 100, "fetch_k": [[[0,10],2],[[500,500],1]] }
+}

@@ -171,6 +171,146 @@ impl TopologyTestDriver {
         pollster::block_on(self.graph.globals.put(store_name, key, value));
     }
 
+    // ── Interactive-query reads ─────────────────────────────────────────────
+    //
+    // These read the driver's local stores through the *byte* IQ layer
+    // (`StoreRegistry::iq_get` → `&dyn IqQueryable`), then deserialize — the same
+    // path the supervisor serves `KafkaStreams::*_store` queries from. They
+    // exercise the full DSL → store → IQ-byte-read round-trip, so a Rust IQ test
+    // can assert read semantics without standing up the async supervisor.
+
+    /// Interactive-query KV read: value for `key`, else `None`. `None` if the
+    /// store is absent or not a key-value store.
+    pub async fn iq_kv_get<K: 'static, V: 'static>(
+        &self,
+        store: &str,
+        key: &K,
+        ks: &dyn Serde<K>,
+        vs: &dyn Serde<V>,
+    ) -> Option<V> {
+        let q = self.graph.stores.iq_get(store)?;
+        let kb = ks.serialize(key);
+        let vb = q.iq_kv_get(&kb).await?;
+        Some(vs.deserialize(&vb).expect("iq deserialize"))
+    }
+
+    /// Interactive-query KV range read over the inclusive `[lo, hi]` key span,
+    /// in store (memcmp) order. Empty if the store is absent or not a KV store.
+    pub async fn iq_kv_range<K: 'static, V: 'static>(
+        &self,
+        store: &str,
+        lo: &K,
+        hi: &K,
+        ks: &dyn Serde<K>,
+        vs: &dyn Serde<V>,
+    ) -> Vec<(K, V)> {
+        let Some(q) = self.graph.stores.iq_get(store) else {
+            return Vec::new();
+        };
+        let lob = ks.serialize(lo);
+        let hib = ks.serialize(hi);
+        q.iq_kv_range(&lob, &hib)
+            .await
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    ks.deserialize(&k).expect("iq deserialize"),
+                    vs.deserialize(&v).expect("iq deserialize"),
+                )
+            })
+            .collect()
+    }
+
+    /// Interactive-query read of every entry in a KV store, in store order.
+    pub async fn iq_kv_all<K: 'static, V: 'static>(
+        &self,
+        store: &str,
+        ks: &dyn Serde<K>,
+        vs: &dyn Serde<V>,
+    ) -> Vec<(K, V)> {
+        let Some(q) = self.graph.stores.iq_get(store) else {
+            return Vec::new();
+        };
+        q.iq_kv_all()
+            .await
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    ks.deserialize(&k).expect("iq deserialize"),
+                    vs.deserialize(&v).expect("iq deserialize"),
+                )
+            })
+            .collect()
+    }
+
+    /// Interactive-query approximate entry count for a KV store (`0` if absent).
+    pub async fn iq_kv_count(&self, store: &str) -> u64 {
+        match self.graph.stores.iq_get(store) {
+            Some(q) => q.iq_kv_approx_count().await,
+            None => 0,
+        }
+    }
+
+    /// Interactive-query window read: `(windowStart, value)` for every window of
+    /// `key` whose start is in the inclusive `[from, to]` span, ascending by
+    /// window start. Empty if the store is absent or not a window store.
+    pub async fn iq_window_fetch<K: 'static, V: 'static>(
+        &self,
+        store: &str,
+        key: &K,
+        from: i64,
+        to: i64,
+        ks: &dyn Serde<K>,
+        vs: &dyn Serde<V>,
+    ) -> Vec<(i64, V)> {
+        let Some(q) = self.graph.stores.iq_get(store) else {
+            return Vec::new();
+        };
+        let kb = ks.serialize(key);
+        q.iq_window_fetch(&kb, from, to)
+            .await
+            .into_iter()
+            .map(|(start, v)| (start, vs.deserialize(&v).expect("iq deserialize")))
+            .collect()
+    }
+
+    /// Interactive-query single-window read: value of the window of `key` that
+    /// starts exactly at `window_start`, else `None`.
+    pub async fn iq_window_fetch_single<K: 'static, V: 'static>(
+        &self,
+        store: &str,
+        key: &K,
+        window_start: i64,
+        ks: &dyn Serde<K>,
+        vs: &dyn Serde<V>,
+    ) -> Option<V> {
+        let q = self.graph.stores.iq_get(store)?;
+        let kb = ks.serialize(key);
+        let vb = q.iq_window_fetch_single(&kb, window_start).await?;
+        Some(vs.deserialize(&vb).expect("iq deserialize"))
+    }
+
+    /// Interactive-query session read: `((start, end), value)` for every session
+    /// of `key`, in store order. Empty if the store is absent or not a session
+    /// store.
+    pub async fn iq_session_fetch<K: 'static, V: 'static>(
+        &self,
+        store: &str,
+        key: &K,
+        ks: &dyn Serde<K>,
+        vs: &dyn Serde<V>,
+    ) -> Vec<((i64, i64), V)> {
+        let Some(q) = self.graph.stores.iq_get(store) else {
+            return Vec::new();
+        };
+        let kb = ks.serialize(key);
+        q.iq_session_fetch_key(&kb)
+            .await
+            .into_iter()
+            .map(|(win, v)| (win, vs.deserialize(&v).expect("iq deserialize")))
+            .collect()
+    }
+
     /// Pop + deserialize the next output record for `topic`.
     ///
     /// `produced` is the same `Produced::with(key_serde, value_serde)` pair the
