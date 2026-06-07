@@ -190,7 +190,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov --workspace --lib --bins --lcov --output-path coverage/unit.lcov
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         if: matrix.os == 'ubuntu-latest'
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -238,7 +238,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov --workspace --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --exclude crabka-grpc-gateway --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/jvm-differential.lcov
@@ -313,7 +313,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov -p crabka-client-core --test integration --lcov --output-path coverage/client-core-integration.lcov -- --ignored --nocapture
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/client-core-integration.lcov
@@ -341,7 +341,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov -p crabka-log --test integration --lcov --output-path coverage/log-integration.lcov -- --ignored --nocapture
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/log-integration.lcov
@@ -371,7 +371,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov -p crabka-client-consumer --tests --lcov --output-path coverage/client-consumer-integration.lcov -- --nocapture
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/client-consumer-integration.lcov
@@ -402,7 +402,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov -p crabka-client-streams --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/client-streams-integration.lcov
@@ -433,7 +433,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov -p crabka-grpc-gateway --tests --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/grpc-gateway-integration.lcov
@@ -465,7 +465,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov -p crabka-schema-registry --test integration --test rest_conformance --test schemas_record --test compat_conformance --test ha --test security --lcov --output-path coverage/schema-registry-integration.lcov -- --nocapture
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/schema-registry-integration.lcov
@@ -488,7 +488,7 @@ jobs:
         run: |
           mkdir -p coverage
           cargo llvm-cov -p crabka-operator --test reconcile_schema_registry --lcov --output-path coverage/operator-integration.lcov -- --nocapture
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/operator-integration.lcov
@@ -553,7 +553,7 @@ jobs:
             --test jvm_consumer_group_next_gen \
             --lcov --output-path coverage/broker-jvm-acceptance.lcov \
             -- --ignored --nocapture --test-threads=1
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/broker-jvm-acceptance.lcov
@@ -607,7 +607,7 @@ jobs:
           cargo llvm-cov --no-report -p crabka-broker --tests
           cargo llvm-cov --no-report -p crabka-client-admin --tests
           cargo llvm-cov report --lcov --output-path coverage/broker-integration.lcov
-      - uses: codecov/codecov-action@v6
+      - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/broker-integration.lcov
