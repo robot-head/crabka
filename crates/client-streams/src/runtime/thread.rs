@@ -110,6 +110,7 @@ impl StreamThread {
     /// [`ProcessingGuarantee::ExactlyOnceV2`] the same producer object is also
     /// passed as `txn` (a [`TransactionalProducer`] view), and the first EOS
     /// assignment runs `init_transactions` once (fencing any zombie).
+    #[allow(clippy::too_many_lines)]
     pub async fn apply_assignment(
         &mut self,
         assignment: &StreamsAssignment,
