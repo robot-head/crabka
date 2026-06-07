@@ -14,10 +14,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::error::StreamsClientError;
 use crate::membership::{StreamsEvent, StreamsMembership};
+use crate::processor::serde::Serde;
 use crate::runtime::io::{OffsetStore, RecordFetcher, RecordProducer};
 use crate::runtime::io_broker;
 use crate::runtime::iq::IqRequest;
+use crate::runtime::iq_view::ReadOnlyKeyValueStore;
 use crate::runtime::thread::StreamThread;
+use crate::store::iq::StoreKind;
 use crate::topology::BuiltTopology;
 
 /// Lifecycle state of a [`KafkaStreams`] runtime.
@@ -36,8 +39,7 @@ pub struct KafkaStreams {
     handle: Option<JoinHandle<()>>,
     state: KafkaStreamsState,
     /// Channel to the supervisor for interactive queries. Read by the
-    /// `KafkaStreams` IQ accessors in IQ-T4.
-    #[allow(dead_code)] // read by KafkaStreams IQ accessors in IQ-T4
+    /// `KafkaStreams` IQ accessors.
     iq_tx: mpsc::Sender<IqRequest>,
 }
 
@@ -135,6 +137,30 @@ impl KafkaStreams {
     #[must_use]
     pub fn state(&self) -> KafkaStreamsState {
         self.state
+    }
+
+    /// A read-only view of the local `KeyValue` state store `name` for
+    /// interactive queries. Errors if the instance is not running, the store is
+    /// not assigned here, or it is a different store kind.
+    pub async fn key_value_store<K, V>(
+        &self,
+        name: impl Into<String>,
+        key_serde: impl Serde<K> + 'static,
+        value_serde: impl Serde<V> + 'static,
+    ) -> Result<ReadOnlyKeyValueStore<K, V>, StreamsClientError> {
+        if self.state != KafkaStreamsState::Running {
+            return Err(StreamsClientError::InteractiveQuery(
+                crate::runtime::iq::IqError::NotRunning,
+            ));
+        }
+        let view = ReadOnlyKeyValueStore {
+            tx: self.iq_tx.clone(),
+            store: name.into(),
+            key_serde: Box::new(key_serde),
+            value_serde: Box::new(value_serde),
+        };
+        crate::runtime::iq_view::validate(&view.tx, &view.store, StoreKind::KeyValue).await?;
+        Ok(view)
     }
 
     /// Stop processing, commit, and leave the group.

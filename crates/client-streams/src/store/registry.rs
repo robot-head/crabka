@@ -94,7 +94,6 @@ impl StoreRegistry {
     }
 
     /// IQ read view for the named store, if present and queryable.
-    #[allow(dead_code)] // consumed by the IQ supervisor (later task)
     pub(crate) fn iq_get(&self, name: &str) -> Option<&dyn crate::store::iq::IqQueryable> {
         self.stores.get(name).and_then(|s| s.as_iq())
     }

@@ -1,0 +1,192 @@
+//! Typed, read-only composite views over local state stores (Interactive
+//! Queries). Each view owns its Serdes and round-trips byte-level `IqRequest`s
+//! to the supervisor; results are eagerly materialized `Vec`s (one intentional
+//! divergence from the JVM's lazy `KeyValueIterator`).
+
+use bytes::Bytes;
+use tokio::sync::{mpsc, oneshot};
+
+use crate::error::StreamsClientError;
+use crate::processor::serde::Serde;
+use crate::runtime::iq::{IqError, IqOp, IqPayload, IqRequest};
+use crate::store::iq::StoreKind;
+
+/// Round-trip one op to the supervisor. Shared by all three views.
+async fn query(
+    tx: &mpsc::Sender<IqRequest>,
+    store: &str,
+    kind: StoreKind,
+    op: IqOp,
+) -> Result<IqPayload, StreamsClientError> {
+    let (reply, rx) = oneshot::channel();
+    tx.send(IqRequest {
+        store: store.to_string(),
+        kind,
+        op,
+        reply,
+    })
+    .await
+    .map_err(|_| StreamsClientError::InteractiveQuery(IqError::RebalanceInProgress))?;
+    rx.await
+        .map_err(|_| StreamsClientError::InteractiveQuery(IqError::RebalanceInProgress))?
+        .map_err(StreamsClientError::InteractiveQuery)
+}
+
+fn deser<T: 'static>(serde: &dyn Serde<T>, bytes: &[u8]) -> Result<T, StreamsClientError> {
+    serde
+        .deserialize(bytes)
+        .map_err(|e| StreamsClientError::Runtime(format!("iq deserialize: {e}")))
+}
+
+pub(crate) fn unexpected(p: &IqPayload) -> StreamsClientError {
+    StreamsClientError::Runtime(format!("iq: unexpected payload {p:?}"))
+}
+
+/// Validate a store exists locally + has the requested kind (eager, in accessors).
+pub(crate) async fn validate(
+    tx: &mpsc::Sender<IqRequest>,
+    store: &str,
+    kind: StoreKind,
+) -> Result<(), StreamsClientError> {
+    match query(tx, store, kind, IqOp::Validate).await? {
+        IqPayload::Validated => Ok(()),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// Read-only composite KV store view (Interactive Queries).
+pub struct ReadOnlyKeyValueStore<K, V> {
+    pub(crate) tx: mpsc::Sender<IqRequest>,
+    pub(crate) store: String,
+    pub(crate) key_serde: Box<dyn Serde<K>>,
+    pub(crate) value_serde: Box<dyn Serde<V>>,
+}
+
+impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
+    /// Value for `key`, or `None` if absent.
+    pub async fn get(&self, key: &K) -> Result<Option<V>, StreamsClientError> {
+        let kb = self.key_serde.serialize(key);
+        match query(
+            &self.tx,
+            &self.store,
+            StoreKind::KeyValue,
+            IqOp::KvGet { key: kb },
+        )
+        .await?
+        {
+            IqPayload::Value(Some(vb)) => Ok(Some(deser(&*self.value_serde, &vb)?)),
+            IqPayload::Value(None) => Ok(None),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    /// Inclusive `[lo, hi]` range, ascending memcmp key order.
+    pub async fn range(&self, lo: &K, hi: &K) -> Result<Vec<(K, V)>, StreamsClientError> {
+        let lo_b = self.key_serde.serialize(lo);
+        let hi_b = self.key_serde.serialize(hi);
+        match query(
+            &self.tx,
+            &self.store,
+            StoreKind::KeyValue,
+            IqOp::KvRange { lo: lo_b, hi: hi_b },
+        )
+        .await?
+        {
+            IqPayload::Entries(pairs) => self.decode_pairs(pairs),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    /// Every entry.
+    pub async fn all(&self) -> Result<Vec<(K, V)>, StreamsClientError> {
+        match query(&self.tx, &self.store, StoreKind::KeyValue, IqOp::KvAll).await? {
+            IqPayload::Entries(pairs) => self.decode_pairs(pairs),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    /// Approximate entry count (exact for in-memory; summed across partitions).
+    pub async fn approximate_num_entries(&self) -> Result<u64, StreamsClientError> {
+        match query(
+            &self.tx,
+            &self.store,
+            StoreKind::KeyValue,
+            IqOp::KvApproxCount,
+        )
+        .await?
+        {
+            IqPayload::Count(n) => Ok(n),
+            other => Err(unexpected(&other)),
+        }
+    }
+
+    fn decode_pairs(&self, pairs: Vec<(Bytes, Bytes)>) -> Result<Vec<(K, V)>, StreamsClientError> {
+        pairs
+            .into_iter()
+            .map(|(kb, vb)| {
+                Ok((
+                    deser(&*self.key_serde, &kb)?,
+                    deser(&*self.value_serde, &vb)?,
+                ))
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::processor::serde::{I64Serde, StringSerde};
+    use crate::runtime::iq::answer_iq;
+    use crate::store::api::KeyValueStore;
+    use crate::store::kv::KeyValueBytesStore;
+    use crate::store::registry::StoreRegistry;
+
+    /// Spawn a tiny servicer over one registry; returns the sender the views use.
+    pub(super) fn servicer(reg: StoreRegistry) -> mpsc::Sender<IqRequest> {
+        let (tx, mut rx) = mpsc::channel::<IqRequest>(16);
+        tokio::spawn(async move {
+            while let Some(req) = rx.recv().await {
+                let matching = reg.iq_get(&req.store).into_iter().collect::<Vec<_>>();
+                let res = answer_iq(matching, req.kind, &req.op, &req.store, true).await;
+                let _ = req.reply.send(res);
+            }
+        });
+        tx
+    }
+
+    async fn kv_registry() -> StoreRegistry {
+        let mut s = KeyValueBytesStore::<String, i64>::in_memory(
+            "counts".into(),
+            Box::new(StringSerde),
+            Box::new(I64Serde),
+            "counts-changelog".into(),
+        );
+        for (k, v) in [("a", 1), ("b", 2), ("c", 3)] {
+            s.put(k.into(), v).await;
+        }
+        let mut reg = StoreRegistry::default();
+        reg.insert(Box::new(s));
+        reg
+    }
+
+    #[tokio::test]
+    async fn kv_view_get_range_all_count() {
+        let tx = servicer(kv_registry().await);
+        let view = ReadOnlyKeyValueStore::<String, i64> {
+            tx,
+            store: "counts".into(),
+            key_serde: Box::new(StringSerde),
+            value_serde: Box::new(I64Serde),
+        };
+        assert_eq!(view.get(&"b".to_string()).await.unwrap(), Some(2));
+        assert_eq!(view.get(&"z".to_string()).await.unwrap(), None);
+        let r = view
+            .range(&"a".to_string(), &"b".to_string())
+            .await
+            .unwrap();
+        assert_eq!(r, vec![("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert_eq!(view.all().await.unwrap().len(), 3);
+        assert_eq!(view.approximate_num_entries().await.unwrap(), 3);
+    }
+}
