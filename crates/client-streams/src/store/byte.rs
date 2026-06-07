@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 /// Object-safe raw-byte KV backend. `range` is half-open `[lo, hi)` in memcmp
-/// (lexicographic) key order — used by 4d-ii's window store; KV stores don't call it.
+/// (lexicographic) key order — used by the window/session stores and the
+/// interactive-query KV range/window scans.
 ///
 /// `Send + Sync`: the boxed backend is held behind a `&self` across `get`'s
 /// `.await`, and the whole execution chain runs inside `tokio::spawn`, so the
@@ -17,7 +18,6 @@ pub(crate) trait ByteKeyValueStore: Send + Sync {
     async fn get(&self, key: &[u8]) -> Option<Bytes>;
     async fn put(&mut self, key: Bytes, value: Bytes);
     async fn delete(&mut self, key: &[u8]) -> Option<Bytes>;
-    #[allow(dead_code)] // used by 4d-ii window store
     async fn range(&self, lo: &[u8], hi: &[u8]) -> Vec<(Bytes, Bytes)>;
     /// Every entry in ascending memcmp key order (for `all()` / IQ full scans).
     async fn scan_all(&self) -> Vec<(Bytes, Bytes)>;
