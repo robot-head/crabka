@@ -96,6 +96,42 @@ impl<K: 'static, V: 'static> StateStore for WindowBytesStore<K, V> {
     fn set_logging(&mut self, on: bool) {
         self.logging = on;
     }
+    fn as_iq(&self) -> Option<&dyn crate::store::iq::IqQueryable> {
+        Some(self)
+    }
+}
+
+// `WindowBytesStore` holds only `Box<dyn Serde<_>>` + byte buffers, so it is
+// `Send + Sync` for any `K`/`V` — no `Sync` bound needed on the impl.
+#[async_trait::async_trait]
+impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for WindowBytesStore<K, V> {
+    fn kind(&self) -> crate::store::iq::StoreKind {
+        crate::store::iq::StoreKind::Window
+    }
+    async fn iq_window_fetch_single(&self, key: &[u8], window_start: i64) -> Option<bytes::Bytes> {
+        let sk = store_key(key, window_start, 0);
+        let wrapped = self.backend.get(&sk).await?;
+        let (_ts, raw) = unwrap_value(&wrapped);
+        Some(bytes::Bytes::copy_from_slice(raw))
+    }
+    async fn iq_window_fetch(
+        &self,
+        key: &[u8],
+        time_from: i64,
+        time_to: i64,
+    ) -> Vec<(i64, bytes::Bytes)> {
+        let lo = store_key(key, time_from, 0);
+        let hi = store_key(key, time_to.saturating_add(1), 0);
+        let mut out = Vec::new();
+        for (k, wrapped) in self.backend.range(&lo, &hi).await {
+            if key_bytes_of(&k) != key {
+                continue;
+            }
+            let (_ts, raw) = unwrap_value(&wrapped);
+            out.push((window_start_of(&k), bytes::Bytes::copy_from_slice(raw)));
+        }
+        out
+    }
 }
 
 #[async_trait]

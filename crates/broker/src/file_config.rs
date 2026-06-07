@@ -632,7 +632,8 @@ impl FileConfig {
                 .map(std::path::PathBuf::from)
                 .collect();
         }
-        if !self.listeners.is_empty() {
+        let had_file_listeners = !self.listeners.is_empty();
+        if had_file_listeners {
             cfg.listeners = self
                 .listeners
                 .into_iter()
@@ -641,6 +642,23 @@ impl FileConfig {
         }
         if let Some(name) = self.inter_broker_listener_name {
             cfg.inter_broker_listener_name = name;
+        }
+        // Sync `advertised_listener` from the resolved listeners. Each
+        // `[[listeners]].advertised` carries the real host:port (the pod FQDN
+        // under the operator); without this, `advertised_listener` keeps the
+        // CLI default (127.0.0.1:9092), so `FindCoordinator` and broker
+        // self-registration hand off-box clients (e.g. a schema-registry node
+        // doing group election) an unreachable loopback address. Prefer the
+        // inter-broker listener; fall back to the first declared listener.
+        if had_file_listeners
+            && let Some(adv) = cfg
+                .listeners
+                .iter()
+                .find(|l| l.name == cfg.inter_broker_listener_name)
+                .or_else(|| cfg.listeners.first())
+                .map(|l| l.advertised.clone())
+        {
+            cfg.advertised_listener = adv;
         }
         if let Some(max) = self.max_connections
             && cfg.max_connections == defaults.max_connections
@@ -1646,6 +1664,41 @@ introspection_client_secret_path = '{}'
 
         assert!(cfg.listeners.len() == 1);
         assert!(cfg.listeners[0].name == "X");
+    }
+
+    #[test]
+    fn apply_to_syncs_advertised_listener_from_inter_broker_listener() {
+        use crate::config::BrokerConfig;
+
+        // Two listeners; the inter-broker one ("PLAIN") is NOT declared first.
+        // `advertised_listener` (used by FindCoordinator + broker
+        // self-registration) must be taken from the inter-broker listener's
+        // `advertised` (the pod FQDN), not left at the CLI default
+        // 127.0.0.1:9092 and not taken from the first-declared listener.
+        let toml = r#"
+inter_broker_listener_name = "PLAIN"
+
+[[listeners]]
+name = "EXTERNAL"
+bind_addr = "0.0.0.0:9094"
+advertised = "ext.example.com:9094"
+protocol = "Plaintext"
+
+[[listeners]]
+name = "PLAIN"
+bind_addr = "0.0.0.0:9092"
+advertised = "demo-0.demo-broker-headless.default.svc.cluster.local:9092"
+protocol = "Plaintext"
+"#;
+        let file: FileConfig = toml::from_str(toml).expect("parse");
+        let mut cfg = BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+
+        assert!(
+            cfg.advertised_listener == "demo-0.demo-broker-headless.default.svc.cluster.local:9092"
+        );
+        // The inter-broker listener wins over the first-declared EXTERNAL one.
+        assert!(cfg.advertised_listener != "ext.example.com:9094");
     }
 
     #[test]

@@ -24,6 +24,10 @@ pub trait StateStore: Any + Send {
     async fn apply_changelog(&mut self, key: bytes::Bytes, value: Option<bytes::Bytes>);
     /// Toggle changelog logging (off during restore, on during processing).
     fn set_logging(&mut self, on: bool);
+    /// IQ read view, if this store is interactively queryable. Default `None`.
+    fn as_iq(&self) -> Option<&dyn crate::store::iq::IqQueryable> {
+        None
+    }
 }
 
 /// A keyed store. Implemented by the in-memory store; the typed view a processor

@@ -104,6 +104,32 @@ impl<K: 'static, V: 'static> StateStore for SessionBytesStore<K, V> {
     fn set_logging(&mut self, on: bool) {
         self.logging = on;
     }
+    fn as_iq(&self) -> Option<&dyn crate::store::iq::IqQueryable> {
+        Some(self)
+    }
+}
+
+// `SessionBytesStore` holds only `Box<dyn Serde<_>>` + byte buffers, so it is
+// `Send + Sync` for any `K`/`V` — no `Sync` bound needed on the impl.
+#[async_trait::async_trait]
+impl<K: 'static, V: 'static> crate::store::iq::IqQueryable for SessionBytesStore<K, V> {
+    fn kind(&self) -> crate::store::iq::StoreKind {
+        crate::store::iq::StoreKind::Session
+    }
+    async fn iq_session_fetch_key(&self, key: &[u8]) -> Vec<((i64, i64), bytes::Bytes)> {
+        let lo = session_key(key, 0, 0);
+        let hi = session_key(key, i64::MAX, i64::MAX);
+        let mut out = Vec::new();
+        for (k, raw) in self.backend.range(&lo, &hi).await {
+            if session_key_bytes_of(&k) != key {
+                continue;
+            }
+            let start = session_start_of(&k);
+            let end = session_end_of(&k);
+            out.push(((start, end), bytes::Bytes::copy_from_slice(&raw)));
+        }
+        out
+    }
 }
 
 #[async_trait]
