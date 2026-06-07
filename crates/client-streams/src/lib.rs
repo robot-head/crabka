@@ -630,7 +630,7 @@
 //! # Ok(())
 //! # }
 //! ```
-#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.0.0")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.1")]
 
 pub mod dsl;
 mod error;

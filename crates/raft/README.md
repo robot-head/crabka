@@ -16,6 +16,27 @@ crabka-raft = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Exercise the KRaft quorum state machine in a deterministic unit test:
+
+```rust
+use crabka_metadata::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
+use crabka_raft::kraft::{QuorumState, QuorumStateMachine};
+use uuid::Uuid;
+
+let voters = VoterSet::new(vec![Voter {
+    id: 1,
+    directory_id: Uuid::new_v4(),
+    endpoints: vec![VoterEndpoint { name: "CONTROLLER".into(), host: "127.0.0.1".into(), port: 9093 }],
+    kraft_version: KRaftVersionRange { min: 0, max: 1 },
+}]).unwrap();
+let state = QuorumState::bootstrap(Uuid::new_v4(), voters);
+let machine = QuorumStateMachine::new(1, state, 1_000);
+
+assert!(machine.is_voter());
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-raft](https://docs.rs/crabka-raft). The repository README contains project-wide setup, development, and release notes.

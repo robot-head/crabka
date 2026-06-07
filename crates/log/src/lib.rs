@@ -14,12 +14,14 @@
 //! - Truncate the log to an offset (for replication / leader election).
 //! - Time-based and size-based retention.
 //!
-//! ## What this crate doesn't do
+//! ## Scope and boundaries
 //!
-//! - Log compaction (handled by the broker cleaner subsystem).
-//! - Transactional marker interpretation (broker concern).
-//! - Tiered storage (broker concern).
-//! - Concurrent writes (single-writer; broker enforces above).
+//! This crate is the byte-compatible segment/index layer. It exposes append,
+//! read, truncation, leader-epoch checkpoint, transaction-index, retention, and
+//! compaction primitives over a single log directory. Broker-level policy —
+//! topic configuration, leader/follower ownership, tiered-storage scheduling,
+//! transaction visibility rules, and write serialization — is applied by
+//! `crabka-broker` above this storage layer.
 //!
 //! ## Quick start
 //!
@@ -53,7 +55,7 @@
 //! # }
 //! ```
 
-#![doc(html_root_url = "https://docs.rs/crabka-log/0.0.0")]
+#![doc(html_root_url = "https://docs.rs/crabka-log/0.3.1")]
 
 mod compact;
 mod config;

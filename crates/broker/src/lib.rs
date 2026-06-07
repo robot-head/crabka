@@ -1,30 +1,28 @@
-//! Single-node Apache Kafka-compatible broker (MVP).
+//! Apache Kafka-compatible broker for Crabka.
 //!
-//! `crabka-broker` ships a library + binary that an unmodified JVM
-//! Kafka client can produce records to and consume from. It is the
-//! smallest demonstrable artifact in the Crabka stack.
+//! `crabka-broker` ships a library + binary that unmodified JVM Kafka clients
+//! can produce to and consume from. It is the runtime that ties together the
+//! wire protocol, KRaft metadata controller, log storage, replication, security,
+//! quotas, compaction, tiered storage, transactions, and observability.
 //!
-//! # What this crate does
+//! # Capability areas
 //!
-//! - Accepts TCP connections speaking the Kafka wire protocol.
-//! - Handles `ApiVersions`, `Metadata`, `CreateTopics`, `DeleteTopics`,
-//!   `Produce`, `Fetch` (with long-poll), `ListOffsets`,
-//!   `DescribeConfigs`, and a stub `FindCoordinator`.
-//! - Persists records via [`crabka_log`]; one [`Log`](crabka_log::Log)
-//!   per (topic, partition) under `<log_dir>/<topic>-<partition>/`.
-//! - Reconstructs its in-memory metadata image from the directory
-//!   layout on startup.
-//!
-//! # What this crate doesn't do
-//!
-//! - Replication, leader election, ISR.
-//! - `KRaft` metadata quorum — the metadata image is in-memory.
-//! - Consumer groups, offset commits, coordinators —
-//!   `FindCoordinator` stubs to `COORDINATOR_NOT_AVAILABLE`; consumers
-//!   must use `--partition` to bypass groups.
-//! - Idempotent / transactional producers.
-//! - Authentication, TLS, SASL, ACLs.
-//! - Log compaction, tiered storage, quotas.
+//! - Accepts Kafka wire-protocol TCP connections and negotiates API versions.
+//! - Handles topic metadata and administration, `Produce`, `Fetch`,
+//!   `ListOffsets`, configs, group coordination, offset commits, share groups,
+//!   transactions, producer-state inspection, quotas, and client telemetry.
+//! - Runs an embedded [`crabka_raft`] KRaft metadata quorum, registers brokers,
+//!   tracks broker liveness, and drives partition leadership / reassignment.
+//! - Persists partition data via [`crabka_log`], including leader-epoch
+//!   checkpoints, transaction indexes, retention, and log compaction.
+//! - Supports idempotent and transactional producers, read-committed fetches,
+//!   high-watermark enforcement for `acks=all`, follower replication, ISR
+//!   maintenance, and leader election.
+//! - Supports plaintext, TLS, SASL/PLAIN, SASL/SCRAM, SASL/OAUTHBEARER,
+//!   SASL/GSSAPI, mTLS principal extraction, ACL authorization, and SCRAM / ACL
+//!   mutation through the admin APIs.
+//! - Supports KIP-405 tiered storage through local and S3-compatible remote
+//!   storage managers plus the topic-backed remote-log metadata manager.
 //!
 //! # Quick start
 //!
@@ -60,9 +58,11 @@
 //! on `Fetch` with `replica_id` set, appending every returned
 //! `RecordBatch` to the local log.
 //!
-//! ISR shrink/expand, high-watermark tracking, `acks=all` blocking,
-//! `AlterPartition` RPC, leader-election-on-failure, and cross-broker
-//! producer routing are deferred.
+//! The replication path includes follower fetch loops, high-watermark tracking,
+//! `acks=all` blocking, leader-epoch fencing, ISR shrink/expand proposals, and
+//! controller-driven leader election for broker failures. Produce routing still
+//! follows the normal Kafka client contract: clients refresh metadata and send
+//! partition writes to the advertised leader.
 //!
 //! ## Transactions
 //!
@@ -75,12 +75,11 @@
 //! `isolation_level=read_committed` to filter aborted records via the
 //! per-segment `.txnindex` and partition-level LSO.
 //!
-//! Soft-EOS caveat: the replication deferrals (HW + acks=all blocking,
-//! leader-election-on-failure, KIP-101 leader-epoch) remain deferred.
-//! The transactional control plane is correct; a partition-leader
-//! crash mid-transaction can lose records the producer believed
-//! durably committed. Bulletproof EOS lands when those replication
-//! follow-ups ship.
+//! The transaction coordinator works with the replication/high-watermark path:
+//! `acks=all` transactional writes wait for the partition high watermark,
+//! consumers using `read_committed` fetch only records visible below the LSO,
+//! and leader-epoch fencing plus controller-driven leader election protect the
+//! log after broker failover.
 //!
 //! ## Bulletproof EOS — HW + acks=all
 //!
@@ -118,7 +117,7 @@
 //! `acks=all` produces survive arbitrary single-broker failures with
 //! no data loss and no zombie writes.
 
-#![doc(html_root_url = "https://docs.rs/crabka-broker/0.0.0")]
+#![doc(html_root_url = "https://docs.rs/crabka-broker/0.3.1")]
 
 pub mod api_catalog;
 pub(crate) mod assign_dirs;

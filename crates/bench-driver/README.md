@@ -16,6 +16,29 @@ crabka-bench-driver = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Run one benchmark scenario against a reachable Kafka-compatible cluster and write the JSON report:
+
+```bash
+cat > /tmp/smoke.yaml <<'YAML'
+name: smoke-produce-consume
+producer:
+  records: 10000
+  valueBytes: 512
+consumer:
+  expectedRecords: 10000
+YAML
+
+crabka-bench-driver \
+  --scenario /tmp/smoke.yaml \
+  --bootstrap localhost:9092 \
+  --stack crabka \
+  --topic bench-topic \
+  --broker-count 1 \
+  --out /tmp/crabka-run.json
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-bench-driver](https://docs.rs/crabka-bench-driver). The repository README contains project-wide setup, development, and release notes.

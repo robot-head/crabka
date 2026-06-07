@@ -16,6 +16,17 @@ crabka-operator = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Generate CRDs locally, then run the operator in a Kubernetes cluster:
+
+```bash
+crabka-operator gen-crds ./target/crds
+kubectl apply -f ./target/crds
+
+WATCH_NAMESPACE=crabka-system crabka-operator run
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-operator](https://docs.rs/crabka-operator). The repository README contains project-wide setup, development, and release notes.

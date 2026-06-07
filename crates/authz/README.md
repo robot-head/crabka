@@ -16,6 +16,37 @@ crabka-authz = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Authorize a topic operation against an ACL source:
+
+```rust
+use std::net::SocketAddr;
+use crabka_authz::{AllowAllAuthorizer, AuthorizationRequest, Authorizer};
+use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
+use crabka_security::{AuthMethod, Principal};
+use uuid::Uuid;
+
+let image = MetadataImage::new(Uuid::nil());
+let host: SocketAddr = "127.0.0.1:9092".parse().unwrap();
+let principal = Principal {
+    name: "alice".into(),
+    auth_method: AuthMethod::SaslPlain,
+    groups: vec![],
+};
+
+let request = AuthorizationRequest {
+    principal: &principal,
+    host: &host,
+    resource_type: ResourceType::Topic,
+    resource_name: "orders",
+    operation: AclOperation::Read,
+};
+
+let decision = AllowAllAuthorizer.authorize(&image, &request);
+println!("authorization decision: {decision:?}");
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-authz](https://docs.rs/crabka-authz). The repository README contains project-wide setup, development, and release notes.

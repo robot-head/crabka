@@ -16,6 +16,20 @@ crabka-schema-registry = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Run the Schema Registry-compatible REST service and register an Avro schema:
+
+```bash
+CRABKA_BOOTSTRAP_SERVERS=127.0.0.1:9092 \
+CRABKA_SCHEMA_REGISTRY_LISTEN_ADDR=127.0.0.1:8081 \
+crabka-schema-registry
+
+curl -X POST http://127.0.0.1:8081/subjects/orders-value/versions \
+  -H 'content-type: application/vnd.schemaregistry.v1+json' \
+  -d '{"schema":"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}"}'
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-schema-registry](https://docs.rs/crabka-schema-registry). The repository README contains project-wide setup, development, and release notes.

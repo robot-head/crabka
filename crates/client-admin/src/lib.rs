@@ -1,9 +1,15 @@
-//! Admin client for the operator. Targets one cluster's
-//! controller; plaintext only.
+//! Admin client for Crabka operators and control-plane services.
+//!
+//! The client targets the active controller and retries selected RPCs on a
+//! refreshed controller connection when the broker returns `NOT_CONTROLLER`.
+//! It supports plaintext by default and the same client-side TLS/SASL security
+//! surface as [`crabka_client_core`] via [`AdminClient::connect_secured`].
 //!
 //! Built on `crabka_client_core::Connection`'s typed
 //! `send::<R: ProtocolRequest>` so request-version negotiation is
-//! automatic via the `ApiVersionTable` populated at connect time.
+//! automatic via the `ApiVersionTable` populated at connect time. The public
+//! modules cover topic CRUD, partition expansion, config changes, SCRAM user
+//! credentials, ACLs, quotas, delegation tokens, and log-dir inspection.
 
 use std::time::Duration;
 

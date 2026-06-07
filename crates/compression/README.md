@@ -9,7 +9,7 @@ codecs Apache Kafka uses on the wire — gzip, snappy, lz4, zstd — with
 byte-level wire compatibility verified against the JVM `kafka-clients`
 implementation.
 
-## Quick start
+## Usage example
 
 ```rust
 use crabka_compression::{compress, decompress, CompressionType};

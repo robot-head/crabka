@@ -55,19 +55,22 @@
 //! # }
 //! ```
 //!
-//! ## Current boundaries
+//! ## Capabilities and boundaries
 //!
-//! - `assign()` (manual partition consumption) — use `crabka-client-core`
-//!   directly.
-//! - Admin RPCs (`DescribeGroups`, `ListGroups`).
-//! - KIP-848 broker-side migration is not exposed through this client API.
-//! - Full EOS transactional consumer guarantees.
+//! This crate owns consumer-facing semantics: classic group membership,
+//! assignment, fetch/poll, offset commit, cooperative shutdown, and KIP-932
+//! share-group consumption. It intentionally does not duplicate admin-client
+//! surfaces such as `DescribeGroups`/`ListGroups`, and manual partition fetches
+//! remain available through the lower-level helpers in `crabka-client-core`.
+//! Transactional consume-process-produce workflows use this crate's
+//! [`ConsumerGroupMetadata`] together with `crabka-client-producer`'s
+//! `send_offsets_to_transaction` support.
 //!
 //! ## Cargo features
 //!
 //! None for now.
 
-#![doc(html_root_url = "https://docs.rs/crabka-client-consumer/0.0.0")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-consumer/0.3.1")]
 
 mod assignor;
 mod builder;

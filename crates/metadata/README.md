@@ -16,6 +16,26 @@ crabka-metadata = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Apply controller records to build an immutable metadata image:
+
+```rust
+use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
+use uuid::Uuid;
+
+let mut image = MetadataImage::new(Uuid::new_v4());
+let topic_id = Uuid::new_v4();
+image.apply(&MetadataRecord::V1Topic(TopicRecord {
+    name: "orders".into(),
+    topic_id,
+    partitions: 3,
+    replication_factor: 1,
+}));
+
+assert_eq!(image.topic("orders").unwrap().topic_id, topic_id);
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-metadata](https://docs.rs/crabka-metadata). The repository README contains project-wide setup, development, and release notes.

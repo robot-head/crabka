@@ -16,6 +16,17 @@ crabka-cli = "0.3.1"
 
 For workspace development, use the path dependency from this repository instead.
 
+## Usage example
+
+Format a broker log directory before first start, optionally seeding credentials:
+
+```bash
+crabka format \
+  --cluster-id 00000000-0000-0000-0000-000000000001 \
+  --node-id 1 \
+  --log-dir /var/lib/crabka/data
+```
+
 ## Documentation
 
 API documentation is published on [docs.rs/crabka-cli](https://docs.rs/crabka-cli). The repository README contains project-wide setup, development, and release notes.
