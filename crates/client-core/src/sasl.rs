@@ -313,6 +313,7 @@ where
 }
 
 #[cfg(not(feature = "sspi-keytab"))]
+#[allow(clippy::unused_async)]
 async fn run_gssapi_client<S>(
     _stream: &mut S,
     _keytab_path: &std::path::Path,
