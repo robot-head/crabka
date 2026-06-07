@@ -24,7 +24,7 @@ crabka-authz = { version = "0.2", path = "../authz" }
 crabka-metadata = { version = "0.2", path = "../metadata" }
 arc-swap = { workspace = true }
 base64 = { workspace = true }
-bcrypt = "0.15"
+bcrypt = "0.19"
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
