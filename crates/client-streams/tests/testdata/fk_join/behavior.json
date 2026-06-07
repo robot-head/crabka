@@ -1,0 +1,68 @@
+{
+  "subscription_wrapper_version": 1,
+  "subscription_response_wrapper_version": 0,
+  "combined_key": [
+    { "fk": "", "pk": "", "bytes_hex": "00000000", "prefix_hex": "00000000" },
+    { "fk": "A", "pk": "k1", "bytes_hex": "00000001416b31", "prefix_hex": "0000000141" },
+    { "fk": "fk", "pk": "pk", "bytes_hex": "00000002666b706b", "prefix_hex": "00000002666b" },
+    { "fk": "hello", "pk": "world", "bytes_hex": "0000000568656c6c6f776f726c64", "prefix_hex": "0000000568656c6c6f" },
+    { "fk": "A", "pk": "k2", "bytes_hex": "00000001416b32", "prefix_hex": "0000000141" }
+  ],
+  "murmur3": [
+    { "input_hex": "", "h0": -7122613646888064702, "h1": -8341524471658347240, "hash_hex": "9d2764a018e329428c3cf3b035938518" },
+    { "input_hex": "41", "h0": -398045539132318856, "h1": 3532033179104405328, "hash_hex": "fa79dbb0eb96db7831044d767f696750" },
+    { "input_hex": "68656c6c6f", "h0": 3512725192710940516, "h1": 6227047293690958278, "hash_hex": "30bfb4f39919e764566aea857401d1c6" },
+    { "input_hex": "000102030405060708090a0b0c0d0e0f10111213", "h0": 9047754787468881171, "h1": 1246774373869888091, "hash_hex": "7d90150ac9ec2d13114d6eaff593225b" }
+  ],
+  "instruction_ordinals": [
+    { "name": "DELETE_KEY_NO_PROPAGATE", "byte": 0, "ordinal": 0 },
+    { "name": "DELETE_KEY_AND_PROPAGATE", "byte": 1, "ordinal": 1 },
+    { "name": "PROPAGATE_NULL_IF_NO_FK_VAL_AVAILABLE", "byte": 2, "ordinal": 2 },
+    { "name": "PROPAGATE_ONLY_IF_FK_VAL_AVAILABLE", "byte": 3, "ordinal": 3 }
+  ],
+  "subscription_wrapper": [
+    { "instruction": "DELETE_KEY_NO_PROPAGATE", "instruction_byte": 0, "hash_hex": null, "pk": "pk", "primary_partition": 0, "bytes_hex": "8100706b00000000" },
+    { "instruction": "DELETE_KEY_AND_PROPAGATE", "instruction_byte": 1, "hash_hex": null, "pk": "pk", "primary_partition": 0, "bytes_hex": "8101706b00000000" },
+    { "instruction": "PROPAGATE_NULL_IF_NO_FK_VAL_AVAILABLE", "instruction_byte": 2, "hash_hex": "01020304050607081112131415161718", "pk": "pk", "primary_partition": 0, "bytes_hex": "010201020304050607081112131415161718706b00000000" },
+    { "instruction": "PROPAGATE_ONLY_IF_FK_VAL_AVAILABLE", "instruction_byte": 3, "hash_hex": "01020304050607081112131415161718", "pk": "pk", "primary_partition": 0, "bytes_hex": "010301020304050607081112131415161718706b00000000" }
+  ],
+  "subscription_response_wrapper": [
+    { "hash_hex": "21222324252627283132333435363738", "foreign_value": "vfk", "foreign_value_hex": "76666b", "bytes_hex": "002122232425262728313233343536373876666b" },
+    { "hash_hex": "21222324252627283132333435363738", "foreign_value": null, "foreign_value_hex": null, "bytes_hex": "0021222324252627283132333435363738" },
+    { "hash_hex": null, "foreign_value": "vfk", "foreign_value_hex": "76666b", "bytes_hex": "8076666b" }
+  ],
+  "inner_sequence": [
+    { "in": "a:k1=A@0", "out": [] },
+    { "in": "b:A=X@1", "out": [{ "key": "k1", "value": "AX" }] },
+    { "in": "a:k1=A2@2", "out": [{ "key": "k1", "value": null }] },
+    { "in": "a:k2=A@3", "out": [{ "key": "k2", "value": "AX" }] },
+    { "in": "b:A=Y@4", "out": [{ "key": "k2", "value": "AY" }] },
+    { "in": "a:k1=B@5", "out": [{ "key": "k1", "value": null }] },
+    { "in": "a:k1=null@6", "out": [{ "key": "k1", "value": null }] }
+  ],
+  "left_sequence": [
+    { "in": "a:k1=A@0", "out": [{ "key": "k1", "value": "A_" }] },
+    { "in": "b:A=X@1", "out": [{ "key": "k1", "value": "AX" }] },
+    { "in": "a:k1=A2@2", "out": [{ "key": "k1", "value": "A2_" }] },
+    { "in": "a:k2=A@3", "out": [{ "key": "k2", "value": "AX" }] },
+    { "in": "b:A=Y@4", "out": [{ "key": "k2", "value": "AY" }] },
+    { "in": "a:k1=B@5", "out": [{ "key": "k1", "value": "B_" }] },
+    { "in": "a:k1=null@6", "out": [{ "key": "k1", "value": null }] }
+  ],
+  "names": {
+    "node_prefixes": {
+      "subscription_registration": "KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-",
+      "subscription_processor": "KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-",
+      "subscription_response_resolver": "KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-RESOLVER-PROCESSOR-",
+      "fk_join_output": "KTABLE-FK-JOIN-OUTPUT-",
+      "subscription_state_store": "KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-"
+    },
+    "subscription_store_name": "KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-0000000008",
+    "subscription_registration_repartition_topic": "app-KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-0000000004-topic",
+    "subscription_response_repartition_topic": "app-KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-0000000012-topic",
+    "subscription_changelog_topic": "app-KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-0000000008-changelog",
+    "all_repartition_topics": ["app-KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-0000000012-topic", "app-KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-0000000004-topic"],
+    "all_changelog_topics": ["a", "app-KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-0000000008-changelog", "b"],
+    "describe_inner": "Topologies:\n   Sub-topology: 0\n    Source: KTABLE-SOURCE-0000000014 (topics: [KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-0000000012-topic])\n      --> KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-RESOLVER-PROCESSOR-0000000015\n    Source: KSTREAM-SOURCE-0000000000 (topics: [a])\n      --> KTABLE-SOURCE-0000000001\n    Processor: KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-RESOLVER-PROCESSOR-0000000015 (stores: [sa])\n      --> KTABLE-FK-JOIN-OUTPUT-0000000016\n      <-- KTABLE-SOURCE-0000000014\n    Processor: KTABLE-FK-JOIN-OUTPUT-0000000016 (stores: [])\n      --> KTABLE-TOSTREAM-0000000018\n      <-- KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-RESOLVER-PROCESSOR-0000000015\n    Processor: KTABLE-SOURCE-0000000001 (stores: [sa])\n      --> KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-0000000005\n      <-- KSTREAM-SOURCE-0000000000\n    Processor: KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-0000000005 (stores: [])\n      --> KTABLE-SINK-0000000006\n      <-- KTABLE-SOURCE-0000000001\n    Processor: KTABLE-TOSTREAM-0000000018 (stores: [])\n      --> KSTREAM-SINK-0000000019\n      <-- KTABLE-FK-JOIN-OUTPUT-0000000016\n    Sink: KSTREAM-SINK-0000000019 (topic: out)\n      <-- KTABLE-TOSTREAM-0000000018\n    Sink: KTABLE-SINK-0000000006 (topic: KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-0000000004-topic)\n      <-- KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-0000000005\n\n  Sub-topology: 1\n    Source: KSTREAM-SOURCE-0000000002 (topics: [b])\n      --> KTABLE-SOURCE-0000000003\n    Source: KTABLE-SOURCE-0000000007 (topics: [KTABLE-FK-JOIN-SUBSCRIPTION-REGISTRATION-0000000004-topic])\n      --> KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-0000000009\n    Processor: KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-0000000009 (stores: [KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-0000000008])\n      --> KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-0000000010\n      <-- KTABLE-SOURCE-0000000007\n    Processor: KTABLE-SOURCE-0000000003 (stores: [sb])\n      --> KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-0000000011\n      <-- KSTREAM-SOURCE-0000000002\n    Processor: KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-0000000010 (stores: [sb])\n      --> KTABLE-SINK-0000000013\n      <-- KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-0000000009\n    Processor: KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-0000000011 (stores: [KTABLE-FK-JOIN-SUBSCRIPTION-STATE-STORE-0000000008])\n      --> KTABLE-SINK-0000000013\n      <-- KTABLE-SOURCE-0000000003\n    Sink: KTABLE-SINK-0000000013 (topic: KTABLE-FK-JOIN-SUBSCRIPTION-RESPONSE-0000000012-topic)\n      <-- KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-0000000010, KTABLE-FK-JOIN-SUBSCRIPTION-PROCESSOR-0000000011\n\n"
+  }
+}

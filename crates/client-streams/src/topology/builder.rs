@@ -604,6 +604,45 @@ impl Topology {
         self
     }
 
+    /// Register a KIP-213 FK-join subscription store connected to the given
+    /// processors.
+    ///
+    /// The subscription store is keyed by `combined_key(fk, pk)` bytes →
+    /// `ValueAndTimestamp<SubscriptionWrapper>` bytes. Its changelog is a plain
+    /// compacted KV changelog (`<app_id>-<name>-changelog`, like
+    /// [`add_state_store`]) — NOT windowed retention. The store types are fixed
+    /// (raw bytes in, `SubscriptionWrapper` out), so no key/value serdes are
+    /// taken.
+    ///
+    /// [`add_state_store`]: Topology::add_state_store
+    pub(crate) fn add_fk_subscription_store(
+        &mut self,
+        name: impl Into<String>,
+        processors: impl IntoIterator<Item = impl Into<String>>,
+    ) -> &mut Self {
+        let name: String = name.into();
+        let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
+        self.reg.add_store(&name, procs, None); // plain compact changelog
+        self.store_factories.insert(
+            name,
+            (
+                None,
+                Box::new(
+                    move |store_name: &str,
+                          changelog: String,
+                          backend: Box<dyn crate::store::byte::ByteKeyValueStore>| {
+                        Box::new(crate::store::fk_subscription::SubscriptionBytesStore::new(
+                            store_name.to_string(),
+                            backend,
+                            changelog,
+                        )) as Box<dyn crate::store::api::StateStore>
+                    },
+                ),
+            ),
+        );
+        self
+    }
+
     /// Register a suppress buffer store connected to the given processor.
     ///
     /// The suppress buffer ([`SuppressBytesStore`]) is a time-ordered in-memory
