@@ -137,6 +137,12 @@ pub struct GatewayConfig {
     /// Outbound webhook subscriptions; compiled from a separate TOML config
     /// file at startup. Empty ⇒ no outbound delivery tasks are spawned.
     pub outbound: Vec<crate::outbound_config::CompiledSubscription>,
+    /// Base URL of a Confluent-compatible Schema Registry (e.g.
+    /// `http://schema-registry:8081`). When set, the gateway builds a
+    /// [`crate::schema::codec::SchemaRegistryCodec`] and injects it into the
+    /// produce and consume paths. When absent, `RawCodec` (the identity
+    /// pass-through) is used — existing behaviour is unchanged.
+    pub schema_registry_url: Option<String>,
 }
 
 impl GatewayConfig {

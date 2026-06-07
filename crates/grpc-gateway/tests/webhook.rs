@@ -167,10 +167,12 @@ async fn webhook_state(
             authz: None,
             webhooks,
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz: Arc::new(GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
         ))),
+        codec: Arc::new(RawCodec),
     });
 
     (state, token, store)
@@ -744,8 +746,10 @@ async fn webhook_state_with_authz(
             authz: None,
             webhooks,
             outbound: Vec::new(),
+            schema_registry_url: None,
         }),
         authz,
+        codec: Arc::new(RawCodec),
     })
 }
 

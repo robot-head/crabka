@@ -139,6 +139,7 @@ async fn ownership_split_non_owner_is_unavailable() {
         topic: "own-user".into(),
         key: None,
         value: Bytes::from_static(b"v"),
+        body_structured: None,
         headers: vec![],
         partition: None,
         timestamp_ms: None,

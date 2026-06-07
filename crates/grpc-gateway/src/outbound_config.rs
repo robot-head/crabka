@@ -65,6 +65,13 @@ pub struct OutboundSubscription {
     /// Extra static HTTP headers added to every POST (e.g. `Authorization`).
     #[serde(default)]
     pub headers: std::collections::HashMap<String, String>,
+    /// When `true`, each record value is run through the injected codec's
+    /// `decode` before delivery: a Confluent-framed value is de-framed to its
+    /// JSON view and delivered as `application/json`. With `RawCodec` (no
+    /// registry) this is inert (decode yields no JSON ⇒ raw delivery). Default
+    /// `false`.
+    #[serde(default)]
+    pub decode_to_json: bool,
 }
 
 fn default_max_attempts() -> u32 {
@@ -105,6 +112,9 @@ pub struct CompiledSubscription {
     pub filter: Option<JpQuery>,
     /// Static extra headers as `(name, value)` pairs.
     pub headers: Vec<(String, String)>,
+    /// Decode each record value to JSON via the injected codec before delivery
+    /// (inert under `RawCodec`). See [`OutboundSubscription::decode_to_json`].
+    pub decode_to_json: bool,
 }
 
 impl OutboundFile {
@@ -174,6 +184,7 @@ impl OutboundFile {
                     .iter()
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect(),
+                decode_to_json: s.decode_to_json,
             });
         }
         Ok(out)

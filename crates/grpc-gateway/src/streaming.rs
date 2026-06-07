@@ -139,7 +139,7 @@ pub fn subscribe_inner(
         }
 
         let client_id = format!("{}-sub", state.config.client_id);
-        let mut session = match ConsumeSession::new(&state.config.bootstrap, &start.group_id, &client_id, start.topics, state.config.broker_security.clone()).await {
+        let mut session = match ConsumeSession::new(&state.config.bootstrap, &start.group_id, &client_id, start.topics, state.config.broker_security.clone(), state.codec.clone()).await {
             Ok(s) => s,
             Err(e) => { yield Err(ConnectError::new_internal(e.to_string())); return; }
         };
@@ -173,6 +173,10 @@ pub fn subscribe_inner(
                                     value: r.value.map(|b| b.to_vec()).unwrap_or_default(),
                                     headers: std::collections::HashMap::new(),
                                     timestamp_ms: r.timestamp,
+                                    // Structured/schema view is wired by a later
+                                    // task; RawCodec emits the raw value only.
+                                    structured: None,
+                                    schema: None,
                                 });
                             }
                             if !to_emit.is_empty() && auto_commit { commit = true; }

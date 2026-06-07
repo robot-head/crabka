@@ -13,14 +13,42 @@ enum Acks {
   ACKS_NONE = 2;
 }
 
+// Schema payload format (mirrors Confluent `schemaType`).
+enum SchemaFormat {
+  SCHEMA_FORMAT_UNSPECIFIED = 0;
+  AVRO = 1;
+  JSON = 2;
+  PROTOBUF = 3;
+}
+
+// Selects the schema to serialize a structured value against. An empty
+// `subject` resolves via TopicNameStrategy (`<topic>-value`); a non-zero
+// `id` pins a registered schema version.
+message SchemaSelector {
+  string subject = 1;
+  int32 id = 2;
+  SchemaFormat format = 3;
+}
+
+// A JSON value the gateway serializes into the bound schema's wire format.
+message StructuredValue {
+  bytes json = 1;
+}
+
 message Record {
   string topic = 1;
   optional bytes key = 2;
-  bytes value = 3;
+  // The value is either pre-serialized opaque bytes (`raw`) or a JSON document
+  // the gateway serializes against `schema` (`structured`).
+  oneof body {
+    bytes raw = 3;
+    StructuredValue structured = 8;
+  }
   map<string, bytes> headers = 4;
   optional int32 partition = 5;
   optional int64 timestamp_ms = 6;
   optional string idempotency_key = 7;
+  optional SchemaSelector schema = 9;
 }
 
 message SendRequest {
@@ -79,4 +107,9 @@ message Inbound {
   bytes value = 5;
   map<string, bytes> headers = 6;
   int64 timestamp_ms = 7;
+  // Decoded structured (JSON) view + resolved schema metadata, populated when
+  // the value was Confluent-framed (wired by a later task; absent under
+  // RawCodec).
+  optional StructuredValue structured = 8;
+  optional SchemaSelector schema = 9;
 }

@@ -13,7 +13,7 @@ use tracing::info;
 
 use tokio_util::sync::CancellationToken;
 
-use crabka_grpc_gateway::codec::RawCodec;
+use crabka_grpc_gateway::codec::{RawCodec, RecordCodec};
 use crabka_grpc_gateway::config::{AuthzSettings, BearerSettings, GatewayConfig, TlsSettings};
 use crabka_grpc_gateway::dedup::DedupEngine;
 use crabka_grpc_gateway::dedup::membership::{MembershipPublisher, MembershipStore};
@@ -22,6 +22,8 @@ use crabka_grpc_gateway::dedup::topic::{ensure_dedup_topic, ensure_membership_to
 use crabka_grpc_gateway::forward::{self, Forwarder};
 use crabka_grpc_gateway::health::{self, Readiness};
 use crabka_grpc_gateway::produce::ProduceCore;
+use crabka_grpc_gateway::schema::client::SchemaRegistryClient;
+use crabka_grpc_gateway::schema::codec::SchemaRegistryCodec;
 use crabka_grpc_gateway::state::AppState;
 
 // ── CLI ────────────────────────────────────────────────────────────────────────
@@ -161,6 +163,12 @@ struct Args {
     /// Optional TOML file defining `[[subscriptions]]` for HTTP webhook outbound.
     #[arg(long, env = "CRABKA_GATEWAY_OUTBOUND_WEBHOOKS_CONFIG")]
     outbound_webhooks_config: Option<std::path::PathBuf>,
+
+    /// Base URL of a Confluent-compatible Schema Registry (e.g.
+    /// `http://schema-registry:8081`). When set, records are encoded/decoded
+    /// via `SchemaRegistryCodec`; when absent, `RawCodec` (identity) is used.
+    #[arg(long, env = "CRABKA_GATEWAY_SCHEMA_REGISTRY_URL")]
+    schema_registry_url: Option<String>,
 }
 
 // ── main ───────────────────────────────────────────────────────────────────────
@@ -243,6 +251,7 @@ async fn main() -> anyhow::Result<()> {
         authz,
         webhooks,
         outbound,
+        schema_registry_url: args.schema_registry_url.clone(),
     };
 
     let bearer = build_bearer(&args)?;
@@ -416,8 +425,6 @@ async fn run(
     spawn_ownership_consumer(&config, &store, &shutdown);
     spawn_readiness_watcher(store.clone(), readiness.clone());
 
-    spawn_outbound_subscriptions(&config, &shutdown).await?;
-
     let engine = Arc::new(DedupEngine::new(
         &config.bootstrap,
         &config.client_id,
@@ -440,10 +447,28 @@ async fn run(
         None => Arc::new(Forwarder::new()),
     };
 
+    // Build the shared codec once: SchemaRegistryCodec when a URL is set,
+    // RawCodec (identity pass-through) otherwise.
+    let codec: Arc<dyn RecordCodec> = match &config.schema_registry_url {
+        Some(url) => {
+            let client = SchemaRegistryClient::new(url)
+                .map_err(|e| anyhow::anyhow!("schema registry client: {e}"))?;
+            Arc::new(SchemaRegistryCodec {
+                client: Arc::new(client),
+                frame_raw: false,
+            })
+        }
+        None => Arc::new(RawCodec),
+    };
+
+    // Spawn outbound delivery tasks with the shared codec (so `decode_to_json`
+    // subscriptions can de-frame Confluent-framed values to JSON).
+    spawn_outbound_subscriptions(&config, &shutdown, codec.clone()).await?;
+
     let produce = ProduceCore::new(
         &config.bootstrap,
         &config.client_id,
-        Arc::new(RawCodec),
+        codec.clone(),
         config.broker_security.clone(),
     )
     .await?
@@ -460,6 +485,7 @@ async fn run(
         produce: Arc::new(produce),
         config: Arc::new(config.clone()),
         authz: gateway_authz,
+        codec,
     });
 
     let app = crabka_grpc_gateway::router(state.clone())
@@ -593,6 +619,7 @@ fn spawn_readiness_watcher(store: Arc<DedupStore>, readiness: Readiness) {
 async fn spawn_outbound_subscriptions(
     config: &GatewayConfig,
     shutdown: &CancellationToken,
+    codec: Arc<dyn RecordCodec>,
 ) -> anyhow::Result<()> {
     if config.outbound.is_empty() {
         return Ok(());
@@ -609,7 +636,7 @@ async fn spawn_outbound_subscriptions(
             .map_err(|e| anyhow::anyhow!("build outbound dlq producer: {e}"))?,
     );
     for sub in &config.outbound {
-        spawn_outbound_delivery(sub, config, dlq_producer.clone(), shutdown);
+        spawn_outbound_delivery(sub, config, dlq_producer.clone(), shutdown, codec.clone());
     }
     Ok(())
 }
@@ -619,6 +646,7 @@ fn spawn_outbound_delivery(
     config: &GatewayConfig,
     dlq_producer: Arc<crabka_client_producer::Producer>,
     shutdown: &CancellationToken,
+    codec: Arc<dyn RecordCodec>,
 ) {
     let sub = sub.clone();
     let bootstrap = config.bootstrap.clone();
@@ -633,6 +661,7 @@ fn spawn_outbound_delivery(
             dlq_producer,
             shutdown,
             security,
+            codec,
         )
         .await
         {

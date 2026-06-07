@@ -435,7 +435,7 @@ jobs:
       - name: gRPC gateway integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-grpc-gateway --tests --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
+          cargo llvm-cov -p crabka-grpc-gateway --tests --test schema_codec --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

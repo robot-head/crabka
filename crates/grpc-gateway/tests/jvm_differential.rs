@@ -60,6 +60,7 @@ async fn jvm_consumer_reads_gateway_output() {
             topic: "gw-jvm".into(),
             key: None,
             value: Bytes::from_static(b"jvm-sees-this"),
+            body_structured: None,
             headers: vec![],
             partition: None,
             timestamp_ms: None,
