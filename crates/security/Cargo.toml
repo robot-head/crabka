@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+description = "TLS, SASL, SCRAM, OAuth, and Kerberos security utilities for Crabka"
 
 [lints]
 workspace = true
@@ -69,4 +70,3 @@ required-features = ["sspi-keytab"]
 [[bench]]
 name = "scram"
 harness = false
-

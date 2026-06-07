@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+description = "Documentation generator for Crabka protocol, broker, and Kubernetes API artifacts"
 publish = false
 
 [lints]
