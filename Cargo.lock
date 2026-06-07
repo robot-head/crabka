@@ -1326,7 +1326,7 @@ dependencies = [
  "bytes",
  "clap",
  "crabka-authz",
- "crabka-broker",
+ "crabka-broker-test-helpers",
  "crabka-client-consumer",
  "crabka-client-core",
  "crabka-client-producer",
@@ -1376,6 +1376,13 @@ dependencies = [
  "wincode",
  "wiremock",
  "zerocopy",
+]
+
+[[package]]
+name = "crabka-broker-test-helpers"
+version = "0.3.1"
+dependencies = [
+ "crabka-broker",
 ]
 
 [[package]]
