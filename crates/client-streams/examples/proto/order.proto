@@ -1,0 +1,7 @@
+syntax = "proto3";
+package demo;
+
+message Order {
+  string id = 1;
+  double total = 2;
+}

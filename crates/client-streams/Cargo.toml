@@ -18,7 +18,7 @@ workspace = true
 
 [features]
 default = []
-schema-serde = ["dep:crabka-schema-serde", "crabka-schema-serde/avro", "crabka-schema-serde/protobuf", "crabka-schema-serde/json"]
+schema-serde = ["dep:crabka-schema-serde", "crabka-schema-serde/avro", "crabka-schema-serde/protobuf", "crabka-schema-serde/json", "dep:protox", "dep:prost-build"]
 
 [dependencies]
 crabka-protocol = { version = "0.3.2", path = "../protocol", default-features = false }
@@ -38,11 +38,22 @@ tracing = { workspace = true }
 turso = "0.6"
 pollster = "0.4"
 
+[build-dependencies]
+# Only compiled under the `schema-serde` feature; compiles the protobuf
+# example's .proto via protox (pure Rust, no protoc) into prost structs that
+# derive prost_reflect::ReflectMessage. See build.rs.
+protox = { version = "0.9", optional = true }
+prost-build = { version = "0.14", optional = true }
+
 [dev-dependencies]
 assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
 crabka-broker = { version = "0.3.2", path = "../broker", features = ["test-helpers"] }
 crabka-schema-serde = { version = "0.3.2", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
+hex = { workspace = true }
+prost = { workspace = true }
+prost-reflect = { workspace = true }
+schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
