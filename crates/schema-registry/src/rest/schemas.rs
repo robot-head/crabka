@@ -4,7 +4,10 @@ use axum::extract::{Path, Query, State};
 use axum::response::Response;
 
 use crate::error::SrError;
-use crate::rest::{AppState, DeletedQ, response::ok_json};
+use crate::rest::{
+    AppState, DeletedQ,
+    response::{ok_json, ok_raw},
+};
 
 /// GET /schemas/ids/{id}
 pub async fn get_by_id(
@@ -60,6 +63,45 @@ pub async fn get_by_id_versions(
         .map(|(subject, version)| serde_json::json!({ "subject": subject, "version": version }))
         .collect();
     Ok(ok_json(&serde_json::Value::Array(arr)))
+}
+
+/// GET /schemas/ids/{id}/schema -> the raw schema string (not JSON-wrapped).
+#[allow(clippy::unused_async)]
+pub async fn get_by_id_schema(
+    State(st): State<AppState>,
+    Path(id): Path<i32>,
+) -> Result<Response, SrError> {
+    let (_, schema, _) = st
+        .store
+        .store
+        .read()
+        .schema_by_id(id, false)
+        .ok_or(SrError::SchemaNotFound)?;
+    Ok(ok_raw(schema))
+}
+
+/// GET /schemas/ids/{id}/subjects -> array of subject strings | 404/40403 when no subjects.
+#[allow(clippy::unused_async)]
+pub async fn get_by_id_subjects(
+    State(st): State<AppState>,
+    Path(id): Path<i32>,
+    Query(q): Query<DeletedQ>,
+) -> Result<Response, SrError> {
+    let pairs = st
+        .store
+        .store
+        .read()
+        .schema_id_subject_versions(id, q.deleted);
+    if pairs.is_empty() {
+        return Err(SrError::SchemaNotFound);
+    }
+    let subjects: Vec<String> = pairs
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    Ok(ok_json(&subjects))
 }
 
 /// GET /schemas -> [{subject,version,id,schemaType,schema}]

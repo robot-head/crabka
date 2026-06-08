@@ -119,10 +119,11 @@ pub struct DeleteSubjectValue {
 /// `CONFIG`/`MODE`) records.
 #[derive(Debug, Clone)]
 pub enum SchemaRecord {
-    Schema(SchemaKey, SchemaValue),
-    Config(ConfigKey, ConfigValue),
+    /// A `CONFIG` record. `None` value = a CONFIG tombstone (clears the per-subject override).
+    Config(ConfigKey, Option<ConfigValue>),
     /// A `MODE` record. `None` value = a MODE tombstone (clears the override).
     Mode(ModeKey, Option<ModeValue>),
+    Schema(SchemaKey, SchemaValue),
     /// A soft subject-delete marker.
     DeleteSubject(DeleteSubjectKey, DeleteSubjectValue),
     /// A `SCHEMA` key with a null value = permanent version delete.
@@ -151,12 +152,12 @@ impl SchemaRecord {
                 },
                 Err(_) => Self::Unknown,
             },
-            Some("CONFIG") => match (
-                serde_json::from_slice::<ConfigKey>(key),
-                value.and_then(|v| serde_json::from_slice::<ConfigValue>(v).ok()),
-            ) {
-                (Ok(k), Some(val)) => Self::Config(k, val),
-                _ => Self::Unknown,
+            Some("CONFIG") => match serde_json::from_slice::<ConfigKey>(key) {
+                Ok(k) => match value.and_then(|v| serde_json::from_slice::<ConfigValue>(v).ok()) {
+                    Some(val) => Self::Config(k, Some(val)),
+                    None => Self::Config(k, None), // null value = clear compat override
+                },
+                Err(_) => Self::Unknown,
             },
             Some("MODE") => match serde_json::from_slice::<ModeKey>(key) {
                 Ok(k) => match value.and_then(|v| serde_json::from_slice::<ModeValue>(v).ok()) {
@@ -294,6 +295,18 @@ pub fn mode_key(subject: Option<&str>) -> Vec<u8> {
     serde_json::to_vec(&key).expect("mode key serialises")
 }
 
+/// Build the `CONFIG` key bytes for a compat-clear tombstone (value is null).
+/// Used to produce a tombstone that removes per-subject compatibility overrides.
+#[must_use]
+pub fn config_key(subject: Option<&str>) -> Vec<u8> {
+    let key = ConfigKey {
+        keytype: "CONFIG".to_string(),
+        subject: subject.map(str::to_string),
+        magic: 0,
+    };
+    serde_json::to_vec(&key).expect("config key serialises")
+}
+
 /// Build a `DELETE_SUBJECT` record's (key, value).
 #[must_use]
 pub fn encode_delete_subject(subject: &str, version: i32) -> (Vec<u8>, Vec<u8>) {
@@ -320,7 +333,7 @@ mod tests {
     fn encode_config_round_trips_via_decode() {
         let (k, v) = encode_config(None, "FULL");
         match SchemaRecord::decode(&k, Some(&v)) {
-            SchemaRecord::Config(key, val) => {
+            SchemaRecord::Config(key, Some(val)) => {
                 assert!(key.subject.is_none());
                 assert_eq!(val.compatibility_level, "FULL");
             }

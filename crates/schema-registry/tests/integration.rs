@@ -1525,3 +1525,188 @@ async fn rest_references_get_by_id_list_and_subject_delete_protection() {
     cancel.cancel();
     broker.shutdown().await;
 }
+
+// ── Slice 9: DELETE /config/{subject}, /schemas/ids/{id}/schema+subjects, ?normalize ──
+
+/// DELETE /config/{subject} reverts per-subject compat to global default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_subject_compat_reverts_to_global() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // PUT a per-subject override to FULL.
+    let (status, body) = put_json(&app, "/config/s", r#"{"compatibility":"FULL"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["compatibility"], "FULL");
+
+    // GET confirms the override is set.
+    let (status, body) = get_status_json(&app, "/config/s").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["compatibilityLevel"], "FULL");
+
+    // DELETE the subject-level override.
+    let resp = app.clone().oneshot(req_delete("/config/s")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let del_body = body_json(resp).await;
+    // Body should include the deleted level.
+    assert_eq!(del_body["compatibility"], "FULL");
+
+    // GET now returns 404 (subject has no per-subject override anymore).
+    let (status, body) = get_status_json(&app, "/config/s").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"], 40401);
+
+    // GET /config (global) still returns BACKWARD.
+    let (status, body) = get_status_json(&app, "/config").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["compatibilityLevel"], "BACKWARD");
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+/// DELETE /config/{subject} when no per-subject override exists returns 404/40401.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_subject_compat_no_override_returns_40401() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // No per-subject override was set.
+    let resp = app
+        .clone()
+        .oneshot(req_delete("/config/no-such-subject"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = body_json(resp).await;
+    assert_eq!(body["error_code"], 40401);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+/// GET /schemas/ids/{id}/schema returns the raw schema string (not JSON-wrapped).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_by_id_schema_returns_raw_string() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    let reg = register(&app, "av-value", AVRO_BODY).await;
+    let id = reg["id"].as_i64().unwrap();
+
+    // GET /schemas/ids/{id}/schema -> raw schema string
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/schemas/ids/{id}/schema"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+    // Should contain the schema content (record type)
+    assert!(text.contains("record"), "expected schema text, got: {text}");
+    // Should NOT be wrapped in a JSON object with a "schema" key
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert!(
+        parsed.get("schema").is_none(),
+        "body should be the raw schema, not a JSON envelope"
+    );
+
+    // Non-existent id -> 404/40403
+    let (status, body) = get_status_json(&app, "/schemas/ids/9999/schema").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"], 40403);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+/// GET /schemas/ids/{id}/subjects returns all subjects that reference the schema ID.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_by_id_subjects_returns_all_subjects() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // Register the same Avro schema under two subjects.
+    let r1 = register(&app, "s1", AVRO_BODY).await;
+    let id = r1["id"].as_i64().unwrap();
+    let r2 = register(&app, "s2", AVRO_BODY).await;
+    // Idempotent: both subjects should share the same schema id.
+    assert_eq!(r2["id"].as_i64().unwrap(), id);
+
+    let (status, body) = get_status_json(&app, &format!("/schemas/ids/{id}/subjects")).await;
+    assert_eq!(status, StatusCode::OK);
+    let subjects: Vec<String> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!(
+        subjects.contains(&"s1".to_string()),
+        "expected s1 in {subjects:?}"
+    );
+    assert!(
+        subjects.contains(&"s2".to_string()),
+        "expected s2 in {subjects:?}"
+    );
+
+    // Non-existent id -> 404/40403
+    let (status, body) = get_status_json(&app, "/schemas/ids/9999/subjects").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"], 40403);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+/// POST /subjects/{subject}/versions?normalize=true deduplicates schemas with
+/// equivalent canonical form (extra whitespace in Avro).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normalize_true_deduplicates_avro_with_whitespace() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // Register the canonical form first (no ?normalize).
+    let r1 = register(&app, "s", AVRO_BODY).await;
+    let id1 = r1["id"].as_i64().unwrap();
+
+    // Register the same schema with extra whitespace using ?normalize=true.
+    // The schema body has extra spaces around colons/keys.
+    let whitespace_body = r#"{"schema":"{ \"type\" : \"record\" , \"name\" : \"U\" , \"fields\" : [ { \"name\" : \"id\" , \"type\" : \"int\" } ] }"}"#;
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/s/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(whitespace_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "normalize register should succeed"
+    );
+    let r2 = body_json(resp).await;
+    let id2 = r2["id"].as_i64().unwrap();
+
+    // Both registrations should produce the same schema id (deduplication worked).
+    assert_eq!(
+        id1, id2,
+        "normalize=true should produce same id as canonical form"
+    );
+
+    cancel.cancel();
+    broker.shutdown().await;
+}

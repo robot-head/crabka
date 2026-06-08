@@ -11,6 +11,33 @@ use crate::rest::{
     response::{ok_json, ok_raw},
 };
 
+/// `?normalize=true` query toggle for `POST /subjects/{subject}/versions` and
+/// `POST /subjects/{subject}`. When set, the schema string is pre-normalised
+/// before registration or lookup (Avro PCF, JSON round-trip, Protobuf no-op).
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct NormalizeQuery {
+    #[serde(default)]
+    pub normalize: bool,
+}
+
+/// Pre-normalise a schema string according to its format's canonical rules.
+/// Returns `SrError::InvalidSchema` (42201) if the schema fails to parse.
+fn normalize_schema(ty: SchemaType, schema: &str) -> Result<String, SrError> {
+    match ty {
+        SchemaType::Avro => {
+            let parsed = apache_avro::Schema::parse_str(schema)
+                .map_err(|e| SrError::InvalidSchema(e.to_string()))?;
+            Ok(parsed.canonical_form())
+        }
+        SchemaType::Json => {
+            let v: serde_json::Value =
+                serde_json::from_str(schema).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
+            Ok(v.to_string())
+        }
+        SchemaType::Protobuf => Ok(schema.to_string()),
+    }
+}
+
 #[derive(Deserialize)]
 struct RegisterBody {
     schema: String,
@@ -28,11 +55,15 @@ struct RegisterBody {
 pub async fn register(
     State(st): State<AppState>,
     Path(subject): Path<String>,
+    Query(q): Query<NormalizeQuery>,
     body: String,
 ) -> Result<Response, SrError> {
-    let req: RegisterBody =
+    let mut req: RegisterBody =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
+    if q.normalize {
+        req.schema = normalize_schema(ty, &req.schema)?;
+    }
     let reg = st
         .store
         .register(
@@ -47,16 +78,28 @@ pub async fn register(
     Ok(ok_json(&serde_json::json!({ "id": reg.id })))
 }
 
+/// Combined query params for POST /subjects/{subject}: `?deleted` + `?normalize`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct LookupQuery {
+    #[serde(default)]
+    pub deleted: bool,
+    #[serde(default)]
+    pub normalize: bool,
+}
+
 /// POST /subjects/{subject} -> `{subject,id,version,schema}` | 404
 pub async fn lookup(
     State(st): State<AppState>,
     Path(subject): Path<String>,
-    Query(q): Query<DeletedQ>,
+    Query(q): Query<LookupQuery>,
     body: String,
 ) -> Result<Response, SrError> {
-    let req: RegisterBody =
+    let mut req: RegisterBody =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
+    if q.normalize {
+        req.schema = normalize_schema(ty, &req.schema)?;
+    }
     let s = st.store.store.read();
     if s.versions(&subject, q.deleted).is_none() {
         return Err(SrError::SubjectNotFound(subject));

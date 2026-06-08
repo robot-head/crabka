@@ -69,6 +69,17 @@ pub async fn get_subject(
     Ok(ok_json(&serde_json::json!({ "compatibilityLevel": lvl })))
 }
 
+/// DELETE /config/{subject} — remove per-subject compat override, revert to global.
+pub async fn delete_subject(
+    State(st): State<AppState>,
+    Path(subject): Path<String>,
+) -> Result<Response, SrError> {
+    match st.store.delete_subject_compat(&subject).await? {
+        Some(level) => Ok(ok_json(&serde_json::json!({ "compatibility": level }))),
+        None => Err(SrError::SubjectNotFound(subject)),
+    }
+}
+
 /// PUT /config/{subject}
 pub async fn put_subject(
     State(st): State<AppState>,

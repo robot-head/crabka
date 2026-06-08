@@ -48,12 +48,20 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
                 None => s.clear_global_mode(),
             }
         }
-        SchemaRecord::Config(k, v) => {
+        SchemaRecord::Config(k, Some(v)) => {
             let mut s = store.write();
             match k.subject {
                 Some(subj) => s.set_subject_compat(&subj, v.compatibility_level),
                 None => s.set_global_compat(v.compatibility_level),
             }
+        }
+        SchemaRecord::Config(k, None) => {
+            let mut s = store.write();
+            if let Some(subj) = k.subject {
+                s.clear_subject_compat(&subj);
+            }
+            // A global CONFIG tombstone is a no-op; global compat has a
+            // hardcoded default (BACKWARD) when no record is present.
         }
         SchemaRecord::Noop | SchemaRecord::Unknown => {}
     }
