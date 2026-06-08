@@ -1,4 +1,4 @@
-//! Broker integration test: DSL counting topology + restart-restore.
+﻿//! Broker integration test: DSL counting topology + restart-restore.
 //!
 //! Proves that a `StreamsBuilder`-based counting app (DSL path) works
 //! end-to-end against a real broker and that a fresh `KafkaStreams` instance
@@ -74,11 +74,11 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 /// stream (key is not changed upstream).
 fn dsl_counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    b.stream(["dsl-in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+    b.stream_explicit(["dsl-in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("counts"))
         .to_stream()
-        .to("dsl-out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("dsl-out", Produced::with(StringSerde, I64Serde));
     b.build_optimized(app_id).unwrap()
 }
 
@@ -171,7 +171,7 @@ async fn dsl_count_and_restart_restore() {
     // writes to it; no explicit creation needed.
 
     // ── 1. Produce ["a","a","b"] to dsl-in ───────────────────────────────────
-    // key = value so group_by_key().count() counts per value.
+    // key = value so group_by_key().count_explicit() counts per value.
     let producer = crabka_client_producer::Producer::builder()
         .bootstrap(&bootstrap)
         .build()

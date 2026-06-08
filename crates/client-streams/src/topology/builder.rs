@@ -1,4 +1,4 @@
-//! Topology builder: public Processor-API surface.
+﻿//! Topology builder: public Processor-API surface.
 
 use std::any::Any;
 use std::borrow::Borrow;
@@ -382,7 +382,7 @@ impl Topology {
     /// rather than the derived `<app_id>-<name>-changelog`.
     ///
     /// This backs the `REUSE_KTABLE_SOURCE_TOPICS` DSL optimizer: a
-    /// `builder.table(topic, ...)` store can reuse `topic` as its changelog, so
+    /// `builder.table_explicit(topic, ...)` store can reuse `topic` as its changelog, so
     /// no separate `app-<store>-changelog` topic is created and the wire
     /// topology lists `topic` as the store's changelog. `changelog_topic` is the
     /// topic name used both in the wire `state_changelog_topics` entry and as the

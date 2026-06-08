@@ -1,4 +1,4 @@
-//! Kafka Streams-compatible client runtime for Crabka.
+﻿//! Kafka Streams-compatible client runtime for Crabka.
 //!
 //! `crabka-client-streams` provides three layers that can be used independently:
 //!
@@ -203,8 +203,8 @@
 //!
 //! let builder = StreamsBuilder::new();
 //! // `a`: primaryKey -> foreignKey ("A"); `b`: foreignKey -> value ("X").
-//! let a = builder.table_default::<String, String>("a", "sa");
-//! let b = builder.table_default::<String, String>("b", "sb");
+//! let a = builder.table::<String, String>("a", "sa");
+//! let b = builder.table::<String, String>("b", "sb");
 //! a.join_on_foreign_key(
 //!     &b,
 //!     |left: &String| left.clone(),                       // foreign-key extractor
@@ -212,7 +212,7 @@
 //!     StringSerde,                                         // foreign-key serde
 //! )
 //! .to_stream()
-//! .to_default("out");
+//! .to("out");
 //! drop(a);
 //! drop(b);
 //! let topology = builder.build("fk-app").unwrap();
@@ -327,15 +327,15 @@
 //! use crabka_client_streams::{StreamsBuilder, StringSerde};
 //!
 //! let b = StreamsBuilder::new();
-//! let customers = b.global_table_default::<String, String>("customers", "customers-by-id");
+//! let customers = b.global_table::<String, String>("customers", "customers-by-id");
 //!
-//! b.stream_default::<String, String>(["orders"])
+//! b.stream::<String, String>(["orders"])
 //! .left_join_global(
 //!     &customers,
 //!     |_order_id, order| order.split(':').next().unwrap_or("").to_string(),
 //!     |order, customer| format!("{order}|customer={}", customer.map_or("unknown", |v| v)),
 //! )
-//! .to_default("enriched-orders");
+//! .to("enriched-orders");
 //!
 //! drop(customers);
 //! let built = b.build("orders-enricher").unwrap();
@@ -354,13 +354,13 @@
 //! };
 //!
 //! let b = StreamsBuilder::new();
-//! b.stream_default::<String, String>(["clicks"])
-//!     .group_by_key_default()
+//! b.stream::<String, String>(["clicks"])
+//!     .group_by_key()
 //!     .windowed_by(TimeWindows::of_size(60_000).grace(10_000))
-//!     .count_default("click-counts")
+//!     .count("click-counts")
 //!     .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
 //!     .to_stream()
-//!     .to_default("click-counts-final");
+//!     .to("click-counts-final");
 //!
 //! let built = b.build("click-analytics").unwrap();
 //! assert_eq!(built.list_sink_topics(), vec!["click-counts-final".to_string()]);
@@ -373,11 +373,11 @@
 //!
 //! // Build a word-count topology: group by key, count, forward to "out".
 //! let b = StreamsBuilder::new();
-//! b.stream_default::<String, String>(["in"])
-//!     .group_by_key_default()
-//!     .count_default("counts")
+//! b.stream::<String, String>(["in"])
+//!     .group_by_key()
+//!     .count("counts")
 //!     .to_stream()
-//!     .to_default("out");
+//!     .to("out");
 //! let built = b.build("word-count").unwrap();
 //!
 //! // Drive it broker-free with TopologyTestDriver.

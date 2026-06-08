@@ -1,4 +1,4 @@
-//! `KGroupedStream<K,V>`: the intermediate handle between `groupByKey`/`groupBy`
+﻿//! `KGroupedStream<K,V>`: the intermediate handle between `groupByKey`/`groupBy`
 //! and a terminal aggregation (`count`/`reduce`/`aggregate`).
 //!
 //! `groupByKey`/`groupBy` record **no** graph node — they capture lineage state
@@ -118,7 +118,7 @@ where
     /// `count`: count records per key into a materialized `KTable<K, i64>`.
     ///
     /// `init = || 0`, `agg = |_k, _v, acc| acc + 1`.
-    pub fn count<KS, VS>(
+    pub fn count_explicit<KS, VS>(
         self,
         materialized: impl Into<Materialized<KS, VS>>,
     ) -> KTable<K, i64, KS, VS>
@@ -139,7 +139,7 @@ where
     /// `Reducer` has no separate `init`); later values fold via
     /// `reducer(&acc, &value)`. The backing processor keeps
     /// the public value type `V` (no `Option`/sentinel leaks into the `KTable`).
-    pub fn reduce<KS, VS, R>(
+    pub fn reduce_explicit<KS, VS, R>(
         self,
         reducer: R,
         materialized: impl Into<Materialized<KS, VS>>,
@@ -156,7 +156,7 @@ where
 
     /// `aggregate`: general aggregation with caller-supplied `init` + `agg`,
     /// materialized as `KTable<K, VA>`.
-    pub fn aggregate<KS, VS, VA, I, A>(
+    pub fn aggregate_explicit<KS, VS, VA, I, A>(
         self,
         init: I,
         agg: A,
@@ -172,7 +172,7 @@ where
         self.aggregate_inner(materialized.into(), names::AGGREGATE_STORE, init, agg)
     }
 
-    pub fn count_default(
+    pub fn count(
         self,
         store_name: impl Into<String>,
     ) -> KTable<K, i64, <K as DefaultSerde>::Serde, I64Serde>
@@ -180,13 +180,13 @@ where
         K: DefaultSerde,
         <K as DefaultSerde>::Serde: Serde<K> + Clone,
     {
-        self.count(
+        self.count_explicit(
             Materialized::with(<K as DefaultSerde>::Serde::default(), I64Serde)
                 .as_store(store_name),
         )
     }
 
-    pub fn reduce_default<R>(
+    pub fn reduce<R>(
         self,
         reducer: R,
         store_name: impl Into<String>,
@@ -198,7 +198,7 @@ where
         <V as DefaultSerde>::Serde: Serde<V> + Clone,
         R: Fn(&V, &V) -> V + Clone + Send + Sync + 'static,
     {
-        self.reduce(
+        self.reduce_explicit(
             reducer,
             Materialized::with(
                 <K as DefaultSerde>::Serde::default(),
@@ -208,7 +208,7 @@ where
         )
     }
 
-    pub fn aggregate_default<VA, I, A>(
+    pub fn aggregate<VA, I, A>(
         self,
         init: I,
         agg: A,
@@ -222,7 +222,7 @@ where
         I: Fn() -> VA + Clone + Send + Sync + 'static,
         A: Fn(&K, &V, VA) -> VA + Clone + Send + Sync + 'static,
     {
-        self.aggregate(
+        self.aggregate_explicit(
             init,
             agg,
             Materialized::with(

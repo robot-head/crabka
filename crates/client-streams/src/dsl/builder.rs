@@ -1,4 +1,4 @@
-//! `StreamsBuilder` (public) + `InternalStreamsBuilder` (graph + name counter).
+﻿//! `StreamsBuilder` (public) + `InternalStreamsBuilder` (graph + name counter).
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -56,7 +56,7 @@ impl StreamsBuilder {
     }
 
     /// Source a `KStream` from one or more topics.
-    pub fn stream<KS, VS>(
+    pub fn stream_explicit<KS, VS>(
         &self,
         topics: impl IntoIterator<Item = impl Into<String>>,
         consumed: impl Into<Consumed<KS, VS>>,
@@ -117,7 +117,7 @@ impl StreamsBuilder {
     /// `KTABLE-SOURCE-STATE-STORE` counter); the changelog topic is
     /// `<app>-<store>-changelog`, unless the `REUSE_KTABLE_SOURCE_TOPICS`
     /// optimizer pass (run by `build_optimized`) makes it reuse the source topic.
-    pub fn table<KS, VS>(
+    pub fn table_explicit<KS, VS>(
         &self,
         topic: impl Into<String>,
         consumed: impl Into<Consumed<KS, VS>>,
@@ -241,7 +241,7 @@ impl StreamsBuilder {
     ///
     /// [`GlobalKTable`]: crate::dsl::global_table::GlobalKTable
     /// [`Topology::add_global_store`]: crate::topology::Topology::add_global_store
-    pub fn global_table<KS, VS>(
+    pub fn global_table_explicit<KS, VS>(
         &self,
         topic: impl Into<String>,
         consumed: impl Into<Consumed<KS, VS>>,
@@ -309,7 +309,7 @@ impl StreamsBuilder {
     }
 
     /// Sourced stream utilizing default associated serdes.
-    pub fn stream_default<K, V>(
+    pub fn stream<K, V>(
         &self,
         topics: impl IntoIterator<Item = impl Into<String>>,
     ) -> crate::dsl::kstream::KStream<K, V>
@@ -321,14 +321,14 @@ impl StreamsBuilder {
         K: std::any::Any + Send + Clone,
         V: std::any::Any + Send + Clone,
     {
-        self.stream(
+        self.stream_explicit(
             topics,
             Consumed::with(K::Serde::default(), V::Serde::default()),
         )
     }
 
     /// Sourced table utilizing default associated serdes.
-    pub fn table_default<K, V>(
+    pub fn table<K, V>(
         &self,
         topic: impl Into<String>,
         store_name: impl Into<String>,
@@ -341,7 +341,7 @@ impl StreamsBuilder {
         K: std::any::Any + Send + Sync + Clone,
         V: std::any::Any + Send + Clone,
     {
-        self.table(
+        self.table_explicit(
             topic,
             Consumed::with(K::Serde::default(), V::Serde::default()),
             crate::dsl::config::Materialized::with(K::Serde::default(), V::Serde::default())
@@ -350,7 +350,7 @@ impl StreamsBuilder {
     }
 
     /// Sourced global table utilizing default associated serdes.
-    pub fn global_table_default<K, V>(
+    pub fn global_table<K, V>(
         &self,
         topic: impl Into<String>,
         store_name: impl Into<String>,
@@ -363,7 +363,7 @@ impl StreamsBuilder {
         K: std::any::Any + Send + Sync + Clone,
         V: std::any::Any + Send + Clone,
     {
-        self.global_table(
+        self.global_table_explicit(
             topic,
             Consumed::with(K::Serde::default(), V::Serde::default()),
             crate::dsl::config::Materialized::with(K::Serde::default(), V::Serde::default())
@@ -420,7 +420,7 @@ impl StreamsBuilder {
     /// Consumes the builder. This requires that no [`KStream`]/[`KTable`] handles
     /// are still alive — each holds an `Rc` clone of the internal builder, so an
     /// outstanding handle makes `Rc::try_unwrap` fail (→ panic). The fluent
-    /// `stream(..).map_values(..)..to(..)` form drops every intermediate handle
+    /// `stream(..).map_values(..)..to_explicit(..)` form drops every intermediate handle
     /// before `build`, satisfying this.
     ///
     /// [`KStream`]: crate::dsl::kstream::KStream
@@ -441,7 +441,7 @@ impl StreamsBuilder {
     ///
     /// The passes are `MERGE_REPARTITION_TOPICS` (two aggregations off one
     /// key-changing op share a single repartition topic) and
-    /// `REUSE_KTABLE_SOURCE_TOPICS` (a `builder.table()` store reuses its source
+    /// `REUSE_KTABLE_SOURCE_TOPICS` (a `builder.table_explicit()` store reuses its source
     /// topic as its changelog). They're independent, so order doesn't matter.
     /// Same outstanding-handle requirement as [`build`](Self::build).
     pub fn build_optimized(
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn stream_records_a_source_node() {
         let builder = StreamsBuilder::new();
-        let _s = builder.stream(
+        let _s = builder.stream_explicit(
             ["in"],
             crate::processor::serde::Consumed::with(StringSerde, StringSerde),
         );
@@ -513,8 +513,8 @@ mod tests {
     fn build_lowers_source_sink_to_wire_topology() {
         use crate::processor::serde::{Consumed, Produced};
         let b = StreamsBuilder::new();
-        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-            .to("out", Produced::with(StringSerde, StringSerde));
+        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+            .to_explicit("out", Produced::with(StringSerde, StringSerde));
         let built = b.build("app").unwrap();
         let wire = built.to_wire();
         check!(wire.epoch == 0);
@@ -528,27 +528,27 @@ mod tests {
     fn build_optimized_matches_build_for_stateless_chain() {
         use crate::processor::serde::{Consumed, Produced};
         let b = StreamsBuilder::new();
-        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
             .map_values(|v: &String| v.clone())
-            .to("out", Produced::with(StringSerde, StringSerde));
+            .to_explicit("out", Produced::with(StringSerde, StringSerde));
         let wire = b.build_optimized("app").unwrap().to_wire();
         check!(wire.subtopologies.len() == 1);
         check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
     }
 
     #[test]
-    fn table_default_build_keeps_derived_changelog_name() {
+    fn table_build_keeps_derived_changelog_name() {
         // Without the optimizer (plain `build`), a `table()` store's changelog is
         // the JVM-default `<app>-<store>-changelog` — REUSE_KTABLE_SOURCE_TOPICS
         // must NOT fire.
         let b = StreamsBuilder::new();
-        b.table(
+        b.table_explicit(
             "in",
             Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("store"),
         )
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             crate::processor::serde::Produced::with(StringSerde, StringSerde),
         );
@@ -566,13 +566,13 @@ mod tests {
         // With the optimizer (`build_optimized`), the `table()` store's changelog
         // is the SOURCE topic ("in"), not "app-store-changelog".
         let b = StreamsBuilder::new();
-        b.table(
+        b.table_explicit(
             "in",
             Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("store"),
         )
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             crate::processor::serde::Produced::with(StringSerde, StringSerde),
         );
@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn global_table_returns_handle_with_store_name() {
         let builder = StreamsBuilder::new();
-        let gt = builder.global_table(
+        let gt = builder.global_table_explicit(
             "global",
             crate::processor::serde::Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("g-store"),
@@ -610,7 +610,7 @@ mod tests {
         let b = StreamsBuilder::new();
         // Declared FIRST: the global source is registered before the stream source,
         // so it consumes node-group index 0 and the stream emits as "1".
-        let gt = b.global_table(
+        let gt = b.global_table_explicit(
             "global",
             Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("g-store"),
@@ -618,8 +618,8 @@ mod tests {
         // The GlobalKTable handle holds an `Rc` clone of the internal builder; drop
         // it before `build()` (which requires `Rc::try_unwrap` to succeed).
         drop(gt);
-        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-            .to("out", Produced::with(StringSerde, StringSerde));
+        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+            .to_explicit("out", Produced::with(StringSerde, StringSerde));
         let wire = b.build("app").unwrap().to_wire();
         check!(wire.subtopologies.len() == 1);
         check!(wire.subtopologies[0].subtopology_id == "1");
@@ -648,7 +648,7 @@ mod tests {
         let b = StreamsBuilder::new();
         // Hold a live KStream handle across the build call: it keeps an `Rc`
         // clone of the internal builder alive, so `Rc::try_unwrap` fails.
-        let _held = b.stream(
+        let _held = b.stream_explicit(
             ["in"],
             crate::processor::serde::Consumed::with(StringSerde, StringSerde),
         );

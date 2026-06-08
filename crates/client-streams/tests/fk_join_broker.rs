@@ -1,4 +1,4 @@
-//! Broker integration test: KIP-213 foreign-key KTable-KTable join over a live
+﻿//! Broker integration test: KIP-213 foreign-key KTable-KTable join over a live
 //! in-process broker.
 //!
 //! Mirrors `dsl_integration.rs` (the DSL counting + restart-restore broker test):
@@ -111,12 +111,12 @@ async fn produce(producer: &crabka_client_producer::Producer, topic: &str, key: 
 /// FK join requires; the foreign-key extractor is identity on `a`'s value.
 fn fk_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    let ta = b.table(
+    let ta = b.table_explicit(
         "fk-a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("fk-sa"),
     );
-    let tb = b.table(
+    let tb = b.table_explicit(
         "fk-b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("fk-sb"),
@@ -128,9 +128,9 @@ fn fk_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
         StringSerde,
     )
     .to_stream()
-    .to("fk-out", Produced::with(StringSerde, StringSerde));
+    .to_explicit("fk-out", Produced::with(StringSerde, StringSerde));
     // The builder refuses `build`/`build_optimized` while typed handles are still
-    // live; the join result is consumed by `to_stream().to(...)`, but the two
+    // live; the join result is consumed by `to_stream().to_explicit(...)`, but the two
     // source tables must be released explicitly (same as the FK exec tests).
     drop(ta);
     drop(tb);

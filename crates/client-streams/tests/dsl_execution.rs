@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "windows"))]
+﻿#![cfg(not(target_os = "windows"))]
 //! Execution-level tests for the KStream/KTable DSL: build a counting app via
 //! `StreamsBuilder`, run it through the broker-free `TopologyTestDriver`, and
 //! assert the forwarded running count + materialized store contents.
@@ -13,11 +13,11 @@ use crabka_client_streams::{Consumed, Grouped, I64Serde, Materialized, Produced,
 #[test]
 fn dsl_count_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("counts"))
         .to_stream()
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     for v in ["a", "a", "b"] {
@@ -55,15 +55,15 @@ fn dsl_count_executes() {
 #[test]
 fn dsl_count_with_repartition_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         // re-key to the value → key-changing → forces a repartition
         .group_by(
             |_k: &String, v: &String| v.clone(),
             Grouped::with(StringSerde, StringSerde),
         )
-        .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("counts"))
         .to_stream()
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     // keys are irrelevant; the new key is the value
@@ -99,14 +99,14 @@ fn dsl_count_with_repartition_executes() {
 #[test]
 fn dsl_reduce_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .reduce(
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .reduce_explicit(
             |acc: &String, v: &String| format!("{acc}{v}"),
             Materialized::with(StringSerde, StringSerde).as_store("reduced"),
         )
         .to_stream()
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     for (k, v) in [("a", "1"), ("a", "2"), ("b", "9")] {
@@ -146,13 +146,13 @@ fn dsl_reduce_executes() {
 #[test]
 fn dsl_branch_executes() {
     let b = StreamsBuilder::new();
-    let src = b.stream(["in"], Consumed::with(StringSerde, StringSerde));
+    let src = b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde));
     let split = src.split();
     // b1 matches records with value "a"; b2 matches anything else.
     let b1 = split.branch(|_k: &String, v: &String| v == "a");
     let b2 = split.branch(|_k: &String, v: &String| v != "a");
     b1.merge(&b2)
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(b1);
     drop(b2);
     drop(src);
@@ -196,10 +196,10 @@ fn dsl_branch_executes() {
 fn dsl_repartition_executes() {
     use crabka_client_streams::Repartitioned;
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .repartition(Repartitioned::with(StringSerde, StringSerde))
         .map_values(|v: &String| v.to_uppercase())
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     // build must succeed (no missing thunk panic)
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -236,9 +236,9 @@ fn dsl_repartition_executes() {
 #[test]
 fn dsl_map_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .map(|k: &String, v: &String| (i64::try_from(k.len()).unwrap(), v.to_uppercase()))
-        .to("out", Produced::with(I64Serde, StringSerde));
+        .to_explicit("out", Produced::with(I64Serde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -265,9 +265,9 @@ fn dsl_map_executes() {
 #[test]
 fn dsl_select_key_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .select_key(|_k: &String, v: &String| v.clone())
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -296,9 +296,9 @@ fn dsl_select_key_executes() {
 #[test]
 fn dsl_filter_not_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .filter_not(|_k: &String, v: &String| v == "drop")
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     for v in ["keep", "drop", "also-keep"] {
@@ -332,14 +332,14 @@ fn dsl_filter_not_executes() {
 #[test]
 fn dsl_flat_map_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .flat_map(|_k: &String, v: &String| {
             v.split('-')
                 .enumerate()
                 .map(|(i, part)| (i.to_string(), part.to_string()))
                 .collect::<Vec<_>>()
         })
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -375,9 +375,9 @@ fn dsl_flat_map_executes() {
 #[test]
 fn dsl_flat_map_values_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .flat_map_values(|v: &String| v.chars().map(|c| c.to_string()).collect::<Vec<_>>())
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -415,11 +415,11 @@ fn dsl_peek_executes() {
     let seen_clone = Arc::clone(&seen);
 
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .peek(move |k: &String, v: &String| {
             seen_clone.lock().unwrap().push((k.clone(), v.clone()));
         })
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     for (k, v) in [("k1", "v1"), ("k2", "v2")] {
@@ -466,7 +466,7 @@ fn dsl_foreach_executes() {
     let collected_clone = Arc::clone(&collected);
 
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .foreach(move |k: &String, v: &String| {
             collected_clone.lock().unwrap().push((k.clone(), v.clone()));
         });
@@ -501,15 +501,15 @@ fn dsl_foreach_executes() {
 #[test]
 fn dsl_aggregate_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .aggregate(
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .aggregate_explicit(
             || 0i64,
             |_k: &String, v: &String, acc: i64| acc + i64::try_from(v.len()).unwrap(),
             Materialized::with(StringSerde, I64Serde).as_store("agg-store"),
         )
         .to_stream()
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     // "a" gets "hi" (len=2) then "world" (len=5) → running sums 2, 7
@@ -554,7 +554,7 @@ fn dsl_aggregate_executes() {
 #[test]
 fn dsl_ktable_filter_executes() {
     let b = StreamsBuilder::new();
-    b.table(
+    b.table_explicit(
         "in",
         Consumed::with(StringSerde, I64Serde),
         Materialized::with(StringSerde, I64Serde).as_store("src-tbl"),
@@ -564,7 +564,7 @@ fn dsl_ktable_filter_executes() {
         Materialized::with(StringSerde, I64Serde).as_store("filtered-tbl"),
     )
     .to_stream()
-    .to("out", Produced::with(StringSerde, I64Serde));
+    .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -610,14 +610,14 @@ fn dsl_ktable_filter_executes() {
 #[test]
 fn dsl_ktable_map_values_view_executes() {
     let b = StreamsBuilder::new();
-    b.table(
+    b.table_explicit(
         "in",
         Consumed::with(StringSerde, I64Serde),
         Materialized::with(StringSerde, I64Serde).as_store("src-tbl"),
     )
     .map_values(|v: &i64| v * 2)
     .to_stream()
-    .to("out", Produced::with(StringSerde, I64Serde));
+    .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -648,15 +648,15 @@ fn dsl_ktable_map_values_view_executes() {
 #[test]
 fn dsl_count_no_logging_omits_changelog() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .count(
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .count_explicit(
             Materialized::with(StringSerde, I64Serde)
                 .as_store("counts")
                 .with_logging(false),
         )
         .to_stream()
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     // No changelog topics anywhere in the wire topology.
     let wire = built.to_wire();
@@ -694,7 +694,7 @@ fn dsl_count_no_logging_omits_changelog() {
 #[test]
 fn dsl_ktable_filter_tombstone_propagates_downstream() {
     let b = StreamsBuilder::new();
-    b.table(
+    b.table_explicit(
         "in",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("src"),
@@ -750,7 +750,7 @@ fn dsl_ktable_filter_tombstone_propagates_downstream() {
 #[test]
 fn dsl_table_map_values_executes() {
     let b = StreamsBuilder::new();
-    b.table(
+    b.table_explicit(
         "in",
         Consumed::with(StringSerde, I64Serde),
         Materialized::with(StringSerde, I64Serde).as_store("tbl"),
@@ -760,7 +760,7 @@ fn dsl_table_map_values_executes() {
         Materialized::with(StringSerde, I64Serde).as_store("tbl-x10"),
     )
     .to_stream()
-    .to("out", Produced::with(StringSerde, I64Serde));
+    .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -791,10 +791,10 @@ fn dsl_to_table_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .to_table(Materialized::with(StringSerde, StringSerde).as_store("store"))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .to_table_explicit(Materialized::with(StringSerde, StringSerde).as_store("store"))
         .to_stream()
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -834,11 +834,11 @@ fn dsl_to_table_executes() {
 #[test]
 fn dsl_to_table_unnamed_store_executes() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         // No `.as_store(...)` — store gets an auto-minted name.
-        .to_table(Materialized::with(StringSerde, StringSerde))
+        .to_table_explicit(Materialized::with(StringSerde, StringSerde))
         .to_stream()
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -877,14 +877,14 @@ fn dsl_to_table_unnamed_store_executes() {
 #[test]
 fn dsl_stream_table_inner_join_executes() {
     let b = StreamsBuilder::new();
-    let table = b.table(
+    let table = b.table_explicit(
         "right",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("store"),
     );
-    b.stream(["left"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["left"], Consumed::with(StringSerde, StringSerde))
         .join_table(&table, |v: &String, vt: &String| format!("{v}{vt}"))
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(table);
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -929,16 +929,16 @@ fn dsl_stream_table_inner_join_executes() {
 #[test]
 fn dsl_stream_table_left_join_executes() {
     let b = StreamsBuilder::new();
-    let table = b.table(
+    let table = b.table_explicit(
         "right",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("store"),
     );
-    b.stream(["left"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["left"], Consumed::with(StringSerde, StringSerde))
         .left_join_table(&table, |v: &String, opt: Option<&String>| {
             format!("{v}{}", opt.cloned().unwrap_or_default())
         })
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(table);
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -985,19 +985,19 @@ fn dsl_ktable_ktable_inner_join_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
     let b = StreamsBuilder::new();
-    let ta = b.table(
+    let ta = b.table_explicit(
         "a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sa"),
     );
-    let tb = b.table(
+    let tb = b.table_explicit(
         "b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sb"),
     );
     ta.join(&tb, |va: &String, vb: &String| format!("{va}{vb}"))
         .to_stream()
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(ta);
     drop(tb);
     let built = b.build("app").unwrap();
@@ -1036,12 +1036,12 @@ fn dsl_ktable_ktable_left_join_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
     let b = StreamsBuilder::new();
-    let ta = b.table(
+    let ta = b.table_explicit(
         "a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sa"),
     );
-    let tb = b.table(
+    let tb = b.table_explicit(
         "b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sb"),
@@ -1050,7 +1050,7 @@ fn dsl_ktable_ktable_left_join_executes() {
         format!("{va}{}", ob.cloned().unwrap_or_default())
     })
     .to_stream()
-    .to("out", Produced::with(StringSerde, StringSerde));
+    .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(ta);
     drop(tb);
     let built = b.build("app").unwrap();
@@ -1076,12 +1076,12 @@ fn dsl_ktable_ktable_outer_join_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, Materialized, Produced, StringSerde};
     let b = StreamsBuilder::new();
-    let ta = b.table(
+    let ta = b.table_explicit(
         "a",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sa"),
     );
-    let tb = b.table(
+    let tb = b.table_explicit(
         "b",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("sb"),
@@ -1094,7 +1094,7 @@ fn dsl_ktable_ktable_outer_join_executes() {
         )
     })
     .to_stream()
-    .to("out", Produced::with(StringSerde, StringSerde));
+    .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(ta);
     drop(tb);
     let built = b.build("app").unwrap();
@@ -1119,14 +1119,14 @@ fn dsl_ktable_ktable_outer_join_executes() {
 #[test]
 fn dsl_to_table_no_logging_omits_changelog() {
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .to_table(
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .to_table_explicit(
             Materialized::with(StringSerde, StringSerde)
                 .as_store("s")
                 .with_logging(false),
         )
         .to_stream()
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
 
     // Wire topology must have no changelog topics for the to_table store.
@@ -1182,12 +1182,12 @@ fn dsl_windowed_count_tumbling_executes() {
         TimeWindows, Window, Windowed,
     };
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by(TimeWindows::of_size(10))
-        .count(Materialized::with(StringSerde, I64Serde).as_store("w"))
+        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("w"))
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
         );
@@ -1258,12 +1258,12 @@ fn dsl_windowed_count_hopping_executes() {
         TimeWindows, Window, Windowed,
     };
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by(TimeWindows::of_size(10).advance_by(5))
-        .count(Materialized::with(StringSerde, I64Serde).as_store("w"))
+        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("w"))
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
         );
@@ -1310,15 +1310,15 @@ fn dsl_windowed_reduce_executes() {
         Consumed, Grouped, Produced, StringSerde, TimeWindowedSerde, TimeWindows, Window, Windowed,
     };
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by(TimeWindows::of_size(10))
-        .reduce(
+        .reduce_explicit(
             |acc: &String, v: &String| format!("{acc}{v}"),
             Materialized::with(StringSerde, StringSerde).as_store("w"),
         )
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde),
         );
@@ -1388,16 +1388,16 @@ fn dsl_windowed_aggregate_executes() {
         TimeWindows, Window, Windowed,
     };
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, I64Serde))
-        .group_by_key(Grouped::with(StringSerde, I64Serde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, I64Serde))
+        .group_by_key_explicit(Grouped::with(StringSerde, I64Serde))
         .windowed_by(TimeWindows::of_size(10))
-        .aggregate(
+        .aggregate_explicit(
             || 0i64,
             |_k: &String, v: &i64, acc: i64| acc + *v,
             Materialized::with(StringSerde, I64Serde).as_store("w"),
         )
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
         );
@@ -1470,15 +1470,15 @@ fn dsl_stream_stream_inner_join_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
     let b = StreamsBuilder::new();
-    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
-    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    let left = b.stream_explicit(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream_explicit(["right"], Consumed::with(StringSerde, StringSerde));
     left.join(
         &right,
         |a: &String, c: &String| format!("{a}{c}"),
         JoinWindows::of(10),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
-    .to("out", Produced::with(StringSerde, StringSerde));
+    .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(left);
     drop(right);
     let built = b.build("app").unwrap();
@@ -1531,15 +1531,15 @@ fn dsl_stream_stream_join_swap_asymmetric() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
     let b = StreamsBuilder::new();
-    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
-    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    let left = b.stream_explicit(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream_explicit(["right"], Consumed::with(StringSerde, StringSerde));
     left.join(
         &right,
         |a: &String, c: &String| format!("{a}{c}"),
         JoinWindows::of(10).before(0).after(20),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
-    .to("out", Produced::with(StringSerde, StringSerde));
+    .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(left);
     drop(right);
     let built = b.build("app").unwrap();
@@ -1606,15 +1606,15 @@ fn dsl_stream_stream_join_duplicates() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
     let b = StreamsBuilder::new();
-    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
-    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    let left = b.stream_explicit(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream_explicit(["right"], Consumed::with(StringSerde, StringSerde));
     left.join(
         &right,
         |a: &String, c: &String| format!("{a}{c}"),
         JoinWindows::of(10),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
-    .to("out", Produced::with(StringSerde, StringSerde));
+    .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(left);
     drop(right);
     let built = b.build("app").unwrap();
@@ -1674,15 +1674,15 @@ fn dsl_stream_stream_left_join_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
     let b = StreamsBuilder::new();
-    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
-    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    let left = b.stream_explicit(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream_explicit(["right"], Consumed::with(StringSerde, StringSerde));
     left.left_join(
         &right,
         |a: &String, b: Option<&String>| format!("{a}{}", b.cloned().unwrap_or_default()),
         JoinWindows::of(10),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
-    .to("out", Produced::with(StringSerde, StringSerde));
+    .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(left);
     drop(right);
     let built = b.build("app").unwrap();
@@ -1758,8 +1758,8 @@ fn dsl_stream_stream_outer_join_executes() {
     use crabka_client_streams::dsl::StreamsBuilder;
     use crabka_client_streams::{Consumed, JoinWindows, Produced, StreamJoined, StringSerde};
     let b = StreamsBuilder::new();
-    let left = b.stream(["left"], Consumed::with(StringSerde, StringSerde));
-    let right = b.stream(["right"], Consumed::with(StringSerde, StringSerde));
+    let left = b.stream_explicit(["left"], Consumed::with(StringSerde, StringSerde));
+    let right = b.stream_explicit(["right"], Consumed::with(StringSerde, StringSerde));
     left.outer_join(
         &right,
         |a: Option<&String>, b: Option<&String>| {
@@ -1772,7 +1772,7 @@ fn dsl_stream_stream_outer_join_executes() {
         JoinWindows::of(10),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
-    .to("out", Produced::with(StringSerde, StringSerde));
+    .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(left);
     drop(right);
     let built = b.build("app").unwrap();
@@ -1817,12 +1817,12 @@ fn dsl_stream_stream_outer_join_executes() {
 fn dsl_session_count_merges_within_gap() {
     use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by_session(SessionWindows::of_inactivity_gap(60))
-        .count(Materialized::with(StringSerde, I64Serde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
         );
@@ -1884,12 +1884,12 @@ fn dsl_session_count_merges_within_gap() {
 fn dsl_session_count_separate_beyond_gap() {
     use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by_session(SessionWindows::of_inactivity_gap(60))
-        .count(Materialized::with(StringSerde, I64Serde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
         );
@@ -1937,15 +1937,15 @@ fn dsl_session_count_separate_beyond_gap() {
 fn dsl_session_reduce_executes() {
     use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by_session(SessionWindows::of_inactivity_gap(60))
-        .reduce(
+        .reduce_explicit(
             |a: &String, c: &String| format!("{a}{c}"),
             Materialized::with(StringSerde, StringSerde),
         )
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(SessionWindowedSerde::new(StringSerde), StringSerde),
         );
@@ -1993,17 +1993,17 @@ fn dsl_session_reduce_executes() {
 fn dsl_session_aggregate_executes() {
     use crabka_client_streams::{SessionWindowedSerde, SessionWindows, Window, Windowed};
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by_session(SessionWindows::of_inactivity_gap(60))
-        .aggregate(
+        .aggregate_explicit(
             || 0i64,
             |_k: &String, _v: &String, acc: i64| acc + 1,
             |_k: &String, a: i64, b: i64| a + b,
             Materialized::with(StringSerde, I64Serde),
         )
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
         );
@@ -2052,13 +2052,13 @@ fn dsl_suppress_until_window_closes_emits_final_only() {
         BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows, Window, Windowed,
     };
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by(TimeWindows::of_size(60_000))
-        .count(Materialized::with(StringSerde, I64Serde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
         );
@@ -2111,13 +2111,13 @@ fn dsl_suppress_closes_multiple_windows_in_order() {
         BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows, Window, Windowed,
     };
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by(TimeWindows::of_size(60_000))
-        .count(Materialized::with(StringSerde, I64Serde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
         );
@@ -2189,15 +2189,15 @@ fn dsl_suppress_max_records_shuts_down_when_full() {
         BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows,
     };
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by(TimeWindows::of_size(60_000))
-        .count(Materialized::with(StringSerde, I64Serde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_window_closes(
             BufferConfig::unbounded().with_max_records(2),
         ))
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
         );
@@ -2228,15 +2228,15 @@ fn dsl_suppress_max_bytes_shuts_down_when_full() {
         BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows,
     };
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
         .windowed_by(TimeWindows::of_size(60_000))
-        .count(Materialized::with(StringSerde, I64Serde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_window_closes(
             BufferConfig::unbounded().with_max_bytes(20),
         ))
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
         );
@@ -2263,15 +2263,15 @@ fn dsl_suppress_max_bytes_shuts_down_when_full() {
 fn dsl_suppress_max_bytes_emit_early() {
     use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .count(Materialized::with(StringSerde, I64Serde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_time_limit(
             1_000_000,
             BufferConfig::max_bytes(10),
         ))
         .to_stream()
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     // "a"@1 buffers (9 ≤ 10), nothing emits.
@@ -2306,12 +2306,12 @@ fn dsl_suppress_max_bytes_emit_early() {
 fn dsl_suppress_until_time_limit_rate_limits() {
     use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .count(Materialized::with(StringSerde, I64Serde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_time_limit(50, BufferConfig::unbounded()))
         .to_stream()
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     // "a"@10 → count 1, buffered (buffer_time 10, would emit at 10+50=60). No output.
@@ -2346,15 +2346,15 @@ fn dsl_suppress_until_time_limit_rate_limits() {
 fn dsl_suppress_emit_early_when_full_evicts_oldest() {
     use crabka_client_streams::{BufferConfig, I64Serde, Materialized, Suppressed};
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .count(Materialized::with(StringSerde, I64Serde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_time_limit(
             100_000,
             BufferConfig::max_records(1),
         )) // eager cap 1
         .to_stream()
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -2404,18 +2404,18 @@ fn dsl_until_window_closes_rejects_eager_buffer() {
 fn dsl_global_join_inner_hit_executes() {
     use crabka_client_streams::GlobalKTable;
     let b = StreamsBuilder::new();
-    let g: GlobalKTable<String, String> = b.global_table(
+    let g: GlobalKTable<String, String> = b.global_table_explicit(
         "global",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("global-store"),
     );
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .join_global(
             &g,
             |_k: &String, v: &String| v.clone(),
             |sv: &String, gv: &String| format!("{sv}{gv}"),
         )
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(g);
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2443,18 +2443,18 @@ fn dsl_global_join_inner_hit_executes() {
 fn dsl_global_join_inner_miss_drops() {
     use crabka_client_streams::GlobalKTable;
     let b = StreamsBuilder::new();
-    let g: GlobalKTable<String, String> = b.global_table(
+    let g: GlobalKTable<String, String> = b.global_table_explicit(
         "global",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("global-store"),
     );
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .join_global(
             &g,
             |_k: &String, v: &String| v.clone(),
             |sv: &String, gv: &String| format!("{sv}{gv}"),
         )
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(g);
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2478,12 +2478,12 @@ fn dsl_global_join_inner_miss_drops() {
 fn dsl_global_left_join_miss_emits_none() {
     use crabka_client_streams::GlobalKTable;
     let b = StreamsBuilder::new();
-    let g: GlobalKTable<String, String> = b.global_table(
+    let g: GlobalKTable<String, String> = b.global_table_explicit(
         "global",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("global-store"),
     );
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .left_join_global(
             &g,
             |_k: &String, v: &String| v.clone(),
@@ -2492,7 +2492,7 @@ fn dsl_global_left_join_miss_emits_none() {
                 None => format!("{sv}-none"),
             },
         )
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(g);
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2516,18 +2516,18 @@ fn dsl_global_left_join_miss_emits_none() {
 fn dsl_global_join_sees_midstream_update() {
     use crabka_client_streams::GlobalKTable;
     let b = StreamsBuilder::new();
-    let g: GlobalKTable<String, String> = b.global_table(
+    let g: GlobalKTable<String, String> = b.global_table_explicit(
         "global",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("global-store"),
     );
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .join_global(
             &g,
             |_k: &String, v: &String| v.clone(),
             |sv: &String, gv: &String| format!("{sv}{gv}"),
         )
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(g);
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2566,18 +2566,18 @@ fn dsl_global_join_sees_midstream_update() {
 fn dsl_global_join_key_mapper_derives_compound_key() {
     use crabka_client_streams::GlobalKTable;
     let b = StreamsBuilder::new();
-    let g: GlobalKTable<String, String> = b.global_table(
+    let g: GlobalKTable<String, String> = b.global_table_explicit(
         "global",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("global-store"),
     );
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .join_global(
             &g,
             |k: &String, v: &String| format!("{k}:{v}"),
             |sv: &String, gv: &String| format!("{sv}{gv}"),
         )
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     drop(g);
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2628,9 +2628,9 @@ fn dsl_process_stateful_counter_executes() {
     }
     let b = StreamsBuilder::new();
     b.add_state_store("counts", StringSerde, I64Serde);
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .process(|| Counter, ["counts"])
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     for v in ["a", "a", "b"] {
@@ -2665,7 +2665,7 @@ fn dsl_process_stateful_counter_executes() {
 }
 
 /// `KStream::process` is **key-changing**: a downstream aggregation must insert a
-/// repartition. Build `stream("in").process(Fwd,["store"]).group_by_key().count()`
+/// repartition. Build `stream("in").process(Fwd,["store"]).group_by_key_explicit().count_explicit()`
 /// and assert the wire carries a repartition topic (the process result re-keys, so
 /// the count repartitions before aggregating).
 #[test]
@@ -2684,12 +2684,12 @@ fn dsl_process_is_key_changing_forces_repartition() {
     }
     let b = StreamsBuilder::new();
     b.add_state_store("store", StringSerde, StringSerde);
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .process(|| Fwd, ["store"])
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("counts"))
         .to_stream()
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let wire = b.build("app").unwrap().to_wire();
     // The process result is key-changing → the count inserts a repartition. Assert
     // SOME subtopology has a non-empty repartition sink + source.
@@ -2735,9 +2735,9 @@ fn dsl_process_values_preserves_key_executes() {
     }
     let b = StreamsBuilder::new();
     b.add_state_store("store", StringSerde, StringSerde);
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .process_values(|| Upper, ["store"])
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     d.pipe_input(
@@ -2760,7 +2760,7 @@ fn dsl_process_values_preserves_key_executes() {
 
 /// `KStream::process_values` is **non-key-changing** (KIP-820 preserves the key):
 /// a downstream aggregation must NOT insert a repartition. Build
-/// `stream("in").process_values(Upper,["store"]).group_by_key().count()` and assert
+/// `stream("in").process_values(Upper,["store"]).group_by_key_explicit().count_explicit()` and assert
 /// the wire carries NO repartition topic anywhere. This is the CONTRAST with the
 /// `process` case (`dsl_process_is_key_changing_forces_repartition`), which DOES
 /// repartition.
@@ -2781,12 +2781,12 @@ fn dsl_process_values_is_not_key_changing_no_repartition() {
     }
     let b = StreamsBuilder::new();
     b.add_state_store("store", StringSerde, StringSerde);
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .process_values(|| Upper, ["store"])
-        .group_by_key(Grouped::with(StringSerde, StringSerde))
-        .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+        .group_by_key_explicit(Grouped::with(StringSerde, StringSerde))
+        .count_explicit(Materialized::with(StringSerde, I64Serde).as_store("counts"))
         .to_stream()
-        .to("out", Produced::with(StringSerde, I64Serde));
+        .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let wire = b.build("app").unwrap().to_wire();
     // process_values preserves the key → NO repartition. Every subtopology's
     // repartition sink AND source lists must be empty.
@@ -2834,9 +2834,9 @@ fn dsl_process_values_reads_store_and_record_context() {
     }
     let b = StreamsBuilder::new();
     b.add_state_store("seen", StringSerde, I64Serde);
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .process_values(|| Tagger, ["seen"])
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     for v in ["a", "b"] {
@@ -2877,7 +2877,7 @@ fn dsl_process_unknown_store_panics() {
         }
     }
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .process(|| Fwd, ["missing"]);
 }
 
@@ -2898,6 +2898,6 @@ fn dsl_process_values_unknown_store_panics() {
         }
     }
     let b = StreamsBuilder::new();
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .process_values(|| FixedFwd, ["missing"]);
 }

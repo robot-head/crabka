@@ -1,4 +1,4 @@
-//! `TimeWindowedKGroupedStream<K,V>`: the intermediate handle between
+﻿//! `TimeWindowedKGroupedStream<K,V>`: the intermediate handle between
 //! `KGroupedStream::windowed_by(TimeWindows)` and a terminal **windowed**
 //! aggregation (`count`/`reduce`/`aggregate`).
 //!
@@ -81,7 +81,7 @@ where
 
     /// `count`: count records per (key, window) into a windowed
     /// `KTable<Windowed<K>, i64>`. `init = || 0`, `agg = |_k, _v, acc| acc + 1`.
-    pub fn count<KS, VS>(
+    pub fn count_explicit<KS, VS>(
         self,
         materialized: impl Into<Materialized<KS, VS>>,
     ) -> KTable<Windowed<K>, i64, TimeWindowedSerde<KS>, VS>
@@ -102,7 +102,7 @@ where
     /// (the JVM `Reducer` has no separate `init`); later values fold via
     /// `reducer(&acc, &value)`. The backing processor keeps the public value
     /// type `V`.
-    pub fn reduce<KS, VS, R>(
+    pub fn reduce_explicit<KS, VS, R>(
         self,
         reducer: R,
         materialized: impl Into<Materialized<KS, VS>>,
@@ -119,7 +119,7 @@ where
 
     /// `aggregate`: general windowed aggregation with caller-supplied `init` +
     /// `agg`, materialized as `KTable<Windowed<K>, VA>`.
-    pub fn aggregate<KS, VS, VA, I, A>(
+    pub fn aggregate_explicit<KS, VS, VA, I, A>(
         self,
         init: I,
         agg: A,
@@ -135,7 +135,7 @@ where
         self.aggregate_inner_windowed(materialized.into(), names::AGGREGATE_STORE, init, agg)
     }
 
-    pub fn count_default(
+    pub fn count(
         self,
         store_name: impl Into<String>,
     ) -> KTable<
@@ -148,7 +148,7 @@ where
         K: DefaultSerde,
         <K as DefaultSerde>::Serde: Serde<K> + Clone,
     {
-        self.count(
+        self.count_explicit(
             Materialized::with(
                 <K as DefaultSerde>::Serde::default(),
                 crate::processor::serde::I64Serde,
@@ -157,7 +157,7 @@ where
         )
     }
 
-    pub fn reduce_default<R>(
+    pub fn reduce<R>(
         self,
         reducer: R,
         store_name: impl Into<String>,
@@ -174,7 +174,7 @@ where
         <V as DefaultSerde>::Serde: Serde<V> + Clone,
         R: Fn(&V, &V) -> V + Clone + Send + Sync + 'static,
     {
-        self.reduce(
+        self.reduce_explicit(
             reducer,
             Materialized::with(
                 <K as DefaultSerde>::Serde::default(),
@@ -184,7 +184,7 @@ where
         )
     }
 
-    pub fn aggregate_default<VA, I, A>(
+    pub fn aggregate<VA, I, A>(
         self,
         init: I,
         agg: A,
@@ -203,7 +203,7 @@ where
         I: Fn() -> VA + Clone + Send + Sync + 'static,
         A: Fn(&K, &V, VA) -> VA + Clone + Send + Sync + 'static,
     {
-        self.aggregate(
+        self.aggregate_explicit(
             init,
             agg,
             Materialized::with(

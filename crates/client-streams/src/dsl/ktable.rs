@@ -1,4 +1,4 @@
-//! `KTable<K,V>`: a materialized, changelog-backed table view. Produced by a
+﻿//! `KTable<K,V>`: a materialized, changelog-backed table view. Produced by a
 //! terminal aggregation (`count`/`reduce`/`aggregate`) or by
 //! [`StreamsBuilder::table`](crate::dsl::StreamsBuilder::table), and convertible back to a `KStream` via
 //! [`KTable::to_stream`].
@@ -79,7 +79,7 @@ where
 /// A changelog-backed table handle. `store_name` is the materialized store this
 /// table reads/writes (used to derive changelog topics + reuse the store in
 /// downstream materialized ops). `source_topic` is the Kafka topic this table
-/// was sourced from (set for `builder.table()` `KTables`; `None` for derived
+/// was sourced from (set for `builder.table_explicit()` `KTables`; `None` for derived
 /// `KTables`). Used by the join DSL to declare copartition groups.
 pub struct KTable<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde>::Serde> {
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
@@ -178,7 +178,7 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
         self.store_name.as_deref()
     }
 
-    /// The Kafka source topic this table was sourced from (`builder.table()`),
+    /// The Kafka source topic this table was sourced from (`builder.table_explicit()`),
     /// or `None` for derived `KTables` (aggregations, `map_values`, `filter`).
     #[allow(dead_code)]
     pub(crate) fn source_topic(&self) -> Option<&str> {
@@ -214,7 +214,7 @@ where
     /// arrival order. Unlike [`to_stream`](Self::to_stream) it preserves
     /// tombstones, so an exec test can assert a table's full change-stream
     /// (value updates *and* `None` deletions) — matching the JVM
-    /// `toStream().to(topic)` capture, which writes null-valued records.
+    /// `toStream().to_explicit(topic)` capture, which writes null-valued records.
     #[cfg(test)]
     pub(crate) fn collect_changes(
         &self,
@@ -1224,12 +1224,12 @@ mod fk_exec_tests {
     fn tables(
         b: &StreamsBuilder,
     ) -> (super::KTable<String, String>, super::KTable<String, String>) {
-        let ta = b.table(
+        let ta = b.table_explicit(
             "a",
             Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("sa"),
         );
-        let tb = b.table(
+        let tb = b.table_explicit(
             "b",
             Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("sb"),

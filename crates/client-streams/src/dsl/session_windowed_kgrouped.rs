@@ -1,4 +1,4 @@
-//! `SessionWindowedKGroupedStream<K,V>`: the handle between
+﻿//! `SessionWindowedKGroupedStream<K,V>`: the handle between
 //! `KGroupedStream::windowed_by_session(SessionWindows)` and a terminal session
 //! aggregation (`count`/`reduce`/`aggregate`). The session analogue of
 //! [`crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream`]: same grouped
@@ -63,7 +63,7 @@ where
     }
 
     /// `count`: count records per session → `KTable<Windowed<K>, i64>`.
-    pub fn count<KS, VS>(
+    pub fn count_explicit<KS, VS>(
         self,
         materialized: impl Into<Materialized<KS, VS>>,
     ) -> KTable<Windowed<K>, i64, SessionWindowedSerde<KS>, VS>
@@ -90,7 +90,7 @@ where
 
     /// `aggregate`: general session aggregation with `init` + `agg` + the session
     /// `merger` (combines two session aggregates on merge).
-    pub fn aggregate<KS, VS, VA, I, A, M>(
+    pub fn aggregate_explicit<KS, VS, VA, I, A, M>(
         self,
         init: I,
         agg: A,
@@ -111,7 +111,7 @@ where
     }
 
     /// `reduce`: combine values per session with `reducer` → `KTable<Windowed<K>, V>`.
-    pub fn reduce<KS, VS, R>(
+    pub fn reduce_explicit<KS, VS, R>(
         self,
         reducer: R,
         materialized: impl Into<Materialized<KS, VS>>,
@@ -126,7 +126,7 @@ where
         self.lower_reduce::<KS, VS, R>(materialized, store_name, reducer)
     }
 
-    pub fn count_default(
+    pub fn count(
         self,
         store_name: impl Into<String>,
     ) -> KTable<
@@ -139,7 +139,7 @@ where
         K: DefaultSerde,
         <K as DefaultSerde>::Serde: Serde<K> + Clone,
     {
-        self.count(
+        self.count_explicit(
             Materialized::with(
                 <K as DefaultSerde>::Serde::default(),
                 crate::processor::serde::I64Serde,
@@ -148,7 +148,7 @@ where
         )
     }
 
-    pub fn reduce_default<R>(
+    pub fn reduce<R>(
         self,
         reducer: R,
         store_name: impl Into<String>,
@@ -165,7 +165,7 @@ where
         <V as DefaultSerde>::Serde: Serde<V> + Clone,
         R: Fn(&V, &V) -> V + Clone + Send + Sync + 'static,
     {
-        self.reduce(
+        self.reduce_explicit(
             reducer,
             Materialized::with(
                 <K as DefaultSerde>::Serde::default(),
@@ -175,7 +175,7 @@ where
         )
     }
 
-    pub fn aggregate_default<VA, I, A, M>(
+    pub fn aggregate<VA, I, A, M>(
         self,
         init: I,
         agg: A,
@@ -196,7 +196,7 @@ where
         A: Fn(&K, &V, VA) -> VA + Clone + Send + Sync + 'static,
         M: Fn(&K, VA, VA) -> VA + Clone + Send + Sync + 'static,
     {
-        self.aggregate(
+        self.aggregate_explicit(
             init,
             agg,
             merger,

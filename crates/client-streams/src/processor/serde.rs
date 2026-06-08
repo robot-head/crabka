@@ -1,4 +1,4 @@
-//! `Serde<T>`: typed (de)serialization at source/sink boundaries.
+﻿//! `Serde<T>`: typed (de)serialization at source/sink boundaries.
 
 use bytes::Bytes;
 
@@ -159,7 +159,7 @@ impl SerdeAssociate for I64Serde {
 
 /// Mapping trait for types that have a default associated [`Serde`].
 ///
-/// If a type does not implement this trait, using `.stream_default` or other default
+/// If a type does not implement this trait, using `.stream` or other ergonomic
 /// methods will trigger a compiler error indicating that the default serde is not found.
 ///
 /// # Examples
@@ -171,7 +171,7 @@ impl SerdeAssociate for I64Serde {
 ///
 /// let builder = StreamsBuilder::new();
 /// // Fails because CustomType does not implement DefaultSerde:
-/// let stream: KStream<CustomType, String> = builder.stream_default(["topic"]);
+/// let stream: KStream<CustomType, String> = builder.stream(["topic"]);
 /// ```
 #[diagnostic::on_unimplemented(
     message = "the type `{Self}` does not have a default Serde implementation",

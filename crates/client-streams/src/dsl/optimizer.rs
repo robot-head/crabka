@@ -1,9 +1,9 @@
-//! DSL optimizer passes (JVM `topology.optimization=all`).
+﻿//! DSL optimizer passes (JVM `topology.optimization=all`).
 //!
 //! Each pass rewrites the [`LogicalGraph`] in place *before* lowering:
 //! [`merge_repartition_topics`] collapses repartition topics shared by two
 //! aggregations off one key-changing op, and [`reuse_ktable_source_topics`]
-//! makes a `builder.table()` store reuse its source topic as its changelog.
+//! makes a `builder.table_explicit()` store reuse its source topic as its changelog.
 
 use std::collections::BTreeMap;
 
@@ -50,7 +50,7 @@ pub(crate) fn merge_repartition_topics(graph: &mut LogicalGraph) {
 }
 
 /// `REUSE_KTABLE_SOURCE_TOPICS`: when a `KTable` is materialized directly from a
-/// source topic (`builder.table(topic, Materialized::as(store))`), the JVM
+/// source topic (`builder.table_explicit(topic, Materialized::as(store))`), the JVM
 /// optimizer makes the store's changelog the **source topic itself** rather than
 /// minting a separate `<app>-<store>-changelog` topic. The source topic is
 /// already a compacted, fully-keyed copy of the table, so reusing it as the

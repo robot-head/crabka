@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -1074,18 +1074,18 @@ mod tests {
 
         // Build the global-table join topology via the DSL.
         let b = StreamsBuilder::new();
-        let g: GlobalKTable<String, String> = b.global_table(
+        let g: GlobalKTable<String, String> = b.global_table_explicit(
             "global",
             Consumed::with(StringSerde, StringSerde),
             Materialized::with(StringSerde, StringSerde).as_store("g-store"),
         );
-        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
             .join_global(
                 &g,
                 |_k: &String, v: &String| v.clone(),
                 |sv: &String, gv: &String| format!("{sv}{gv}"),
             )
-            .to("out", Produced::with(StringSerde, StringSerde));
+            .to_explicit("out", Produced::with(StringSerde, StringSerde));
         drop(g);
         let built = b.build("app").unwrap();
 
@@ -1547,7 +1547,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(|s| **s == Step::Commit)
-                .count()
+                .count_explicit()
                 == 2
         );
     }

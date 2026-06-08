@@ -501,8 +501,11 @@ where
     }
 
     /// `to`: write the stream to a topic via a sink (consumes the stream).
-    pub fn to<KS2, VS2>(self, topic: impl Into<String>, produced: impl Into<Produced<KS2, VS2>>)
-    where
+    pub fn to_explicit<KS2, VS2>(
+        self,
+        topic: impl Into<String>,
+        produced: impl Into<Produced<KS2, VS2>>,
+    ) where
         KS2: SerdeAssociate + Serde<K> + Clone,
         VS2: SerdeAssociate + Serde<V> + Clone,
     {
@@ -532,14 +535,14 @@ where
     }
 
     /// Write the stream to a topic using the default/carried serdes of the stream.
-    pub fn to_default(self, topic: impl Into<String>)
+    pub fn to(self, topic: impl Into<String>)
     where
         KS: SerdeAssociate + Serde<K> + Clone,
         VS: SerdeAssociate + Serde<V> + Clone,
     {
         let key_serde = self.key_serde.clone();
         let value_serde = self.value_serde.clone();
-        self.to(topic, Produced::with(key_serde, value_serde));
+        self.to_explicit(topic, Produced::with(key_serde, value_serde));
     }
 
     /// `merge`: union this stream with `other` (same K/V). Both feed one node.
@@ -1035,8 +1038,16 @@ where
         g.new_processor_name(names::KSTREAM_WINDOWED);
 
         // KIP-633: use OUTERTHIS/OUTEROTHER when a/b side may produce without a match.
-        let this_prefix = if kind.a_required { names::KSTREAM_JOINTHIS } else { names::KSTREAM_OUTERTHIS };
-        let other_prefix = if kind.b_required { names::KSTREAM_JOINOTHER } else { names::KSTREAM_OUTEROTHER };
+        let this_prefix = if kind.a_required {
+            names::KSTREAM_JOINTHIS
+        } else {
+            names::KSTREAM_OUTERTHIS
+        };
+        let other_prefix = if kind.b_required {
+            names::KSTREAM_JOINOTHER
+        } else {
+            names::KSTREAM_OUTEROTHER
+        };
         let join_this = g.new_processor_name(this_prefix);
         let join_other = g.new_processor_name(other_prefix);
         let merge = g.new_processor_name(names::MERGE);
@@ -1395,7 +1406,7 @@ where
     /// returned [`KGroupedStream`] carries whether the upstream key lineage is
     /// key-changing (→ the aggregation must insert a repartition) and a typed
     /// repartition-lowering thunk built from the `Grouped` serdes.
-    pub fn group_by_key<GKS, GVS>(
+    pub fn group_by_key_explicit<GKS, GVS>(
         &self,
         grouped: impl Into<Grouped<GKS, GVS>>,
     ) -> KGroupedStream<K, V>
@@ -1417,7 +1428,7 @@ where
     }
 
     /// `groupByKey` using the stream's existing serdes.
-    pub fn group_by_key_default(&self) -> KGroupedStream<K, V>
+    pub fn group_by_key(&self) -> KGroupedStream<K, V>
     where
         KS: Serde<K> + Clone + 'static,
         VS: Serde<V> + Clone + 'static,
@@ -1436,7 +1447,7 @@ where
 
     /// `groupBy`: re-key via `f`, then group by the new key.
     ///
-    /// Equivalent to `select_key(f).group_by_key(grouped)`; the key change forces
+    /// Equivalent to `select_key(f).group_by_key_explicit(grouped)`; the key change forces
     /// a repartition before any subsequent aggregation.
     pub fn group_by<GKS, GVS, F>(
         &self,
@@ -1452,7 +1463,7 @@ where
     {
         let grouped = grouped.into();
         self.select_key_with_serde(f, grouped.key_serde.clone())
-            .group_by_key(grouped)
+            .group_by_key_explicit(grouped)
     }
 
     /// `process`: attach a custom Processor-API node that may rewrite the key.
@@ -1647,7 +1658,7 @@ where
     /// [`Materialized::with_logging(false)`]).
     ///
     /// [`Materialized::with_logging(false)`]: crate::dsl::config::Materialized::with_logging
-    pub fn to_table<NKS, NVS>(
+    pub fn to_table_explicit<NKS, NVS>(
         &self,
         materialized: impl Into<Materialized<NKS, NVS>>,
     ) -> KTable<K, V, NKS, NVS>
@@ -1730,12 +1741,12 @@ where
     }
 
     /// Sourced `KTable` from this stream using the stream's carried serdes.
-    pub fn to_table_default(&self, store_name: impl Into<String>) -> KTable<K, V, KS, VS>
+    pub fn to_table(&self, store_name: impl Into<String>) -> KTable<K, V, KS, VS>
     where
         KS: Serde<K> + Clone + 'static,
         VS: Serde<V> + Clone + 'static,
     {
-        self.to_table(
+        self.to_table_explicit(
             Materialized::with(self.key_serde.clone(), self.value_serde.clone())
                 .as_store(store_name),
         )
@@ -1830,10 +1841,10 @@ mod tests {
     #[test]
     fn stateless_chain_records_named_nodes() {
         let b = StreamsBuilder::new();
-        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
             .map_values(|v: &String| v.to_uppercase())
             .filter(|_k: &String, _v: &String| true)
-            .to("out", Produced::with(StringSerde, StringSerde));
+            .to_explicit("out", Produced::with(StringSerde, StringSerde));
         let g = b.internal.borrow();
         let names: Vec<&str> = g.graph.nodes.iter().map(|n| n.name.as_str()).collect();
         check!(
@@ -1850,7 +1861,7 @@ mod tests {
     #[test]
     fn select_key_marks_key_changing() {
         let b = StreamsBuilder::new();
-        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
             .select_key(|_k: &String, v: &String| v.clone());
         let g = b.internal.borrow();
         check!(g.graph.nodes[1].key_changing_operation);

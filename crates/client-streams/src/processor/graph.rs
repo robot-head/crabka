@@ -1,4 +1,4 @@
-//! The instantiated, runnable processor graph for one subtopology + partition.
+﻿//! The instantiated, runnable processor graph for one subtopology + partition.
 //! Non-recursive driver loop: a node's `forward` appends `(child_idx,
 //! ErasedRecord)` to a buffer the driver drains, so there is no `&mut` aliasing
 //! across nodes.
@@ -278,7 +278,7 @@ impl Graph {
     ///
     /// A store whose changelog topic is one of `reuse_source_topics` is a
     /// **reuse-source** store: the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a
-    /// `builder.table(topic, …)` store's changelog at its own source `topic`
+    /// `builder.table_explicit(topic, …)` store's changelog at its own source `topic`
     /// instead of a derived `<app>-<store>-changelog`. Its buffer is still drained
     /// (so it can't grow unbounded), but the entries are **not** re-produced — the
     /// source topic already IS the changelog, and re-producing onto it would feed

@@ -1,8 +1,8 @@
-//! Broker regression test for the `REUSE_KTABLE_SOURCE_TOPICS` changelog
+﻿//! Broker regression test for the `REUSE_KTABLE_SOURCE_TOPICS` changelog
 //! write-back loop.
 //!
 //! Under `build_optimized()`, the `REUSE_KTABLE_SOURCE_TOPICS` optimizer points a
-//! materialized `builder.table(topic, …)` store's changelog at its own source
+//! materialized `builder.table_explicit(topic, …)` store's changelog at its own source
 //! `topic` (instead of a derived `<app>-<store>-changelog`). The runtime must NOT
 //! re-produce that store's changelog entries — the source topic already IS the
 //! log, so re-producing onto it feeds the source node an unbounded re-emit loop
@@ -164,19 +164,19 @@ async fn poll_until_latest(admin: &Client, bootstrap: &str, topic: &str, key: &s
 
 // ─── topology: the canonical REUSE_KTABLE_SOURCE_TOPICS shape ───────────────────
 
-/// `builder.table("rt-in", as "rt-store").mapValues(id).toStream().to("rt-out")`,
+/// `builder.table_explicit("rt-in", as "rt-store").mapValues(id).toStream().to_explicit("rt-out")`,
 /// built with `build_optimized` so the `rt-store` changelog reuses the `rt-in`
 /// source topic (matches the `table_reuse` wire golden).
 fn reuse_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    b.table(
+    b.table_explicit(
         "rt-in",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("rt-store"),
     )
     .map_values(|v: &String| v.clone())
     .to_stream()
-    .to("rt-out", Produced::with(StringSerde, StringSerde));
+    .to_explicit("rt-out", Produced::with(StringSerde, StringSerde));
     b.build_optimized(app_id).unwrap()
 }
 
