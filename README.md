@@ -19,8 +19,10 @@ quorum on KRaft, and integrates cleanly with the standard JVM tooling —
 client. Existing producers, consumers, and operator workflows work against a
 Crabka broker without modification.
 
-Beyond the broker, Crabka ships native Rust clients, a Kubernetes operator
-(Strimzi-equivalent), and a Cruise-Control-equivalent partition rebalancer.
+Beyond the broker, Crabka ships native Rust clients, a KIP-1071 Streams client,
+a Schema Registry-compatible service, a gRPC / Connect-RPC gateway, a Kubernetes
+operator (Strimzi-equivalent), and a Cruise-Control-equivalent partition
+rebalancer.
 
 Distributed under the Apache License 2.0 as a derivative work.
 
@@ -37,8 +39,9 @@ Distributed under the Apache License 2.0 as a derivative work.
   KIP-595 wire — interoperable with JVM controllers in a mixed quorum.
 - **Modern crypto.** TLS via `rustls`; SASL/SCRAM-SHA-256/512, SASL/PLAIN,
   SASL/OAUTHBEARER (signed-JWT / JWKS), and SASL/GSSAPI (Kerberos) out of the box.
-- **Batteries included.** Native producer/consumer/admin clients, a Kubernetes
-  operator, and an automated rebalancer live in the same workspace.
+- **Batteries included.** Native producer/consumer/admin/streams clients, Schema
+  Registry, a gateway, a Kubernetes operator, and an automated rebalancer live in
+  the same workspace.
 
 ## Performance
 
@@ -62,10 +65,11 @@ Reproduce locally with [`bench/local/run-local-bench.sh`](bench/local).
 
 ## Project status
 
-Crabka is in **beta** (`v0.3.0`). The Kafka-parity surface — wire protocol,
-storage, replication, KRaft metadata, security, authorization, quotas, the
-Kubernetes operator, and the rebalancer — is now broad enough, and validated
-hard enough against the JVM, that the project has matured out of its alpha phase.
+Crabka is in **beta** (`v0.3.2`). The Kafka-parity surface — wire protocol,
+storage, replication, KRaft metadata, security, authorization, quotas, Schema
+Registry, gateway, Kubernetes operator, and rebalancer — is now broad enough,
+and validated hard enough against the JVM, that the project has matured out of
+its alpha phase.
 
 It remains **greenfield and pre-1.0** — undeployed, with no production users and
 no on-disk compatibility guarantees yet. The Kafka wire protocol is the contract
@@ -100,9 +104,11 @@ What works today:
   and opaque-token introspection, GSSAPI/Kerberos), SASL re-authentication
   (KIP-368), delegation tokens (KIP-48 / KIP-373), ACL authorization, the OPA
   cluster-authorizer bridge, and the full client-quota surface.
-- Native Rust producer / consumer / admin clients.
-- A Kubernetes operator (Strimzi-equivalent CRDs, including a tiered-storage
-  surface) and a Cruise-Control-equivalent rebalancer.
+- Native Rust producer / consumer / admin clients plus a KIP-1071 Streams client
+  with a DSL/runtime for common stream-processing workloads.
+- A Schema Registry-compatible REST service, a gRPC / Connect-RPC + HTTP gateway,
+  a Kubernetes operator (Strimzi-equivalent CRDs, including tiered-storage and
+  Schema Registry surfaces), and a Cruise-Control-equivalent rebalancer.
 
 Notable gaps (see the [KIP matrix](#kip-implementation-status) for detail): the
 next-gen consumer group protocol (KIP-848) is fully implemented — `__consumer_offsets`
@@ -128,9 +134,10 @@ survivor broker can serve remote reads from metadata it consumed off
 `RemoteLogMetadataSerde`, so a mixed JVM+Crabka tiered cluster sharing the
 internal topic is unsupported — real clusters run a single RLMM implementation,
 making this a non-issue in practice. The broker-side Streams rebalance protocol
-(KIP-1071) is implemented and serves real JVM Streams-group admin clients, but
-the Kafka Streams *client* library itself — along with a Kafka Connect /
-MirrorMaker equivalent — is not. ZooKeeper mode and ZK→KRaft migration are
+(KIP-1071) is implemented and serves real JVM Streams-group admin clients, and
+`crabka-client-streams` provides a Rust Streams client/runtime, but it is still
+not a full JVM Kafka Streams replacement. Kafka Connect and MirrorMaker
+equivalents are not yet implemented. ZooKeeper mode and ZK→KRaft migration are
 deliberately out of scope — Crabka is KRaft-only.
 
 ## Architecture
@@ -144,10 +151,15 @@ Crabka is organized as a Rust workspace.
 | [`crabka-protocol`](crates/protocol) | Kafka wire-protocol codec (4.3.0), typed `RecordBatch`, zero-copy borrowed decode |
 | [`crabka-protocol-codegen`](crates/protocol-codegen) | Code generator that turns Kafka message schemas into the protocol codec |
 | [`crabka-compression`](crates/compression) | Kafka-compatible compression codecs (gzip, snappy, lz4, zstd) |
+| [`crabka-records-legacy`](crates/records-legacy) | Kafka v0/v1 `MessageSet` codec and bridges to v2 `RecordBatch` |
 | [`crabka-log`](crates/log) | Byte-compatible log segments, indexes, transaction index, compaction, retention |
 | [`crabka-metadata`](crates/metadata) | Versioned metadata records, immutable metadata image, ACL model |
 | [`crabka-raft`](crates/raft) | Metadata Raft quorum (native KRaft / KIP-595 wire + controller) |
+| [`crabka-remote-storage`](crates/remote-storage) | KIP-405 tiered-storage SPI and local/S3-compatible implementations |
+| [`crabka-remote-storage-topic`](crates/remote-storage-topic) | Topic-backed `RemoteLogMetadataManager` for tiered storage |
+| [`crabka-authz`](crates/authz) | Shared Kafka ACL authorization evaluator for broker and gateway |
 | [`crabka-security`](crates/security) | TLS (`rustls`), SASL/PLAIN, SASL/SCRAM-256/512, SASL/OAUTHBEARER, SASL/GSSAPI, mTLS |
+| [`crabka-telemetry`](crates/telemetry) | Shared OTLP distributed-tracing pipeline |
 
 ### Broker
 
@@ -163,12 +175,15 @@ Crabka is organized as a Rust workspace.
 | [`crabka-client-producer`](crates/client-producer) | Native idempotent / transactional producer |
 | [`crabka-client-consumer`](crates/client-consumer) | Native subscribe-style consumer + group membership |
 | [`crabka-client-admin`](crates/client-admin) | Admin client (topics, configs, ACLs, quotas, SCRAM) |
+| [`crabka-client-streams`](crates/client-streams) | KIP-1071 Streams membership, DSL, runtime, state stores, and interactive queries |
 
 ### Operations
 
 | Crate | Role |
 |-------|------|
 | [`crabka-cli`](crates/cli) | `crabka` binary: `format` + bootstrap |
+| [`crabka-schema-registry`](crates/schema-registry) | Confluent Schema Registry-compatible REST service |
+| [`crabka-grpc-gateway`](crates/grpc-gateway) | gRPC / Connect-RPC + HTTP gateway into Kafka topics |
 | [`crabka-operator`](crates/operator) | Kubernetes operator (Strimzi-equivalent CRDs) |
 | [`crabka-rebalancer`](crates/rebalancer) | Cruise-Control-equivalent partition rebalancer |
 | [`crabka-bench-driver`](crates/bench-driver) | Load driver + report aggregator for the Crabka-vs-Strimzi benchmark harness |
@@ -187,7 +202,7 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Flexible / tagged-field versions (KIP-482) | ✅ |
 | Compression: gzip, snappy, lz4, zstd | ✅ |
 | JVM Java client interoperability | ✅ |
-| Native Rust producer / consumer / admin clients | ✅ |
+| Native Rust producer / consumer / admin / streams clients | ✅ |
 | Broker-side recompression (`compression.type` per topic) | ✅ |
 | Incremental fetch sessions (KIP-227) | ✅ |
 
@@ -330,12 +345,14 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 | Prometheus metrics / JMX-equivalent exporter | ✅ |
 | OTLP distributed tracing (OpenTelemetry) | ✅ |
 | Client metrics push (KIP-714) | ✅ |
+| Shared OTLP service telemetry | ✅ |
 
 ### Kubernetes operator (Strimzi-equivalent)
 
 | Feature | Status |
 |---------|:------:|
 | `Kafka` / `KafkaNodePool` / `KafkaTopic` / `KafkaUser` / `KafkaRebalance` CRDs | ✅ |
+| `SchemaRegistry` CRD | ✅ |
 | StatefulSet per node pool + headless services | ✅ |
 | Persistent (PVC) + JBOD storage | ✅ |
 | Listeners: internal / NodePort / LoadBalancer | ✅ |
@@ -368,10 +385,11 @@ implements it today. Legend: ✅ implemented · ⚠️ partial · ❌ not yet ·
 
 | Feature | Status |
 |---------|:------:|
-| Kafka Streams equivalent | ❌ |
+| Kafka Streams equivalent | ⚠️ |
 | Kafka Connect equivalent | ❌ |
 | MirrorMaker equivalent | ❌ |
 | Schema Registry | ✅ |
+| gRPC / Connect-RPC gateway | ✅ |
 
 ## KIP implementation status
 
@@ -519,8 +537,29 @@ KIPs. Legend: ✅ implemented · ⚠️ partial · ❌ not yet · ⛔ out of sco
 
 ## Published crates
 
+- [`crabka-authz`](https://crates.io/crates/crabka-authz) — shared Kafka ACL authorization evaluator ([docs](https://docs.rs/crabka-authz)).
+- [`crabka-bench-driver`](https://crates.io/crates/crabka-bench-driver) — load driver and benchmark report aggregation ([docs](https://docs.rs/crabka-bench-driver)).
+- [`crabka-broker`](https://crates.io/crates/crabka-broker) — Kafka-compatible broker runtime ([docs](https://docs.rs/crabka-broker)).
+- [`crabka-cli`](https://crates.io/crates/crabka-cli) — operator CLI, installed as `crabka` ([docs](https://docs.rs/crabka-cli)).
+- [`crabka-client-admin`](https://crates.io/crates/crabka-client-admin) — admin client ([docs](https://docs.rs/crabka-client-admin)).
+- [`crabka-client-consumer`](https://crates.io/crates/crabka-client-consumer) — subscribe-style consumer client ([docs](https://docs.rs/crabka-client-consumer)).
+- [`crabka-client-core`](https://crates.io/crates/crabka-client-core) — connection management and request dispatch ([docs](https://docs.rs/crabka-client-core)).
+- [`crabka-client-producer`](https://crates.io/crates/crabka-client-producer) — idempotent and transactional producer client ([docs](https://docs.rs/crabka-client-producer)).
+- [`crabka-client-streams`](https://crates.io/crates/crabka-client-streams) — KIP-1071 Streams client/runtime ([docs](https://docs.rs/crabka-client-streams)).
 - [`crabka-compression`](https://crates.io/crates/crabka-compression) — Kafka wire-protocol compression codecs ([docs](https://docs.rs/crabka-compression)).
+- [`crabka-grpc-gateway`](https://crates.io/crates/crabka-grpc-gateway) — gRPC / Connect-RPC + HTTP gateway ([docs](https://docs.rs/crabka-grpc-gateway)).
+- [`crabka-log`](https://crates.io/crates/crabka-log) — Kafka-compatible log segment reader/writer ([docs](https://docs.rs/crabka-log)).
+- [`crabka-metadata`](https://crates.io/crates/crabka-metadata) — metadata records and immutable image ([docs](https://docs.rs/crabka-metadata)).
+- [`crabka-operator`](https://crates.io/crates/crabka-operator) — Kubernetes operator ([docs](https://docs.rs/crabka-operator)).
 - [`crabka-protocol`](https://crates.io/crates/crabka-protocol) — Apache Kafka wire-protocol codec ([docs](https://docs.rs/crabka-protocol)).
+- [`crabka-raft`](https://crates.io/crates/crabka-raft) — KRaft metadata quorum ([docs](https://docs.rs/crabka-raft)).
+- [`crabka-rebalancer`](https://crates.io/crates/crabka-rebalancer) — partition rebalancer ([docs](https://docs.rs/crabka-rebalancer)).
+- [`crabka-records-legacy`](https://crates.io/crates/crabka-records-legacy) — Kafka v0/v1 `MessageSet` codec ([docs](https://docs.rs/crabka-records-legacy)).
+- [`crabka-remote-storage`](https://crates.io/crates/crabka-remote-storage) — KIP-405 tiered-storage SPI ([docs](https://docs.rs/crabka-remote-storage)).
+- [`crabka-remote-storage-topic`](https://crates.io/crates/crabka-remote-storage-topic) — topic-backed RLMM ([docs](https://docs.rs/crabka-remote-storage-topic)).
+- [`crabka-schema-registry`](https://crates.io/crates/crabka-schema-registry) — Confluent Schema Registry-compatible REST service ([docs](https://docs.rs/crabka-schema-registry)).
+- [`crabka-security`](https://crates.io/crates/crabka-security) — TLS, SASL, SCRAM, OAuth, and Kerberos utilities ([docs](https://docs.rs/crabka-security)).
+- [`crabka-telemetry`](https://crates.io/crates/crabka-telemetry) — OTLP distributed tracing pipeline ([docs](https://docs.rs/crabka-telemetry)).
 
 ## License
 
