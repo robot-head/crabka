@@ -57,7 +57,12 @@ x509-parser = { workspace = true }
 assert2 = { workspace = true }
 crabka-broker = { version = "0.3.3", path = "../broker" }
 crabka-client-core = { version = "0.3.3", path = "../client-core" }
-crabka-rebalancer = { version = "0.3.3", path = "../rebalancer" }
+# Path-only (no version): keeps this dev-dependency out of the published
+# manifest so `cargo publish`/release-plz never resolve it against crates.io.
+# crabka-rebalancer publishes a release behind the rest of the workspace, so a
+# version pin here aborts the whole release run (see #455). Do not let
+# `cargo set-version` re-add a version — dev-deps need none.
+crabka-rebalancer = { path = "../rebalancer" }
 http = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
