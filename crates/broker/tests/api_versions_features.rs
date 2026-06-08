@@ -10,7 +10,7 @@
 //! (`metadata.version = 25`, `group.version = 1`, `transaction.version = 2`)
 //! and surfaces a real
 //! (`>= 0`) `finalized_features_epoch`. `UpdateFeatures` (api_key 57) then
-//! moves those levels — that path is exercised in `tests/update_features.rs`.
+//! moves those levels — that path is exercised in `tests/feature_finalization.rs`.
 //!
 //! Advertising a `supported_features` entry whose `max_version` is above a
 //! connecting client's known `MetadataVersion` enum, or a finalized

@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: write
 
 # Cancel superseded PR runs; let pushes to main run to completion.
 concurrency:
@@ -51,6 +52,7 @@ jobs:
               - 'tools/oracle/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             cargo_deny:
               - 'deny.toml'
@@ -65,6 +67,7 @@ jobs:
               - 'crates/rebalancer/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             client_core:
               - 'crates/client-core/**'
@@ -73,6 +76,7 @@ jobs:
               - 'crates/security/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             log:
               - 'crates/log/**'
@@ -81,6 +85,7 @@ jobs:
               - 'crates/remote-storage/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             client_consumer:
               - 'crates/client-consumer/**'
@@ -92,6 +97,7 @@ jobs:
               - 'crates/broker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             client_streams:
               - 'crates/client-streams/**'
@@ -103,6 +109,7 @@ jobs:
               - 'crates/broker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             grpc_gateway:
               - 'crates/grpc-gateway/**'
@@ -116,6 +123,7 @@ jobs:
               - 'crates/broker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             schema_registry:
               - 'crates/schema-registry/**'
@@ -128,6 +136,7 @@ jobs:
               - 'crates/broker/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             broker_jvm:
               - 'crates/authz/**'
@@ -143,6 +152,7 @@ jobs:
               - 'tools/oracle/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
             broker_integration:
               - 'crates/authz/**'
@@ -158,6 +168,7 @@ jobs:
               - 'crates/security/**'
               - 'Cargo.toml'
               - 'Cargo.lock'
+              - '.config/nextest.toml'
               - '.github/workflows/ci.yml'
 
   rust:
@@ -192,46 +203,23 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run tests
+        if: matrix.os != 'ubuntu-latest'
         run: cargo nextest run --workspace --profile ci
       - name: Upload test results to Codecov
-        if: ${{ !cancelled() }}
-        uses: codecov/test-results-action@v5
+        if: ${{ !cancelled() && matrix.os != 'ubuntu-latest' }}
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          report-type: test_results
+          report_type: test_results
           files: target/nextest/ci/junit.xml
           disable_search: true
           flags: rust-${{ matrix.os }}
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Rust nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: rust-nextest
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/rust-nextest.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Unit test coverage
         if: matrix.os == 'ubuntu-latest'
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --lib --bins --lcov --output-path coverage/unit.lcov
+          cargo llvm-cov nextest --workspace --profile ci --lib --bins --lcov --output-path coverage/unit.lcov
       - uses: codecov/codecov-action@v7
         if: matrix.os == 'ubuntu-latest'
         with:
@@ -240,6 +228,40 @@ jobs:
           disable_search: true
           flags: unit
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: unit
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Unit nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: unit
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/unit.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   jvm-differential:
     needs: changes
@@ -257,6 +279,7 @@ jobs:
           version: "31.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -279,7 +302,7 @@ jobs:
       - name: JVM differential coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov --workspace --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --exclude crabka-grpc-gateway --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
+          cargo llvm-cov nextest --workspace --profile ci --exclude crabka-client-core --exclude crabka-log --exclude crabka-broker --exclude crabka-grpc-gateway --lcov --output-path coverage/jvm-differential.lcov -- --include-ignored
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -287,6 +310,40 @@ jobs:
           disable_search: true
           flags: jvm-differential
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: jvm-differential
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: JVM differential nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: jvm-differential
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/jvm-differential.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   cargo-deny:
     needs: changes
@@ -351,10 +408,11 @@ jobs:
         with:
           key: client-core-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Client core integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-client-core --test integration --lcov --output-path coverage/client-core-integration.lcov -- --ignored --nocapture
+          cargo llvm-cov nextest -p crabka-client-core --profile ci --test integration --lcov --output-path coverage/client-core-integration.lcov -- --ignored --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -362,6 +420,40 @@ jobs:
           disable_search: true
           flags: client-core-integration
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: client-core-integration
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Client core integration nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: client-core-integration
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/client-core-integration.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-log integration: docker cp a JVM-produced partition dir out of
   # a Kafka container and re-read it with crabka-log.
@@ -379,10 +471,11 @@ jobs:
         with:
           key: log-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Log integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-log --test integration --lcov --output-path coverage/log-integration.lcov -- --ignored --nocapture
+          cargo llvm-cov nextest -p crabka-log --profile ci --test integration --lcov --output-path coverage/log-integration.lcov -- --ignored --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -390,6 +483,40 @@ jobs:
           disable_search: true
           flags: log-integration
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: log-integration
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Log integration nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: log-integration
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/log-integration.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-client-consumer integration: cooperative-rebalance + poll/commit
   # against an in-process Rust broker (no Docker). The `unit` flag's
@@ -409,10 +536,11 @@ jobs:
         with:
           key: client-consumer-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Client consumer integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-client-consumer --tests --lcov --output-path coverage/client-consumer-integration.lcov -- --nocapture
+          cargo llvm-cov nextest -p crabka-client-consumer --profile ci --tests --lcov --output-path coverage/client-consumer-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -420,6 +548,40 @@ jobs:
           disable_search: true
           flags: client-consumer-integration
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: client-consumer-integration
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Client consumer integration nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: client-consumer-integration
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/client-consumer-integration.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-client-streams integration: KIP-1071 streams-group membership
   # (join / heartbeat / assignment / leave) against an in-process Rust broker
@@ -440,10 +602,11 @@ jobs:
         with:
           key: client-streams-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-client-streams --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
+          cargo llvm-cov nextest -p crabka-client-streams --profile ci --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -451,6 +614,40 @@ jobs:
           disable_search: true
           flags: client-streams-integration
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: client-streams-integration
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Client streams integration nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: client-streams-integration
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/client-streams-integration.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-grpc-gateway integration: unary Send produce, group consume+commit,
   # and single-owner exactly-once dedup against an in-process Rust broker (no
@@ -471,10 +668,11 @@ jobs:
         with:
           key: grpc-gateway-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: gRPC gateway integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-grpc-gateway --tests --test schema_codec --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
+          cargo llvm-cov nextest -p crabka-grpc-gateway --profile ci --tests --test schema_codec --lcov --output-path coverage/grpc-gateway-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -482,6 +680,40 @@ jobs:
           disable_search: true
           flags: grpc-gateway-integration
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: grpc-gateway-integration
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: gRPC gateway integration nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: grpc-gateway-integration
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/grpc-gateway-integration.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-schema-registry integration: schema validation, REST conformance, and
   # record-schema round-trips against an in-process broker (no Docker). The
@@ -503,10 +735,11 @@ jobs:
         with:
           key: schema-registry-integration
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Schema registry integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-schema-registry --test integration --test rest_conformance --test schemas_record --test compat_conformance --test ha --test security --lcov --output-path coverage/schema-registry-integration.lcov -- --nocapture
+          cargo llvm-cov nextest -p crabka-schema-registry --profile ci --test integration --test rest_conformance --test schemas_record --test compat_conformance --test ha --test security --lcov --output-path coverage/schema-registry-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -514,7 +747,40 @@ jobs:
           disable_search: true
           flags: schema-registry-integration
           fail_ci_if_error: false
-
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: schema-registry-integration
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Schema registry integration nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: schema-registry-integration
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/schema-registry-integration.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
@@ -558,6 +824,7 @@ jobs:
       # host itself has no such resolution on Linux runners, so add it.
       - run: echo "127.0.0.1 host.docker.internal" | sudo tee -a /etc/hosts
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Preload Docker images
         run: |
           docker pull confluentinc/cp-kafka:7.4.0
@@ -568,7 +835,7 @@ jobs:
       - name: Broker JVM acceptance coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-broker \
+          cargo llvm-cov nextest -p crabka-broker --profile ci \
             --test jvm_acceptance \
             --test jvm_consumer_group_next_gen \
             --lcov --output-path coverage/broker-jvm-acceptance.lcov \
@@ -580,11 +847,45 @@ jobs:
           disable_search: true
           flags: broker-jvm-acceptance
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: broker-jvm-acceptance
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Broker JVM acceptance nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: broker-jvm-acceptance
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/broker-jvm-acceptance.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Non-ignored broker + client-admin integration tests (the
   # in-process Broker-driven suites under `crates/broker/tests/*.rs`
   # and `crates/client-admin/tests/*.rs`). These don't show up in the
-  # `unit` flag — that flag's `cargo llvm-cov --lib --bins` only walks
+  # `unit` flag — that flag's `cargo llvm-cov nextest --lib --bins` only walks
   # in-`src/` tests — so before this job KIP-113 handler + dispatch
   # branches that are only exercised end-to-end appeared as uncovered
   # in the patch view. Two `--no-report` runs share a profraw set,
@@ -620,12 +921,13 @@ jobs:
           version: "31.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Broker + client-admin integration coverage
         run: |
           mkdir -p coverage
           cargo llvm-cov clean --workspace
-          cargo llvm-cov --no-report -p crabka-broker --tests
-          cargo llvm-cov --no-report -p crabka-client-admin --tests
+          cargo llvm-cov nextest --no-report --profile ci -p crabka-broker --tests
+          cargo llvm-cov nextest --no-report --profile ci -p crabka-client-admin --tests
           cargo llvm-cov report --lcov --output-path coverage/broker-integration.lcov
       - uses: codecov/codecov-action@v7
         with:
@@ -634,6 +936,40 @@ jobs:
           disable_search: true
           flags: broker-integration
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: broker-integration
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Broker integration nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: broker-integration
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/broker-integration.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Operator mock-harness reconcile tests (no Docker, no real K8s cluster).
   # Each tests/<name>.rs file must be listed with `--test <name>` so that
@@ -656,10 +992,11 @@ jobs:
           version: "31.x"
           repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@nextest
       - name: Operator reconcile integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-operator \
+          cargo llvm-cov nextest -p crabka-operator --profile ci \
             --test ca_renewal_cronjob \
             --test rebalance_e2e \
             --test reconcile_ca \
@@ -689,6 +1026,40 @@ jobs:
           disable_search: true
           flags: operator-integration
           fail_ci_if_error: false
+      - name: Upload test results to Codecov
+        if: ${{ !cancelled() }}
+        uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          report_type: test_results
+          files: target/nextest/ci/junit.xml
+          disable_search: true
+          flags: operator-integration
+          fail_ci_if_error: false
+      - name: Publish nextest report
+        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: target/nextest/ci/junit.xml
+          title: Operator integration nextest
+          summary-report: true
+          failed-report: true
+          pull-request-report: true
+          update-comment: true
+          comment-tag: operator-integration
+          integrations-config: |
+            {
+              "junit-to-ctrf": {
+                "enabled": true,
+                "action": "convert",
+                "options": {
+                  "output": "./ctrf-reports/operator-integration.json",
+                  "toolname": "cargo-nextest"
+                }
+              }
+            }
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   gatekeeper-ci:
     needs:
