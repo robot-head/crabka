@@ -1188,6 +1188,49 @@ mod tests {
     }
 
     #[test]
+    fn register_broker_incarnation_id_survives_round_trip() {
+        let id = uuid::Uuid::from_u128(0x0102030405060708_090a0b0c0d0e0f10);
+        round_trip(
+            &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
+                node_id: 3,
+                broker_epoch: 5,
+                incarnation_id: id,
+                host: "127.0.0.1".into(),
+                port: 9092,
+                rack: None,
+                endpoints: vec![],
+            }),
+            &img(),
+        );
+    }
+
+    #[test]
+    fn partition_epoch_survives_round_trip() {
+        let mut image = img();
+        let tid = uuid::Uuid::from_u128(99);
+        image.apply(&MetadataRecord::V1Topic(TopicRecord {
+            name: "epoch-test".into(),
+            topic_id: tid,
+            partitions: 1,
+            replication_factor: 1,
+        }));
+        let rec = MetadataRecord::V1Partition(PartitionRecord {
+            topic: "epoch-test".into(),
+            partition: 0,
+            leader: 1,
+            replicas: vec![1],
+            isr: vec![1],
+            leader_epoch: 7,
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 42,
+        });
+        image.apply(&rec);
+        round_trip(&rec, &image);
+    }
+
+    #[test]
     fn unregister_broker_round_trips() {
         let rec = MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord { node_id: 42 });
         round_trip(&rec, &img());

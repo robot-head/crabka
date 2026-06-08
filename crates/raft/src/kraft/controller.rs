@@ -2315,6 +2315,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }),
         ]
     }
@@ -2500,6 +2501,7 @@ mod tests {
                 BrokerRegistrationRecord {
                     node_id: id,
                     broker_epoch: 0, // overwritten by the leader at append
+                    incarnation_id: uuid::Uuid::from_u128(id as u128),
                     host: "h".into(),
                     port: 9092,
                     rack: None,
