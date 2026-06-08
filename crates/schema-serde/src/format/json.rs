@@ -22,6 +22,18 @@ pub struct JsonSerde<T> {
     _marker: PhantomData<fn() -> T>,
 }
 
+// Manual `Clone` (not derived) to avoid a spurious `T: Clone` bound;
+// `add_source`/`add_sink` require `Serde<_> + Clone`.
+impl<T> Clone for JsonSerde<T> {
+    fn clone(&self) -> Self {
+        Self {
+            binding: self.binding.clone(),
+            validate: self.validate,
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<T: JsonSchema> JsonSerde<T> {
     /// Bind `T`'s `schemars` JSON Schema to `subject` and intern it.
     /// `validate` enables draft validation of decoded payloads.

@@ -23,6 +23,18 @@ pub struct AvroSerde<T> {
     _marker: PhantomData<fn() -> T>,
 }
 
+// Manual `Clone` (not derived) to avoid a spurious `T: Clone` bound;
+// `add_source`/`add_sink` require `Serde<_> + Clone`.
+impl<T> Clone for AvroSerde<T> {
+    fn clone(&self) -> Self {
+        Self {
+            binding: self.binding.clone(),
+            reader_schema: self.reader_schema.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<T: AvroSchema> AvroSerde<T> {
     /// Bind `T`'s derived schema to `subject` and intern it for pre-warm.
     pub fn new(cache: &Arc<SchemaCache>, subject: impl Into<String>) -> Self {

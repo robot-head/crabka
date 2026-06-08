@@ -22,6 +22,18 @@ pub struct ProtobufSerde<T> {
     _marker: PhantomData<fn() -> T>,
 }
 
+// Manual `Clone` (not derived) to avoid a spurious `T: Clone` bound;
+// `add_source`/`add_sink` require `Serde<_> + Clone`.
+impl<T> Clone for ProtobufSerde<T> {
+    fn clone(&self) -> Self {
+        Self {
+            binding: self.binding.clone(),
+            message_index: self.message_index.clone(),
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<T: ReflectMessage + Default> ProtobufSerde<T> {
     /// Bind `T`'s descriptor to `subject` and intern its `.proto` schema.
     pub fn new(cache: &Arc<SchemaCache>, subject: impl Into<String>) -> Self {

@@ -16,6 +16,17 @@ pub struct SchemaSerde<T, S> {
     _marker: std::marker::PhantomData<fn() -> T>,
 }
 
+// Manual `Clone` (not derived) to avoid a spurious `T: Clone` bound;
+// `add_source`/`add_sink` require `Serde<_> + Clone`.
+impl<T, S: Clone> Clone for SchemaSerde<T, S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+}
+
 impl<T, S> SchemaSerde<T, S> {
     /// Wrap a schema-serde serde (e.g. `AvroSerde<T>`).
     pub fn new(inner: S) -> Self {

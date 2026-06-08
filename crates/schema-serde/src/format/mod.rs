@@ -32,6 +32,7 @@ pub trait SchemaDeserializer<T>: Send + Sync + 'static {
 /// Shared bound state every format serde carries.
 // used by feature-gated format serdes
 #[allow(dead_code)]
+#[derive(Clone)]
 pub(crate) struct Binding {
     pub cache: Arc<SchemaCache>,
     pub subject: String,
