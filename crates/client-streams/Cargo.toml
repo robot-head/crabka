@@ -16,6 +16,19 @@ categories = ["api-bindings", "network-programming"]
 [lints]
 workspace = true
 
+# Schema-serde examples need the optional dep + generated protobuf types.
+[[example]]
+name = "avro_pipeline"
+required-features = ["schema-serde"]
+
+[[example]]
+name = "protobuf_pipeline"
+required-features = ["schema-serde"]
+
+[[example]]
+name = "json_pipeline"
+required-features = ["schema-serde"]
+
 [features]
 default = []
 schema-serde = ["dep:crabka-schema-serde", "crabka-schema-serde/avro", "crabka-schema-serde/protobuf", "crabka-schema-serde/json", "dep:protox", "dep:prost-build"]
