@@ -39,8 +39,6 @@
 //! Gated to non-Windows to match the multi-broker test convention (openraft
 //! `debug_assert!` races on the hosted Windows scheduler are unrelated).
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;

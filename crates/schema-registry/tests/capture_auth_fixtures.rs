@@ -2,7 +2,7 @@
 // otherwise strip the trailing `#![allow(clippy::pedantic)]` while the crate-root
 // `//!` docs are still linted ⇒ `doc_markdown` fires windows-only. Attributes-first
 // prevents that; code-like identifiers in the docs are also backticked.
-#![cfg(not(target_os = "windows"))]
+
 #![allow(clippy::pedantic)]
 
 //! Golden HTTP-Basic-auth capture harness for Crabka Schema Registry slice 6.

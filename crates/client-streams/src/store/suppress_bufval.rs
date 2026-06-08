@@ -220,8 +220,8 @@ mod tests {
     const WC_FIRST: &str = "000000000000000a0000000000000000000000026\
 96e0000000000000000ffffffffffffffff000000080000000000000001000000000000000a";
 
-    /// `wc_update`: prior=count(1), old=count(1) (→ -2), new=count(2), ts=12, bt=12.
-    const WC_UPDATE: &str = "000000000000000c0000000000000000000000026\
+    /// `wc_change`: prior=count(1), old=count(1) (→ -2), new=count(2), ts=12, bt=12.
+    const WC_CHANGE: &str = "000000000000000c0000000000000000000000026\
 96e0000000000000000000000080000000000000001fffffffe000000080000000000000002000000000000000c";
 
     /// `tombstone`: prior=count(1), old=count(1) (→ -2), new=null, ts=20, bt=20.
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn wc_update_matches_jvm_bytes() {
+    fn wc_change_matches_jvm_bytes() {
         let bytes = serialize_buffer_change(
             &ctx(12),
             Some(&count(1)),
@@ -243,7 +243,7 @@ mod tests {
             Some(&count(2)),
             12,
         );
-        assert_eq!(hex(&bytes), WC_UPDATE);
+        assert_eq!(hex(&bytes), WC_CHANGE);
     }
 
     #[test]

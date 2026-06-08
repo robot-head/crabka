@@ -14,8 +14,6 @@
 //! 9092, so it must not run concurrently with `jvm_acceptance` (single test
 //! here keeps it self-contained).
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::process::Command;
 

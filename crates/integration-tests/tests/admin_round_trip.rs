@@ -28,8 +28,6 @@
 //!   `parse_create_topics` / `parse_delete_topics` / `parse_create_partitions`
 //!   is fully exercised.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::collections::BTreeMap;
 use std::time::Duration;

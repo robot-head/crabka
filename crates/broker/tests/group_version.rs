@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 //! KIP-848 / KIP-584: the next-gen consumer-group protocol

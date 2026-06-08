@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 //! Cross-broker transaction-marker fan-out over a *secured* inter-broker
 //! listener.
 //!

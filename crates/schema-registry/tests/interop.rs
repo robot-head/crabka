@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 //! Docker interop test: prove our `KafkaStore` + `StoreReader` can decode
 //! `_schemas` records that a REAL `confluentinc/cp-schema-registry:7.4.0`
 //! wrote, and that our REST router returns the same schema through `GET`.

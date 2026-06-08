@@ -1,5 +1,4 @@
-﻿#![cfg(not(target_os = "windows"))]
-//! Execution-level tests for Interactive-Query *read semantics* over the three
+﻿//! Execution-level tests for Interactive-Query *read semantics* over the three
 //! materialized store kinds (KV / window / session). Each test builds a counting
 //! topology with the Rust DSL, pipes deterministic input through the broker-free
 //! [`TopologyTestDriver`], then reads the materialized store back through the

@@ -1,4 +1,4 @@
-﻿//! `StreamsBuilder` (public) + `InternalStreamsBuilder` (graph + name counter).
+//! `StreamsBuilder` (public) + `InternalStreamsBuilder` (graph + name counter).
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -91,11 +91,13 @@ impl StreamsBuilder {
         let consumed_for_lower = consumed.clone();
         g.graph.nodes[id].lower = Some(Box::new(
             move |state: &mut crate::dsl::graph::LowerState| {
-                let h = state.topology.add_source::<KS::Target, VS::Target, KS, VS>(
-                    name,
-                    topics,
-                    consumed_for_lower,
-                );
+                let h = state
+                    .topology
+                    .add_source_explicit::<KS::Target, VS::Target, KS, VS>(
+                        name,
+                        topics,
+                        consumed_for_lower,
+                    );
                 state.handle_name.insert(id, h.name().to_string());
             },
         ));
@@ -168,11 +170,13 @@ impl StreamsBuilder {
         let value_serde_for_lower = value_serde.clone();
         g.graph.nodes[id].lower = Some(Box::new(
             move |state: &mut crate::dsl::graph::LowerState| {
-                let src = state.topology.add_source::<KS::Target, VS::Target, KS, VS>(
-                    source_name,
-                    [topic],
-                    consumed,
-                );
+                let src = state
+                    .topology
+                    .add_source_explicit::<KS::Target, VS::Target, KS, VS>(
+                        source_name,
+                        [topic],
+                        consumed,
+                    );
                 let store_for_proc = store_for_thunk.clone();
                 // The KTable source forwards Change<V> (prior store value as old).
                 let h = state

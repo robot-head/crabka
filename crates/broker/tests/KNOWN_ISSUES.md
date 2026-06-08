@@ -37,7 +37,7 @@ Run with `cargo test -p crabka-broker --test jvm_acceptance -- --ignored`.
 The CI job `broker-jvm-acceptance` is the only place these execute by
 default; `cargo test` on a contributor's machine skips them.
 
-## `#![cfg(not(target_os = "windows"))]`
+## ``
 
 Docker on Windows + the bridge-gateway pattern is fragile and the JVM
 command-line tools have inconsistent behavior under Docker Desktop on

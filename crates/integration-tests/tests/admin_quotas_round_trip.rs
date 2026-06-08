@@ -6,8 +6,6 @@
 //! quota path: read the current per-user state, diff, write the
 //! resulting `(set, remove)` ops, read back.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use crabka_client_admin::{AdminClient, QuotaOp, diff_user_quotas};
 

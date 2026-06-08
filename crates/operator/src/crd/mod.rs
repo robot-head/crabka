@@ -31,7 +31,8 @@ pub use metrics::{MetricsConfig, MetricsType, PodMonitorSpec, ServiceMonitorSpec
 pub use network_policy::{NetworkPolicyPeer, NetworkPolicySpec};
 pub use rebalance::{KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus, OptimizationResult};
 pub use schema_registry::{
-    BasicAuthn, BearerAuthn, BearerMode, SchemaRegistry, SchemaRegistryAuthn, SchemaRegistryAuthz,
+    BasicAuthn, BearerAuthn, BearerMode, CertManagerIssuerRef, KafkaClientSasl, KafkaClientTls,
+    SchemaRegistry, SchemaRegistryAuthn, SchemaRegistryAuthz, SchemaRegistryKafkaClient,
     SchemaRegistrySpec, SchemaRegistryStatus, SchemaRegistryTls, TlsClientAuth,
 };
 pub use topic::{KafkaTopic, KafkaTopicSpec, KafkaTopicStatus};

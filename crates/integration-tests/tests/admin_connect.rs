@@ -9,8 +9,6 @@
 //! pipeline (response → reconnect → resend) is covered by
 //! `round_trip.rs` against a real broker.
 
-#![cfg(not(target_os = "windows"))]
-
 #[path = "../../broker/tests/support/mod.rs"]
 mod support;
 

@@ -400,11 +400,11 @@ mod tests {
     use crate::membership::TopicPartition;
     use crate::processor::api::{Processor, ProcessorContext};
     use crate::processor::record::Record;
-    use crate::processor::serde::{Consumed, I64Serde, Produced, StringSerde};
+    use crate::processor::serde::{I64Serde, StringSerde};
     use crate::runtime::io::{
         FetchBatch, FetchedRec, IsolationLevel, OffsetStore, RecordFetcher, RecordProducer,
     };
-    use crate::topology::Topology;
+    use crate::topology::{NodeHandle, Topology};
     use assert2::check;
     use std::collections::HashMap;
     use std::sync::Mutex as StdMutex;
@@ -431,10 +431,10 @@ mod tests {
 
     fn stateful_built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let c = t.add_processor("c", || Counter, [&src]);
         t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
-        t.add_sink("out", "out", [&c], Produced::with(StringSerde, I64Serde));
+        t.add_sink("out", "out", [&c]);
         t.build("app").unwrap()
     }
 
@@ -486,14 +486,9 @@ mod tests {
 
     fn built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let up = t.add_processor("up", || Upper, [&src]);
-        t.add_sink(
-            "out",
-            "out",
-            [&up],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("out", "out", [&up]);
         t.build("app").unwrap()
     }
 
@@ -789,9 +784,9 @@ mod tests {
 
     fn stream_time_punct_built() -> crate::topology::BuiltTopology {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let p = t.add_processor("p", || StreamTimeScheduler, [&src]);
-        t.add_sink("out", "out", [&p], Produced::with(StringSerde, I64Serde));
+        t.add_sink("out", "out", [&p]);
         t.build("app").unwrap()
     }
 

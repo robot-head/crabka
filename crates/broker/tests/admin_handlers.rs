@@ -9,13 +9,7 @@
 //! dispatches the relevant request through `crabka-client-core`, and
 //! asserts on either the response or observable broker state exposed by
 //! the `BrokerHandle` test-helper methods.
-//!
-//! Gated `#[cfg(not(target_os = "windows"))]` to mirror the other
-//! multi-node test files: openraft's `debug_assert!` races on the hosted
-//! Windows task scheduler, and `start_n_node` boots even a 1-node cluster
-//! through the same raft bootstrap path.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::default_trait_access, clippy::manual_assert)]
 
 use assert2::assert;

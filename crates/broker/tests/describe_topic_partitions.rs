@@ -14,8 +14,6 @@
 //!     `next_cursor` round-trip
 //!   * Stable sort order on fetch-all (alphabetical)
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 mod support;
 

@@ -1,5 +1,4 @@
-﻿#![cfg(not(target_os = "windows"))]
-//! JVM golden-parity tests for Interactive-Query read semantics.
+﻿//! JVM golden-parity tests for Interactive-Query read semantics.
 //!
 //! Ground truth is `tests/testdata/iq/behavior.json`, captured from a real JVM
 //! Kafka Streams 4.1 `TopologyTestDriver` run (`jvm-capture/run.sh --iq`). Each

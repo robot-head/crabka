@@ -40,15 +40,14 @@ pub(crate) fn resolve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::topology::Topology;
+    use crate::topology::{NodeHandle, Topology};
     use assert2::check;
     use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds;
 
     fn built() -> crate::topology::BuiltTopology {
-        use crate::processor::serde::{BytesSerde, Consumed, Produced};
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(BytesSerde, BytesSerde));
-        t.add_sink("snk", "out", [&src], Produced::with(BytesSerde, BytesSerde));
+        let src: NodeHandle<bytes::Bytes, bytes::Bytes> = t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", [&src]);
         t.build("app").unwrap()
     }
 

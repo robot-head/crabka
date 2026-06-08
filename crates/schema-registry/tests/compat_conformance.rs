@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "windows"))]
-
 //! No-Docker conformance gate: drive the compatibility engine directly against
 //! the golden cp-schema-registry verdicts in `tests/fixtures/compat/*_matrix.json`
 //! (21 Avro cases, 88 Protobuf cases, 92 JSON cases, all captured from real

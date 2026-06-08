@@ -15,7 +15,6 @@
 //! exactly that one record (no write-back loop) and the output topic has not
 //! exploded. Before the fix, the source topic grew without bound from the single
 //! input record.
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 
