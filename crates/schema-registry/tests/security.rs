@@ -601,6 +601,9 @@ async fn start_jwks_node(
         bearer: "jwks".into(),
         jwks_endpoint_uri: Some("https://test.invalid/.well-known/jwks.json".into()),
         jwks_valid_issuer: valid_issuer,
+        // Default::default() gives "" for String fields; build_security's client
+        // builder requires a valid protocol even when auth is off.
+        kafka_security_protocol: "PLAINTEXT".into(),
         ..Default::default()
     };
     let out = build_security(&input).expect("build_security should succeed with JWKS input");
