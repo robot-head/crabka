@@ -28,6 +28,7 @@ fn sr(name: &str, cluster: Option<&str>) -> SchemaRegistry {
             schemas_topic: None,
             schemas_topic_replication_factor: Some(1),
             group_id: None,
+            kafka_client: None,
             tls: None,
             authentication: None,
             authorization: None,
@@ -137,6 +138,12 @@ async fn optional_topic_group_and_bearer_render_to_args() {
         bearer: Some(crabka_operator::crd::BearerAuthn {
             mode: crabka_operator::crd::BearerMode::Unsecured,
             principal_claim: Some("email".into()),
+            jwks_endpoint_uri: None,
+            jwks_valid_issuer: None,
+            jwks_expected_audience: None,
+            jwks_tls_secret_name: None,
+            jwks_principal_claim: None,
+            jwks_refresh_ms: None,
         }),
     });
     // kube-rs deserializes each SSA response into its typed object, which
@@ -363,7 +370,8 @@ async fn full_security_fields_render_to_args_and_mounts() {
     let mut cr = sr("sr1", Some(CLUSTER));
     cr.spec.bootstrap_servers = Some("ext:9092".into()); // skip the Kafka GET
     cr.spec.tls = Some(crabka_operator::crd::SchemaRegistryTls {
-        secret_name: "sr-tls".into(),
+        secret_name: Some("sr-tls".into()),
+        issuer_ref: None,
         client_auth: Some(crabka_operator::crd::TlsClientAuth::Required),
         client_ca_secret_name: Some("sr-client-ca".into()),
     });
@@ -464,4 +472,310 @@ async fn full_security_fields_render_to_args_and_mounts() {
     assert!(mount_paths.contains(&"/etc/sr/tls"));
     assert!(mount_paths.contains(&"/etc/sr/client-ca"));
     assert!(mount_paths.contains(&"/etc/sr/basic"));
+}
+
+#[tokio::test]
+async fn kafka_client_missing_when_absent() {
+    let mut cr = sr("sr1", Some(CLUSTER));
+    cr.spec.bootstrap_servers = Some("ext:9092".into());
+    let rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr-headless".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr-headless"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/schemaregistries/sr1/status".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"SchemaRegistry","metadata":{"name":"sr1"},"spec":{"replicas":1}}),
+            ),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+    reconcile(Arc::new(cr), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let dep = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/deployments/sr1-sr")
+        })
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(dep.body()).unwrap();
+    let args = body["spec"]["template"]["spec"]["containers"][0]["args"]
+        .as_array()
+        .unwrap();
+    let joined = args
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(!joined.contains("--kafka-security-protocol"));
+    assert!(!joined.contains("--kafka-sasl-mechanism"));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn kafka_client_sasl_ssl_renders_to_args_and_env() {
+    let mut cr = sr("sr1", Some(CLUSTER));
+    cr.spec.bootstrap_servers = Some("ext:9092".into());
+    cr.spec.kafka_client = Some(crabka_operator::crd::SchemaRegistryKafkaClient {
+        security_protocol: Some("SASL_SSL".into()),
+        sasl: Some(crabka_operator::crd::KafkaClientSasl {
+            mechanism: "PLAIN".into(),
+            secret_ref: "kafka-creds".into(),
+        }),
+        tls: Some(crabka_operator::crd::KafkaClientTls {
+            ca_secret_name: Some("kafka-ca".into()),
+            server_name_override: Some("broker.internal".into()),
+        }),
+    });
+    let rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr-headless".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr-headless"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/schemaregistries/sr1/status".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"SchemaRegistry","metadata":{"name":"sr1"},"spec":{"replicas":1}}),
+            ),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+    reconcile(Arc::new(cr), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let dep = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/deployments/sr1-sr")
+        })
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(dep.body()).unwrap();
+    let c = &body["spec"]["template"]["spec"]["containers"][0];
+    let joined = c["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join(" ");
+    // Args
+    assert!(
+        joined.contains("--kafka-security-protocol=SASL_SSL"),
+        "joined: {joined}"
+    );
+    assert!(
+        joined.contains("--kafka-sasl-mechanism=PLAIN"),
+        "joined: {joined}"
+    );
+    assert!(
+        joined.contains("--kafka-tls-ca=/etc/sr/kafka-tls/ca.crt"),
+        "joined: {joined}"
+    );
+    assert!(
+        joined.contains("--kafka-tls-server-name=broker.internal"),
+        "joined: {joined}"
+    );
+    // Env: SASL creds via secretKeyRef
+    let env = c["env"].as_array().unwrap();
+    let sasl_user = env
+        .iter()
+        .find(|e| e["name"] == "SCHEMA_REGISTRY_KAFKA_SASL_USERNAME")
+        .unwrap();
+    assert_eq!(
+        sasl_user["valueFrom"]["secretKeyRef"]["name"],
+        "kafka-creds"
+    );
+    assert_eq!(sasl_user["valueFrom"]["secretKeyRef"]["key"], "username");
+    let sasl_pass = env
+        .iter()
+        .find(|e| e["name"] == "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD")
+        .unwrap();
+    assert_eq!(
+        sasl_pass["valueFrom"]["secretKeyRef"]["name"],
+        "kafka-creds"
+    );
+    assert_eq!(sasl_pass["valueFrom"]["secretKeyRef"]["key"], "password");
+    // Volume + mount for kafka-tls CA
+    let vols = body["spec"]["template"]["spec"]["volumes"]
+        .as_array()
+        .unwrap();
+    assert!(
+        vols.iter().any(|v| v["name"] == "kafka-tls"),
+        "expected kafka-tls volume"
+    );
+    let mounts = c["volumeMounts"].as_array().unwrap();
+    assert!(
+        mounts.iter().any(|m| m["mountPath"] == "/etc/sr/kafka-tls"),
+        "expected kafka-tls mount"
+    );
+}
+
+#[tokio::test]
+async fn bearer_jwks_renders_to_args() {
+    let mut cr = sr("sr1", Some(CLUSTER));
+    cr.spec.bootstrap_servers = Some("ext:9092".into());
+    cr.spec.authentication = Some(crabka_operator::crd::SchemaRegistryAuthn {
+        require_auth: false,
+        realm: None,
+        basic: None,
+        bearer: Some(crabka_operator::crd::BearerAuthn {
+            mode: crabka_operator::crd::BearerMode::Jwks,
+            principal_claim: None,
+            jwks_endpoint_uri: Some("https://idp.example.com/jwks".into()),
+            jwks_valid_issuer: Some("https://idp.example.com".into()),
+            jwks_expected_audience: Some("kafka-sr".into()),
+            jwks_tls_secret_name: None,
+            jwks_principal_claim: Some("email".into()),
+            jwks_refresh_ms: Some(30_000),
+        }),
+    });
+    let rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr-headless".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr-headless"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/schemaregistries/sr1/status".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"SchemaRegistry","metadata":{"name":"sr1"},"spec":{"replicas":1}}),
+            ),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+    reconcile(Arc::new(cr), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let dep = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/deployments/sr1-sr")
+        })
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(dep.body()).unwrap();
+    let joined = body["spec"]["template"]["spec"]["containers"][0]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(joined.contains("--bearer=jwks"), "joined: {joined}");
+    assert!(
+        joined.contains("--bearer-jwks-endpoint-uri=https://idp.example.com/jwks"),
+        "joined: {joined}"
+    );
+    assert!(
+        joined.contains("--bearer-jwks-valid-issuer=https://idp.example.com"),
+        "joined: {joined}"
+    );
+    assert!(
+        joined.contains("--bearer-jwks-expected-audience=kafka-sr"),
+        "joined: {joined}"
+    );
+    assert!(
+        joined.contains("--bearer-jwks-principal-claim=email"),
+        "joined: {joined}"
+    );
+    assert!(
+        joined.contains("--bearer-jwks-refresh-ms=30000"),
+        "joined: {joined}"
+    );
 }

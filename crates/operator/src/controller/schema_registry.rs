@@ -19,7 +19,7 @@ use serde_json::json;
 use crate::context::Context;
 use crate::controller::common::{ReconcileError, apply_object, condition, owner_ref, patch_status};
 use crate::controller::topic::internal_listener_bootstrap;
-use crate::crd::{Kafka, SchemaRegistry, SchemaRegistryStatus, TlsClientAuth};
+use crate::crd::{BearerMode, Kafka, SchemaRegistry, SchemaRegistryStatus, TlsClientAuth};
 
 const APP_NAME: &str = "crabka-schema-registry";
 const SR_PORT: i32 = 8081;
@@ -252,13 +252,18 @@ fn render_deployment(
         .clone()
         .unwrap_or_else(|| "default".into());
     let selector = selector_labels(obj);
-    let (args, volumes, mounts) = build_args_and_mounts(obj, bootstrap);
+    let (args, volumes, mounts, extra_env) = build_args_and_mounts(obj, bootstrap);
     let advertised = format!(
         "{}://$(POD_NAME).{}.{}.svc.cluster.local:{SR_PORT}",
         scheme(obj),
         headless_name(&name),
         ns
     );
+    let mut env = vec![
+        json!({ "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } }),
+        json!({ "name": "SCHEMA_REGISTRY_ADVERTISED_URL", "value": advertised }),
+    ];
+    env.extend(extra_env);
     let dep = serde_json::from_value(json!({
         "metadata": {
             "name": deployment_name(&name),
@@ -278,10 +283,7 @@ fn render_deployment(
                         "name": "schema-registry",
                         "image": image,
                         "args": args,
-                        "env": [
-                            { "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } },
-                            { "name": "SCHEMA_REGISTRY_ADVERTISED_URL", "value": advertised },
-                        ],
+                        "env": env,
                         "ports": [{ "name": "rest", "containerPort": SR_PORT, "protocol": "TCP" }],
                         "volumeMounts": mounts,
                         "readinessProbe": { "tcpSocket": { "port": SR_PORT }, "initialDelaySeconds": 2, "periodSeconds": 5 },
@@ -297,11 +299,17 @@ fn render_deployment(
 
 /// Build the container args + the Secret volumes/mounts from the spec.
 /// Non-secret config → args; credentials → mounted Secret files referenced
-/// by path args. Returns (args, volumes, volumeMounts) as JSON values.
+/// by path args. Returns (args, volumes, volumeMounts, `extra_env`) as JSON values.
+#[allow(clippy::too_many_lines)]
 fn build_args_and_mounts(
     obj: &SchemaRegistry,
     bootstrap: &str,
-) -> (Vec<String>, Vec<serde_json::Value>, Vec<serde_json::Value>) {
+) -> (
+    Vec<String>,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+) {
     let s = &obj.spec;
     // The SR binary has no subcommand — args are flags only. (apko's
     // `cmd: run` default is replaced by the container `args` set here.)
@@ -320,13 +328,16 @@ fn build_args_and_mounts(
 
     let mut volumes = Vec::new();
     let mut mounts = Vec::new();
+    let mut extra_env: Vec<serde_json::Value> = Vec::new();
 
     // Server TLS
     if let Some(tls) = &s.tls {
-        a.push("--tls-cert=/etc/sr/tls/tls.crt".into());
-        a.push("--tls-key=/etc/sr/tls/tls.key".into());
-        volumes.push(json!({ "name": "tls", "secret": { "secretName": tls.secret_name } }));
-        mounts.push(json!({ "name": "tls", "mountPath": "/etc/sr/tls", "readOnly": true }));
+        if let Some(sn) = &tls.secret_name {
+            a.push("--tls-cert=/etc/sr/tls/tls.crt".into());
+            a.push("--tls-key=/etc/sr/tls/tls.key".into());
+            volumes.push(json!({ "name": "tls", "secret": { "secretName": sn } }));
+            mounts.push(json!({ "name": "tls", "mountPath": "/etc/sr/tls", "readOnly": true }));
+        }
         let mode = match tls.client_auth.unwrap_or(TlsClientAuth::Disabled) {
             TlsClientAuth::Disabled => "disabled",
             TlsClientAuth::Optional => "optional",
@@ -359,14 +370,44 @@ fn build_args_and_mounts(
             }}));
             mounts.push(json!({ "name": "basic", "mountPath": "/etc/sr/basic", "readOnly": true }));
         }
-        if authn.bearer.is_some() {
-            a.push("--bearer=unsecured".into());
-            if let Some(pc) = authn
-                .bearer
-                .as_ref()
-                .and_then(|b| b.principal_claim.clone())
-            {
-                a.push(format!("--bearer-principal-claim={pc}"));
+        if let Some(bearer) = &authn.bearer {
+            match bearer.mode {
+                BearerMode::Unsecured => {
+                    a.push("--bearer=unsecured".into());
+                    if let Some(pc) = &bearer.principal_claim {
+                        a.push(format!("--bearer-principal-claim={pc}"));
+                    }
+                }
+                BearerMode::Jwks => {
+                    a.push("--bearer=jwks".into());
+                    if let Some(uri) = &bearer.jwks_endpoint_uri {
+                        a.push(format!("--bearer-jwks-endpoint-uri={uri}"));
+                    }
+                    if let Some(iss) = &bearer.jwks_valid_issuer {
+                        a.push(format!("--bearer-jwks-valid-issuer={iss}"));
+                    }
+                    if let Some(aud) = &bearer.jwks_expected_audience {
+                        a.push(format!("--bearer-jwks-expected-audience={aud}"));
+                    }
+                    if let Some(pc) = bearer
+                        .jwks_principal_claim
+                        .as_ref()
+                        .or(bearer.principal_claim.as_ref())
+                    {
+                        a.push(format!("--bearer-jwks-principal-claim={pc}"));
+                    }
+                    if let Some(ms) = bearer.jwks_refresh_ms {
+                        a.push(format!("--bearer-jwks-refresh-ms={ms}"));
+                    }
+                    if let Some(ca_sn) = &bearer.jwks_tls_secret_name {
+                        a.push("--bearer-jwks-ca=/etc/sr/jwks-ca/ca.crt".into());
+                        volumes
+                            .push(json!({ "name": "jwks-ca", "secret": { "secretName": ca_sn } }));
+                        mounts.push(
+                            json!({ "name": "jwks-ca", "mountPath": "/etc/sr/jwks-ca", "readOnly": true }),
+                        );
+                    }
+                }
             }
         }
     }
@@ -384,7 +425,38 @@ fn build_args_and_mounts(
         }
     }
 
-    (a, volumes, mounts)
+    // SR → broker kafka-client security
+    if let Some(kc) = &s.kafka_client {
+        let proto = kc.security_protocol.as_deref().unwrap_or("PLAINTEXT");
+        a.push(format!("--kafka-security-protocol={proto}"));
+        if let Some(sasl) = &kc.sasl {
+            a.push(format!("--kafka-sasl-mechanism={}", sasl.mechanism));
+            extra_env.push(json!({
+                "name": "SCHEMA_REGISTRY_KAFKA_SASL_USERNAME",
+                "valueFrom": { "secretKeyRef": { "name": sasl.secret_ref, "key": "username" } }
+            }));
+            extra_env.push(json!({
+                "name": "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD",
+                "valueFrom": { "secretKeyRef": { "name": sasl.secret_ref, "key": "password" } }
+            }));
+        }
+        if let Some(tls) = &kc.tls {
+            if tls.ca_secret_name.is_some() {
+                a.push("--kafka-tls-ca=/etc/sr/kafka-tls/ca.crt".into());
+            }
+            if let Some(sn) = &tls.server_name_override {
+                a.push(format!("--kafka-tls-server-name={sn}"));
+            }
+            if let Some(ca_sn) = &tls.ca_secret_name {
+                volumes.push(json!({ "name": "kafka-tls", "secret": { "secretName": ca_sn } }));
+                mounts.push(
+                    json!({ "name": "kafka-tls", "mountPath": "/etc/sr/kafka-tls", "readOnly": true }),
+                );
+            }
+        }
+    }
+
+    (a, volumes, mounts, extra_env)
 }
 
 /// Patch status with a single rolled-up `Ready` condition + a `KafkaReady`
