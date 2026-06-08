@@ -337,6 +337,7 @@ async fn unclean_recovery_elects_longest_log_replica() {
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
+        partition_epoch: 0,
     });
     h1.submit_metadata_record_for_test(forged)
         .await

@@ -469,6 +469,7 @@ pub async fn ensure_internal_topics(
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }));
         }
 
@@ -532,6 +533,7 @@ mod tests {
                     adding_replicas: vec![],
                     removing_replicas: vec![],
                     directories: vec![],
+                    partition_epoch: 0,
                 }));
             }
         }

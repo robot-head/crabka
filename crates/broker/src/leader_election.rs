@@ -83,6 +83,7 @@ pub(crate) async fn compute_failover_changes(
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
                     directories: pr.directories.clone(),
+                    partition_epoch: pr.partition_epoch + 1,
                 }));
             } else {
                 // ISR is empty after dropping the dead broker. How we
@@ -130,6 +131,7 @@ pub(crate) async fn compute_failover_changes(
                                 adding_replicas: pr.adding_replicas.clone(),
                                 removing_replicas: pr.removing_replicas.clone(),
                                 directories: pr.directories.clone(),
+                                partition_epoch: pr.partition_epoch + 1,
                             }));
                         } else {
                             warn!(
@@ -157,6 +159,7 @@ pub(crate) async fn compute_failover_changes(
                 adding_replicas: pr.adding_replicas.clone(),
                 removing_replicas: pr.removing_replicas.clone(),
                 directories: pr.directories.clone(),
+                partition_epoch: pr.partition_epoch + 1,
             }));
         }
     }
@@ -179,6 +182,7 @@ pub(crate) async fn compute_failover_changes(
 ///
 /// Pure; idempotent (after the change `broker` is neither leader nor in ISR,
 /// so a repeat yields an empty plan).
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn compute_offline_dir_failover_changes(
     image: &MetadataImage,
     broker: NodeId,
@@ -218,6 +222,7 @@ pub(crate) async fn compute_offline_dir_failover_changes(
                     adding_replicas: pr.adding_replicas.clone(),
                     removing_replicas: pr.removing_replicas.clone(),
                     directories: pr.directories.clone(),
+                    partition_epoch: pr.partition_epoch + 1,
                 }));
             } else {
                 // ISR is empty after dropping the broker. Apply the same
@@ -251,6 +256,7 @@ pub(crate) async fn compute_offline_dir_failover_changes(
                                 adding_replicas: pr.adding_replicas.clone(),
                                 removing_replicas: pr.removing_replicas.clone(),
                                 directories: pr.directories.clone(),
+                                partition_epoch: pr.partition_epoch + 1,
                             }));
                         } else {
                             warn!(
@@ -278,6 +284,7 @@ pub(crate) async fn compute_offline_dir_failover_changes(
                 adding_replicas: pr.adding_replicas.clone(),
                 removing_replicas: pr.removing_replicas.clone(),
                 directories: pr.directories.clone(),
+                partition_epoch: pr.partition_epoch + 1,
             }));
         }
     }
@@ -419,6 +426,7 @@ pub(crate) async fn select_replacement_leader_for_shutdown(
         adding_replicas: pr.adding_replicas.clone(),
         removing_replicas: pr.removing_replicas.clone(),
         directories: pr.directories.clone(),
+        partition_epoch: pr.partition_epoch + 1,
     })
 }
 
@@ -462,6 +470,7 @@ pub(crate) async fn select_new_leader_for_partition(
                 adding_replicas: pr.adding_replicas.clone(),
                 removing_replicas: pr.removing_replicas.clone(),
                 directories: pr.directories.clone(),
+                partition_epoch: pr.partition_epoch + 1,
             })
         }
         ElectionType::Unclean => {
@@ -485,6 +494,7 @@ pub(crate) async fn select_new_leader_for_partition(
                         adding_replicas: pr.adding_replicas.clone(),
                         removing_replicas: pr.removing_replicas.clone(),
                         directories: pr.directories.clone(),
+                        partition_epoch: pr.partition_epoch + 1,
                     });
                 }
             }
@@ -532,6 +542,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
         img
     }
@@ -554,6 +565,7 @@ mod tests {
         assert!(new_pr.leader == 1);
         assert!(new_pr.isr == vec![1, 2, 3]);
         assert!(new_pr.leader_epoch == 6);
+        assert!(new_pr.partition_epoch == 1);
     }
 
     #[tokio::test]
@@ -597,6 +609,7 @@ mod tests {
         assert!(new_pr.leader == 2);
         assert!(new_pr.isr == vec![2]);
         assert!(new_pr.leader_epoch == 6);
+        assert!(new_pr.partition_epoch == 1);
     }
 
     #[tokio::test]
@@ -632,6 +645,7 @@ mod tests {
         // ISR untouched — shutting-down broker stays in ISR until dead.
         assert!(new_pr.isr == vec![1, 2, 3]);
         assert!(new_pr.leader_epoch == 6);
+        assert!(new_pr.partition_epoch == 1);
     }
 
     #[tokio::test]
@@ -968,6 +982,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: dirs.to_vec(),
+            partition_epoch: 0,
         }));
         img
     }

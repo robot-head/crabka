@@ -468,6 +468,7 @@ async fn unclean_election_via_wire_picks_alive_replica() {
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
+        partition_epoch: 0,
     });
     h0.submit_metadata_record_for_test(forged)
         .await
@@ -570,6 +571,7 @@ async fn wait_partition_record_known(
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             };
         }
         assert!(
