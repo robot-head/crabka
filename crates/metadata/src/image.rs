@@ -991,6 +991,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 1,
                 broker_epoch: 0,
+                incarnation_id: Uuid::nil(),
                 host: "h1".into(),
                 port: 9092,
                 rack: Some("r1".into()),
@@ -1006,6 +1007,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 2,
                 broker_epoch: 0,
+                incarnation_id: Uuid::nil(),
                 host: "h2".into(),
                 port: 9092,
                 rack: None,
@@ -1057,6 +1059,7 @@ mod tests {
             adding_replicas: vec![2],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "orders".into(),
@@ -1068,6 +1071,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![1],
             directories: vec![],
+            partition_epoch: 0,
         }));
         image.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "doomed".into(),
@@ -1079,6 +1083,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
 
         // Topic config.
@@ -1358,6 +1363,7 @@ mod tests {
             adding_replicas: vec![3],
             removing_replicas: vec![],
             directories: vec![uuid::Uuid::nil(), uuid::Uuid::nil(), uuid::Uuid::nil()],
+            partition_epoch: 0,
         }));
         let dir = uuid::Uuid::from_u128(0xABCD);
         m.apply(&MetadataRecord::V1PartitionDirAssignment(
@@ -1391,6 +1397,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
         m.apply(&MetadataRecord::V1Partition(PartitionRecord {
             topic: "t".into(),
@@ -1402,6 +1409,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
         assert!(m.partitions_of("t").count() == 2);
         m.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
@@ -1435,6 +1443,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }));
         }
     }
@@ -1494,6 +1503,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         });
         let err = m.validate(&p).unwrap_err();
         assert!(matches!(err, MetadataError::UnknownTopic(_)));
@@ -1505,6 +1515,7 @@ mod tests {
         let b = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 1,
             broker_epoch: 0,
+            incarnation_id: Uuid::nil(),
             host: "h".into(),
             port: 9092,
             rack: None,
@@ -1810,6 +1821,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }));
         }
         m.apply(&topic("u", 1));
@@ -1823,6 +1835,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
         // 3 partitions for "t" + 1 for "u" = 4, one walk, no per-topic filter.
         assert!(m.all_partitions().count() == 4);
@@ -1851,6 +1864,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
         assert!(img.reassignments_in_flight().count() == 0);
     }
@@ -1874,6 +1888,7 @@ mod tests {
             adding_replicas: vec![4],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
         assert!(rows.len() == 1);
@@ -1899,6 +1914,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![3],
             directories: vec![],
+            partition_epoch: 0,
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
         assert!(rows.len() == 1);
@@ -1925,6 +1941,7 @@ mod tests {
                 adding_replicas: vec![4],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }));
         }
         assert!(img.reassignments_in_flight().count() == 2);
@@ -2356,6 +2373,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 5,
                 broker_epoch: 99,
+                incarnation_id: Uuid::nil(),
                 host: "h".into(),
                 port: 9092,
                 rack: None,

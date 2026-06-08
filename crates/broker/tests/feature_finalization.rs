@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 //! KIP-584 `UpdateFeatures` (api_key 57) write path. Finalizing

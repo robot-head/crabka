@@ -208,6 +208,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }));
         }
 
@@ -286,6 +287,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 1,
                 broker_epoch: 0,
+                incarnation_id: uuid::Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10),
                 host: "broker-1".into(),
                 port: 9092,
                 rack: Some("rack-a".into()),
@@ -316,6 +318,7 @@ mod tests {
                 adding_replicas: vec![],
                 removing_replicas: vec![],
                 directories: vec![],
+                partition_epoch: 0,
             }));
         }
         // Config (apiKey 4), topic scope.
@@ -371,6 +374,21 @@ mod tests {
         assert!(
             !text.contains("isvalid: false") && !text.to_lowercase().contains("could not"),
             "dump-log reported an invalid record: {text}"
+        );
+        // Assert all RegisterBroker records have a non-nil incarnationId.
+        // kafka-dump-log output contains lines like:
+        //   RegisterBrokerRecord(brokerId=1, incarnationId=00000000-0000-0000-0000-000000000000, ...)
+        // where a nil UUID is all-zeros.
+        assert!(
+            !text.contains("incarnationId=00000000-0000-0000-0000-000000000000"),
+            "all RegisterBroker records must have a non-nil incarnationId; found nil in dump output"
+        );
+        // Assert all Partition records have partitionEpoch >= 0 (not -1, the schema default).
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.contains("PartitionRecord") && l.contains("partitionEpoch=-1")),
+            "all PartitionRecord entries must have partitionEpoch >= 0 after Slice 6; found -1 in dump"
         );
     }
 

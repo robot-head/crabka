@@ -7,7 +7,6 @@
 //! exercises handler logic at the same level a real Connect call
 //! would, but without any HTTP serialization. HTTP smoke is T15.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 use assert2::assert;

@@ -39,8 +39,6 @@
 //! Gated to non-Windows to match the multi-broker test convention (openraft
 //! `debug_assert!` races on the hosted Windows scheduler are unrelated).
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
@@ -339,6 +337,7 @@ async fn unclean_recovery_elects_longest_log_replica() {
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
+        partition_epoch: 0,
     });
     h1.submit_metadata_record_for_test(forged)
         .await

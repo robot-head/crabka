@@ -51,7 +51,7 @@
 //! deliberately do NOT use `--network host` (it silently fails to share the
 //! host loopback on hosted ubuntu runners — see the `jvm_acceptance.rs`
 //! module docs).
-#![cfg(not(target_os = "windows"))]
+
 #![allow(clippy::too_many_lines)]
 // rustc 1.95 clippy ICEs on pedantic lints for files that build wire frames
 // with `.expect()` inside Result-returning helpers — same upstream
@@ -754,6 +754,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
+        partition_epoch: 0,
     });
     c1.submit_metadata_record_for_test(forged)
         .await
@@ -785,6 +786,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
         adding_replicas: vec![],
         removing_replicas: vec![],
         directories: vec![],
+        partition_epoch: 0,
     });
     c1.submit_metadata_record_for_test(restore)
         .await

@@ -847,6 +847,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 2,
                 broker_epoch: 0,
+                incarnation_id: uuid::Uuid::nil(),
                 host: "127.0.0.1".to_string(),
                 port: 9,
                 rack: None,
@@ -888,6 +889,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 2,
                 broker_epoch: 0,
+                incarnation_id: uuid::Uuid::nil(),
                 host: "127.0.0.1".to_string(),
                 port: 9,
                 rack: None,

@@ -4,7 +4,10 @@ use axum::extract::{Path, Query, State};
 use axum::response::Response;
 
 use crate::error::SrError;
-use crate::rest::{AppState, DeletedQ, response::{ok_json, ok_raw}};
+use crate::rest::{
+    AppState, DeletedQ,
+    response::{ok_json, ok_raw},
+};
 
 /// GET /schemas/ids/{id}
 pub async fn get_by_id(

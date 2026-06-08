@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 //! End-to-end integration tests for KIP-932 Slice D: share-group admin offset

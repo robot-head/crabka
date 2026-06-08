@@ -43,10 +43,7 @@ pub fn router(state: AppState) -> Router {
             "/schemas/ids/{id}/versions",
             get(schemas::get_by_id_versions),
         )
-        .route(
-            "/schemas/ids/{id}/schema",
-            get(schemas::get_by_id_schema),
-        )
+        .route("/schemas/ids/{id}/schema", get(schemas::get_by_id_schema))
         .route(
             "/schemas/ids/{id}/subjects",
             get(schemas::get_by_id_subjects),

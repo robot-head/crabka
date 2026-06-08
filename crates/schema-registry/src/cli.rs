@@ -14,7 +14,8 @@ use std::sync::Arc;
 use crabka_client_core::ClientSecurity;
 use crabka_client_core::security::{SaslCredentials, TlsConnectorConfig};
 use crabka_security::{
-    ClientAuthMode, ListenerProtocol, OAuthBearerValidator, SaslMechanism, TlsConfig,
+    ClientAuthMode, Jwks, JwksHandle, ListenerProtocol, OAuthBearerValidator, SaslMechanism,
+    SignedJwsValidator, TlsConfig,
 };
 
 use crate::config::{AuthzConfig, BasicAuthConfig, BearerAuthConfig, SecurityConfig};
@@ -34,10 +35,17 @@ pub struct SecurityCliInput {
     pub basic_auth_file: Option<PathBuf>,
     /// Inline Basic credentials as `user:cred` (repeatable).
     pub basic_users: Vec<String>,
-    /// Bearer-token mode: `off` | `unsecured`.
+    /// Bearer-token mode: `off` | `unsecured` | `jwks`.
     pub bearer: String,
     /// JWT claim whose value becomes the principal name (Bearer mode).
     pub bearer_principal_claim: String,
+    // ── JWKS fields (bearer = "jwks" only) ─────────────────────────────────
+    pub jwks_endpoint_uri: Option<String>,
+    pub jwks_valid_issuer: Option<String>,
+    pub jwks_expected_audience: Option<String>,
+    pub jwks_ca: Option<std::path::PathBuf>,
+    pub jwks_principal_claim: Option<String>,
+    pub jwks_refresh_ms: Option<u64>,
     /// Server cert chain (PEM); enables HTTPS with `tls_key`.
     pub tls_cert: Option<PathBuf>,
     /// Server private key (PEM).
@@ -66,6 +74,37 @@ pub struct SecurityCliInput {
     pub kafka_tls_server_name: Option<String>,
 }
 
+/// JWKS key-set handle plus the metadata the binary needs to drive the
+/// periodic refresh task. Returned by [`build_security`] when
+/// `--bearer=jwks` is configured; the binary spawns `run_jwks_refresher`.
+#[derive(Debug)]
+pub struct JwksHandleForRefresh {
+    /// The live key-set cell shared with the `SignedJwsValidator`.
+    pub handle: JwksHandle,
+    /// URL of the JWKS endpoint (`--bearer-jwks-endpoint-uri`).
+    pub endpoint_uri: String,
+    /// Optional CA bundle trusted for the JWKS HTTPS connection.
+    pub ca_path: Option<std::path::PathBuf>,
+    /// Refresh interval in milliseconds. Default 60 000.
+    pub refresh_ms: u64,
+}
+
+/// Return value of [`build_security`]: the assembled [`SecurityConfig`] plus,
+/// when `--bearer=jwks` is set, a [`JwksHandleForRefresh`] the binary must
+/// hand to `run_jwks_refresher`.
+#[derive(Debug)]
+pub struct SecurityOutput {
+    pub config: SecurityConfig,
+    pub jwks_handle: Option<JwksHandleForRefresh>,
+}
+
+impl std::ops::Deref for SecurityOutput {
+    type Target = SecurityConfig;
+    fn deref(&self) -> &SecurityConfig {
+        &self.config
+    }
+}
+
 /// Assemble [`SecurityConfig`] from [`SecurityCliInput`]. The all-defaults case
 /// (no TLS, no auth, no authz, plaintext broker client) yields the fully-open
 /// [`SecurityConfig::default`] behaviour.
@@ -76,15 +115,19 @@ pub struct SecurityCliInput {
 /// `kafka_security_protocol`/`kafka_sasl_mechanism` value, a `tls_cert` set
 /// without `tls_key` (or vice versa), or a `SASL_*` protocol missing its SASL
 /// username/password.
-pub fn build_security(input: &SecurityCliInput) -> anyhow::Result<SecurityConfig> {
-    Ok(SecurityConfig {
-        require_auth: input.require_auth,
-        realm: input.realm.clone(),
-        basic: build_basic(input),
-        bearer: build_bearer(input)?,
-        tls: build_tls(input)?,
-        authz: build_authz(input),
-        client: build_client_security(input)?,
+pub fn build_security(input: &SecurityCliInput) -> anyhow::Result<SecurityOutput> {
+    let (bearer, jwks_handle) = build_bearer(input)?;
+    Ok(SecurityOutput {
+        config: SecurityConfig {
+            require_auth: input.require_auth,
+            realm: input.realm.clone(),
+            basic: build_basic(input),
+            bearer,
+            tls: build_tls(input)?,
+            authz: build_authz(input),
+            client: build_client_security(input)?,
+        },
+        jwks_handle,
     })
 }
 
@@ -110,23 +153,66 @@ fn build_basic(input: &SecurityCliInput) -> Option<BasicAuthConfig> {
 }
 
 /// Build [`BearerAuthConfig`] from `bearer`. `off` ⇒ `None`; `unsecured` ⇒ a
-/// dev `UnsecuredJwsValidator` (mirrors the gateway). Signed/`JWKS` validators
-/// are supported by the config struct but not yet CLI-exposed.
-fn build_bearer(input: &SecurityCliInput) -> anyhow::Result<Option<BearerAuthConfig>> {
+/// dev `UnsecuredJwsValidator` (mirrors the gateway); `jwks` ⇒ a
+/// `SignedJwsValidator` backed by a refreshable [`JwksHandle`].
+fn build_bearer(
+    input: &SecurityCliInput,
+) -> anyhow::Result<(Option<BearerAuthConfig>, Option<JwksHandleForRefresh>)> {
     match input.bearer.as_str() {
-        "off" => Ok(None),
+        "off" => Ok((None, None)),
         "unsecured" => {
             let validator =
                 OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
                     principal_claim_name: input.bearer_principal_claim.clone(),
                     ..Default::default()
                 });
-            Ok(Some(BearerAuthConfig {
-                validator: Arc::new(validator),
-            }))
+            Ok((
+                Some(BearerAuthConfig {
+                    validator: Arc::new(validator),
+                }),
+                None,
+            ))
         }
-        other => anyhow::bail!("invalid --bearer: {other} (want off|unsecured)"),
+        "jwks" => {
+            let (cfg, refresh) = build_bearer_jwks(input)?;
+            Ok((Some(cfg), Some(refresh)))
+        }
+        other => anyhow::bail!("invalid --bearer: {other} (want off|unsecured|jwks)"),
     }
+}
+
+fn build_bearer_jwks(
+    input: &SecurityCliInput,
+) -> anyhow::Result<(BearerAuthConfig, JwksHandleForRefresh)> {
+    let endpoint_uri = input
+        .jwks_endpoint_uri
+        .as_ref()
+        .ok_or_else(|| {
+            anyhow::anyhow!("--bearer-jwks-endpoint-uri is required when --bearer=jwks")
+        })?
+        .clone();
+
+    let handle = JwksHandle::new(Jwks::empty());
+    let mut validator = SignedJwsValidator::new(handle.clone());
+    validator.principal_claim_name = input
+        .jwks_principal_claim
+        .clone()
+        .unwrap_or_else(|| input.bearer_principal_claim.clone());
+    validator.valid_issuer.clone_from(&input.jwks_valid_issuer);
+    validator
+        .expected_audience
+        .clone_from(&input.jwks_expected_audience);
+
+    let cfg = BearerAuthConfig {
+        validator: Arc::new(OAuthBearerValidator::Signed(validator)),
+    };
+    let refresh = JwksHandleForRefresh {
+        handle,
+        endpoint_uri,
+        ca_path: input.jwks_ca.clone(),
+        refresh_ms: input.jwks_refresh_ms.unwrap_or(60_000),
+    };
+    Ok((cfg, refresh))
 }
 
 /// Build server [`TlsConfig`] from the `tls_*` inputs. Requires both cert+key
@@ -258,11 +344,17 @@ mod tests {
         }
     }
 
+    /// Unwrap the [`SecurityConfig`] out of a [`SecurityOutput`] for the
+    /// existing tests that only care about the assembled config.
+    fn sec(input: &SecurityCliInput) -> SecurityConfig {
+        build_security(input).unwrap().config
+    }
+
     // ---- defaults --------------------------------------------------------
 
     #[test]
     fn default_input_is_fully_open() {
-        let s = build_security(&input()).unwrap();
+        let s = sec(&input());
         assert!(!s.require_auth);
         assert!(s.realm.is_empty());
         assert!(s.basic.is_none());
@@ -274,12 +366,11 @@ mod tests {
 
     #[test]
     fn require_auth_and_realm_passthrough() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             require_auth: true,
             realm: "MyRealm".to_string(),
             ..input()
-        })
-        .unwrap();
+        });
         assert!(s.require_auth);
         assert_eq!(s.realm, "MyRealm");
     }
@@ -288,11 +379,10 @@ mod tests {
 
     #[test]
     fn basic_inline_users() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             basic_users: vec!["alice:pw".to_string(), "bob:bpw".to_string()],
             ..input()
-        })
-        .unwrap();
+        });
         let b = s.basic.expect("Basic enabled by inline users");
         assert_eq!(b.users.get("alice").map(String::as_str), Some("pw"));
         assert_eq!(b.users.get("bob").map(String::as_str), Some("bpw"));
@@ -302,11 +392,10 @@ mod tests {
     #[test]
     fn basic_malformed_inline_user_is_skipped() {
         // Entry with no ':' is warned + dropped; the valid one still loads.
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             basic_users: vec!["no-colon".to_string(), "alice:pw".to_string()],
             ..input()
-        })
-        .unwrap();
+        });
         let b = s.basic.expect("Basic still enabled");
         assert_eq!(b.users.len(), 1);
         assert_eq!(b.users.get("alice").map(String::as_str), Some("pw"));
@@ -315,11 +404,10 @@ mod tests {
     #[test]
     fn basic_file_only() {
         let path = PathBuf::from("/etc/sr/htpasswd");
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             basic_auth_file: Some(path.clone()),
             ..input()
-        })
-        .unwrap();
+        });
         let b = s.basic.expect("Basic enabled by file");
         assert!(b.users.is_empty(), "file is read at load(), not here");
         assert_eq!(b.file, Some(path));
@@ -328,12 +416,11 @@ mod tests {
     #[test]
     fn basic_file_and_inline_both_set() {
         let path = PathBuf::from("/etc/sr/htpasswd");
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             basic_auth_file: Some(path.clone()),
             basic_users: vec!["alice:pw".to_string()],
             ..input()
-        })
-        .unwrap();
+        });
         let b = s.basic.expect("Basic enabled");
         assert_eq!(b.file, Some(path));
         assert_eq!(b.users.get("alice").map(String::as_str), Some("pw"));
@@ -343,22 +430,20 @@ mod tests {
 
     #[test]
     fn bearer_off_is_none() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             bearer: "off".to_string(),
             ..input()
-        })
-        .unwrap();
+        });
         assert!(s.bearer.is_none());
     }
 
     #[test]
     fn bearer_unsecured_builds_validator_with_principal_claim() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             bearer: "unsecured".to_string(),
             bearer_principal_claim: "preferred_username".to_string(),
             ..input()
-        })
-        .unwrap();
+        });
         let b = s.bearer.expect("Bearer enabled");
         match &*b.validator {
             OAuthBearerValidator::Unsecured(v) => {
@@ -386,14 +471,13 @@ mod tests {
             ("optional", ClientAuthMode::Optional),
             ("required", ClientAuthMode::Required),
         ] {
-            let s = build_security(&SecurityCliInput {
+            let s = sec(&SecurityCliInput {
                 tls_cert: Some(PathBuf::from("/c.pem")),
                 tls_key: Some(PathBuf::from("/k.pem")),
                 tls_client_ca: Some(PathBuf::from("/ca.pem")),
                 tls_client_auth: mode.to_string(),
                 ..input()
-            })
-            .unwrap();
+            });
             let tls = s.tls.unwrap_or_else(|| panic!("TLS enabled for {mode}"));
             assert_eq!(tls.cert_chain_path, PathBuf::from("/c.pem"));
             assert_eq!(tls.private_key_path, PathBuf::from("/k.pem"));
@@ -438,13 +522,12 @@ mod tests {
 
     #[test]
     fn authz_enabled_builds_config() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             authz: true,
             super_users: vec!["admin".to_string(), "root".to_string()],
             acl_refresh_secs: 45,
             ..input()
-        })
-        .unwrap();
+        });
         let a = s.authz.expect("authz enabled");
         assert!(a.enabled);
         assert!(a.super_users.contains("admin"));
@@ -454,11 +537,10 @@ mod tests {
 
     #[test]
     fn authz_default_refresh_secs() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             authz: true,
             ..input()
-        })
-        .unwrap();
+        });
         let a = s.authz.expect("authz enabled");
         assert_eq!(a.acl_refresh, std::time::Duration::from_secs(30));
         assert!(a.super_users.is_empty());
@@ -468,34 +550,31 @@ mod tests {
 
     #[test]
     fn client_plaintext_is_none() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             kafka_security_protocol: "PLAINTEXT".to_string(),
             ..input()
-        })
-        .unwrap();
+        });
         assert!(s.client.is_none());
     }
 
     #[test]
     fn client_protocol_is_case_insensitive() {
         // lower-case is upcased before matching, like the binary.
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             kafka_security_protocol: "plaintext".to_string(),
             ..input()
-        })
-        .unwrap();
+        });
         assert!(s.client.is_none());
     }
 
     #[test]
     fn client_ssl_has_tls_no_sasl() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             kafka_security_protocol: "SSL".to_string(),
             kafka_tls_ca: Some(PathBuf::from("/broker-ca.pem")),
             kafka_tls_server_name: Some("broker.internal".to_string()),
             ..input()
-        })
-        .unwrap();
+        });
         let c = s.client.expect("SSL ⇒ Some(ClientSecurity)");
         assert_eq!(c.protocol, ListenerProtocol::Ssl);
         let tls = c.tls.expect("SSL requires TLS");
@@ -506,11 +585,10 @@ mod tests {
 
     #[test]
     fn client_ssl_default_server_name_is_localhost() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             kafka_security_protocol: "SSL".to_string(),
             ..input()
-        })
-        .unwrap();
+        });
         let tls = s.client.unwrap().tls.unwrap();
         assert_eq!(tls.server_name, "localhost");
         assert!(tls.trust_roots_pem.is_none());
@@ -518,14 +596,13 @@ mod tests {
 
     #[test]
     fn client_sasl_plaintext_has_sasl_no_tls() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             kafka_security_protocol: "SASL_PLAINTEXT".to_string(),
             kafka_sasl_mechanism: "PLAIN".to_string(),
             kafka_sasl_username: Some("u".to_string()),
             kafka_sasl_password: Some("p".to_string()),
             ..input()
-        })
-        .unwrap();
+        });
         let c = s.client.expect("SASL_PLAINTEXT ⇒ Some");
         assert_eq!(c.protocol, ListenerProtocol::SaslPlaintext);
         assert!(c.tls.is_none(), "SASL_PLAINTEXT carries no TLS");
@@ -540,14 +617,13 @@ mod tests {
 
     #[test]
     fn client_sasl_ssl_has_both() {
-        let s = build_security(&SecurityCliInput {
+        let s = sec(&SecurityCliInput {
             kafka_security_protocol: "SASL_SSL".to_string(),
             kafka_sasl_mechanism: "SCRAM-SHA-256".to_string(),
             kafka_sasl_username: Some("u".to_string()),
             kafka_sasl_password: Some("p".to_string()),
             ..input()
-        })
-        .unwrap();
+        });
         let c = s.client.expect("SASL_SSL ⇒ Some");
         assert_eq!(c.protocol, ListenerProtocol::SaslSsl);
         assert!(c.tls.is_some(), "SASL_SSL requires TLS");
@@ -560,14 +636,13 @@ mod tests {
             ("SCRAM-SHA-256", SaslMechanism::ScramSha256),
             ("SCRAM-SHA-512", SaslMechanism::ScramSha512),
         ] {
-            let s = build_security(&SecurityCliInput {
+            let s = sec(&SecurityCliInput {
                 kafka_security_protocol: "SASL_PLAINTEXT".to_string(),
                 kafka_sasl_mechanism: mech.to_string(),
                 kafka_sasl_username: Some("u".to_string()),
                 kafka_sasl_password: Some("p".to_string()),
                 ..input()
-            })
-            .unwrap();
+            });
             match s.client.unwrap().sasl.unwrap() {
                 SaslCredentials::Scram { mechanism, .. } => {
                     assert_eq!(mechanism, want, "mechanism for {mech}");
@@ -618,5 +693,70 @@ mod tests {
             ..input()
         };
         assert!(build_security(&bad).is_err());
+    }
+
+    // ---- JWKS bearer --------------------------------------------------------
+
+    #[test]
+    fn bearer_jwks_off_variant_returns_none_handle() {
+        let out = build_security(&input()).unwrap();
+        assert!(out.jwks_handle.is_none());
+    }
+
+    #[test]
+    fn bearer_jwks_builds_signed_validator() {
+        let i = SecurityCliInput {
+            bearer: "jwks".into(),
+            jwks_endpoint_uri: Some("https://idp.example.com/.well-known/jwks.json".into()),
+            ..input()
+        };
+        let out = build_security(&i).unwrap();
+        assert!(out.bearer.is_some());
+        assert!(out.jwks_handle.is_some());
+        let h = out.jwks_handle.unwrap();
+        assert_eq!(
+            h.endpoint_uri,
+            "https://idp.example.com/.well-known/jwks.json"
+        );
+        assert_eq!(h.refresh_ms, 60_000);
+    }
+
+    #[test]
+    fn bearer_jwks_missing_endpoint_errors() {
+        let i = SecurityCliInput {
+            bearer: "jwks".into(),
+            jwks_endpoint_uri: None,
+            ..input()
+        };
+        let err = build_security(&i).unwrap_err().to_string();
+        assert!(err.contains("--bearer-jwks-endpoint-uri"), "got: {err}");
+    }
+
+    #[test]
+    fn bearer_jwks_sets_issuer_and_audience() {
+        let i = SecurityCliInput {
+            bearer: "jwks".into(),
+            jwks_endpoint_uri: Some("https://idp/jwks".into()),
+            jwks_valid_issuer: Some("https://idp".into()),
+            jwks_expected_audience: Some("kafka-sr".into()),
+            jwks_principal_claim: Some("email".into()),
+            ..input()
+        };
+        let out = build_security(&i).unwrap();
+        assert!(out.bearer.is_some());
+        let h = out.jwks_handle.unwrap();
+        assert_eq!(h.endpoint_uri, "https://idp/jwks");
+    }
+
+    #[test]
+    fn bearer_jwks_custom_refresh_ms() {
+        let i = SecurityCliInput {
+            bearer: "jwks".into(),
+            jwks_endpoint_uri: Some("https://idp/jwks".into()),
+            jwks_refresh_ms: Some(120_000),
+            ..input()
+        };
+        let out = build_security(&i).unwrap();
+        assert_eq!(out.jwks_handle.unwrap().refresh_ms, 120_000);
     }
 }

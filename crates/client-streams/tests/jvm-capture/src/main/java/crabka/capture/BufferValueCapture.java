@@ -42,11 +42,11 @@ public final class BufferValueCapture {
             new ProcessorRecordContext(10L, 0L, 0, "in", new RecordHeaders());
         dump(out, "wc_first", serialize, ctor.newInstance(null, null, count1, ctx10), 10L);
 
-        // wc_update: the same window updates 1->2 — prior=count1, old=count1, new=count2
+        // wc_change: the same window changes 1->2 — prior=count1, old=count1, new=count2
         // (exercises the "old == prior" sentinel).
         ProcessorRecordContext ctx12 =
             new ProcessorRecordContext(12L, 0L, 0, "in", new RecordHeaders());
-        dump(out, "wc_update", serialize, ctor.newInstance(count1, count1, count2, ctx12), 12L);
+        dump(out, "wc_change", serialize, ctor.newInstance(count1, count1, count2, ctx12), 12L);
 
         // tombstone: a deletion — new=null.
         ProcessorRecordContext ctx20 =

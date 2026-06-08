@@ -15,6 +15,10 @@ pub struct TopicRecord {
     pub replication_factor: i16,
 }
 
+fn default_partition_epoch() -> i32 {
+    -1
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PartitionRecord {
     pub topic: String,
@@ -38,6 +42,12 @@ pub struct PartitionRecord {
     /// broker's failed-dir UUID to the partitions it must fail over by
     /// matching this against the broker's replica slot.
     pub directories: Vec<Uuid>,
+    /// KIP-631: per-partition state epoch. Increments on every state change
+    /// (leader election, ISR change, reassignment). Set to 0 on creation.
+    /// Default of -1 matches the KIP-631 schema default for compatibility
+    /// with records written before this field was added.
+    #[serde(default = "default_partition_epoch")]
+    pub partition_epoch: i32,
 }
 
 /// KIP-858 directory-assignment delta. A broker reports which log-dir UUID
@@ -80,6 +90,12 @@ pub struct BrokerRegistrationRecord {
     /// leader stamps it. Used to fence stale replicas from the ISR on
     /// `AlterPartition`.
     pub broker_epoch: i64,
+    /// KIP-631: UUID that identifies this specific process invocation of the
+    /// broker. Generated once at first boot and persisted in
+    /// `{log_dir}/incarnation_id`. A JVM controller uses it to detect
+    /// broker restarts and fence stale replica memberships.
+    #[serde(default)]
+    pub incarnation_id: uuid::Uuid,
     /// Legacy single-listener host, used as inter-broker default and by
     /// pre-v9 `Metadata` responses. v9+ projects [`Self::endpoints`].
     pub host: String,
@@ -323,6 +339,7 @@ mod tests {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::nil()],
+            partition_epoch: 0,
         });
         assert!(round_trip(&r) == r);
     }
@@ -343,6 +360,7 @@ mod tests {
         let r = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 7,
             broker_epoch: 0,
+            incarnation_id: Uuid::from_u128(0xdeadbeef_cafe_babe_0123_456789abcdef),
             host: "192.168.1.10".into(),
             port: 9092,
             rack: Some("us-east-1a".into()),
@@ -356,6 +374,7 @@ mod tests {
         let r = MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
             node_id: 1,
             broker_epoch: 0,
+            incarnation_id: Uuid::from_u128(0xfeedface_0000_0000_0000_000000000001),
             host: "h".into(),
             port: 9092,
             rack: None,

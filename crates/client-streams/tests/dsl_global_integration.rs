@@ -6,7 +6,6 @@
 //! override) *before* tasks process, and a `KStream::join_global` then looks up
 //! global values keyed off the stream record's value — including a key that lives
 //! on a non-zero partition of the global topic.
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 

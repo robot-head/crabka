@@ -16,8 +16,6 @@
 //! slices 10b/12b (openraft `debug_assert!` races on the hosted
 //! Windows task scheduler are unrelated to the protocol under test).
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::io;
 use std::net::SocketAddr;
@@ -157,6 +155,7 @@ async fn force_leadership_for_test(
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         });
         leader_handle
             .submit_metadata_record_for_test(record)

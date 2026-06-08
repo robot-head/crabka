@@ -1,5 +1,4 @@
-﻿#![cfg(not(target_os = "windows"))]
-//! Execution-level tests for the KStream/KTable DSL: build a counting app via
+﻿//! Execution-level tests for the KStream/KTable DSL: build a counting app via
 //! `StreamsBuilder`, run it through the broker-free `TopologyTestDriver`, and
 //! assert the forwarded running count + materialized store contents.
 //!

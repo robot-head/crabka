@@ -296,7 +296,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::topology::Topology;
+    use crate::topology::{NodeHandle, Topology};
 
     // ---------------------------------------------------------------------------
     // Fake transport
@@ -351,10 +351,9 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn built() -> Arc<BuiltTopology> {
-        use crate::processor::serde::{BytesSerde, Consumed, Produced};
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(BytesSerde, BytesSerde));
-        t.add_sink("snk", "out", [&src], Produced::with(BytesSerde, BytesSerde));
+        let src: NodeHandle<bytes::Bytes, bytes::Bytes> = t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", [&src]);
         Arc::new(t.build("app").unwrap())
     }
 
@@ -582,10 +581,9 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     fn built_plain() -> BuiltTopology {
-        use crate::processor::serde::{BytesSerde, Consumed, Produced};
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(BytesSerde, BytesSerde));
-        t.add_sink("snk", "out", [&src], Produced::with(BytesSerde, BytesSerde));
+        let src: NodeHandle<bytes::Bytes, bytes::Bytes> = t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", [&src]);
         t.build("app").unwrap()
     }
 

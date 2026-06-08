@@ -137,6 +137,12 @@ pub struct BrokerConfig {
     /// `meta.properties.json` at boot. Identifies which voter this node *is*.
     pub directory_id: uuid::Uuid,
 
+    /// UUID identifying this specific broker process invocation. Persisted in
+    /// `{log_dir}/incarnation_id` and reloaded on restart. Populated before
+    /// self-registration by [`crate::incarnation::load_or_generate`].
+    /// Tests generate a random UUID per call via [`Self::for_tests`].
+    pub incarnation_id: uuid::Uuid,
+
     /// KIP-853: when true, an observer issues `AddVoter` for itself once it
     /// has caught up to the leader, joining the quorum without operator
     /// action. Maps to Kafka's `controller.quorum.auto.join.enable`.
@@ -575,6 +581,7 @@ impl BrokerConfig {
             controller_quorum_voters: vec![(1, controller_addr)],
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
+            incarnation_id: uuid::Uuid::new_v4(),
             auto_join: false,
             observer_lag_bound: 100,
             heartbeat_interval_ms: 200,
@@ -846,6 +853,7 @@ impl Default for BrokerConfig {
             controller_quorum_voters: vec![(1, controller_addr)],
             bootstrap_servers: vec![],
             directory_id: uuid::Uuid::from_u128(1),
+            incarnation_id: uuid::Uuid::nil(),
             auto_join: false,
             observer_lag_bound: 100,
             heartbeat_interval_ms: 3_000,

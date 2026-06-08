@@ -3,12 +3,7 @@
 //! `CreateTopics` forwarded through it lands on the controller and
 //! propagates back to the observer's image, and the observer never joins
 //! the voter set.
-//!
-//! Gated `#[cfg(not(target_os = "windows"))]` for the same openraft
-//! debug-assert race that gates `quorum.rs`. Deadlines are 2 minutes to
-//! match the cold-start budget of the other multi-node tests.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::manual_assert)]
 
 use assert2::assert;

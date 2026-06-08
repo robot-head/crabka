@@ -2,7 +2,6 @@
 // (an upstream bug in clippy's body-analysis pass). Disable pedantic
 // locally; the rest of the workspace still enforces the full pedantic gate.
 #![allow(clippy::pedantic)]
-#![cfg(not(target_os = "windows"))]
 
 //! Byte-exactness pin for `DescribeGroups` (`api_key=15`) on a CLASSIC
 //! consumer group: the response must carry, per member, the JoinGroup

@@ -5,14 +5,13 @@
 //! the public `KafkaStreams::key_value_store` interactive-query interface — the
 //! same path an out-of-topology caller uses. Also exercises the error surfaces
 //! (`StoreNotFound`, `WrongStoreKind`).
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_client_streams::{
-    Consumed, I64Serde, IqError, KafkaStreams, Processor, ProcessorContext, Produced, Record,
+    I64Serde, IqError, KafkaStreams, NodeHandle, Processor, ProcessorContext, Record,
     StreamsClientError, StringSerde, Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -92,19 +91,10 @@ impl Processor<String, String, String, i64> for Counter {
 
 fn counting_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let mut topo = Topology::new();
-    let src = topo.add_source(
-        "src",
-        ["stream-in"],
-        Consumed::with(StringSerde, StringSerde),
-    );
+    let src: NodeHandle<String, String> = topo.add_source("src", ["stream-in"]);
     let c = topo.add_processor("c", || Counter, [&src]);
     topo.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
-    topo.add_sink(
-        "out",
-        "stream-out",
-        [&c],
-        Produced::with(StringSerde, I64Serde),
-    );
+    topo.add_sink("out", "stream-out", [&c]);
     topo.build(app_id).unwrap()
 }
 
