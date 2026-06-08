@@ -2,23 +2,14 @@
 //! Processor-API topology must match the JVM 4.x fixture.
 #![cfg(not(target_os = "windows"))]
 
-use crabka_client_streams::{BytesSerde, Consumed, Produced, Topology};
+use crabka_client_streams::{NodeHandle, Topology};
 
 #[test]
 fn single_source_sink_matches_jvm_fixture() {
     // The Rust topology MUST mirror the Java PAPI app the fixture was captured from.
     let mut topo = Topology::new();
-    let src = topo.add_source(
-        "src",
-        ["streams-input"],
-        Consumed::with(BytesSerde, BytesSerde),
-    );
-    topo.add_sink(
-        "snk",
-        "streams-output",
-        [&src],
-        Produced::with(BytesSerde, BytesSerde),
-    );
+    let src: NodeHandle<bytes::Bytes, bytes::Bytes> = topo.add_source("src", ["streams-input"]);
+    topo.add_sink("snk", "streams-output", [&src]);
     let wire = topo.build("streams-app").unwrap().to_wire();
 
     // Assert the JVM-derived shape (mirrors single_source_sink.topology.json).

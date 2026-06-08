@@ -1,4 +1,4 @@
-﻿//! Kafka Streams-compatible client runtime for Crabka.
+//! Kafka Streams-compatible client runtime for Crabka.
 //!
 //! `crabka-client-streams` provides three layers that can be used independently:
 //!
@@ -20,12 +20,12 @@
 //!
 //! ```no_run
 //! use std::time::Duration;
-//! use crabka_client_streams::{StreamsEvent, StreamsMembership, StringSerde, Topology};
+//! use crabka_client_streams::{NodeHandle, StreamsEvent, StreamsMembership, Topology};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["input-topic"], (StringSerde, StringSerde));
-//! topo.add_sink("snk", "output-topic", [&src], (StringSerde, StringSerde));
+//! let src: NodeHandle<String, String> = topo.add_source("src", ["input-topic"]);
+//! topo.add_sink("snk", "output-topic", [&src]);
 //! let built = topo.build("my-application-id")?;
 //!
 //! let mut membership = StreamsMembership::builder()
@@ -54,7 +54,7 @@
 //!
 //! ```
 //! use async_trait::async_trait;
-//! use crabka_client_streams::{Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver};
+//! use crabka_client_streams::{NodeHandle, Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver};
 //!
 //! struct Upper;
 //! #[async_trait]
@@ -65,9 +65,9 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
+//! let src: NodeHandle<String, String> = topo.add_source("src", ["in"]);
 //! let up = topo.add_processor("up", || Upper, [&src]);
-//! topo.add_sink("out", "out", [&up], (StringSerde, StringSerde));
+//! topo.add_sink("out", "out", [&up]);
 //! let built = topo.build("my-app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
@@ -82,13 +82,13 @@
 //! **compile error** rather than a `build()`-time failure:
 //!
 //! ```compile_fail
-//! use crabka_client_streams::{I64Serde, StringSerde, Topology};
+//! use crabka_client_streams::{NodeHandle, Topology};
 //!
 //! let mut topo = Topology::new();
 //! // `src` produces Record<String, String>:
-//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
+//! let src: NodeHandle<String, String> = topo.add_source("src", ["in"]);
 //! // but this sink expects Record<String, i64> — won't compile:
-//! topo.add_sink("out", "out", [&src], (StringSerde, I64Serde));
+//! topo.add_sink::<String, i64>("out", "out", [&src]);
 //! ```
 //!
 //! ## State stores
@@ -100,7 +100,7 @@
 //! ```
 //! use async_trait::async_trait;
 //! use crabka_client_streams::{
-//!     I64Serde, Processor, ProcessorContext, Record, StringSerde, Topology,
+//!     I64Serde, Processor, ProcessorContext, NodeHandle, Record, StringSerde, Topology,
 //!     TopologyTestDriver,
 //! };
 //!
@@ -119,10 +119,10 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
+//! let src: NodeHandle<String, String> = topo.add_source("src", ["in"]);
 //! let c = topo.add_processor("c", || Counter, [&src]);
 //! topo.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
-//! topo.add_sink("out", "out", [&c], (StringSerde, I64Serde));
+//! topo.add_sink("out", "out", [&c]);
 //! let built = topo.build("app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
@@ -439,7 +439,7 @@
 //! use std::time::Duration;
 //! use crabka_client_streams::{
 //!     I64Serde, Processor, ProcessorContext, PunctuationType, Punctuator,
-//!     Record, StringSerde, Topology, TopologyTestDriver,
+//!     NodeHandle, Record, StringSerde, Topology, TopologyTestDriver,
 //! };
 //!
 //! // A punctuator that forwards the fire timestamp downstream.
@@ -461,9 +461,9 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
+//! let src: NodeHandle<String, String> = topo.add_source("src", ["in"]);
 //! let p = topo.add_processor("p", || Scheduler, [&src]);
-//! topo.add_sink("out", "out", [&p], (StringSerde, I64Serde));
+//! topo.add_sink("out", "out", [&p]);
 //! let built = topo.build("app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
@@ -485,7 +485,7 @@
 //!
 //! ```no_run
 //! use async_trait::async_trait;
-//! use crabka_client_streams::{KafkaStreams, Processor, ProcessorContext, Record, StringSerde, Topology};
+//! use crabka_client_streams::{KafkaStreams, NodeHandle, Processor, ProcessorContext, Record, Topology};
 //!
 //! struct Upper;
 //! #[async_trait]
@@ -497,9 +497,9 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["input-topic"], (StringSerde, StringSerde));
+//! let src: NodeHandle<String, String> = topo.add_source("src", ["input-topic"]);
 //! let up = topo.add_processor("up", || Upper, [&src]);
-//! topo.add_sink("out", "output-topic", [&up], (StringSerde, StringSerde));
+//! topo.add_sink("out", "output-topic", [&up]);
 //! let built = topo.build("my-app")?;
 //!
 //! let mut streams = KafkaStreams::builder()
@@ -587,13 +587,11 @@
 //! [`StreamThread`]: runtime
 //!
 //! ```no_run
-//! use crabka_client_streams::{
-//!     KafkaStreams, ProcessingGuarantee, StringSerde, Topology,
-//! };
+//! use crabka_client_streams::{KafkaStreams, NodeHandle, ProcessingGuarantee, Topology};
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
-//! topo.add_sink("out", "out", [&src], (StringSerde, StringSerde));
+//! let src: NodeHandle<String, String> = topo.add_source("src", ["in"]);
+//! topo.add_sink("out", "out", [&src]);
 //! let built = topo.build("my-app")?;
 //!
 //! // Opt into exactly-once: output + changelog + source offsets commit atomically.

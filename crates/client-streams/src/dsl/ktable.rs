@@ -1,4 +1,4 @@
-﻿//! `KTable<K,V>`: a materialized, changelog-backed table view. Produced by a
+//! `KTable<K,V>`: a materialized, changelog-backed table view. Produced by a
 //! terminal aggregation (`count`/`reduce`/`aggregate`) or by
 //! [`StreamsBuilder::table`](crate::dsl::StreamsBuilder::table), and convertible back to a `KStream` via
 //! [`KTable::to_stream`].
@@ -886,7 +886,7 @@ where
                 );
             state
                 .topology
-                .add_sink::<KO, SubscriptionWrapper, KOS, SubscriptionWrapperSerde, _, _>(
+                .add_sink_explicit::<KO, SubscriptionWrapper, KOS, SubscriptionWrapperSerde, _, _>(
                     reg_sink_name.clone(),
                     registration_topic.clone(),
                     [&send_h],
@@ -900,7 +900,7 @@ where
                 .add_repartition_topic(registration_topic.clone());
             let reg_src_h = state
                 .topology
-                .add_source::<KO, SubscriptionWrapper, KOS, SubscriptionWrapperSerde>(
+                .add_source_explicit::<KO, SubscriptionWrapper, KOS, SubscriptionWrapperSerde>(
                     reg_source_name.clone(),
                     [registration_topic.clone()],
                     crate::processor::serde::Consumed::with(
@@ -982,7 +982,7 @@ where
             // ── Response sink (sub1) ← {sub-join, foreign-join} ───────────────
             state
                 .topology
-                .add_sink::<K, SubscriptionResponseWrapper, _, SubscriptionResponseWrapperSerde, _, _>(
+                .add_sink_explicit::<K, SubscriptionResponseWrapper, _, SubscriptionResponseWrapperSerde, _, _>(
                     resp_sink_name.clone(),
                     response_topic.clone(),
                     [&sub_join_h, &foreign_join_h],
@@ -996,7 +996,7 @@ where
             // ── Response source (sub0) → resolver → output ────────────────────
             let resp_src_h = state
                 .topology
-                .add_source::<K, SubscriptionResponseWrapper, _, SubscriptionResponseWrapperSerde>(
+                .add_source_explicit::<K, SubscriptionResponseWrapper, _, SubscriptionResponseWrapperSerde>(
                     resp_source_name.clone(),
                     [response_topic.clone()],
                     crate::processor::serde::Consumed::with(

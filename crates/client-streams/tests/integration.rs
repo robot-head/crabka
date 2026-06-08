@@ -7,7 +7,7 @@ use std::time::Duration;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_client_streams::{
-    BytesSerde, Consumed, Produced, StreamsEvent, StreamsMembership, Topology,
+    BytesSerde, Consumed, NodeHandle, Produced, StreamsEvent, StreamsMembership, Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
@@ -69,17 +69,8 @@ async fn member_joins_converges_and_leaves() {
     create_topic(&admin, "streams-input", 2).await;
 
     let mut topo = Topology::new();
-    let src = topo.add_source(
-        "src",
-        ["streams-input"],
-        Consumed::with(BytesSerde, BytesSerde),
-    );
-    topo.add_sink(
-        "snk",
-        "streams-output",
-        [&src],
-        Produced::with(BytesSerde, BytesSerde),
-    );
+    let src: NodeHandle<bytes::Bytes, bytes::Bytes> = topo.add_source("src", ["streams-input"]);
+    topo.add_sink("snk", "streams-output", [&src]);
     let built = topo.build("streams-app").unwrap();
 
     let mut membership = StreamsMembership::builder()
@@ -136,12 +127,8 @@ async fn missing_source_topic_reports_not_ready() {
     // Deliberately do NOT create "streams-missing".
 
     let mut topo = Topology::new();
-    let src = topo.add_source(
-        "src",
-        ["streams-missing"],
-        Consumed::with(BytesSerde, BytesSerde),
-    );
-    topo.add_sink("snk", "out", [&src], Produced::with(BytesSerde, BytesSerde));
+    let src: NodeHandle<bytes::Bytes, bytes::Bytes> = topo.add_source("src", ["streams-missing"]);
+    topo.add_sink("snk", "out", [&src]);
     let built = topo.build("streams-missing-app").unwrap();
 
     let mut membership = StreamsMembership::builder()
