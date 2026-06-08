@@ -1,2 +1,9 @@
 [profile.ci.junit]
 path = "junit.xml"
+
+[test-groups]
+broker-jvm-acceptance = { max-threads = 1 }
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-broker) & (binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen))'
+test-group = 'broker-jvm-acceptance'

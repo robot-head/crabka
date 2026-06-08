@@ -1271,7 +1271,7 @@ async fn transactional_console_producer_eos() {
 //
 // Fixed ports above 10000 — the other multi-broker tests use 9092-9992;
 // this test steps into 10000+ to dodge TIME_WAIT + raft-quorum collisions
-// when JVM tests run sequentially via --test-threads=1.
+// when JVM tests run sequentially via the nextest broker-jvm-acceptance test group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]
@@ -1466,7 +1466,8 @@ async fn acks_all_durability() {
 //
 // Fixed ports 10392/10492/10592 + 10393/10493/10593 — next free hundred
 // above acks_all_durability (10092/10192/10292) to dodge
-// TIME_WAIT collisions when JVM tests run sequentially via --test-threads=1.
+// TIME_WAIT collisions when JVM tests run sequentially via the nextest
+// broker-jvm-acceptance test group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
 #[allow(clippy::too_many_lines)]

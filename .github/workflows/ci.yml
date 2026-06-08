@@ -789,7 +789,7 @@ jobs:
   #
   # 30-minute job timeout: each acceptance test is 1-2 min of docker-driven
   # broker boot + kafka-console-* round trip, and we currently run ~10 of
-  # them serially (--test-threads=1). The default 360-minute GitHub timeout
+  # them serially through a nextest test group. The default 360-minute GitHub timeout
   # made a hung test waste >1.5h before surfacing. If a single test stalls
   # for more than half an hour something is wedged — fail fast and re-run.
   broker-jvm-acceptance:
@@ -797,7 +797,7 @@ jobs:
     if: ${{ needs.changes.outputs.broker_jvm == 'true' }}
     runs-on: ubuntu-latest
     # 45-minute budget: the suite grew (next-gen consumer-group + KIP-595
-    # multi-voter cases) and runs serially under `llvm-cov` instrumentation
+    # multi-voter cases) and runs serially via a nextest test group under `llvm-cov`
     # (~2x slowdown), so the ~25 docker-driven acceptance tests no longer fit
     # the old 30-minute wall. A genuinely wedged test still surfaces well
     # inside the CI cap. (Per-test stalls are caught by the in-test timeouts.)
@@ -829,17 +829,17 @@ jobs:
         run: |
           docker pull confluentinc/cp-kafka:7.4.0
           docker pull apache/kafka:4.0.0
-      # --test-threads=1: tests bind the Rust broker to a fixed host port
-      # (so the `docker run --add-host` Kafka tools have a known bootstrap
-      # target). Parallel execution would hit `AddrInUse`.
+      # The nextest `broker-jvm-acceptance` test group serializes these tests:
+      # they bind the Rust broker to a fixed host port so the Dockerized Kafka
+      # tools have a known bootstrap target. Parallel execution would hit `AddrInUse`.
       - name: Broker JVM acceptance coverage
         run: |
           mkdir -p coverage
           cargo llvm-cov nextest -p crabka-broker --profile ci \
             --test jvm_acceptance \
             --test jvm_consumer_group_next_gen \
-            --lcov --output-path coverage/broker-jvm-acceptance.lcov \
-            -- --ignored --nocapture --test-threads=1
+            --run-ignored only \
+            --lcov --output-path coverage/broker-jvm-acceptance.lcov
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

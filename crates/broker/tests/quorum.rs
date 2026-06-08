@@ -36,7 +36,7 @@ mod support;
 /// loopback ephemeral ports and starves the openraft election timing.
 /// Acquire this lock at the top of every `#[tokio::test]` so the binary
 /// is effectively single-threaded for these scenarios, regardless of
-/// whether the caller passes `--test-threads=1`.
+/// whether the caller serializes execution through nextest test groups.
 ///
 /// `tokio::sync::Mutex` rather than `std::sync::Mutex` so the lock can
 /// be held across the `.await` calls that fill each test body without
