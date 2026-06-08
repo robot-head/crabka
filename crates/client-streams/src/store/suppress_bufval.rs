@@ -192,7 +192,7 @@ fn read_i32(b: &[u8]) -> i32 {
 mod tests {
     use super::*;
 
-    fn count_explicit(n: i64) -> Vec<u8> {
+    fn count(n: i64) -> Vec<u8> {
         n.to_be_bytes().to_vec()
     }
 

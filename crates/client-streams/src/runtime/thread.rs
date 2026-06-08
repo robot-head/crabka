@@ -1547,7 +1547,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .filter(|s| **s == Step::Commit)
-                .count_explicit()
+                .count()
                 == 2
         );
     }
