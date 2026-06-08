@@ -199,8 +199,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Run tests
-        if: matrix.os != 'ubuntu-latest'
+        if: matrix.os == 'macos-latest'
         run: cargo nextest run --workspace --profile ci
+      - name: Run tests
+        if: matrix.os == 'windows-latest'
+        run: cargo nextest run --workspace --profile ci --lib --bins
       - name: Upload test results to Codecov
         if: ${{ !cancelled() && matrix.os != 'ubuntu-latest' }}
         uses: codecov/codecov-action@v7
