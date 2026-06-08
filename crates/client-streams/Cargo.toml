@@ -18,9 +18,11 @@ workspace = true
 
 [features]
 default = []
+schema-serde = ["dep:crabka-schema-serde", "crabka-schema-serde/avro", "crabka-schema-serde/protobuf", "crabka-schema-serde/json"]
 
 [dependencies]
 crabka-protocol = { version = "0.3.2", path = "../protocol", default-features = false }
+crabka-schema-serde = { version = "0.3.2", path = "../schema-serde", optional = true }
 crabka-client-core = { version = "0.3.2", path = "../client-core" }
 crabka-client-consumer = { version = "0.3.2", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3.2", path = "../client-producer" }

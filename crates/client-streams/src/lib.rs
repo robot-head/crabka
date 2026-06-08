@@ -627,8 +627,8 @@ pub use dsl::{
 };
 pub use error::StreamsClientError;
 pub use membership::{
-    StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus, TaskAssignment,
-    TaskOffsetTracker, TopicPartition,
+    SchemaPrewarm, StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus,
+    TaskAssignment, TaskOffsetTracker, TopicPartition,
 };
 pub use processor::{
     BytesSerde, Cancellable, Consumed, DefaultSerde, FixedKeyProcessor, FixedKeyProcessorContext,
