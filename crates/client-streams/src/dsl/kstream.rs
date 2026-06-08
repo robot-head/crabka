@@ -1029,8 +1029,16 @@ where
         let grace = windows.grace_ms;
 
         let mut g = self.builder.borrow_mut();
-        let join_this = g.new_processor_name(names::KSTREAM_JOINTHIS);
-        let join_other = g.new_processor_name(names::KSTREAM_JOINOTHER);
+        // Burn two KSTREAM-WINDOWED- indices: the JVM creates one per side before
+        // allocating the join processors, so THIS/OTHER land at index+2.
+        g.new_processor_name(names::KSTREAM_WINDOWED);
+        g.new_processor_name(names::KSTREAM_WINDOWED);
+
+        // KIP-633: use OUTERTHIS/OUTEROTHER when a/b side may produce without a match.
+        let this_prefix = if kind.a_required { names::KSTREAM_JOINTHIS } else { names::KSTREAM_OUTERTHIS };
+        let other_prefix = if kind.b_required { names::KSTREAM_JOINOTHER } else { names::KSTREAM_OUTEROTHER };
+        let join_this = g.new_processor_name(this_prefix);
+        let join_other = g.new_processor_name(other_prefix);
         let merge = g.new_processor_name(names::MERGE);
 
         // Store names at their JVM positions (minted before the processors).
@@ -1038,8 +1046,11 @@ where
         let other_store = format!("{join_other}-store");
 
         // The shared outer KV store is only needed for left/outer joins.
-        let outer_store =
-            (!kind.a_required || !kind.b_required).then(|| format!("{merge}-outer-store"));
+        // Named KSTREAM-OUTERSHARED-{this_index}-store (reuses THIS processor's index).
+        let outer_store = (!kind.a_required || !kind.b_required).then(|| {
+            let this_index = &join_this[this_prefix.len()..];
+            format!("{}{this_index}-store", names::KSTREAM_OUTERSHARED)
+        });
 
         let this_id = g.graph.add(
             join_this.clone(),

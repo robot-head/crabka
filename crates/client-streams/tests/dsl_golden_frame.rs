@@ -1,6 +1,5 @@
 //! DSL golden frame: the wire `Topology` the DSL lowers to must byte-match the
 //! captured JVM 4.x fixture for the same logical pipeline.
-#![cfg(not(target_os = "windows"))]
 use crabka_client_streams::dsl::StreamsBuilder;
 use crabka_client_streams::{Consumed, Produced, StringSerde};
 
