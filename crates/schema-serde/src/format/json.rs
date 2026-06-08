@@ -78,7 +78,7 @@ where
                 .map_err(|e| SchemaSerdeError::Schema(e.to_string()))?;
             let instance: serde_json::Value = serde_json::from_slice(body)
                 .map_err(|e| SchemaSerdeError::Deserialize(e.to_string()))?;
-            // jsonschema 0.26: validator_for(&Value) -> Result<Validator, ValidationError<'static>>
+            // jsonschema: validator_for(&Value) -> Result<Validator, ValidationError<'static>>
             let validator = jsonschema::validator_for(&writer)
                 .map_err(|e| SchemaSerdeError::Schema(e.to_string()))?;
             // Validator::validate(&self, instance) -> Result<(), ValidationError<'i>>

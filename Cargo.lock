@@ -1949,7 +1949,6 @@ version = "0.3.2"
 dependencies = [
  "apache-avro",
  "assert2",
- "async-trait",
  "bytes",
  "hex",
  "jsonschema 0.30.0",
@@ -1961,7 +1960,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "tracing",
 ]
 
 [[package]]
