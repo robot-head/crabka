@@ -58,6 +58,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 
 [dev-dependencies]
 assert2 = { workspace = true }
+ring = { workspace = true }
 crabka-broker = { version = "0.3.2", path = "../broker", features = ["test-helpers"] }
 crabka-client-consumer = { version = "0.3.2", path = "../client-consumer" }
 tempfile.workspace = true
