@@ -52,7 +52,7 @@ crabka-broker = { version = "0.3.2", path = "../broker", features = ["test-helpe
 crabka-schema-serde = { version = "0.3.2", path = "../schema-serde", features = ["avro", "protobuf", "json"] }
 hex = { workspace = true }
 prost = { workspace = true }
-prost-reflect = { workspace = true }
+prost-reflect = { workspace = true, features = ["derive"] }
 schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
