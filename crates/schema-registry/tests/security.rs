@@ -34,15 +34,16 @@ use crabka_client_admin::{
 use crabka_schema_registry::auth::AuthState;
 use crabka_schema_registry::auth::basic::BasicAuthStore;
 use crabka_schema_registry::authz::SchemaRegistryAuthz;
+use crabka_schema_registry::cli::{SecurityCliInput, build_security};
 use crabka_schema_registry::config::{
-    AuthzConfig, BasicAuthConfig, BearerAuthConfig, RegistryConfig, SecurityConfig,
+    AuthzConfig, BasicAuthConfig, RegistryConfig, SecurityConfig,
 };
 use crabka_schema_registry::election::{Election, PrimaryState};
 use crabka_schema_registry::kafkastore::KafkaStore;
 use crabka_schema_registry::rest::{self, AppState, SecurityLayers, forward::ForwardState};
+use crabka_security::Jwks;
 use crabka_security::TlsConfig;
 use crabka_security::ca::{SubjectAltName, generate_clients_ca, issue_broker_cert};
-use crabka_security::{Jwks, JwksHandle, OAuthBearerValidator, SignedJwsValidator};
 use tokio_util::sync::CancellationToken;
 
 const SR_CONTENT_TYPE: &str = "application/vnd.schemaregistry.v1+json";
@@ -579,11 +580,13 @@ fn split_pkcs1_for_jwks(der: &[u8]) -> (Vec<u8>, Vec<u8>) {
     (n, e)
 }
 
-/// Start an SR node with JWKS Bearer auth. The `JwksHandle` is pre-loaded by the
-/// caller (bypassing HTTP fetch), so the validator has keys from the start.
+/// Start an SR node with JWKS Bearer auth. Routes through `build_security()` so
+/// the production CLI code path (and its coverage) is exercised. The caller
+/// provides a pre-built `Jwks` that is stored in the handle immediately,
+/// bypassing the HTTP refresher (no real JWKS endpoint needed in tests).
 async fn start_jwks_node(
     bootstrap: &str,
-    jwks_handle: JwksHandle,
+    initial_jwks: Jwks,
     valid_issuer: Option<String>,
 ) -> Node {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
@@ -591,10 +594,19 @@ async fn start_jwks_node(
         .unwrap();
     let port = i32::from(listener.local_addr().unwrap().port());
 
-    let mut validator = SignedJwsValidator::new(jwks_handle);
-    if let Some(iss) = valid_issuer {
-        validator.valid_issuer = Some(iss);
-    }
+    // Exercise the production CLI assembly path so cli.rs JWKS code is covered.
+    let input = SecurityCliInput {
+        require_auth: true,
+        realm: "test".into(),
+        bearer: "jwks".into(),
+        jwks_endpoint_uri: Some("https://test.invalid/.well-known/jwks.json".into()),
+        jwks_valid_issuer: valid_issuer,
+        ..Default::default()
+    };
+    let out = build_security(&input).expect("build_security should succeed with JWKS input");
+    let jwks_for_refresh = out.jwks_handle.unwrap();
+    // Pre-load test keys directly — no HTTP fetch or refresher task in tests.
+    jwks_for_refresh.handle.store(initial_jwks);
 
     let cfg = RegistryConfig {
         bootstrap: bootstrap.into(),
@@ -604,17 +616,7 @@ async fn start_jwks_node(
         advertised_url: format!("http://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
-        security: SecurityConfig {
-            require_auth: true,
-            realm: "test".into(),
-            basic: None,
-            bearer: Some(BearerAuthConfig {
-                validator: Arc::new(OAuthBearerValidator::Signed(validator)),
-            }),
-            tls: None,
-            authz: None,
-            client: None,
-        },
+        security: out.config,
     };
     let cancel = CancellationToken::new();
     let store = KafkaStore::start(&cfg, cancel.clone()).await.unwrap();
@@ -667,8 +669,8 @@ async fn jwks_bearer_valid_signed_token_returns_200() {
     let bootstrap = broker.listen_addr().to_string();
 
     let (token, jwks_json) = mint_rs256_for_test("k1", r#"{"sub":"alice","exp":9999999999}"#);
-    let handle = JwksHandle::new(Jwks::from_json(&jwks_json, true).unwrap());
-    let mut node = start_jwks_node(&bootstrap, handle, None).await;
+    let jwks = Jwks::from_json(&jwks_json, true).unwrap();
+    let mut node = start_jwks_node(&bootstrap, jwks, None).await;
     // Wait until the node becomes primary so _schemas topic is ready.
     await_state(&mut node.primary, 25, |s| s.is_primary).await;
     let base = format!("http://127.0.0.1:{}", node.port);
@@ -701,8 +703,8 @@ async fn jwks_bearer_unsigned_token_returns_401() {
     let bootstrap = broker.listen_addr().to_string();
 
     let (_token, jwks_json) = mint_rs256_for_test("k1", r#"{"sub":"alice","exp":9999999999}"#);
-    let handle = JwksHandle::new(Jwks::from_json(&jwks_json, true).unwrap());
-    let node = start_jwks_node(&bootstrap, handle, None).await;
+    let jwks = Jwks::from_json(&jwks_json, true).unwrap();
+    let node = start_jwks_node(&bootstrap, jwks, None).await;
     let base = format!("http://127.0.0.1:{}", node.port);
     let client = reqwest::Client::new();
 
@@ -743,9 +745,9 @@ async fn jwks_bearer_wrong_issuer_returns_401() {
         "k1",
         r#"{"sub":"alice","iss":"https://wrong-idp.example.com","exp":9999999999}"#,
     );
-    let handle = JwksHandle::new(Jwks::from_json(&jwks_json, true).unwrap());
+    let jwks = Jwks::from_json(&jwks_json, true).unwrap();
     // Configure node to require iss = "https://idp.example.com"
-    let node = start_jwks_node(&bootstrap, handle, Some("https://idp.example.com".into())).await;
+    let node = start_jwks_node(&bootstrap, jwks, Some("https://idp.example.com".into())).await;
     let base = format!("http://127.0.0.1:{}", node.port);
     let client = reqwest::Client::new();
 
