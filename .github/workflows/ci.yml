@@ -94,6 +94,7 @@ jobs:
               - '.github/workflows/ci.yml'
             client_streams:
               - 'crates/client-streams/**'
+              - 'crates/schema-serde/**'
               - 'crates/client-core/**'
               - 'crates/protocol/**'
               - 'crates/metadata/**'
@@ -404,13 +405,28 @@ jobs:
       - name: Client streams integration coverage
         run: |
           mkdir -p coverage
-          cargo llvm-cov -p crabka-client-streams --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
+          # `--features schema-serde` also exercises the Avro/Protobuf/JSON
+          # bridge tests (build.rs compiles the protobuf example via protox,
+          # no protoc needed). The `schema_serde_*_golden` tests are `#[ignore]`
+          # placeholders (real Confluent goldens captured out-of-band), so the
+          # default run (no `--include-ignored`) correctly skips them.
+          cargo llvm-cov -p crabka-client-streams --features schema-serde --tests --lcov --output-path coverage/client-streams-integration.lcov -- --nocapture
       - uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/client-streams-integration.lcov
           disable_search: true
           flags: client-streams-integration
+          fail_ci_if_error: false
+      - name: Schema-serde unit coverage
+        run: |
+          cargo llvm-cov -p crabka-schema-serde --all-features --lib --lcov --output-path coverage/schema-serde-unit.lcov
+      - uses: codecov/codecov-action@v7
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/schema-serde-unit.lcov
+          disable_search: true
+          flags: schema-serde
           fail_ci_if_error: false
 
   # crabka-grpc-gateway integration: unary Send produce, group consume+commit,
