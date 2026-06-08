@@ -1,4 +1,4 @@
-//! Kafka Streams-compatible client runtime for Crabka.
+﻿//! Kafka Streams-compatible client runtime for Crabka.
 //!
 //! `crabka-client-streams` provides three layers that can be used independently:
 //!
@@ -20,12 +20,12 @@
 //!
 //! ```no_run
 //! use std::time::Duration;
-//! use crabka_client_streams::{Consumed, Produced, StreamsEvent, StreamsMembership, StringSerde, Topology};
+//! use crabka_client_streams::{StreamsEvent, StreamsMembership, StringSerde, Topology};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
-//! topo.add_sink("snk", "output-topic", [&src], Produced::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["input-topic"], (StringSerde, StringSerde));
+//! topo.add_sink("snk", "output-topic", [&src], (StringSerde, StringSerde));
 //! let built = topo.build("my-application-id")?;
 //!
 //! let mut membership = StreamsMembership::builder()
@@ -54,7 +54,7 @@
 //!
 //! ```
 //! use async_trait::async_trait;
-//! use crabka_client_streams::{Consumed, Processor, ProcessorContext, Produced, Record, StringSerde, Topology, TopologyTestDriver};
+//! use crabka_client_streams::{Processor, ProcessorContext, Record, StringSerde, Topology, TopologyTestDriver};
 //!
 //! struct Upper;
 //! #[async_trait]
@@ -65,15 +65,15 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
 //! let up = topo.add_processor("up", || Upper, [&src]);
-//! topo.add_sink("out", "out", [&up], Produced::with(StringSerde, StringSerde));
+//! topo.add_sink("out", "out", [&up], (StringSerde, StringSerde));
 //! let built = topo.build("my-app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
-//! driver.pipe_input("in", Consumed::with(StringSerde, StringSerde), Some("k".to_string()), "hello".to_string(), 0);
+//! driver.pipe_input("in", (StringSerde, StringSerde), Some("k".to_string()), "hello".to_string(), 0);
 //! assert_eq!(
-//!     driver.read_output("out", Produced::with(StringSerde, StringSerde)),
+//!     driver.read_output("out", (StringSerde, StringSerde)),
 //!     Some((Some("k".to_string()), "HELLO".to_string())),
 //! );
 //! ```
@@ -82,13 +82,13 @@
 //! **compile error** rather than a `build()`-time failure:
 //!
 //! ```compile_fail
-//! use crabka_client_streams::{Consumed, I64Serde, Produced, StringSerde, Topology};
+//! use crabka_client_streams::{I64Serde, StringSerde, Topology};
 //!
 //! let mut topo = Topology::new();
 //! // `src` produces Record<String, String>:
-//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
 //! // but this sink expects Record<String, i64> — won't compile:
-//! topo.add_sink("out", "out", [&src], Produced::with(StringSerde, I64Serde));
+//! topo.add_sink("out", "out", [&src], (StringSerde, I64Serde));
 //! ```
 //!
 //! ## State stores
@@ -100,7 +100,7 @@
 //! ```
 //! use async_trait::async_trait;
 //! use crabka_client_streams::{
-//!     Consumed, I64Serde, Processor, ProcessorContext, Produced, Record, StringSerde, Topology,
+//!     I64Serde, Processor, ProcessorContext, Record, StringSerde, Topology,
 //!     TopologyTestDriver,
 //! };
 //!
@@ -119,21 +119,21 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
 //! let c = topo.add_processor("c", || Counter, [&src]);
 //! topo.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
-//! topo.add_sink("out", "out", [&c], Produced::with(StringSerde, I64Serde));
+//! topo.add_sink("out", "out", [&c], (StringSerde, I64Serde));
 //! let built = topo.build("app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
-//! driver.pipe_input("in", Consumed::with(StringSerde, StringSerde), None, "a".to_string(), 0);
-//! driver.pipe_input("in", Consumed::with(StringSerde, StringSerde), None, "a".to_string(), 1);
+//! driver.pipe_input("in", (StringSerde, StringSerde), None, "a".to_string(), 0);
+//! driver.pipe_input("in", (StringSerde, StringSerde), None, "a".to_string(), 1);
 //! assert_eq!(
-//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
+//!     driver.read_output("out", (StringSerde, I64Serde)),
 //!     Some((Some("a".to_string()), 1_i64)),
 //! );
 //! assert_eq!(
-//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
+//!     driver.read_output("out", (StringSerde, I64Serde)),
 //!     Some((Some("a".to_string()), 2_i64)),
 //! );
 //! assert_eq!(driver.store_get::<String, i64>("counts", &"a".to_string()), Some(2_i64));
@@ -199,20 +199,12 @@
 //! subscribe to each foreign key — all created and copartitioned automatically.
 //!
 //! ```no_run
-//! use crabka_client_streams::{Consumed, Materialized, Produced, StreamsBuilder, StringSerde};
+//! use crabka_client_streams::{StreamsBuilder, StringSerde};
 //!
 //! let builder = StreamsBuilder::new();
 //! // `a`: primaryKey -> foreignKey ("A"); `b`: foreignKey -> value ("X").
-//! let a = builder.table::<String, String, _, _>(
-//!     "a",
-//!     Consumed::with(StringSerde, StringSerde),
-//!     Materialized::with(StringSerde, StringSerde).as_store("sa"),
-//! );
-//! let b = builder.table::<String, String, _, _>(
-//!     "b",
-//!     Consumed::with(StringSerde, StringSerde),
-//!     Materialized::with(StringSerde, StringSerde).as_store("sb"),
-//! );
+//! let a = builder.table::<String, String>("a", "sa");
+//! let b = builder.table::<String, String>("b", "sb");
 //! a.join_on_foreign_key(
 //!     &b,
 //!     |left: &String| left.clone(),                       // foreign-key extractor
@@ -220,7 +212,7 @@
 //!     StringSerde,                                         // foreign-key serde
 //! )
 //! .to_stream()
-//! .to("out", Produced::with(StringSerde, StringSerde));
+//! .to("out");
 //! drop(a);
 //! drop(b);
 //! let topology = builder.build("fk-app").unwrap();
@@ -332,27 +324,18 @@
 //! to look up any key without repartitioning the stream:
 //!
 //! ```
-//! use crabka_client_streams::{
-//!     Consumed, Materialized, Produced, StreamsBuilder, StringSerde,
-//! };
+//! use crabka_client_streams::{StreamsBuilder, StringSerde};
 //!
 //! let b = StreamsBuilder::new();
-//! let customers = b.global_table::<String, String, _, _>(
-//!     "customers",
-//!     Consumed::with(StringSerde, StringSerde),
-//!     Materialized::with(StringSerde, StringSerde).as_store("customers-by-id"),
-//! );
+//! let customers = b.global_table::<String, String>("customers", "customers-by-id");
 //!
-//! b.stream::<String, String, _, _>(
-//!     ["orders"],
-//!     Consumed::with(StringSerde, StringSerde),
-//! )
+//! b.stream::<String, String>(["orders"])
 //! .left_join_global(
 //!     &customers,
 //!     |_order_id, order| order.split(':').next().unwrap_or("").to_string(),
 //!     |order, customer| format!("{order}|customer={}", customer.map_or("unknown", |v| v)),
 //! )
-//! .to("enriched-orders", Produced::with(StringSerde, StringSerde));
+//! .to("enriched-orders");
 //!
 //! drop(customers);
 //! let built = b.build("orders-enricher").unwrap();
@@ -367,21 +350,17 @@
 //!
 //! ```
 //! use crabka_client_streams::{
-//!     BufferConfig, Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder,
-//!     StringSerde, Suppressed, TimeWindowedSerde, TimeWindows,
+//!     BufferConfig, StreamsBuilder, Suppressed, TimeWindows,
 //! };
 //!
 //! let b = StreamsBuilder::new();
-//! b.stream::<String, String, _, _>(["clicks"], Consumed::with(StringSerde, StringSerde))
-//!     .group_by_key(Grouped::with(StringSerde, StringSerde))
+//! b.stream::<String, String>(["clicks"])
+//!     .group_by_key()
 //!     .windowed_by(TimeWindows::of_size(60_000).grace(10_000))
-//!     .count(Materialized::with(StringSerde, I64Serde).as_store("click-counts"))
+//!     .count("click-counts")
 //!     .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
 //!     .to_stream()
-//!     .to(
-//!         "click-counts-final",
-//!         Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
-//!     );
+//!     .to("click-counts-final");
 //!
 //! let built = b.build("click-analytics").unwrap();
 //! assert_eq!(built.list_sink_topics(), vec!["click-counts-final".to_string()]);
@@ -389,17 +368,16 @@
 //!
 //! ```
 //! use crabka_client_streams::{
-//!     Consumed, Grouped, I64Serde, Materialized, Produced, StreamsBuilder, StringSerde,
-//!     TopologyTestDriver,
+//!     I64Serde, StreamsBuilder, StringSerde, TopologyTestDriver,
 //! };
 //!
 //! // Build a word-count topology: group by key, count, forward to "out".
 //! let b = StreamsBuilder::new();
-//! b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-//!     .group_by_key(Grouped::with(StringSerde, StringSerde))
-//!     .count(Materialized::with(StringSerde, I64Serde).as_store("counts"))
+//! b.stream::<String, String>(["in"])
+//!     .group_by_key()
+//!     .count("counts")
 //!     .to_stream()
-//!     .to("out", Produced::with(StringSerde, I64Serde));
+//!     .to("out");
 //! let built = b.build("word-count").unwrap();
 //!
 //! // Drive it broker-free with TopologyTestDriver.
@@ -407,7 +385,7 @@
 //! for word in ["a", "a", "b"] {
 //!     driver.pipe_input(
 //!         "in",
-//!         Consumed::with(StringSerde, StringSerde),
+//!         (StringSerde, StringSerde),
 //!         Some(word.to_string()),
 //!         word.to_string(),
 //!         0,
@@ -416,15 +394,15 @@
 //!
 //! // The stream output carries the running count per key.
 //! assert_eq!(
-//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
+//!     driver.read_output("out", (StringSerde, I64Serde)),
 //!     Some((Some("a".to_string()), 1)),
 //! );
 //! assert_eq!(
-//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
+//!     driver.read_output("out", (StringSerde, I64Serde)),
 //!     Some((Some("a".to_string()), 2)),
 //! );
 //! assert_eq!(
-//!     driver.read_output("out", Produced::with(StringSerde, I64Serde)),
+//!     driver.read_output("out", (StringSerde, I64Serde)),
 //!     Some((Some("b".to_string()), 1)),
 //! );
 //!
@@ -460,7 +438,7 @@
 //! use async_trait::async_trait;
 //! use std::time::Duration;
 //! use crabka_client_streams::{
-//!     Consumed, I64Serde, Processor, ProcessorContext, Produced, PunctuationType, Punctuator,
+//!     I64Serde, Processor, ProcessorContext, PunctuationType, Punctuator,
 //!     Record, StringSerde, Topology, TopologyTestDriver,
 //! };
 //!
@@ -483,20 +461,20 @@
 //! }
 //!
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
 //! let p = topo.add_processor("p", || Scheduler, [&src]);
-//! topo.add_sink("out", "out", [&p], Produced::with(StringSerde, I64Serde));
+//! topo.add_sink("out", "out", [&p], (StringSerde, I64Serde));
 //! let built = topo.build("app").unwrap();
 //!
 //! let mut driver = TopologyTestDriver::new(&built).unwrap();
 //! // Stream-time advances with each record's timestamp; the punctuator fires once per
 //! // crossed 10ms boundary, stamped with the CURRENT stream-time (5 is skipped).
 //! for ts in [0_i64, 5, 10] {
-//!     driver.pipe_input("in", Consumed::with(StringSerde, StringSerde), Some("k".to_string()), "v".to_string(), ts);
+//!     driver.pipe_input("in", (StringSerde, StringSerde), Some("k".to_string()), "v".to_string(), ts);
 //! }
-//! assert_eq!(driver.read_output("out", Produced::with(StringSerde, I64Serde)), Some((None, 0_i64)));
-//! assert_eq!(driver.read_output("out", Produced::with(StringSerde, I64Serde)), Some((None, 10_i64)));
-//! assert_eq!(driver.read_output("out", Produced::with(StringSerde, I64Serde)), None);
+//! assert_eq!(driver.read_output("out", (StringSerde, I64Serde)), Some((None, 0_i64)));
+//! assert_eq!(driver.read_output("out", (StringSerde, I64Serde)), Some((None, 10_i64)));
+//! assert_eq!(driver.read_output("out", (StringSerde, I64Serde)), None);
 //! ```
 //!
 //! ## Running an app (`KafkaStreams`)
@@ -507,7 +485,7 @@
 //!
 //! ```no_run
 //! use async_trait::async_trait;
-//! use crabka_client_streams::{Consumed, KafkaStreams, Processor, ProcessorContext, Produced, Record, StringSerde, Topology};
+//! use crabka_client_streams::{KafkaStreams, Processor, ProcessorContext, Record, StringSerde, Topology};
 //!
 //! struct Upper;
 //! #[async_trait]
@@ -519,9 +497,9 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["input-topic"], (StringSerde, StringSerde));
 //! let up = topo.add_processor("up", || Upper, [&src]);
-//! topo.add_sink("out", "output-topic", [&up], Produced::with(StringSerde, StringSerde));
+//! topo.add_sink("out", "output-topic", [&up], (StringSerde, StringSerde));
 //! let built = topo.build("my-app")?;
 //!
 //! let mut streams = KafkaStreams::builder()
@@ -610,12 +588,12 @@
 //!
 //! ```no_run
 //! use crabka_client_streams::{
-//!     Consumed, KafkaStreams, ProcessingGuarantee, Produced, StringSerde, Topology,
+//!     KafkaStreams, ProcessingGuarantee, StringSerde, Topology,
 //! };
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut topo = Topology::new();
-//! let src = topo.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-//! topo.add_sink("out", "out", [&src], Produced::with(StringSerde, StringSerde));
+//! let src = topo.add_source("src", ["in"], (StringSerde, StringSerde));
+//! topo.add_sink("out", "out", [&src], (StringSerde, StringSerde));
 //! let built = topo.build("my-app")?;
 //!
 //! // Opt into exactly-once: output + changelog + source offsets commit atomically.
@@ -630,7 +608,7 @@
 //! # Ok(())
 //! # }
 //! ```
-#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.1")]
+#![doc(html_root_url = "https://docs.rs/crabka-client-streams/0.3.2")]
 
 pub mod dsl;
 mod error;
@@ -653,7 +631,7 @@ pub use membership::{
     TaskOffsetTracker, TopicPartition,
 };
 pub use processor::{
-    BytesSerde, Cancellable, Consumed, FixedKeyProcessor, FixedKeyProcessorContext,
+    BytesSerde, Cancellable, Consumed, DefaultSerde, FixedKeyProcessor, FixedKeyProcessorContext,
     FixedKeyProcessorSupplier, FixedKeyRecord, I64Serde, Processor, ProcessorContext,
     ProcessorError, ProcessorSupplier, Produced, PunctuationType, Punctuator, Record,
     RecordContext, Serde, SerdeError, StringSerde,

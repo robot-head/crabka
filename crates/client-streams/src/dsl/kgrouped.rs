@@ -1,4 +1,4 @@
-//! `KGroupedStream<K,V>`: the intermediate handle between `groupByKey`/`groupBy`
+﻿//! `KGroupedStream<K,V>`: the intermediate handle between `groupByKey`/`groupBy`
 //! and a terminal aggregation (`count`/`reduce`/`aggregate`).
 //!
 //! `groupByKey`/`groupBy` record **no** graph node — they capture lineage state
@@ -29,7 +29,7 @@ use crate::dsl::graph::{GraphNodeKind, LowerState, NodeId};
 use crate::dsl::ktable::KTable;
 use crate::dsl::names;
 use crate::dsl::processors::aggregate::{KStreamAggregateProcessor, KStreamReduceProcessor};
-use crate::processor::serde::Serde;
+use crate::processor::serde::{DefaultSerde, I64Serde, Serde};
 use crate::topology::NodeHandle;
 
 /// A typed thunk that wires a repartition `sink → topic → source` triple into
@@ -118,13 +118,16 @@ where
     /// `count`: count records per key into a materialized `KTable<K, i64>`.
     ///
     /// `init = || 0`, `agg = |_k, _v, acc| acc + 1`.
-    pub fn count<KS, VS>(self, materialized: Materialized<KS, VS>) -> KTable<K, i64>
+    pub fn count_explicit<KS, VS>(
+        self,
+        materialized: impl Into<Materialized<KS, VS>>,
+    ) -> KTable<K, i64, KS, VS>
     where
         KS: Serde<K> + Clone + 'static,
         VS: Serde<i64> + Clone + 'static,
     {
         self.aggregate_inner(
-            materialized,
+            materialized.into(),
             names::AGGREGATE_STORE,
             || 0i64,
             |_k: &K, _v: &V, acc: i64| acc + 1,
@@ -136,24 +139,29 @@ where
     /// `Reducer` has no separate `init`); later values fold via
     /// `reducer(&acc, &value)`. The backing processor keeps
     /// the public value type `V` (no `Option`/sentinel leaks into the `KTable`).
-    pub fn reduce<KS, VS, R>(self, reducer: R, materialized: Materialized<KS, VS>) -> KTable<K, V>
+    pub fn reduce_explicit<KS, VS, R>(
+        self,
+        reducer: R,
+        materialized: impl Into<Materialized<KS, VS>>,
+    ) -> KTable<K, V, KS, VS>
     where
         KS: Serde<K> + Clone + 'static,
         VS: Serde<V> + Clone + 'static,
         R: Fn(&V, &V) -> V + Clone + Send + Sync + 'static,
     {
+        let materialized = materialized.into();
         let store_name = mint_store_name(&self.builder, &materialized, names::REDUCE_STORE);
         self.lower_reduce::<KS, VS, R>(materialized, store_name, reducer)
     }
 
     /// `aggregate`: general aggregation with caller-supplied `init` + `agg`,
     /// materialized as `KTable<K, VA>`.
-    pub fn aggregate<KS, VS, VA, I, A>(
+    pub fn aggregate_explicit<KS, VS, VA, I, A>(
         self,
         init: I,
         agg: A,
-        materialized: Materialized<KS, VS>,
-    ) -> KTable<K, VA>
+        materialized: impl Into<Materialized<KS, VS>>,
+    ) -> KTable<K, VA, KS, VS>
     where
         VA: Any + Send + Clone,
         KS: Serde<K> + Clone + 'static,
@@ -161,7 +169,68 @@ where
         I: Fn() -> VA + Clone + Send + Sync + 'static,
         A: Fn(&K, &V, VA) -> VA + Clone + Send + Sync + 'static,
     {
-        self.aggregate_inner(materialized, names::AGGREGATE_STORE, init, agg)
+        self.aggregate_inner(materialized.into(), names::AGGREGATE_STORE, init, agg)
+    }
+
+    pub fn count(
+        self,
+        store_name: impl Into<String>,
+    ) -> KTable<K, i64, <K as DefaultSerde>::Serde, I64Serde>
+    where
+        K: DefaultSerde,
+        <K as DefaultSerde>::Serde: Serde<K> + Clone,
+    {
+        self.count_explicit(
+            Materialized::with(<K as DefaultSerde>::Serde::default(), I64Serde)
+                .as_store(store_name),
+        )
+    }
+
+    pub fn reduce<R>(
+        self,
+        reducer: R,
+        store_name: impl Into<String>,
+    ) -> KTable<K, V, <K as DefaultSerde>::Serde, <V as DefaultSerde>::Serde>
+    where
+        K: DefaultSerde,
+        V: DefaultSerde,
+        <K as DefaultSerde>::Serde: Serde<K> + Clone,
+        <V as DefaultSerde>::Serde: Serde<V> + Clone,
+        R: Fn(&V, &V) -> V + Clone + Send + Sync + 'static,
+    {
+        self.reduce_explicit(
+            reducer,
+            Materialized::with(
+                <K as DefaultSerde>::Serde::default(),
+                <V as DefaultSerde>::Serde::default(),
+            )
+            .as_store(store_name),
+        )
+    }
+
+    pub fn aggregate<VA, I, A>(
+        self,
+        init: I,
+        agg: A,
+        store_name: impl Into<String>,
+    ) -> KTable<K, VA, <K as DefaultSerde>::Serde, <VA as DefaultSerde>::Serde>
+    where
+        VA: DefaultSerde + Any + Send + Clone,
+        K: DefaultSerde,
+        <K as DefaultSerde>::Serde: Serde<K> + Clone,
+        <VA as DefaultSerde>::Serde: Serde<VA> + Clone,
+        I: Fn() -> VA + Clone + Send + Sync + 'static,
+        A: Fn(&K, &V, VA) -> VA + Clone + Send + Sync + 'static,
+    {
+        self.aggregate_explicit(
+            init,
+            agg,
+            Materialized::with(
+                <K as DefaultSerde>::Serde::default(),
+                <VA as DefaultSerde>::Serde::default(),
+            )
+            .as_store(store_name),
+        )
     }
 
     /// `windowedBy(TimeWindows)`: switch to a windowed aggregation. Moves the
@@ -214,7 +283,7 @@ where
         store_prefix: &'static str,
         init: I,
         agg: A,
-    ) -> KTable<K, VA>
+    ) -> KTable<K, VA, KS, VS>
     where
         VA: Any + Send + Clone,
         KS: Serde<K> + Clone + 'static,
@@ -235,7 +304,7 @@ where
         store_name: String,
         init: I,
         agg: A,
-    ) -> KTable<K, VA>
+    ) -> KTable<K, VA, KS, VS>
     where
         VA: Any + Send + Clone,
         KS: Serde<K> + Clone + 'static,
@@ -270,6 +339,8 @@ where
             vec![agg_parent],
         );
         let store_for_thunk = store_name.clone();
+        let key_serde_for_lower = key_serde.clone();
+        let value_serde_for_lower = value_serde.clone();
         g.graph.nodes[agg_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&agg_parent].clone());
             let store_for_proc = store_for_thunk.clone();
@@ -293,8 +364,8 @@ where
             if logging {
                 state.topology.add_state_store::<K, VA, KS, VS>(
                     store_for_thunk.clone(),
-                    key_serde.clone(),
-                    value_serde.clone(),
+                    key_serde_for_lower.clone(),
+                    value_serde_for_lower.clone(),
                     [h.name().to_string()],
                 );
             } else {
@@ -302,16 +373,23 @@ where
                     .topology
                     .add_state_store_no_changelog::<K, VA, KS, VS>(
                         store_for_thunk.clone(),
-                        key_serde.clone(),
-                        value_serde.clone(),
+                        key_serde_for_lower.clone(),
+                        value_serde_for_lower.clone(),
                     );
             }
             state.handle_name.insert(agg_id, h.name().to_string());
         }));
 
         drop(g);
-        KTable::new(Rc::clone(&self.builder), agg_id, Some(store_name), None)
-            .with_suppress_factory(Some(suppress_factory))
+        KTable::new(
+            Rc::clone(&self.builder),
+            agg_id,
+            Some(store_name),
+            None,
+            key_serde,
+            value_serde,
+        )
+        .with_suppress_factory(Some(suppress_factory))
     }
 
     /// Record the (optional) repartition node + a `KStreamReduceProcessor`
@@ -321,7 +399,7 @@ where
         materialized: Materialized<KS, VS>,
         store_name: String,
         reducer: R,
-    ) -> KTable<K, V>
+    ) -> KTable<K, V, KS, VS>
     where
         KS: Serde<K> + Clone + 'static,
         VS: Serde<V> + Clone + 'static,
@@ -354,6 +432,8 @@ where
             vec![agg_parent],
         );
         let store_for_thunk = store_name.clone();
+        let key_serde_for_lower = key_serde.clone();
+        let value_serde_for_lower = value_serde.clone();
         g.graph.nodes[red_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent = NodeHandle::<K, V>::from_name(state.handle_name[&agg_parent].clone());
             let store_for_proc = store_for_thunk.clone();
@@ -374,23 +454,30 @@ where
             if logging {
                 state.topology.add_state_store::<K, V, KS, VS>(
                     store_for_thunk.clone(),
-                    key_serde.clone(),
-                    value_serde.clone(),
+                    key_serde_for_lower.clone(),
+                    value_serde_for_lower.clone(),
                     [h.name().to_string()],
                 );
             } else {
                 state.topology.add_state_store_no_changelog::<K, V, KS, VS>(
                     store_for_thunk.clone(),
-                    key_serde.clone(),
-                    value_serde.clone(),
+                    key_serde_for_lower.clone(),
+                    value_serde_for_lower.clone(),
                 );
             }
             state.handle_name.insert(red_id, h.name().to_string());
         }));
 
         drop(g);
-        KTable::new(Rc::clone(&self.builder), red_id, Some(store_name), None)
-            .with_suppress_factory(Some(suppress_factory))
+        KTable::new(
+            Rc::clone(&self.builder),
+            red_id,
+            Some(store_name),
+            None,
+            key_serde,
+            value_serde,
+        )
+        .with_suppress_factory(Some(suppress_factory))
     }
 
     /// If the upstream is key-changing, record a `Repartition` node

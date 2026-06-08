@@ -39,7 +39,7 @@ Default features enable all four compression codecs. Disable per-codec
 via `--no-default-features` + selective `--features`:
 
 ```toml
-crabka-protocol = { version = "0.3.1", default-features = false, features = ["snappy", "zstd"] }
+crabka-protocol = { version = "0.3.2", default-features = false, features = ["snappy", "zstd"] }
 ```
 
 ## MSRV

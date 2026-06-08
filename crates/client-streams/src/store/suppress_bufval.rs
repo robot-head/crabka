@@ -1,4 +1,4 @@
-//! JVM-exact `suppress`-buffer changelog VALUE codec.
+﻿//! JVM-exact `suppress`-buffer changelog VALUE codec.
 //!
 //! When a `KTable.suppress(...)` buffer has logging enabled, each buffered entry
 //! is logged to a changelog topic. The changelog KEY is the record's serialized

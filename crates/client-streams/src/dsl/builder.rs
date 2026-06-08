@@ -1,9 +1,9 @@
-//! `StreamsBuilder` (public) + `InternalStreamsBuilder` (graph + name counter).
+﻿//! `StreamsBuilder` (public) + `InternalStreamsBuilder` (graph + name counter).
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::dsl::graph::{GraphNodeKind, LogicalGraph};
-use crate::processor::serde::{Consumed, Serde};
+use crate::processor::serde::{Consumed, DefaultSerde, Serde, SerdeAssociate};
 
 /// A serde-carrying thunk that registers + connects a DSL-added state store to a
 /// processor by name during lowering. Looked up and invoked by `process` and
@@ -56,17 +56,18 @@ impl StreamsBuilder {
     }
 
     /// Source a `KStream` from one or more topics.
-    pub fn stream<K, V, KS, VS>(
+    pub fn stream_explicit<KS, VS>(
         &self,
         topics: impl IntoIterator<Item = impl Into<String>>,
-        consumed: Consumed<KS, VS>,
-    ) -> crate::dsl::kstream::KStream<K, V>
+        consumed: impl Into<Consumed<KS, VS>>,
+    ) -> crate::dsl::kstream::KStream<KS::Target, VS::Target, KS, VS>
     where
-        K: std::any::Any + Send + Clone,
-        V: std::any::Any + Send + Clone,
-        KS: Serde<K> + Clone,
-        VS: Serde<V> + Clone,
+        KS: SerdeAssociate + Serde<KS::Target> + Clone,
+        VS: SerdeAssociate + Serde<VS::Target> + Clone,
+        KS::Target: std::any::Any + Send + Clone,
+        VS::Target: std::any::Any + Send + Clone,
     {
+        let consumed = consumed.into();
         let topics: Vec<String> = topics.into_iter().map(Into::into).collect();
         // A stream sourced from exactly one topic carries that topic as its
         // copartition-group member lineage (used by `KStream::join`). A multi-topic
@@ -87,17 +88,25 @@ impl StreamsBuilder {
         // Attach the lowering thunk: it performs the typed `Topology::add_source`
         // call (capturing the source `Consumed` serdes + topics) and records the
         // resulting node name so children can rebuild a typed parent handle.
+        let consumed_for_lower = consumed.clone();
         g.graph.nodes[id].lower = Some(Box::new(
             move |state: &mut crate::dsl::graph::LowerState| {
-                let h = state
-                    .topology
-                    .add_source::<K, V, KS, VS>(name, topics, consumed);
+                let h = state.topology.add_source::<KS::Target, VS::Target, KS, VS>(
+                    name,
+                    topics,
+                    consumed_for_lower,
+                );
                 state.handle_name.insert(id, h.name().to_string());
             },
         ));
         drop(g);
-        crate::dsl::kstream::KStream::new(Rc::clone(&self.internal), id)
-            .with_source_topic(single_source_topic)
+        crate::dsl::kstream::KStream::new(
+            Rc::clone(&self.internal),
+            id,
+            consumed.key_serde.clone(),
+            consumed.value_serde.clone(),
+        )
+        .with_source_topic(single_source_topic)
     }
 
     /// Source a materialized `KTable` from a changelog-style topic.
@@ -108,33 +117,30 @@ impl StreamsBuilder {
     /// `KTABLE-SOURCE-STATE-STORE` counter); the changelog topic is
     /// `<app>-<store>-changelog`, unless the `REUSE_KTABLE_SOURCE_TOPICS`
     /// optimizer pass (run by `build_optimized`) makes it reuse the source topic.
-    pub fn table<K, V, KS, VS>(
+    pub fn table_explicit<KS, VS>(
         &self,
         topic: impl Into<String>,
-        consumed: Consumed<KS, VS>,
-        materialized: crate::dsl::config::Materialized<KS, VS>,
-    ) -> crate::dsl::ktable::KTable<K, V>
+        consumed: impl Into<Consumed<KS, VS>>,
+        materialized: impl Into<crate::dsl::config::Materialized<KS, VS>>,
+    ) -> crate::dsl::ktable::KTable<KS::Target, VS::Target, KS, VS>
     where
-        K: std::any::Any + Send + Sync + Clone,
-        V: std::any::Any + Send + Clone,
-        KS: Serde<K> + Clone + 'static,
-        VS: Serde<V> + Clone + 'static,
+        KS: SerdeAssociate + Serde<KS::Target> + Clone + 'static,
+        VS: SerdeAssociate + Serde<VS::Target> + Clone + 'static,
+        KS::Target: std::any::Any + Send + Sync + Clone,
+        VS::Target: std::any::Any + Send + Clone,
     {
+        let consumed = consumed.into();
+        let materialized = materialized.into();
         let topic: String = topic.into();
         // Preserve a copy of the source topic to surface via `KTable::source_topic()`.
         let topic_for_ktable = topic.clone();
         // Factory letting a downstream `suppress` register a SuppressBytesStore<K,V>
         // with this table's serdes (non-windowed). Built before the thunk moves them.
-        let suppress_factory = crate::dsl::ktable::kv_suppress_factory::<K, V, KS, VS>(
-            materialized.key_serde.clone(),
-            materialized.value_serde.clone(),
-        );
-        // Capture the table's key/value serdes for the FK-join DSL (which needs the
-        // left key/value + right value serdes to (de)serialize the FK wrappers).
-        let key_serde_arc: std::sync::Arc<dyn Serde<K>> =
-            std::sync::Arc::new(materialized.key_serde.clone());
-        let value_serde_arc: std::sync::Arc<dyn Serde<V>> =
-            std::sync::Arc::new(materialized.value_serde.clone());
+        let suppress_factory =
+            crate::dsl::ktable::kv_suppress_factory::<KS::Target, VS::Target, KS, VS>(
+                materialized.key_serde.clone(),
+                materialized.value_serde.clone(),
+            );
         let mut g = self.internal.borrow_mut();
         // Store name at the JVM position (minted before the source/processor name).
         let store_name = match &materialized.store_name {
@@ -158,16 +164,20 @@ impl StreamsBuilder {
             ..
         } = materialized;
         let store_for_thunk = store_name.clone();
+        let key_serde_for_lower = key_serde.clone();
+        let value_serde_for_lower = value_serde.clone();
         g.graph.nodes[id].lower = Some(Box::new(
             move |state: &mut crate::dsl::graph::LowerState| {
-                let src = state
-                    .topology
-                    .add_source::<K, V, KS, VS>(source_name, [topic], consumed);
+                let src = state.topology.add_source::<KS::Target, VS::Target, KS, VS>(
+                    source_name,
+                    [topic],
+                    consumed,
+                );
                 let store_for_proc = store_for_thunk.clone();
                 // The KTable source forwards Change<V> (prior store value as old).
                 let h = state
                     .topology
-                    .add_processor::<K, V, K, crate::dsl::processors::change::Change<V>, _, _, _>(
+                    .add_processor::<KS::Target, VS::Target, KS::Target, crate::dsl::processors::change::Change<VS::Target>, _, _, _>(
                         proc_name,
                         move || crate::dsl::processors::table::KTableSourceProcessor {
                             store_name: store_for_proc.clone(),
@@ -182,21 +192,23 @@ impl StreamsBuilder {
                     Some(changelog_topic) => {
                         state
                             .topology
-                            .add_state_store_with_changelog::<K, V, KS, VS>(
+                            .add_state_store_with_changelog::<KS::Target, VS::Target, KS, VS>(
                                 store_for_thunk.clone(),
-                                key_serde,
-                                value_serde,
+                                key_serde_for_lower,
+                                value_serde_for_lower,
                                 [h.name().to_string()],
                                 changelog_topic,
                             );
                     }
                     None => {
-                        state.topology.add_state_store::<K, V, KS, VS>(
-                            store_for_thunk.clone(),
-                            key_serde,
-                            value_serde,
-                            [h.name().to_string()],
-                        );
+                        state
+                            .topology
+                            .add_state_store::<KS::Target, VS::Target, KS, VS>(
+                                store_for_thunk.clone(),
+                                key_serde_for_lower,
+                                value_serde_for_lower,
+                                [h.name().to_string()],
+                            );
                     }
                 }
                 // Children of the TableSource wire to the processor output.
@@ -209,9 +221,10 @@ impl StreamsBuilder {
             id,
             Some(store_name),
             Some(topic_for_ktable),
+            key_serde.clone(),
+            value_serde.clone(),
         )
         .with_suppress_factory(Some(suppress_factory))
-        .with_serdes(key_serde_arc, value_serde_arc)
     }
 
     /// Source a [`GlobalKTable`] from a topic: a fully-replicated lookup table,
@@ -228,18 +241,20 @@ impl StreamsBuilder {
     ///
     /// [`GlobalKTable`]: crate::dsl::global_table::GlobalKTable
     /// [`Topology::add_global_store`]: crate::topology::Topology::add_global_store
-    pub fn global_table<K, V, KS, VS>(
+    pub fn global_table_explicit<KS, VS>(
         &self,
         topic: impl Into<String>,
-        consumed: Consumed<KS, VS>,
-        materialized: crate::dsl::config::Materialized<KS, VS>,
-    ) -> crate::dsl::global_table::GlobalKTable<K, V>
+        consumed: impl Into<Consumed<KS, VS>>,
+        materialized: impl Into<crate::dsl::config::Materialized<KS, VS>>,
+    ) -> crate::dsl::global_table::GlobalKTable<KS::Target, VS::Target, KS, VS>
     where
-        K: std::any::Any + Send + Sync + Clone,
-        V: std::any::Any + Send + Clone,
-        KS: Serde<K> + Clone + 'static,
-        VS: Serde<V> + Clone + 'static,
+        KS: SerdeAssociate + Serde<KS::Target> + Clone + 'static,
+        VS: SerdeAssociate + Serde<VS::Target> + Clone + 'static,
+        KS::Target: std::any::Any + Send + Sync + Clone,
+        VS::Target: std::any::Any + Send + Clone,
     {
+        let consumed = consumed.into();
+        let materialized = materialized.into();
         let topic: String = topic.into();
         let topic_for_handle = topic.clone();
         let mut g = self.internal.borrow_mut();
@@ -265,17 +280,21 @@ impl StreamsBuilder {
         // for both the source deser and the store factory) takes the source serdes.
         // Drop `materialized` to keep its API surface symmetric with `table()` even
         // though its serdes aren't separately threaded here.
+        let key_serde = materialized.key_serde.clone();
+        let value_serde = materialized.value_serde.clone();
         drop(materialized);
         let store_for_handle = store_name.clone();
         g.graph.nodes[id].lower = Some(Box::new(
             move |state: &mut crate::dsl::graph::LowerState| {
-                state.topology.add_global_store::<K, V, KS, VS>(
-                    store_name,
-                    source_name,
-                    topic,
-                    proc_name,
-                    consumed,
-                );
+                state
+                    .topology
+                    .add_global_store::<KS::Target, VS::Target, KS, VS>(
+                        store_name,
+                        source_name,
+                        topic,
+                        proc_name,
+                        consumed,
+                    );
             },
         ));
         drop(g);
@@ -284,6 +303,71 @@ impl StreamsBuilder {
             id,
             store_for_handle,
             topic_for_handle,
+            key_serde,
+            value_serde,
+        )
+    }
+
+    /// Sourced stream utilizing default associated serdes.
+    pub fn stream<K, V>(
+        &self,
+        topics: impl IntoIterator<Item = impl Into<String>>,
+    ) -> crate::dsl::kstream::KStream<K, V>
+    where
+        K: DefaultSerde,
+        V: DefaultSerde,
+        K::Serde: SerdeAssociate<Target = K> + Clone,
+        V::Serde: SerdeAssociate<Target = V> + Clone,
+        K: std::any::Any + Send + Clone,
+        V: std::any::Any + Send + Clone,
+    {
+        self.stream_explicit(
+            topics,
+            Consumed::with(K::Serde::default(), V::Serde::default()),
+        )
+    }
+
+    /// Sourced table utilizing default associated serdes.
+    pub fn table<K, V>(
+        &self,
+        topic: impl Into<String>,
+        store_name: impl Into<String>,
+    ) -> crate::dsl::ktable::KTable<K, V>
+    where
+        K: DefaultSerde,
+        V: DefaultSerde,
+        K::Serde: SerdeAssociate<Target = K> + Clone,
+        V::Serde: SerdeAssociate<Target = V> + Clone,
+        K: std::any::Any + Send + Sync + Clone,
+        V: std::any::Any + Send + Clone,
+    {
+        self.table_explicit(
+            topic,
+            Consumed::with(K::Serde::default(), V::Serde::default()),
+            crate::dsl::config::Materialized::with(K::Serde::default(), V::Serde::default())
+                .as_store(store_name),
+        )
+    }
+
+    /// Sourced global table utilizing default associated serdes.
+    pub fn global_table<K, V>(
+        &self,
+        topic: impl Into<String>,
+        store_name: impl Into<String>,
+    ) -> crate::dsl::global_table::GlobalKTable<K, V>
+    where
+        K: DefaultSerde,
+        V: DefaultSerde,
+        K::Serde: SerdeAssociate<Target = K> + Clone,
+        V::Serde: SerdeAssociate<Target = V> + Clone,
+        K: std::any::Any + Send + Sync + Clone,
+        V: std::any::Any + Send + Clone,
+    {
+        self.global_table_explicit(
+            topic,
+            Consumed::with(K::Serde::default(), V::Serde::default()),
+            crate::dsl::config::Materialized::with(K::Serde::default(), V::Serde::default())
+                .as_store(store_name),
         )
     }
 
@@ -298,29 +382,31 @@ impl StreamsBuilder {
     /// changelog. The thunk is recorded under `name` and looked up by `process`.
     ///
     /// [`Topology::add_state_store`]: crate::topology::Topology::add_state_store
-    pub fn add_state_store<K, V, KS, VS>(
+    pub fn add_state_store<KS, VS>(
         &self,
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
     ) -> &Self
     where
-        K: std::any::Any + Send + Sync + Clone,
-        V: std::any::Any + Send + Clone,
-        KS: Serde<K> + Clone + 'static,
-        VS: Serde<V> + Clone + 'static,
+        KS: SerdeAssociate + Serde<KS::Target> + Clone + 'static,
+        VS: SerdeAssociate + Serde<VS::Target> + Clone + 'static,
+        KS::Target: std::any::Any + Send + Sync + Clone,
+        VS::Target: std::any::Any + Send + Clone,
     {
         let name: String = name.into();
         // `name` is moved into the thunk; keep a copy for the map key.
         let key = name.clone();
         let thunk: StoreConnectThunk = std::sync::Arc::new(
             move |state: &mut crate::dsl::graph::LowerState, processor: &str| {
-                state.topology.add_state_store::<K, V, KS, VS>(
-                    name.clone(),
-                    key_serde.clone(),
-                    value_serde.clone(),
-                    [processor.to_string()],
-                );
+                state
+                    .topology
+                    .add_state_store::<KS::Target, VS::Target, KS, VS>(
+                        name.clone(),
+                        key_serde.clone(),
+                        value_serde.clone(),
+                        [processor.to_string()],
+                    );
             },
         );
         self.internal.borrow_mut().store_thunks.insert(key, thunk);
@@ -334,7 +420,7 @@ impl StreamsBuilder {
     /// Consumes the builder. This requires that no [`KStream`]/[`KTable`] handles
     /// are still alive — each holds an `Rc` clone of the internal builder, so an
     /// outstanding handle makes `Rc::try_unwrap` fail (→ panic). The fluent
-    /// `stream(..).map_values(..)..to(..)` form drops every intermediate handle
+    /// `stream(..).map_values(..)..to_explicit(..)` form drops every intermediate handle
     /// before `build`, satisfying this.
     ///
     /// [`KStream`]: crate::dsl::kstream::KStream
@@ -355,7 +441,7 @@ impl StreamsBuilder {
     ///
     /// The passes are `MERGE_REPARTITION_TOPICS` (two aggregations off one
     /// key-changing op share a single repartition topic) and
-    /// `REUSE_KTABLE_SOURCE_TOPICS` (a `builder.table()` store reuses its source
+    /// `REUSE_KTABLE_SOURCE_TOPICS` (a `builder.table_explicit()` store reuses its source
     /// topic as its changelog). They're independent, so order doesn't matter.
     /// Same outstanding-handle requirement as [`build`](Self::build).
     pub fn build_optimized(
@@ -410,7 +496,7 @@ mod tests {
     #[test]
     fn stream_records_a_source_node() {
         let builder = StreamsBuilder::new();
-        let _s = builder.stream(
+        let _s = builder.stream_explicit(
             ["in"],
             crate::processor::serde::Consumed::with(StringSerde, StringSerde),
         );
@@ -427,8 +513,8 @@ mod tests {
     fn build_lowers_source_sink_to_wire_topology() {
         use crate::processor::serde::{Consumed, Produced};
         let b = StreamsBuilder::new();
-        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-            .to("out", Produced::with(StringSerde, StringSerde));
+        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+            .to_explicit("out", Produced::with(StringSerde, StringSerde));
         let built = b.build("app").unwrap();
         let wire = built.to_wire();
         check!(wire.epoch == 0);
@@ -442,27 +528,27 @@ mod tests {
     fn build_optimized_matches_build_for_stateless_chain() {
         use crate::processor::serde::{Consumed, Produced};
         let b = StreamsBuilder::new();
-        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
             .map_values(|v: &String| v.clone())
-            .to("out", Produced::with(StringSerde, StringSerde));
+            .to_explicit("out", Produced::with(StringSerde, StringSerde));
         let wire = b.build_optimized("app").unwrap().to_wire();
         check!(wire.subtopologies.len() == 1);
         check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
     }
 
     #[test]
-    fn table_default_build_keeps_derived_changelog_name() {
+    fn table_build_keeps_derived_changelog_name() {
         // Without the optimizer (plain `build`), a `table()` store's changelog is
         // the JVM-default `<app>-<store>-changelog` — REUSE_KTABLE_SOURCE_TOPICS
         // must NOT fire.
         let b = StreamsBuilder::new();
-        b.table::<String, String, _, _>(
+        b.table_explicit(
             "in",
             Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("store"),
         )
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             crate::processor::serde::Produced::with(StringSerde, StringSerde),
         );
@@ -480,13 +566,13 @@ mod tests {
         // With the optimizer (`build_optimized`), the `table()` store's changelog
         // is the SOURCE topic ("in"), not "app-store-changelog".
         let b = StreamsBuilder::new();
-        b.table::<String, String, _, _>(
+        b.table_explicit(
             "in",
             Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("store"),
         )
         .to_stream()
-        .to(
+        .to_explicit(
             "out",
             crate::processor::serde::Produced::with(StringSerde, StringSerde),
         );
@@ -502,7 +588,7 @@ mod tests {
     #[test]
     fn global_table_returns_handle_with_store_name() {
         let builder = StreamsBuilder::new();
-        let gt = builder.global_table::<String, String, _, _>(
+        let gt = builder.global_table_explicit(
             "global",
             crate::processor::serde::Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("g-store"),
@@ -524,7 +610,7 @@ mod tests {
         let b = StreamsBuilder::new();
         // Declared FIRST: the global source is registered before the stream source,
         // so it consumes node-group index 0 and the stream emits as "1".
-        let gt = b.global_table::<String, String, _, _>(
+        let gt = b.global_table_explicit(
             "global",
             Consumed::with(StringSerde, StringSerde),
             crate::dsl::config::Materialized::with(StringSerde, StringSerde).as_store("g-store"),
@@ -532,8 +618,8 @@ mod tests {
         // The GlobalKTable handle holds an `Rc` clone of the internal builder; drop
         // it before `build()` (which requires `Rc::try_unwrap` to succeed).
         drop(gt);
-        b.stream(["in"], Consumed::with(StringSerde, StringSerde))
-            .to("out", Produced::with(StringSerde, StringSerde));
+        b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
+            .to_explicit("out", Produced::with(StringSerde, StringSerde));
         let wire = b.build("app").unwrap().to_wire();
         check!(wire.subtopologies.len() == 1);
         check!(wire.subtopologies[0].subtopology_id == "1");
@@ -551,7 +637,7 @@ mod tests {
         use crate::processor::serde::I64Serde;
         let b = StreamsBuilder::new();
         // Chains (returns &Self) and records a thunk under the given name.
-        b.add_state_store::<String, i64, _, _>("counts", StringSerde, I64Serde);
+        b.add_state_store("counts", StringSerde, I64Serde);
         check!(b.internal.borrow().store_thunk("counts").is_some());
         check!(b.internal.borrow().store_thunk("missing").is_none());
     }
@@ -562,7 +648,7 @@ mod tests {
         let b = StreamsBuilder::new();
         // Hold a live KStream handle across the build call: it keeps an `Rc`
         // clone of the internal builder alive, so `Rc::try_unwrap` fails.
-        let _held = b.stream(
+        let _held = b.stream_explicit(
             ["in"],
             crate::processor::serde::Consumed::with(StringSerde, StringSerde),
         );

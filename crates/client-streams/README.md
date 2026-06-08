@@ -11,7 +11,7 @@ This crate is part of [Crabka](https://github.com/robot-head/crabka), a Rust imp
 ## Install
 
 ```toml
-crabka-client-streams = "0.3.1"
+crabka-client-streams = "0.3.2"
 ```
 
 For workspace development, use the path dependency from this repository instead.
@@ -22,12 +22,12 @@ Build and run a simple source-to-sink topology using the KIP-1071 membership cli
 
 ```rust,no_run
 use std::sync::Arc;
-use crabka_client_streams::{Consumed, Produced, StreamsEvent, StreamsMembership, StringSerde, Topology};
+use crabka_client_streams::{StreamsEvent, StreamsMembership, StringSerde, Topology};
 
 # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 let mut topo = Topology::new();
-let src = topo.add_source("src", ["input-topic"], Consumed::with(StringSerde, StringSerde));
-topo.add_sink("snk", "output-topic", [&src], Produced::with(StringSerde, StringSerde));
+let src = topo.add_source("src", ["input-topic"], (StringSerde, StringSerde));
+topo.add_sink("snk", "output-topic", [&src], (StringSerde, StringSerde));
 let built = topo.build("orders-stream")?;
 
 let mut membership = StreamsMembership::builder()

@@ -1,4 +1,4 @@
-//! Broker integration test: DSL `GlobalKTable` stream-globaltable join.
+﻿//! Broker integration test: DSL `GlobalKTable` stream-globaltable join.
 //!
 //! Proves the full `GlobalKTable` runtime path end-to-end against a real broker:
 //! the global consumer bootstraps a fully-replicated store from **every**
@@ -76,12 +76,12 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
 /// `in` → `join_global` (lookup key = stream value) → `out`.
 fn global_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
     let b = StreamsBuilder::new();
-    let g: GlobalKTable<String, String> = b.global_table(
+    let g: GlobalKTable<String, String> = b.global_table_explicit(
         "global",
         Consumed::with(StringSerde, StringSerde),
         Materialized::with(StringSerde, StringSerde).as_store("global-store"),
     );
-    b.stream(["in"], Consumed::with(StringSerde, StringSerde))
+    b.stream_explicit(["in"], Consumed::with(StringSerde, StringSerde))
         .join_global(
             &g,
             // key-mapper: the stream VALUE is the global lookup key.
@@ -89,7 +89,7 @@ fn global_join_topology(app_id: &str) -> crabka_client_streams::BuiltTopology {
             // joiner: combine stream value and global value.
             |sv: &String, gv: &String| format!("{sv}-{gv}"),
         )
-        .to("out", Produced::with(StringSerde, StringSerde));
+        .to_explicit("out", Produced::with(StringSerde, StringSerde));
     // Drop the GlobalKTable handle (it holds an Rc clone of the internal builder)
     // so `build` can `Rc::try_unwrap` the shared graph.
     drop(g);

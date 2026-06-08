@@ -1,4 +1,4 @@
-//! Topology builder: public Processor-API surface.
+﻿//! Topology builder: public Processor-API surface.
 
 use std::any::Any;
 use std::borrow::Borrow;
@@ -208,7 +208,7 @@ impl Topology {
         &mut self,
         name: impl Into<String>,
         topics: impl IntoIterator<Item = impl Into<String>>,
-        consumed: Consumed<KS, VS>,
+        consumed: impl Into<Consumed<KS, VS>>,
     ) -> NodeHandle<K, V>
     where
         K: Any + Send + Clone,
@@ -219,7 +219,7 @@ impl Topology {
         let Consumed {
             key_serde,
             value_serde,
-        } = consumed;
+        } = consumed.into();
         let name: String = name.into();
         let topics: Vec<String> = topics.into_iter().map(Into::into).collect();
         let r = self.reg.add_source(&name, topics.clone());
@@ -310,7 +310,7 @@ impl Topology {
         name: impl Into<String>,
         topic: impl Into<String>,
         parents: I,
-        produced: Produced<KS, VS>,
+        produced: impl Into<Produced<KS, VS>>,
     ) where
         K: Any + Send,
         V: Any + Send,
@@ -322,7 +322,7 @@ impl Topology {
         let Produced {
             key_serde,
             value_serde,
-        } = produced;
+        } = produced.into();
         let name: String = name.into();
         let topic: String = topic.into();
         let preds: Vec<String> = parents
@@ -382,7 +382,7 @@ impl Topology {
     /// rather than the derived `<app_id>-<name>-changelog`.
     ///
     /// This backs the `REUSE_KTABLE_SOURCE_TOPICS` DSL optimizer: a
-    /// `builder.table(topic, ...)` store can reuse `topic` as its changelog, so
+    /// `builder.table_explicit(topic, ...)` store can reuse `topic` as its changelog, so
     /// no separate `app-<store>-changelog` topic is created and the wire
     /// topology lists `topic` as the store's changelog. `changelog_topic` is the
     /// topic name used both in the wire `state_changelog_topics` entry and as the
@@ -775,7 +775,7 @@ impl Topology {
         source_name: impl Into<String>,
         topic: impl Into<String>,
         processor_name: impl Into<String>,
-        consumed: Consumed<KS, VS>,
+        consumed: impl Into<Consumed<KS, VS>>,
     ) -> &mut Self
     where
         K: Send + 'static,
@@ -790,7 +790,7 @@ impl Topology {
         let Consumed {
             key_serde,
             value_serde,
-        } = consumed;
+        } = consumed.into();
 
         // (a) source node reading the global topic (consumes a node-group index).
         let r = self.reg.add_source(&source_name, vec![topic.clone()]);
