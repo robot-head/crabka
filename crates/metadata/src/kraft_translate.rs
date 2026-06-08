@@ -420,6 +420,8 @@ pub fn to_kraft_values(
             let version: i16 = match kr {
                 // KIP-858: directories field only present at v1+.
                 KraftMetadataRecord::Partition(_) => 1,
+                // KIP-631: RegisterBrokerRecord v1 adds InControlledShutdown bool.
+                KraftMetadataRecord::RegisterBroker(_) => 1,
                 // All other modeled record types frame at the defaulted v0.
                 _ => 0,
             };
