@@ -3,15 +3,13 @@
 //! Proves that a fresh `KafkaStreams` instance restores its `counts` store from
 //! the changelog so that counts continue from where the previous instance left
 //! off rather than resetting to zero.
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_streams::{
-    Consumed, I64Serde, KafkaStreams, NodeHandle, Processor, ProcessorContext, Produced, Record,
-    StringSerde, Topology,
+    I64Serde, KafkaStreams, NodeHandle, Processor, ProcessorContext, Record, StringSerde, Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};

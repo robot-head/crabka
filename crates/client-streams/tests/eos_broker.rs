@@ -31,7 +31,6 @@
 //!    restarted consumer reset to `earliest`, re-read the input, and re-emitted
 //!    committed records (double-counting); post-fix it resumes from the
 //!    materialized offset and processes only the new record.
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 
@@ -40,8 +39,8 @@ use crabka_client_core::{
     Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition_with_isolation,
 };
 use crabka_client_streams::{
-    Consumed, I64Serde, KafkaStreams, NodeHandle, ProcessingGuarantee, Processor, ProcessorContext,
-    Produced, Record, StringSerde, Topology,
+    I64Serde, KafkaStreams, NodeHandle, ProcessingGuarantee, Processor, ProcessorContext, Record,
+    StringSerde, Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::offset_fetch_request::{

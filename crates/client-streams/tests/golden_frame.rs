@@ -1,6 +1,5 @@
 //! Byte-exact interop gate: the encoder's wire `Topology` for a canonical
 //! Processor-API topology must match the JVM 4.x fixture.
-#![cfg(not(target_os = "windows"))]
 
 use crabka_client_streams::{NodeHandle, Topology};
 

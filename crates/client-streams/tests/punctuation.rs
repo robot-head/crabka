@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 //! Execution-level tests for stream-time punctuation through the
 //! [`TopologyTestDriver`]. After each `pipe_input`, the driver fires due
 //! `STREAM_TIME` punctuators at the current stream-time (at most once each).

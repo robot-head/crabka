@@ -7,14 +7,13 @@
 //!
 //! Mirrors the harness in `state_store_integration.rs`, adding a `tempdir`-based
 //! `StoreBackend::Turso` to both `KafkaStreams` instances.
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_streams::{
-    Consumed, I64Serde, KafkaStreams, Processor, ProcessorContext, Produced, Record, StoreBackend,
+    I64Serde, KafkaStreams, NodeHandle, Processor, ProcessorContext, Record, StoreBackend,
     StringSerde, Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};

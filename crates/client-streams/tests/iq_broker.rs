@@ -5,15 +5,14 @@
 //! the public `KafkaStreams::key_value_store` interactive-query interface — the
 //! same path an out-of-topology caller uses. Also exercises the error surfaces
 //! (`StoreNotFound`, `WrongStoreKind`).
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_client_streams::{
-    Consumed, I64Serde, IqError, KafkaStreams, NodeHandle, Processor, ProcessorContext, Produced,
-    Record, StreamsClientError, StringSerde, Topology,
+    I64Serde, IqError, KafkaStreams, NodeHandle, Processor, ProcessorContext, Record,
+    StreamsClientError, StringSerde, Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};

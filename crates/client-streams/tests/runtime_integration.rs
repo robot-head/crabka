@@ -1,14 +1,12 @@
 //! End-to-end integration test: a real `KafkaStreams` runtime running against an
 //! in-process broker, processing records through a typed upper-case topology.
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::{Client, Connection, ConnectionOptions, FetchedRecord, fetch_partition};
 use crabka_client_streams::{
-    Consumed, KafkaStreams, NodeHandle, Processor, ProcessorContext, Produced, Record, StringSerde,
-    Topology,
+    KafkaStreams, NodeHandle, Processor, ProcessorContext, Record, Topology,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
 use crabka_protocol::owned::update_features_request::{FeatureUpdateKey, UpdateFeaturesRequest};
