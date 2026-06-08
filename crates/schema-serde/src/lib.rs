@@ -15,3 +15,4 @@ pub mod format;
 
 pub use error::SchemaSerdeError;
 pub use registry::RegistryClient;
+pub use subject::{Role, SchemaKind, SubjectStrategy, TopicNameStrategy};
