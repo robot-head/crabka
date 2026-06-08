@@ -1754,3 +1754,154 @@ async fn normalize_true_deduplicates_avro_schemas() {
     cancel.cancel();
     broker.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normalize_true_json_schema_deduplicates_and_errors() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // JSON schema with extra whitespace — normalize=true round-trips through serde_json
+    let json_body = r#"{"schemaType":"JSON","schema":"{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"integer\" } } }"}"#;
+
+    // Register with normalize=true → JSON round-trip strips extraneous whitespace
+    let resp_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/json-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(json_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_a.status(), StatusCode::OK);
+    let id_a = body_json(resp_a).await["id"].as_i64().unwrap();
+
+    // Same schema again with normalize=true → idempotent (same id)
+    let resp_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/json-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(json_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_b.status(), StatusCode::OK);
+    assert_eq!(body_json(resp_b).await["id"].as_i64().unwrap(), id_a);
+
+    // Invalid JSON with normalize=true → 422 / 42201 (exercises JSON error path in normalize_schema)
+    let resp_bad = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/json-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(
+                    r#"{"schemaType":"JSON","schema":"not valid { json"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(resp_bad).await["error_code"], 42201);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normalize_true_protobuf_is_noop() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    let pb_body =
+        r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { int32 id = 1; }"}"#;
+
+    // normalize=true with Protobuf is a no-op — schema is stored verbatim
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/pb-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(pb_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let id = body_json(resp).await["id"].as_i64().unwrap();
+
+    // Re-register identical → same id (idempotent)
+    let resp2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/pb-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(pb_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    assert_eq!(body_json(resp2).await["id"].as_i64().unwrap(), id);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normalize_true_lookup_finds_normalized_schema() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    let avro_with_spaces = r#"{"schema":"{ \"type\" : \"record\" , \"name\" : \"U\" , \"fields\" : [ { \"name\" : \"id\" , \"type\" : \"int\" } ] }"}"#;
+
+    // Register with normalize=true → stored as PCF
+    let reg_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/norm-lookup/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(avro_with_spaces))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reg_resp.status(), StatusCode::OK);
+    let stored_id = body_json(reg_resp).await["id"].as_i64().unwrap();
+
+    // POST /subjects/{s}?normalize=true → exercises the lookup handler's normalize path
+    let lookup_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/norm-lookup?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(avro_with_spaces))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lookup_resp.status(), StatusCode::OK);
+    let found = body_json(lookup_resp).await;
+    assert_eq!(found["id"].as_i64().unwrap(), stored_id);
+    assert_eq!(found["subject"], "norm-lookup");
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
