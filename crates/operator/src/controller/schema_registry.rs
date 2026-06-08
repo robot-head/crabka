@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::Service;
-use kube::api::Api;
+use k8s_openapi::api::core::v1::{Secret, Service};
+use kube::api::{Api, DynamicObject, Patch, PatchParams};
+use kube::core::{ApiResource, GroupVersionKind};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher;
@@ -17,9 +18,13 @@ use kube::{Resource, ResourceExt as _};
 use serde_json::json;
 
 use crate::context::Context;
-use crate::controller::common::{ReconcileError, apply_object, condition, owner_ref, patch_status};
+use crate::controller::common::{
+    FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref, patch_status,
+};
 use crate::controller::topic::internal_listener_bootstrap;
-use crate::crd::{BearerMode, Kafka, SchemaRegistry, SchemaRegistryStatus, TlsClientAuth};
+use crate::crd::{
+    BearerMode, CertManagerIssuerRef, Kafka, SchemaRegistry, SchemaRegistryStatus, TlsClientAuth,
+};
 
 const APP_NAME: &str = "crabka-schema-registry";
 const SR_PORT: i32 = 8081;
@@ -51,6 +56,7 @@ pub fn error_policy(_obj: Arc<SchemaRegistry>, err: &ReconcileError, _ctx: Arc<C
     Action::requeue(Duration::from_secs(15))
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn reconcile(
     obj: Arc<SchemaRegistry>,
     ctx: Arc<Context>,
@@ -101,7 +107,62 @@ pub async fn reconcile(
         return Ok(Action::requeue(Duration::from_secs(30)));
     };
 
-    // 3. Render + apply children (Deployment + 2 Services).
+    // 3. Resolve TLS secret name (handles issuerRef path + mutual-exclusion).
+    let tls_secret_name: Option<String> = if let Some(tls) = &obj.spec.tls {
+        match (&tls.secret_name, &tls.issuer_ref) {
+            (Some(_), Some(_)) => {
+                set_status(
+                    &sr_api,
+                    &name,
+                    &obj,
+                    "InvalidSpec",
+                    "spec.tls.secretName and spec.tls.issuerRef are mutually exclusive",
+                    None,
+                    None,
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            (None, None) => {
+                set_status(
+                    &sr_api,
+                    &name,
+                    &obj,
+                    "InvalidSpec",
+                    "spec.tls must set either secretName or issuerRef",
+                    None,
+                    None,
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            (Some(sn), None) => Some(sn.clone()),
+            (None, Some(issuer)) => {
+                let cert_secret = format!("{name}-sr-tls");
+                apply_certificate_cr(&ctx.client, &ns, &name, &cert_secret, issuer, &obj).await?;
+                // Gate: wait for cert-manager to provision the Secret.
+                let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
+                if secret_api.get_opt(&cert_secret).await?.is_none() {
+                    set_status(
+                        &sr_api,
+                        &name,
+                        &obj,
+                        "WaitingForCert",
+                        &format!("waiting for cert-manager to provision Secret {cert_secret}"),
+                        None,
+                        None,
+                    )
+                    .await?;
+                    return Ok(Action::requeue(Duration::from_secs(10)));
+                }
+                Some(cert_secret)
+            }
+        }
+    } else {
+        None
+    };
+
+    // 4. Render + apply children (Deployment + 2 Services).
     let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
 
@@ -115,19 +176,24 @@ pub async fn reconcile(
         .clone()
         .or_else(|| ctx.config.default_schema_registry_image.clone())
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
-    let deployment = render_deployment(&obj, &bootstrap, &image)?;
+    let deployment = render_deployment(&obj, &bootstrap, &image, tls_secret_name.as_deref())?;
     apply_object(&dep_api, &deployment_name(&name), &deployment).await?;
 
-    // 4. Status from the live Deployment.
+    // 5. Status from the live Deployment.
     let live = dep_api.get_opt(&deployment_name(&name)).await?;
     let (replicas, ready) = live
         .as_ref()
         .and_then(|d| d.status.as_ref())
         .map_or((None, None), |s| (s.replicas, s.ready_replicas));
     let desired = obj.spec.replicas;
+    let scheme = if tls_secret_name.is_some() {
+        "https"
+    } else {
+        "http"
+    };
     let url = format!(
         "{}://{}.{}.svc.cluster.local:{SR_PORT}",
-        scheme(&obj),
+        scheme,
         service_name(&name),
         ns
     );
@@ -165,13 +231,6 @@ fn service_name(n: &str) -> String {
 }
 fn headless_name(n: &str) -> String {
     format!("{n}-sr-headless")
-}
-fn scheme(obj: &SchemaRegistry) -> &'static str {
-    if obj.spec.tls.is_some() {
-        "https"
-    } else {
-        "http"
-    }
 }
 
 /// Stable label set used for Deployment `selector.matchLabels`, the pod
@@ -244,6 +303,7 @@ fn render_deployment(
     obj: &SchemaRegistry,
     bootstrap: &str,
     image: &str,
+    tls_secret: Option<&str>,
 ) -> Result<Deployment, ReconcileError> {
     let name = obj.name_any();
     let ns = obj
@@ -252,10 +312,15 @@ fn render_deployment(
         .clone()
         .unwrap_or_else(|| "default".into());
     let selector = selector_labels(obj);
-    let (args, volumes, mounts, extra_env) = build_args_and_mounts(obj, bootstrap);
+    let (args, volumes, mounts, extra_env) = build_args_and_mounts(obj, bootstrap, tls_secret);
+    let scheme = if tls_secret.is_some() {
+        "https"
+    } else {
+        "http"
+    };
     let advertised = format!(
         "{}://$(POD_NAME).{}.{}.svc.cluster.local:{SR_PORT}",
-        scheme(obj),
+        scheme,
         headless_name(&name),
         ns
     );
@@ -304,6 +369,7 @@ fn render_deployment(
 fn build_args_and_mounts(
     obj: &SchemaRegistry,
     bootstrap: &str,
+    tls_secret: Option<&str>,
 ) -> (
     Vec<String>,
     Vec<serde_json::Value>,
@@ -330,14 +396,15 @@ fn build_args_and_mounts(
     let mut mounts = Vec::new();
     let mut extra_env: Vec<serde_json::Value> = Vec::new();
 
-    // Server TLS
+    // Server TLS — use the resolved tls_secret param instead of tls.secret_name
     if let Some(tls) = &s.tls {
-        if let Some(sn) = &tls.secret_name {
+        if let Some(sn) = tls_secret {
             a.push("--tls-cert=/etc/sr/tls/tls.crt".into());
             a.push("--tls-key=/etc/sr/tls/tls.key".into());
             volumes.push(json!({ "name": "tls", "secret": { "secretName": sn } }));
             mounts.push(json!({ "name": "tls", "mountPath": "/etc/sr/tls", "readOnly": true }));
         }
+        // client_auth and client_ca still read from tls struct (unchanged)
         let mode = match tls.client_auth.unwrap_or(TlsClientAuth::Disabled) {
             TlsClientAuth::Disabled => "disabled",
             TlsClientAuth::Optional => "optional",
@@ -457,6 +524,56 @@ fn build_args_and_mounts(
     }
 
     (a, volumes, mounts, extra_env)
+}
+
+/// SSA-apply a `cert-manager.io/v1` `Certificate` CR using [`DynamicObject`]
+/// (avoids a cert-manager Rust crate dep — same pattern as `metrics.rs`).
+///
+/// DNS SANs: per-pod headless DNS + `ClusterIP` service DNS.
+async fn apply_certificate_cr(
+    client: &kube::Client,
+    ns: &str,
+    name: &str,
+    cert_secret_name: &str,
+    issuer: &CertManagerIssuerRef,
+    owner: &SchemaRegistry,
+) -> Result<(), ReconcileError> {
+    let kind = issuer.kind.as_deref().unwrap_or("Issuer");
+    let group = issuer.group.as_deref().unwrap_or("cert-manager.io");
+    let cert_name = format!("{name}-sr");
+    let body = serde_json::json!({
+        "apiVersion": "cert-manager.io/v1",
+        "kind": "Certificate",
+        "metadata": {
+            "name": cert_name,
+            "namespace": ns,
+            "ownerReferences": [owner_ref::<SchemaRegistry>(owner)?],
+        },
+        "spec": {
+            "secretName": cert_secret_name,
+            "issuerRef": {
+                "name": issuer.name,
+                "kind": kind,
+                "group": group,
+            },
+            "dnsNames": [
+                format!("*.{}.{}.svc.cluster.local", headless_name(name), ns),
+                format!("{}.{}.svc.cluster.local", service_name(name), ns),
+            ],
+        }
+    });
+    let gvk = GroupVersionKind::gvk("cert-manager.io", "v1", "Certificate");
+    let ar = ApiResource::from_gvk_with_plural(&gvk, "certificates");
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), ns, &ar);
+    let obj: DynamicObject = serde_json::from_value(body)?;
+    let pp = PatchParams::apply(FIELD_MANAGER).force();
+    match api.patch(&cert_name, &pp, &Patch::Apply(&obj)).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(status)) if status.code == 404 => Err(ReconcileError::Malformed(
+            "cert-manager Certificate CRD not installed".into(),
+        )),
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Patch status with a single rolled-up `Ready` condition + a `KafkaReady`

@@ -677,6 +677,230 @@ async fn kafka_client_sasl_ssl_renders_to_args_and_env() {
 }
 
 #[tokio::test]
+async fn secret_name_and_issuer_ref_mutual_exclusion() {
+    let mut cr = sr("sr1", Some(CLUSTER));
+    cr.spec.bootstrap_servers = Some("ext:9092".into());
+    cr.spec.tls = Some(crabka_operator::crd::SchemaRegistryTls {
+        secret_name: Some("explicit-secret".into()),
+        issuer_ref: Some(crabka_operator::crd::CertManagerIssuerRef {
+            name: "my-issuer".into(),
+            kind: None,
+            group: None,
+        }),
+        client_auth: None,
+        client_ca_secret_name: None,
+    });
+    let rules = vec![MockRule {
+        method: Method::PATCH,
+        path_substr: "/schemaregistries/sr1/status".into(),
+        response: json_response(
+            200,
+            &serde_json::json!({"kind":"SchemaRegistry","metadata":{"name":"sr1"},"spec":{"replicas":1}}),
+        ),
+    }];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+    reconcile(Arc::new(cr), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    assert!(
+        !observed
+            .iter()
+            .any(|r| r.uri().to_string().contains("/deployments/"))
+    );
+    let patch = observed
+        .iter()
+        .find(|r| r.uri().to_string().contains("/schemaregistries/sr1/status"))
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(patch.body()).unwrap();
+    let ready = body["status"]["conditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["type"] == "Ready")
+        .unwrap();
+    assert_eq!(ready["reason"], "InvalidSpec");
+}
+
+#[tokio::test]
+async fn issuer_ref_creates_certificate_cr_and_waits() {
+    let mut cr = sr("sr1", Some(CLUSTER));
+    cr.spec.bootstrap_servers = Some("ext:9092".into());
+    cr.spec.tls = Some(crabka_operator::crd::SchemaRegistryTls {
+        secret_name: None,
+        issuer_ref: Some(crabka_operator::crd::CertManagerIssuerRef {
+            name: "my-issuer".into(),
+            kind: Some("ClusterIssuer".into()),
+            group: None,
+        }),
+        client_auth: None,
+        client_ca_secret_name: None,
+    });
+    let rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/certificates/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"apiVersion":"cert-manager.io/v1","kind":"Certificate","metadata":{"name":"sr1-sr"}}),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/secrets/sr1-sr-tls".into(),
+            response: json_response(
+                404,
+                &serde_json::json!({"kind":"Status","status":"Failure","reason":"NotFound"}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/schemaregistries/sr1/status".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"SchemaRegistry","metadata":{"name":"sr1"},"spec":{"replicas":1}}),
+            ),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+    reconcile(Arc::new(cr), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    assert!(
+        observed
+            .iter()
+            .any(|r| r.method() == Method::PATCH
+                && r.uri().to_string().contains("/certificates/sr1-sr")),
+        "expected Certificate CR PATCH"
+    );
+    assert!(
+        !observed
+            .iter()
+            .any(|r| r.uri().to_string().contains("/deployments/")),
+        "expected no deployment while WaitingForCert"
+    );
+    let patch = observed
+        .iter()
+        .find(|r| r.uri().to_string().contains("/schemaregistries/sr1/status"))
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(patch.body()).unwrap();
+    let ready = body["status"]["conditions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["type"] == "Ready")
+        .unwrap();
+    assert_eq!(ready["reason"], "WaitingForCert");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn issuer_ref_with_cert_secret_ready_renders_deployment() {
+    let mut cr = sr("sr1", Some(CLUSTER));
+    cr.spec.bootstrap_servers = Some("ext:9092".into());
+    cr.spec.tls = Some(crabka_operator::crd::SchemaRegistryTls {
+        secret_name: None,
+        issuer_ref: Some(crabka_operator::crd::CertManagerIssuerRef {
+            name: "my-issuer".into(),
+            kind: None,
+            group: None,
+        }),
+        client_auth: None,
+        client_ca_secret_name: None,
+    });
+    let rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/certificates/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"apiVersion":"cert-manager.io/v1","kind":"Certificate","metadata":{"name":"sr1-sr"}}),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/secrets/sr1-sr-tls".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Secret","metadata":{"name":"sr1-sr-tls"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr-headless".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr-headless"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Service","metadata":{"name":"sr1-sr"}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/deployments/sr1-sr".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"Deployment","metadata":{"name":"sr1-sr"},"status":{"replicas":1,"readyReplicas":1}}),
+            ),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/schemaregistries/sr1/status".into(),
+            response: json_response(
+                200,
+                &serde_json::json!({"kind":"SchemaRegistry","metadata":{"name":"sr1"},"spec":{"replicas":1}}),
+            ),
+        },
+    ];
+    let state = MockState::new(rules);
+    let client = mock_client(&state, NS);
+    let ctx = Arc::new(fixture_ctx(client, NS));
+    reconcile(Arc::new(cr), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let dep = observed
+        .iter()
+        .find(|r| {
+            r.method() == Method::PATCH && r.uri().to_string().contains("/deployments/sr1-sr")
+        })
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(dep.body()).unwrap();
+    let joined = body["spec"]["template"]["spec"]["containers"][0]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        joined.contains("--tls-cert=/etc/sr/tls/tls.crt"),
+        "joined: {joined}"
+    );
+    let vols = body["spec"]["template"]["spec"]["volumes"]
+        .as_array()
+        .unwrap();
+    let tls_vol = vols.iter().find(|v| v["name"] == "tls").unwrap();
+    assert_eq!(tls_vol["secret"]["secretName"], "sr1-sr-tls");
+}
+
+#[tokio::test]
 async fn bearer_jwks_renders_to_args() {
     let mut cr = sr("sr1", Some(CLUSTER));
     cr.spec.bootstrap_servers = Some("ext:9092".into());
