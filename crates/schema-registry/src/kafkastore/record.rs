@@ -120,7 +120,9 @@ pub struct DeleteSubjectValue {
 #[derive(Debug, Clone)]
 pub enum SchemaRecord {
     Schema(SchemaKey, SchemaValue),
-    Config(ConfigKey, ConfigValue),
+    /// A `CONFIG` record. `None` value = a CONFIG tombstone: clears the
+    /// per-subject compat override (or, for a global key, a no-op).
+    Config(ConfigKey, Option<ConfigValue>),
     /// A `MODE` record. `None` value = a MODE tombstone (clears the override).
     Mode(ModeKey, Option<ModeValue>),
     /// A soft subject-delete marker.
@@ -151,12 +153,12 @@ impl SchemaRecord {
                 },
                 Err(_) => Self::Unknown,
             },
-            Some("CONFIG") => match (
-                serde_json::from_slice::<ConfigKey>(key),
-                value.and_then(|v| serde_json::from_slice::<ConfigValue>(v).ok()),
-            ) {
-                (Ok(k), Some(val)) => Self::Config(k, val),
-                _ => Self::Unknown,
+            Some("CONFIG") => match serde_json::from_slice::<ConfigKey>(key) {
+                Ok(k) => match value.and_then(|v| serde_json::from_slice::<ConfigValue>(v).ok()) {
+                    Some(val) => Self::Config(k, Some(val)),
+                    None => Self::Config(k, None), // null value = clear compat override
+                },
+                Err(_) => Self::Unknown,
             },
             Some("MODE") => match serde_json::from_slice::<ModeKey>(key) {
                 Ok(k) => match value.and_then(|v| serde_json::from_slice::<ModeValue>(v).ok()) {
@@ -331,7 +333,7 @@ mod tests {
     fn encode_config_round_trips_via_decode() {
         let (k, v) = encode_config(None, "FULL");
         match SchemaRecord::decode(&k, Some(&v)) {
-            SchemaRecord::Config(key, val) => {
+            SchemaRecord::Config(key, Some(val)) => {
                 assert!(key.subject.is_none());
                 assert_eq!(val.compatibility_level, "FULL");
             }

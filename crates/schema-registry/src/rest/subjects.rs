@@ -24,15 +24,17 @@ struct RegisterBody {
     version: Option<i32>,
 }
 
+/// `?normalize=true` query flag on register/lookup (KIP-compatible). Public
+/// because it appears in the `register`/`lookup` handler signatures.
 #[derive(Debug, Default, serde::Deserialize)]
-struct NormalizeQuery {
+pub struct NormalizeQuery {
     #[serde(default)]
     normalize: bool,
 }
 
 /// Normalize a schema string to its canonical form for the given type.
 /// - Avro: Parsing Canonical Form via `apache_avro::Schema::canonical_form()`
-/// - JSON Schema: round-trip through serde_json (strips whitespace, sorts keys)
+/// - JSON Schema: round-trip through `serde_json` (strips whitespace, sorts keys)
 /// - Protobuf: no-op (Confluent SR does not define textual normalization for proto)
 fn normalize_schema(ty: SchemaType, schema: &str) -> Result<String, SrError> {
     match ty {
@@ -63,14 +65,7 @@ pub async fn register(
     };
     let reg = st
         .store
-        .register(
-            &subject,
-            ty,
-            &schema,
-            &req.references,
-            req.id,
-            req.version,
-        )
+        .register(&subject, ty, &schema, &req.references, req.id, req.version)
         .await?;
     Ok(ok_json(&serde_json::json!({ "id": reg.id })))
 }

@@ -88,7 +88,7 @@ pub async fn put_subject(
 
 /// DELETE /config/{subject} — remove per-subject compat override, revert to global.
 ///
-/// Returns 200 `{"compatibility": "<deleted-level>"}` or 404 SubjectNotFound
+/// Returns 200 `{"compatibility": "<deleted-level>"}` or 404 `SubjectNotFound`
 /// if no per-subject override was set.
 pub async fn delete_subject(
     State(st): State<AppState>,
