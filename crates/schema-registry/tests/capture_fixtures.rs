@@ -24,7 +24,6 @@
 //! The fixtures it writes live under `tests/fixtures/`; re-running this test
 //! regenerates them verbatim.
 
-#![cfg(not(target_os = "windows"))]
 // Match the convention used by the broker integration tests: this is a
 // Docker-driven capture harness, not production code, so the pedantic group is
 // allowed wholesale (e.g. `doc_markdown`, `redundant_closure_for_method_calls`,

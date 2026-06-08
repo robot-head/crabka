@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 use crabka_schema_registry::format::SchemaType;
 use crabka_schema_registry::kafkastore::record::{
     SchemaKey, SchemaRecord, SchemaValue, encode_schema,

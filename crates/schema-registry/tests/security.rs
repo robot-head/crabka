@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 //! In-process integration of the registry security stack against a real broker.
 //!

@@ -1,5 +1,3 @@
-#![cfg(not(target_os = "windows"))]
-
 //! End-to-end gate for schema-registry slice 1: REST -> register -> produce to
 //! `_schemas` -> group-less reader replay -> in-memory store -> GET, against a
 //! real in-process Crabka broker. Drives the registry's REST router via `tower`'s

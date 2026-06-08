@@ -6,10 +6,10 @@
     "scheme": "http",
     "version": 1
   },
-  "elected_master_member_id": "crabka-d7c9d4c3-a778-465d-a069-954b68d772f9",
+  "elected_master_member_id": "crabka-94d06161-7d0b-4101-acb6-aa18c71a9335",
   "group_id": "schema-registry",
   "group_state": "Stable",
   "member_count": 2,
-  "protocol_name_via_describe_groups": "",
+  "protocol_name_via_describe_groups": "v0",
   "protocol_type": "sr"
 }
