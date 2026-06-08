@@ -1905,6 +1905,7 @@ dependencies = [
  "prost-reflect",
  "protox-parse",
  "reqwest 0.13.4",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
