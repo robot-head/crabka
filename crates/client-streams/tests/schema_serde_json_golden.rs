@@ -3,7 +3,7 @@
 //! `KafkaJsonSchemaSerializer`. The golden in
 //! `testdata/schema_serde/json/order.hex` is a PLACEHOLDER until captured from
 //! a real Confluent run, so the test is `#[ignore]`. NOTE: cross-vendor JSON
-//! byte-exactness also depends on field ordering (serde_json vs Jackson) — to
+//! byte-exactness also depends on field ordering (`serde_json` vs Jackson) — to
 //! be reconciled when capturing the real golden.
 
 use assert2::check;
