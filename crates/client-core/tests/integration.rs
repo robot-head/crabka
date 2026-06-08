@@ -43,7 +43,6 @@
 
 // Skip compilation on Windows runners where testcontainers + Docker reliability
 // is poor. On Linux CI the tests run via the `client-core-integration` job.
-#![cfg(not(target_os = "windows"))]
 
 use assert2::assert;
 use std::time::Duration;

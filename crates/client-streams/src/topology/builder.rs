@@ -1,4 +1,4 @@
-﻿//! Topology builder: public Processor-API surface.
+//! Topology builder: public Processor-API surface.
 
 use std::any::Any;
 use std::borrow::Borrow;
@@ -27,7 +27,7 @@ use crate::processor::erased::ProcessorError;
 use crate::processor::factory::{MakeDeser, NodeFactory};
 use crate::processor::graph::{Graph, GraphSource};
 use crate::processor::node::{ErasedNode, ProcessorNode, SinkNode, SourceNode};
-use crate::processor::serde::{Consumed, Produced, Serde};
+use crate::processor::serde::{Consumed, DefaultSerde, Produced, Serde};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // TopologyError
@@ -198,13 +198,35 @@ impl Topology {
         Self::default()
     }
 
+    /// Add a source node reading the given external topics with the default
+    /// serdes for `K` and `V`, returning a typed [`NodeHandle`] used to wire
+    /// children to it.
+    ///
+    /// Use [`Topology::add_source_explicit`] when either type has no default
+    /// serde or when a topology needs custom serdes.
+    pub fn add_source<K, V>(
+        &mut self,
+        name: impl Into<String>,
+        topics: impl IntoIterator<Item = impl Into<String>>,
+    ) -> NodeHandle<K, V>
+    where
+        K: Any + Send + Sync + Clone + DefaultSerde,
+        V: Any + Send + Sync + Clone + DefaultSerde,
+    {
+        self.add_source_explicit::<K, V, K::Serde, V::Serde>(
+            name,
+            topics,
+            Consumed::with(K::Serde::default(), V::Serde::default()),
+        )
+    }
+
     /// Add a source node reading the given external topics, returning a typed
     /// [`NodeHandle`] used to wire children to it.
     ///
     /// `consumed` carries the key + value serdes used to deserialize incoming
     /// bytes into typed `Record<K, V>` values at runtime — written
     /// `Consumed::with(key_serde, value_serde)` so the two roles are visible.
-    pub fn add_source<K, V, KS, VS>(
+    pub fn add_source_explicit<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         topics: impl IntoIterator<Item = impl Into<String>>,
@@ -298,6 +320,29 @@ impl Topology {
         NodeHandle::new(name)
     }
 
+    /// Add a sink node writing to `topic` with the default serdes for `K` and
+    /// `V`, fed by the given parent [`NodeHandle`]s. Every parent's output type
+    /// must equal the sink's input type `(K, V)` — enforced by the compiler.
+    ///
+    /// Use [`Topology::add_sink_explicit`] when either type has no default serde
+    /// or when a topology needs custom serdes.
+    pub fn add_sink<K, V>(
+        &mut self,
+        name: impl Into<String>,
+        topic: impl Into<String>,
+        parents: impl IntoIterator<Item = impl Borrow<NodeHandle<K, V>>>,
+    ) where
+        K: Any + Send + Sync + DefaultSerde,
+        V: Any + Send + Sync + DefaultSerde,
+    {
+        self.add_sink_explicit::<K, V, K::Serde, V::Serde, _, _>(
+            name,
+            topic,
+            parents,
+            Produced::with(K::Serde::default(), V::Serde::default()),
+        );
+    }
+
     /// Add a sink node writing to `topic`, fed by the given parent
     /// [`NodeHandle`]s. Every parent's output type must equal the sink's input
     /// type `(K, V)` — enforced by the compiler.
@@ -305,7 +350,7 @@ impl Topology {
     /// `produced` carries the key + value serdes used to serialize outgoing
     /// records — written `Produced::with(key_serde, value_serde)`. A sink is
     /// terminal, so nothing is returned.
-    pub fn add_sink<K, V, KS, VS, P, I>(
+    pub fn add_sink_explicit<K, V, KS, VS, P, I>(
         &mut self,
         name: impl Into<String>,
         topic: impl Into<String>,
@@ -1256,16 +1301,10 @@ mod tests {
 
     #[test]
     fn copartition_group_emitted_in_wire() {
-        use crate::processor::serde::{BytesSerde, Consumed, Produced};
         let mut t = Topology::new();
-        let a = t.add_source("sa", ["left"], Consumed::with(BytesSerde, BytesSerde));
-        let b = t.add_source("sb", ["right"], Consumed::with(BytesSerde, BytesSerde));
-        t.add_sink(
-            "snk",
-            "out",
-            [&a, &b],
-            Produced::with(BytesSerde, BytesSerde),
-        ); // both → one subtopology
+        let a: NodeHandle<bytes::Bytes, bytes::Bytes> = t.add_source("sa", ["left"]);
+        let b: NodeHandle<bytes::Bytes, bytes::Bytes> = t.add_source("sb", ["right"]);
+        t.add_sink("snk", "out", [&a, &b]); // both → one subtopology
         t.add_copartition_group(["left", "right"]);
         let wire = t.build("app").unwrap().to_wire();
         let sub = &wire.subtopologies[0];
@@ -1289,13 +1328,8 @@ mod tests {
             Consumed::with(StringSerde, StringSerde),
         );
         // Normal stream second → index 1.
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_sink(
-            "snk",
-            "out",
-            [&src],
-            Produced::with(StringSerde, StringSerde),
-        );
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", [&src]);
         check!(t.has_global_store_for_test("global-store"));
         let built = t.build("app").unwrap();
         let wire = built.to_wire();
@@ -1317,16 +1351,23 @@ mod tests {
     }
 
     #[test]
+    fn add_source_and_sink_can_use_default_serdes() {
+        let mut t = Topology::new();
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        t.add_sink("out", "out-topic", [&src]);
+        let built = t.build("app").unwrap();
+        let wire = built.to_wire();
+
+        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
+        check!(built.source_topics_for("0") == ["in".to_string()]);
+    }
+
+    #[test]
     fn build_single_source_sink_wire_unchanged() {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let up = t.add_processor("up", || Upper, [&src]);
-        t.add_sink(
-            "out",
-            "out-topic",
-            [&up],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("out", "out-topic", [&up]);
         let built = t.build("app").unwrap();
         let wire = built.to_wire();
         check!(wire.epoch == 0);
@@ -1362,17 +1403,12 @@ mod tests {
         // NodeHandle is Clone + Debug, and parents may be passed by value (an
         // owned handle), not only by reference — exercise all three.
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let src2 = src.clone();
         check!(src2.name() == "src");
         check!(format!("{src2:?}").contains("src"));
         // `[src2]` wires by value (the owned-handle `Borrow` path).
-        t.add_sink(
-            "out",
-            "out",
-            [src2],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("out", "out", [src2]);
         check!(t.build("app").is_ok());
     }
 
@@ -1383,29 +1419,19 @@ mod tests {
         // that `build()` rejects. (Within one topology, forward references and
         // cycles can't even be written — you need a parent's handle first.)
         let mut a = Topology::new();
-        let foreign = a.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let foreign: NodeHandle<String, String> = a.add_source("src", ["in"]);
 
         let mut b = Topology::new();
-        b.add_sink(
-            "out",
-            "o",
-            [&foreign],
-            Produced::with(StringSerde, StringSerde),
-        );
+        b.add_sink("out", "o", [&foreign]);
         check!(b.build("app").is_err());
     }
 
     #[test]
     fn instantiate_runs_records() {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let up = t.add_processor("up", || Upper, [&src]);
-        t.add_sink(
-            "out",
-            "out-topic",
-            [&up],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("out", "out-topic", [&up]);
         let built = t.build("app").unwrap();
         let mut g = pollster::block_on(
             built.instantiate(&crate::store::backend::StoreBackend::InMemory, "app"),
@@ -1427,22 +1453,12 @@ mod tests {
     fn build_with_processor_store_and_repartition() {
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let proc = t.add_processor("proc", || Upper, [&src]);
         t.add_state_store("store", StringSerde, StringSerde, [proc.name()]);
-        t.add_sink(
-            "rsink",
-            "rp",
-            [&proc],
-            Produced::with(StringSerde, StringSerde),
-        );
-        let rsrc = t.add_source("rsrc", ["rp"], Consumed::with(StringSerde, StringSerde));
-        t.add_sink(
-            "out",
-            "out-topic",
-            [&rsrc],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("rsink", "rp", [&proc]);
+        let rsrc: NodeHandle<String, String> = t.add_source("rsrc", ["rp"]);
+        t.add_sink("out", "out-topic", [&rsrc]);
         let built = t.build("my-app").unwrap();
         check!(built.application_id() == "my-app");
         let wire = built.to_wire();
@@ -1460,13 +1476,8 @@ mod tests {
     #[test]
     fn application_id_accessor() {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_sink(
-            "snk",
-            "out",
-            [&src],
-            Produced::with(StringSerde, StringSerde),
-        );
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", [&src]);
         let built = t.build("my-streams-app").unwrap();
         check!(built.application_id() == "my-streams-app");
     }
@@ -1474,13 +1485,8 @@ mod tests {
     #[test]
     fn source_topics_for_unknown_id_returns_empty() {
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_sink(
-            "snk",
-            "out",
-            [&src],
-            Produced::with(StringSerde, StringSerde),
-        );
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        t.add_sink("snk", "out", [&src]);
         let built = t.build("app").unwrap();
         check!(built.source_topics_for("99").is_empty());
     }
@@ -1517,8 +1523,8 @@ mod tests {
     #[test]
     fn duplicate_node_name_propagates_error() {
         let mut t = Topology::new();
-        t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
-        t.add_source("src", ["other"], Consumed::with(StringSerde, StringSerde)); // duplicate
+        let _: NodeHandle<String, String> = t.add_source("src", ["in"]);
+        let _: NodeHandle<String, String> = t.add_source("src", ["other"]); // duplicate
         check!(t.build("app").is_err());
     }
 
@@ -1526,21 +1532,11 @@ mod tests {
     fn instantiate_repartition_topology_lists_topics() {
         let mut t = Topology::new();
         t.add_repartition_topic("rp");
-        let s1 = t.add_source("s1", ["in"], Consumed::with(StringSerde, StringSerde));
+        let s1: NodeHandle<String, String> = t.add_source("s1", ["in"]);
         let p = t.add_processor("p", || Upper, [&s1]);
-        t.add_sink(
-            "to_rp",
-            "rp",
-            [&p],
-            Produced::with(StringSerde, StringSerde),
-        );
-        let s2 = t.add_source("s2", ["rp"], Consumed::with(StringSerde, StringSerde));
-        t.add_sink(
-            "out",
-            "out",
-            [&s2],
-            Produced::with(StringSerde, StringSerde),
-        );
+        t.add_sink("to_rp", "rp", [&p]);
+        let s2: NodeHandle<String, String> = t.add_source("s2", ["rp"]);
+        t.add_sink("out", "out", [&s2]);
         let built = t.build("app").unwrap();
         let mut srcs = built.list_source_topics();
         srcs.sort();
@@ -1579,10 +1575,10 @@ mod tests {
             }
         }
         let mut t = Topology::new();
-        let src = t.add_source("src", ["in"], Consumed::with(StringSerde, StringSerde));
+        let src: NodeHandle<String, String> = t.add_source("src", ["in"]);
         let c = t.add_processor("c", || Counter, [&src]);
         t.add_state_store("counts", StringSerde, I64Serde, [c.name()]);
-        t.add_sink("out", "out", [&c], Produced::with(StringSerde, I64Serde));
+        t.add_sink("out", "out", [&c]);
         let built = t.build("app").unwrap();
         // wire topology still has the changelog topic (golden frame contract)
         check!(built.to_wire().subtopologies.iter().any(|s| {

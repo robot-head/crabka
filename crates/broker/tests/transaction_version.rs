@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 //! KIP-890 per-level `transaction.version` integration tests.
 //!

@@ -10,7 +10,6 @@
 //! ...)` verbatim, matching the canonical Connect/gRPC path format
 //! (`<package>.<Service>/<Method>`).
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic)]
 
 use assert2::assert;

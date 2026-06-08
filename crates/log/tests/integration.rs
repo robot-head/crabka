@@ -6,8 +6,6 @@
 //! The companion scenario `jvm_consumes_rust_written_log_dir` is currently
 //! deferred — see `crates/log/tests/KNOWN_ISSUES.md`.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::path::Path;
 use std::process::{Command, Stdio};

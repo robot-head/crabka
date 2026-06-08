@@ -4,8 +4,6 @@
 //! `tokio` scheduling on Windows runners cause flakes that have
 //! nothing to do with the protocol being tested.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 use std::time::{Duration, Instant};
 

@@ -4,7 +4,6 @@
 //! end-to-end against a real broker and that a fresh `KafkaStreams` instance
 //! restores its `counts` store from the changelog so that counts continue from
 //! where the previous instance left off rather than resetting to zero.
-#![cfg(not(target_os = "windows"))]
 
 use std::time::Duration;
 

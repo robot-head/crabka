@@ -1,4 +1,3 @@
-#![cfg(not(target_os = "windows"))]
 //! Execution-level tests for stream-time punctuation through the
 //! [`TopologyTestDriver`]. After each `pipe_input`, the driver fires due
 //! `STREAM_TIME` punctuators at the current stream-time (at most once each).
@@ -20,8 +19,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use crabka_client_streams::{
-    Cancellable, Consumed, I64Serde, Processor, ProcessorContext, Produced, PunctuationType,
-    Punctuator, Record, StringSerde, Topology, TopologyTestDriver,
+    Cancellable, Consumed, I64Serde, NodeHandle, Processor, ProcessorContext, Produced,
+    PunctuationType, Punctuator, Record, StringSerde, Topology, TopologyTestDriver,
 };
 
 /// A stream-time punctuator that, on each fire, records the fired timestamp into
@@ -89,7 +88,7 @@ fn build_driver(interval_ms: u64) -> DriverRig {
     let handle: Arc<Mutex<Option<Cancellable>>> = Arc::new(Mutex::new(None));
 
     let mut t = Topology::new();
-    let src = t.add_source("in", ["in"], Consumed::with(StringSerde, I64Serde));
+    let src: NodeHandle<String, i64> = t.add_source("in", ["in"]);
     let proc_fired = fired.clone();
     let proc_handle = handle.clone();
     let proc = t.add_processor(
@@ -101,7 +100,7 @@ fn build_driver(interval_ms: u64) -> DriverRig {
         },
         [&src],
     );
-    t.add_sink("out", "out", [&proc], Produced::with(StringSerde, I64Serde));
+    t.add_sink("out", "out", [&proc]);
 
     let driver = TopologyTestDriver::new(&t.build("app").unwrap()).unwrap();
     (driver, fired, handle)
@@ -215,10 +214,10 @@ fn punctuator_reads_and_writes_store() {
     }
 
     let mut t = Topology::new();
-    let src = t.add_source("in", ["in"], Consumed::with(StringSerde, I64Serde));
+    let src: NodeHandle<String, i64> = t.add_source("in", ["in"]);
     let proc = t.add_processor("proc", || StoreScheduler, [&src]);
     t.add_state_store("fires", StringSerde, I64Serde, [proc.name()]);
-    t.add_sink("out", "out", [&proc], Produced::with(StringSerde, I64Serde));
+    t.add_sink("out", "out", [&proc]);
     let mut driver = TopologyTestDriver::new(&t.build("app").unwrap()).unwrap();
 
     // pipe at {0, 5, 10, 100} → boundaries crossed at {0, 10, 100} = 3 fires.
@@ -282,7 +281,7 @@ fn build_wall_driver(interval_ms: u64) -> (TopologyTestDriver, Arc<Mutex<Vec<i64
     let fired = Arc::new(Mutex::new(Vec::new()));
 
     let mut t = Topology::new();
-    let src = t.add_source("in", ["in"], Consumed::with(StringSerde, I64Serde));
+    let src: NodeHandle<String, i64> = t.add_source("in", ["in"]);
     let proc_fired = fired.clone();
     let proc = t.add_processor(
         "proc",
@@ -292,7 +291,7 @@ fn build_wall_driver(interval_ms: u64) -> (TopologyTestDriver, Arc<Mutex<Vec<i64
         },
         [&src],
     );
-    t.add_sink("out", "out", [&proc], Produced::with(StringSerde, I64Serde));
+    t.add_sink("out", "out", [&proc]);
 
     let driver = TopologyTestDriver::new(&t.build("app").unwrap()).unwrap();
     (driver, fired)
@@ -375,7 +374,7 @@ fn stream_and_wall_fire_independently() {
     let wall_log = Arc::new(Mutex::new(Vec::new()));
 
     let mut t = Topology::new();
-    let src = t.add_source("in", ["in"], Consumed::with(StringSerde, I64Serde));
+    let src: NodeHandle<String, i64> = t.add_source("in", ["in"]);
     let s_log = stream_log.clone();
     let w_log = wall_log.clone();
     let proc = t.add_processor(
@@ -386,7 +385,7 @@ fn stream_and_wall_fire_independently() {
         },
         [&src],
     );
-    t.add_sink("out", "out", [&proc], Produced::with(StringSerde, I64Serde));
+    t.add_sink("out", "out", [&proc]);
     let mut driver = TopologyTestDriver::new(&t.build("app").unwrap()).unwrap();
 
     // Pipe at stream-times {0, 10}: STREAM fires {0, 10}; WALL stays empty

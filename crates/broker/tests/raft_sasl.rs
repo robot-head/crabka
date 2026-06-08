@@ -3,11 +3,7 @@
 //! These exercise the controller listener under `SaslPlaintext` and prove
 //! both inbound (broker A accepts auth'd raft frames from broker B) and
 //! outbound (`InterBrokerDialer` dials with SASL credentials) paths
-//! work together. Gated `#[cfg(not(target_os = "windows"))]` per the
-//! existing multi-broker test convention (openraft `debug_assert!`
-//! racing on the hosted Windows runner).
-
-#![cfg(not(target_os = "windows"))]
+//! work together.
 
 use assert2::assert;
 use std::net::SocketAddr;

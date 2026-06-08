@@ -9,8 +9,6 @@
 //! JoinGroup and v5 for SyncGroup, so the KIP-559 fields are always
 //! exercised on these tests.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 mod support;
 

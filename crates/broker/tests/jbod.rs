@@ -1,7 +1,6 @@
 // rustc 1.95 clippy ICEs on annotate-snippets in pedantic lints on these
 // raw-wire test files; match the opt-out used by compaction.rs / elect_leaders.rs.
 #![allow(clippy::pedantic)]
-#![cfg(not(target_os = "windows"))]
 
 //! JBOD / multi-log-dir + DescribeLogDirs (KIP-113) end-to-end.
 //!

@@ -25,7 +25,6 @@
 //!   `host.docker.internal:p1` / `:p2`.
 //! - Shared cluster id: a `uuid::Uuid` whose 16 bytes are the same bytes the JVM
 //!   sees as the base64-url-no-pad `--cluster-id` string.
-#![cfg(not(target_os = "windows"))]
 
 use std::net::SocketAddr;
 use std::process::Command;

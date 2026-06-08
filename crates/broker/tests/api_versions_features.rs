@@ -10,7 +10,7 @@
 //! (`metadata.version = 25`, `group.version = 1`, `transaction.version = 2`)
 //! and surfaces a real
 //! (`>= 0`) `finalized_features_epoch`. `UpdateFeatures` (api_key 57) then
-//! moves those levels — that path is exercised in `tests/update_features.rs`.
+//! moves those levels — that path is exercised in `tests/feature_finalization.rs`.
 //!
 //! Advertising a `supported_features` entry whose `max_version` is above a
 //! connecting client's known `MetadataVersion` enum, or a finalized
@@ -21,8 +21,6 @@
 //! historically). The advertised range `7 .. 25` (`3.3-IV3` .. `4.0-IV3`)
 //! tracks Kafka's own `MetadataVersion` enum; this test guards the
 //! fresh-broker surface.
-
-#![cfg(not(target_os = "windows"))]
 
 use assert2::assert;
 mod support;

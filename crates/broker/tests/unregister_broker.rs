@@ -5,8 +5,6 @@
 //! registration record so subsequent `Metadata` responses no longer
 //! advertise the broker's endpoints.
 
-#![cfg(not(target_os = "windows"))]
-
 use assert2::assert;
 mod support;
 

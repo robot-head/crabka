@@ -8,7 +8,6 @@
 //!
 //! openraft's debug assertions race on the hosted Windows scheduler, so these
 //! are gated off Windows like the other multi-node suites.
-#![cfg(not(target_os = "windows"))]
 
 use assert2::assert;
 use std::time::{Duration, Instant};

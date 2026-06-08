@@ -7,11 +7,7 @@
 //! subscribes to a subset starting at a non-zero offset, and asserts the
 //! reworked consumer delivers exactly the assigned records — never the
 //! unassigned partition.
-//!
-//! Gated `#[cfg(not(target_os = "windows"))]` like the sibling
-//! raft-bootstrapping integration tests.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic, clippy::manual_assert)]
 
 use assert2::assert;

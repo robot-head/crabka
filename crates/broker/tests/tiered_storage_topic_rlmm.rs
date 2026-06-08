@@ -16,13 +16,7 @@
 //!   tiered (proving the RLM copy task's `CopySegment*` events round-trip
 //!   through `__remote_log_metadata` over the loopback) and the records
 //!   read back at offset 0.
-//!
-//! Gated `#[cfg(not(target_os = "windows"))]` like the other
-//! raft-bootstrapping integration tests: the single-broker boot still
-//! runs through openraft, whose `debug_assert!` races on the hosted
-//! Windows scheduler.
 
-#![cfg(not(target_os = "windows"))]
 #![allow(clippy::pedantic, clippy::manual_assert)]
 
 use assert2::assert;

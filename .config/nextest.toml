@@ -1,0 +1,29 @@
+[profile.ci.junit]
+path = "junit.xml"
+
+[test-groups]
+broker-jvm-acceptance = { max-threads = 1 }
+broker-share-state = { max-threads = 1 }
+broker-transactions = { max-threads = 1 }
+broker-tiered-storage-rlmm = { max-threads = 1 }
+schema-registry-fixed-port-captures = { max-threads = 1 }
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-broker) & (binary(jvm_acceptance) | binary(jvm_consumer_group_next_gen))'
+test-group = 'broker-jvm-acceptance'
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-broker) & (binary(share_consume) | binary(share_admin_offsets))'
+test-group = 'broker-share-state'
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-broker) & binary(transactions)'
+test-group = 'broker-transactions'
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-broker) & binary(tiered_storage_topic_rlmm)'
+test-group = 'broker-tiered-storage-rlmm'
+
+[[profile.ci.overrides]]
+filter = 'package(crabka-schema-registry) & (binary(interop) | binary(capture_fixtures) | binary(capture_admin_fixtures) | binary(capture_auth_fixtures) | binary(capture_compat_fixtures) | binary(capture_election_fixtures) | binary(capture_json_fixtures) | binary(capture_protobuf_fixtures) | binary(capture_references_fixtures))'
+test-group = 'schema-registry-fixed-port-captures'
