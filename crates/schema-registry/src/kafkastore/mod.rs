@@ -161,6 +161,29 @@ impl KafkaStore {
         self.set_compat(Some(subject), level).await
     }
 
+    /// Remove the per-subject compat override and revert to global. Returns the
+    /// deleted level string (e.g. `"BACKWARD"`) or `None` if no per-subject
+    /// override was set.
+    pub async fn delete_subject_compat(&self, subject: &str) -> Result<Option<String>, SrError> {
+        let _gate = self.write_gate.lock().await;
+        let current = self
+            .store
+            .read()
+            .subject_compat(subject)
+            .map(str::to_string);
+        let Some(level) = current else {
+            return Ok(None);
+        };
+        let key = record::config_key(Some(subject));
+        let offset = self
+            .writer
+            .produce_tombstone(key)
+            .await
+            .map_err(|e| SrError::Backend(e.to_string()))?;
+        self.await_applied(offset).await;
+        Ok(Some(level))
+    }
+
     async fn set_compat(&self, subject: Option<&str>, level: String) -> Result<(), SrError> {
         let _gate = self.write_gate.lock().await;
         let mode = match subject {

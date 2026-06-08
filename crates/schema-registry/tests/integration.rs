@@ -222,6 +222,24 @@ async fn post_raw(app: &axum::Router, uri: &str, body: &str) -> axum::response::
         .unwrap()
 }
 
+/// DELETE `uri`, return (status, parsed body).
+async fn delete_req(app: &axum::Router, uri: &str) -> (axum::http::StatusCode, serde_json::Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let json = body_json(resp).await;
+    (status, json)
+}
+
 const AVRO_BODY: &str = r#"{"schema":"{\"type\":\"record\",\"name\":\"U\",\"fields\":[{\"name\":\"id\",\"type\":\"int\"}]}"}"#;
 
 // ── /config endpoints ────────────────────────────────────────────────────────
@@ -1520,6 +1538,368 @@ async fn rest_references_get_by_id_list_and_subject_delete_protection() {
         .unwrap();
     assert_eq!(blocked.status(), StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body_json(blocked).await["error_code"], 42206);
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+// ── DELETE /config/{subject} ─────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_subject_compat_reverts_to_global() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // Set a per-subject override to FULL
+    let (status, body) =
+        put_json(&app, "/config/test-subject", r#"{"compatibility":"FULL"}"#).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["compatibility"], "FULL");
+
+    // GET confirms the override is set
+    let (status, body) = get_status_json(&app, "/config/test-subject").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["compatibilityLevel"], "FULL");
+
+    // DELETE returns the deleted level
+    let (status, body) = delete_req(&app, "/config/test-subject").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "DELETE /config/{{subject}} should be 200"
+    );
+    assert_eq!(
+        body["compatibility"], "FULL",
+        "response should echo the deleted level"
+    );
+
+    // GET now returns 404 (no per-subject override remains)
+    let (status, body) = get_status_json(&app, "/config/test-subject").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"], 40401);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_subject_compat_no_override_returns_404() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // No per-subject override was ever set
+    let (status, body) = delete_req(&app, "/config/no-override-subject").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"], 40401);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+// ── GET /schemas/ids/{id}/schema ─────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_by_id_schema_returns_raw_string() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // Register a schema
+    let reg = register(&app, "raw-schema-test", AVRO_BODY).await;
+    let id = reg["id"].as_i64().unwrap();
+
+    // GET /schemas/ids/{id}/schema → raw schema string (not JSON-wrapped)
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/schemas/ids/{id}/schema"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&bytes).unwrap();
+
+    // Body should contain the schema content
+    assert!(
+        text.contains("record"),
+        "raw schema body should contain the word 'record'"
+    );
+
+    // Body should be a JSON value representing the schema itself, NOT {"schema":"..."}
+    let v: serde_json::Value = serde_json::from_str(text).expect("body should be valid JSON");
+    assert!(
+        v.get("schema").is_none(),
+        "body should be the raw schema, not a JSON envelope with a 'schema' key"
+    );
+
+    // Non-existent id → 404 / 40403
+    let (status, body) = get_status_json(&app, "/schemas/ids/9999/schema").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"], 40403);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+// ── GET /schemas/ids/{id}/subjects ───────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_by_id_subjects_returns_all_subjects() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // Register the SAME schema under two subjects → they share one schema ID
+    let reg1 = register(&app, "subject-alpha", AVRO_BODY).await;
+    let reg2 = register(&app, "subject-beta", AVRO_BODY).await;
+    assert_eq!(reg1["id"], reg2["id"], "same schema must share one id");
+    let shared_id = reg1["id"].as_i64().unwrap();
+
+    // GET /schemas/ids/{id}/subjects → both subjects present
+    let body = get_json(&app, &format!("/schemas/ids/{shared_id}/subjects")).await;
+    let subjects: Vec<String> =
+        serde_json::from_value(body).expect("response should be a JSON array");
+    assert!(
+        subjects.contains(&"subject-alpha".to_string()),
+        "subject-alpha should be in the list"
+    );
+    assert!(
+        subjects.contains(&"subject-beta".to_string()),
+        "subject-beta should be in the list"
+    );
+
+    // Non-existent id → 404 / 40403
+    let (status, body) = get_status_json(&app, "/schemas/ids/9999/subjects").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error_code"], 40403);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+// ── ?normalize=true ──────────────────────────────────────────────────────────
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normalize_true_deduplicates_avro_schemas() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // Avro schema with extra whitespace — semantically identical to AVRO_BODY
+    let avro_with_spaces = r#"{"schema":"{ \"type\" : \"record\" , \"name\" : \"U\" , \"fields\" : [ { \"name\" : \"id\" , \"type\" : \"int\" } ] }"}"#;
+
+    // Register with normalize=true → normalizes to PCF, stored as canonical form
+    let resp_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/norm-test/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(avro_with_spaces))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp_a.status(),
+        StatusCode::OK,
+        "first normalize=true register should succeed"
+    );
+    let reg_a = body_json(resp_a).await;
+    let id_a = reg_a["id"].as_i64().unwrap();
+
+    // Register same schema again with normalize=true → same PCF → same ID
+    let resp_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/norm-test/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(avro_with_spaces))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_b.status(), StatusCode::OK);
+    let reg_b = body_json(resp_b).await;
+    assert_eq!(
+        reg_b["id"].as_i64().unwrap(),
+        id_a,
+        "second normalize=true registration of same schema must be idempotent (same id)"
+    );
+
+    // normalize=true on an invalid Avro → 422 / 42201
+    let resp_bad = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/norm-test/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(r#"{"schema":"{ not avro at all"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let err_body = body_json(resp_bad).await;
+    assert_eq!(err_body["error_code"], 42201);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normalize_true_json_schema_deduplicates_and_errors() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    // JSON schema with extra whitespace — normalize=true round-trips through serde_json
+    let json_body = r#"{"schemaType":"JSON","schema":"{ \"type\": \"object\", \"properties\": { \"id\": { \"type\": \"integer\" } } }"}"#;
+
+    // Register with normalize=true → JSON round-trip strips extraneous whitespace
+    let resp_a = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/json-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(json_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_a.status(), StatusCode::OK);
+    let id_a = body_json(resp_a).await["id"].as_i64().unwrap();
+
+    // Same schema again with normalize=true → idempotent (same id)
+    let resp_b = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/json-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(json_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_b.status(), StatusCode::OK);
+    assert_eq!(body_json(resp_b).await["id"].as_i64().unwrap(), id_a);
+
+    // Invalid JSON with normalize=true → 422 / 42201 (exercises JSON error path in normalize_schema)
+    let resp_bad = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/json-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(
+                    r#"{"schemaType":"JSON","schema":"not valid { json"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp_bad.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body_json(resp_bad).await["error_code"], 42201);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normalize_true_protobuf_is_noop() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    let pb_body =
+        r#"{"schemaType":"PROTOBUF","schema":"syntax = \"proto3\"; message U { int32 id = 1; }"}"#;
+
+    // normalize=true with Protobuf is a no-op — schema is stored verbatim
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/pb-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(pb_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let id = body_json(resp).await["id"].as_i64().unwrap();
+
+    // Re-register identical → same id (idempotent)
+    let resp2 = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/pb-norm/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(pb_body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp2.status(), StatusCode::OK);
+    assert_eq!(body_json(resp2).await["id"].as_i64().unwrap(), id);
+
+    cancel.cancel();
+    broker.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn normalize_true_lookup_finds_normalized_schema() {
+    let (broker, store, cancel, _dir) = boot_registry(1).await;
+    let app = rest::router(AppState { store });
+
+    let avro_with_spaces = r#"{"schema":"{ \"type\" : \"record\" , \"name\" : \"U\" , \"fields\" : [ { \"name\" : \"id\" , \"type\" : \"int\" } ] }"}"#;
+
+    // Register with normalize=true → stored as PCF
+    let reg_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/norm-lookup/versions?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(avro_with_spaces))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reg_resp.status(), StatusCode::OK);
+    let stored_id = body_json(reg_resp).await["id"].as_i64().unwrap();
+
+    // POST /subjects/{s}?normalize=true → exercises the lookup handler's normalize path
+    let lookup_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/subjects/norm-lookup?normalize=true")
+                .header("content-type", "application/vnd.schemaregistry.v1+json")
+                .body(Body::from(avro_with_spaces))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lookup_resp.status(), StatusCode::OK);
+    let found = body_json(lookup_resp).await;
+    assert_eq!(found["id"].as_i64().unwrap(), stored_id);
+    assert_eq!(found["subject"], "norm-lookup");
+
     cancel.cancel();
     broker.shutdown().await;
 }

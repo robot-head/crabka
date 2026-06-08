@@ -24,44 +24,72 @@ struct RegisterBody {
     version: Option<i32>,
 }
 
-/// POST /subjects/{subject}/versions -> `{"id":N}`
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct NormalizeQuery {
+    #[serde(default)]
+    normalize: bool,
+}
+
+/// Normalize a schema string to its canonical form for the given type.
+/// - Avro: Parsing Canonical Form via `apache_avro::Schema::canonical_form()`
+/// - JSON Schema: round-trip through `serde_json` (strips whitespace, sorts keys)
+/// - Protobuf: no-op (Confluent SR does not define textual normalization for proto)
+fn normalize_schema(ty: SchemaType, schema: &str) -> Result<String, SrError> {
+    match ty {
+        SchemaType::Avro => apache_avro::Schema::parse_str(schema)
+            .map(|s| s.canonical_form())
+            .map_err(|e| SrError::InvalidSchema(e.to_string())),
+        SchemaType::Json => serde_json::from_str::<serde_json::Value>(schema)
+            .map(|v| v.to_string())
+            .map_err(|e| SrError::InvalidSchema(e.to_string())),
+        SchemaType::Protobuf => Ok(schema.to_string()),
+    }
+}
+
+/// POST /subjects/{subject}/versions[?normalize=true] -> `{"id":N}`
 pub async fn register(
     State(st): State<AppState>,
     Path(subject): Path<String>,
+    Query(n): Query<NormalizeQuery>,
     body: String,
 ) -> Result<Response, SrError> {
     let req: RegisterBody =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
+    let schema = if n.normalize {
+        normalize_schema(ty, &req.schema)?
+    } else {
+        req.schema.clone()
+    };
     let reg = st
         .store
-        .register(
-            &subject,
-            ty,
-            &req.schema,
-            &req.references,
-            req.id,
-            req.version,
-        )
+        .register(&subject, ty, &schema, &req.references, req.id, req.version)
         .await?;
     Ok(ok_json(&serde_json::json!({ "id": reg.id })))
 }
 
-/// POST /subjects/{subject} -> `{subject,id,version,schema}` | 404
+/// POST /subjects/{subject}[?normalize=true][&deleted=true] -> `{subject,id,version,schema}` | 404
 pub async fn lookup(
     State(st): State<AppState>,
     Path(subject): Path<String>,
     Query(q): Query<DeletedQ>,
+    Query(n): Query<NormalizeQuery>,
     body: String,
 ) -> Result<Response, SrError> {
     let req: RegisterBody =
         serde_json::from_str(&body).map_err(|e| SrError::InvalidSchema(e.to_string()))?;
     let ty = SchemaType::from_wire(req.schema_type.as_deref());
+    let schema_to_find = if n.normalize {
+        normalize_schema(ty, &req.schema)?
+    } else {
+        req.schema.clone()
+    };
     let s = st.store.store.read();
     if s.versions(&subject, q.deleted).is_none() {
         return Err(SrError::SubjectNotFound(subject));
     }
-    let Some(found) = s.find_under_subject(&subject, ty, &req.schema, &req.references, q.deleted)
+    let Some(found) =
+        s.find_under_subject(&subject, ty, &schema_to_find, &req.references, q.deleted)
     else {
         return Err(SrError::SchemaNotFound);
     };

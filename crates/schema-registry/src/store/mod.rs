@@ -259,6 +259,10 @@ impl StoreState {
         self.subject_compat.insert(subject.to_string(), level);
     }
 
+    pub fn clear_subject_compat(&mut self, subject: &str) {
+        self.subject_compat.remove(subject);
+    }
+
     #[must_use]
     pub fn global_compat(&self) -> &str {
         self.global_compat.as_deref().unwrap_or("BACKWARD")

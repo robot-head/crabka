@@ -43,6 +43,11 @@ pub fn router(state: AppState) -> Router {
             "/schemas/ids/{id}/versions",
             get(schemas::get_by_id_versions),
         )
+        .route("/schemas/ids/{id}/schema", get(schemas::get_by_id_schema))
+        .route(
+            "/schemas/ids/{id}/subjects",
+            get(schemas::get_by_id_subjects),
+        )
         .route("/subjects", get(subjects::list))
         .route(
             "/subjects/{subject}",
@@ -74,7 +79,9 @@ pub fn router(state: AppState) -> Router {
         .route("/config", get(config::get_global).put(config::put_global))
         .route(
             "/config/{subject}",
-            get(config::get_subject).put(config::put_subject),
+            get(config::get_subject)
+                .put(config::put_subject)
+                .delete(config::delete_subject),
         )
         .route(
             "/compatibility/subjects/{subject}/versions/{version}",

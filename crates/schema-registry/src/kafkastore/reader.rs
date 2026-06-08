@@ -48,11 +48,21 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
                 None => s.clear_global_mode(),
             }
         }
-        SchemaRecord::Config(k, v) => {
+        SchemaRecord::Config(k, Some(v)) => {
             let mut s = store.write();
             match k.subject {
                 Some(subj) => s.set_subject_compat(&subj, v.compatibility_level),
                 None => s.set_global_compat(v.compatibility_level),
+            }
+        }
+        SchemaRecord::Config(k, None) => {
+            // CONFIG tombstone: clear the per-subject override so the subject
+            // reverts to the global level.
+            // Global CONFIG tombstones (k.subject = None) are ignored: there is
+            // no DELETE /config endpoint in our REST surface, so we never emit
+            // them, and ignoring them is safe if an external SR sends one.
+            if let Some(subj) = k.subject {
+                store.write().clear_subject_compat(&subj);
             }
         }
         SchemaRecord::Noop | SchemaRecord::Unknown => {}
