@@ -103,6 +103,26 @@ struct Args {
     )]
     bearer_principal_claim: String,
 
+    // ── JWKS Bearer ─────────────────────────────────────────────────────────
+    /// JWKS endpoint URL (required when --bearer=jwks).
+    #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_ENDPOINT_URI")]
+    bearer_jwks_endpoint_uri: Option<String>,
+    /// Expected token `iss` claim. Absent = no issuer check.
+    #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_VALID_ISSUER")]
+    bearer_jwks_valid_issuer: Option<String>,
+    /// Expected token `aud` value. Absent = no audience check.
+    #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_EXPECTED_AUDIENCE")]
+    bearer_jwks_expected_audience: Option<String>,
+    /// PEM CA bundle trusted for the JWKS HTTPS endpoint.
+    #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_CA")]
+    bearer_jwks_ca: Option<PathBuf>,
+    /// Override JWT principal-claim name for JWKS mode.
+    #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_PRINCIPAL_CLAIM")]
+    bearer_jwks_principal_claim: Option<String>,
+    /// JWKS refresh interval in milliseconds. Default 60 000.
+    #[arg(long, env = "SCHEMA_REGISTRY_BEARER_JWKS_REFRESH_MS")]
+    bearer_jwks_refresh_ms: Option<u64>,
+
     // ── Server TLS / mTLS ───────────────────────────────────────────────────
     /// Server cert chain (PEM). Enables HTTPS when set together with --tls-key.
     #[arg(long, env = "SCHEMA_REGISTRY_TLS_CERT")]
@@ -165,6 +185,7 @@ struct Args {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> anyhow::Result<()> {
     // Install the ring crypto provider before any TLS work (server or client).
     rustls::crypto::ring::default_provider()
@@ -179,8 +200,10 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let security_out = crabka_schema_registry::cli::build_security(&args.security_input())?;
-    let security = security_out.config;
+    let crabka_schema_registry::cli::SecurityOutput {
+        config: security,
+        jwks_handle,
+    } = crabka_schema_registry::cli::build_security(&args.security_input())?;
     let cfg = RegistryConfig {
         bootstrap: args.bootstrap_servers.clone(),
         schemas_topic: args.schemas_topic.clone(),
@@ -205,6 +228,15 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let shutdown = CancellationToken::new();
+
+    // ── JWKS refresh task (bearer=jwks only) ────────────────────────────────
+    if let Some(jwks) = jwks_handle {
+        let shutdown_for_jwks = shutdown.clone();
+        tokio::spawn(async move {
+            run_jwks_refresher(jwks, shutdown_for_jwks).await;
+        });
+    }
+
     let store = KafkaStore::start(&cfg, shutdown.clone()).await?;
     let primary = crabka_schema_registry::election::Election::start(&cfg, shutdown.clone()).await?;
 
@@ -290,12 +322,12 @@ impl Args {
             basic_users: self.basic_users.clone(),
             bearer: self.bearer.clone(),
             bearer_principal_claim: self.bearer_principal_claim.clone(),
-            jwks_endpoint_uri: None,
-            jwks_valid_issuer: None,
-            jwks_expected_audience: None,
-            jwks_ca: None,
-            jwks_principal_claim: None,
-            jwks_refresh_ms: None,
+            jwks_endpoint_uri: self.bearer_jwks_endpoint_uri.clone(),
+            jwks_valid_issuer: self.bearer_jwks_valid_issuer.clone(),
+            jwks_expected_audience: self.bearer_jwks_expected_audience.clone(),
+            jwks_ca: self.bearer_jwks_ca.clone(),
+            jwks_principal_claim: self.bearer_jwks_principal_claim.clone(),
+            jwks_refresh_ms: self.bearer_jwks_refresh_ms,
             tls_cert: self.tls_cert.clone(),
             tls_key: self.tls_key.clone(),
             tls_client_ca: self.tls_client_ca.clone(),
@@ -322,4 +354,61 @@ fn split_bootstrap(bootstrap: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect()
+}
+
+/// Periodically fetch the JWKS endpoint and refresh the live key-set handle.
+///
+/// Fetches immediately on startup, then once per `jwks.refresh_ms`.
+/// Cancelled by the shared `CancellationToken`.
+async fn run_jwks_refresher(
+    jwks: crabka_schema_registry::cli::JwksHandleForRefresh,
+    cancel: CancellationToken,
+) {
+    use crabka_security::Jwks;
+    use std::time::Duration;
+
+    let client = build_jwks_client(jwks.ca_path.as_ref()).unwrap_or_else(|e| {
+        tracing::error!(error = %e, "JWKS client build failed; using default TLS roots");
+        reqwest::Client::new()
+    });
+    loop {
+        match client.get(&jwks.endpoint_uri).send().await {
+            Ok(resp) if resp.status().is_success() => match resp.text().await {
+                Ok(text) => match Jwks::from_json(&text, true) {
+                    Ok(new_keys) => {
+                        jwks.handle.store(new_keys);
+                        tracing::debug!(uri = %jwks.endpoint_uri, "JWKS refreshed");
+                    }
+                    Err(e) => tracing::warn!(
+                        error = %e, uri = %jwks.endpoint_uri, "JWKS parse error"
+                    ),
+                },
+                Err(e) => tracing::warn!(error = %e, "JWKS response body read error"),
+            },
+            Ok(resp) => tracing::warn!(
+                status = %resp.status(), uri = %jwks.endpoint_uri, "JWKS endpoint error"
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, uri = %jwks.endpoint_uri, "JWKS fetch failed");
+            }
+        }
+        tokio::select! {
+            () = cancel.cancelled() => break,
+            () = tokio::time::sleep(Duration::from_millis(jwks.refresh_ms)) => {}
+        }
+    }
+}
+
+fn build_jwks_client(ca_path: Option<&std::path::PathBuf>) -> anyhow::Result<reqwest::Client> {
+    let Some(path) = ca_path else {
+        return Ok(reqwest::Client::new());
+    };
+    let pem =
+        std::fs::read(path).map_err(|e| anyhow::anyhow!("read JWKS CA {}: {e}", path.display()))?;
+    let cert = reqwest::Certificate::from_pem(&pem)
+        .map_err(|e| anyhow::anyhow!("parse JWKS CA PEM: {e}"))?;
+    reqwest::Client::builder()
+        .add_root_certificate(cert)
+        .build()
+        .map_err(|e| anyhow::anyhow!("build JWKS reqwest client: {e}"))
 }
