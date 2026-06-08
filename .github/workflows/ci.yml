@@ -6,7 +6,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 # Cancel superseded PR runs; let pushes to main run to completion.
 concurrency:
@@ -175,9 +174,6 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     timeout-minutes: 45
-    permissions:
-      contents: read
-      pull-requests: write
     strategy:
       fail-fast: false
       matrix:
@@ -238,30 +234,6 @@ jobs:
           disable_search: true
           flags: unit
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Unit nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: unit
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/unit.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   jvm-differential:
     needs: changes
@@ -320,30 +292,6 @@ jobs:
           disable_search: true
           flags: jvm-differential
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: JVM differential nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: jvm-differential
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/jvm-differential.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   cargo-deny:
     needs: changes
@@ -430,30 +378,6 @@ jobs:
           disable_search: true
           flags: client-core-integration
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Client core integration nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: client-core-integration
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/client-core-integration.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-log integration: docker cp a JVM-produced partition dir out of
   # a Kafka container and re-read it with crabka-log.
@@ -493,30 +417,6 @@ jobs:
           disable_search: true
           flags: log-integration
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Log integration nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: log-integration
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/log-integration.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-client-consumer integration: cooperative-rebalance + poll/commit
   # against an in-process Rust broker (no Docker). The `unit` flag's
@@ -558,30 +458,6 @@ jobs:
           disable_search: true
           flags: client-consumer-integration
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Client consumer integration nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: client-consumer-integration
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/client-consumer-integration.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-client-streams integration: KIP-1071 streams-group membership
   # (join / heartbeat / assignment / leave) against an in-process Rust broker
@@ -624,30 +500,6 @@ jobs:
           disable_search: true
           flags: client-streams-integration
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Client streams integration nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: client-streams-integration
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/client-streams-integration.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-grpc-gateway integration: unary Send produce, group consume+commit,
   # and single-owner exactly-once dedup against an in-process Rust broker (no
@@ -690,30 +542,6 @@ jobs:
           disable_search: true
           flags: grpc-gateway-integration
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: gRPC gateway integration nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: grpc-gateway-integration
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/grpc-gateway-integration.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # crabka-schema-registry integration: schema validation, REST conformance, and
   # record-schema round-trips against an in-process broker (no Docker). The
@@ -757,30 +585,6 @@ jobs:
           disable_search: true
           flags: schema-registry-integration
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Schema registry integration nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: schema-registry-integration
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/schema-registry-integration.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # JVM kafka-console-{producer,consumer,topics} driving a Rust crabka-broker.
   # The broker binds 0.0.0.0:9092 on the runner; the in-container JVM tools
@@ -857,30 +661,6 @@ jobs:
           disable_search: true
           flags: broker-jvm-acceptance
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Broker JVM acceptance nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: broker-jvm-acceptance
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/broker-jvm-acceptance.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Non-ignored broker + client-admin integration tests (the
   # in-process Broker-driven suites under `crates/broker/tests/*.rs`
@@ -946,30 +726,6 @@ jobs:
           disable_search: true
           flags: broker-integration
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Broker integration nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: broker-integration
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/broker-integration.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # Operator mock-harness reconcile tests (no Docker, no real K8s cluster).
   # Each tests/<name>.rs file must be listed with `--test <name>` so that
@@ -1036,30 +792,6 @@ jobs:
           disable_search: true
           flags: operator-integration
           fail_ci_if_error: false
-      - name: Publish nextest report
-        if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: target/nextest/ci/junit.xml
-          title: Operator integration nextest
-          summary-report: true
-          failed-report: true
-          pull-request-report: true
-          update-comment: true
-          comment-tag: operator-integration
-          integrations-config: |
-            {
-              "junit-to-ctrf": {
-                "enabled": true,
-                "action": "convert",
-                "options": {
-                  "output": "./ctrf-reports/operator-integration.json",
-                  "toolname": "cargo-nextest"
-                }
-              }
-            }
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   gatekeeper-ci:
     needs:
