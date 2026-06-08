@@ -179,7 +179,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let security = crabka_schema_registry::cli::build_security(&args.security_input())?;
+    let security_out = crabka_schema_registry::cli::build_security(&args.security_input())?;
+    let security = security_out.config;
     let cfg = RegistryConfig {
         bootstrap: args.bootstrap_servers.clone(),
         schemas_topic: args.schemas_topic.clone(),
@@ -289,6 +290,12 @@ impl Args {
             basic_users: self.basic_users.clone(),
             bearer: self.bearer.clone(),
             bearer_principal_claim: self.bearer_principal_claim.clone(),
+            jwks_endpoint_uri: None,
+            jwks_valid_issuer: None,
+            jwks_expected_audience: None,
+            jwks_ca: None,
+            jwks_principal_claim: None,
+            jwks_refresh_ms: None,
             tls_cert: self.tls_cert.clone(),
             tls_key: self.tls_key.clone(),
             tls_client_ca: self.tls_client_ca.clone(),
