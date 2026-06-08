@@ -630,6 +630,8 @@ pub use membership::{
     SchemaPrewarm, StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus,
     TaskAssignment, TaskOffsetTracker, TopicPartition,
 };
+#[cfg(feature = "schema-serde")]
+pub use processor::schema_serde::SchemaSerde;
 pub use processor::{
     BytesSerde, Cancellable, Consumed, DefaultSerde, FixedKeyProcessor, FixedKeyProcessorContext,
     FixedKeyProcessorSupplier, FixedKeyRecord, I64Serde, Processor, ProcessorContext,
