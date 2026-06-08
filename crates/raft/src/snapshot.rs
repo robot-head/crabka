@@ -287,7 +287,7 @@ mod tests {
             BrokerRegistrationRecord {
                 node_id: 1,
                 broker_epoch: 0,
-                incarnation_id: uuid::Uuid::from_u128(0x0102030405060708_090a0b0c0d0e0f10),
+                incarnation_id: uuid::Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10),
                 host: "broker-1".into(),
                 port: 9092,
                 rack: Some("rack-a".into()),

@@ -182,6 +182,7 @@ pub(crate) async fn compute_failover_changes(
 ///
 /// Pure; idempotent (after the change `broker` is neither leader nor in ISR,
 /// so a repeat yields an empty plan).
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn compute_offline_dir_failover_changes(
     image: &MetadataImage,
     broker: NodeId,

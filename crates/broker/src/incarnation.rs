@@ -21,10 +21,10 @@ pub fn load_or_generate(log_dir: &Path) -> Uuid {
     let path = log_dir.join(FILE_NAME);
     if let Ok(mut f) = std::fs::File::open(&path) {
         let mut s = String::new();
-        if f.read_to_string(&mut s).is_ok() {
-            if let Ok(id) = s.trim().parse::<Uuid>() {
-                return id;
-            }
+        if f.read_to_string(&mut s).is_ok()
+            && let Ok(id) = s.trim().parse::<Uuid>()
+        {
+            return id;
         }
     }
     let id = Uuid::new_v4();

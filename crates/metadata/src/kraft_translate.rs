@@ -419,9 +419,7 @@ pub fn to_kraft_values(
         .map(|kr| {
             let version: i16 = match kr {
                 // KIP-858: directories field only present at v1+.
-                KraftMetadataRecord::Partition(_) => 1,
-                // KIP-631: RegisterBrokerRecord v1 adds InControlledShutdown bool.
-                KraftMetadataRecord::RegisterBroker(_) => 1,
+                KraftMetadataRecord::Partition(_) | KraftMetadataRecord::RegisterBroker(_) => 1,
                 // All other modeled record types frame at the defaulted v0.
                 _ => 0,
             };
@@ -1189,7 +1187,7 @@ mod tests {
 
     #[test]
     fn register_broker_incarnation_id_survives_round_trip() {
-        let id = uuid::Uuid::from_u128(0x0102030405060708_090a0b0c0d0e0f10);
+        let id = uuid::Uuid::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
         round_trip(
             &MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
                 node_id: 3,

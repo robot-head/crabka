@@ -5645,6 +5645,7 @@ async fn jvm_kafka_leader_election_preferred() {
             adding_replicas: vec![],
             removing_replicas: vec![],
             directories: vec![],
+            partition_epoch: 0,
         },
     ))
     .await
